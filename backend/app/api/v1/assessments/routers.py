@@ -1,0 +1,4429 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import secrets
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
+from ....core.dependencies import require_editor
+from ....core.security import sanitize_input, sanitize_text_field
+from ....db.mongo import get_db
+from .schemas import (
+    SuggestTopicsRequest,
+    ClassifyTechnicalTopicRequest,
+    AddCustomTopicsRequest,
+    AddNewQuestionRequest,
+    CreateAssessmentFromJobDesignationRequest,
+    DeleteQuestionRequest,
+    DeleteTopicQuestionsRequest,
+    FinalizeAssessmentRequest,
+    AddQuestionRowRequest,
+    GenerateAllQuestionsRequest,
+    GenerateQuestionRequest,
+    GenerateQuestionsFromConfigRequest,
+    RegenerateSingleQuestionRequest,
+    RemoveQuestionRowRequest,
+    GenerateQuestionsRequest,
+    GenerateTopicCardsRequest,
+    GenerateTopicsFromSkillRequest,
+    GenerateTopicsRequest,
+    GenerateTopicsRequestOld,
+    RegenerateSingleTopicRequest,
+    RegenerateTopicRequest,
+    RemoveCustomTopicsRequest,
+    ScheduleUpdateRequest,
+    TopicConfigRow,
+    TopicModel,
+    UpdateAssessmentDraftRequest,
+    UpdateQuestionsRequest,
+    UpdateSingleQuestionRequest,
+    UpdateSingleQuestionRequestV2,
+    UpdateTopicSettingsRequest,
+    ValidateQuestionTypeRequest,
+)
+from .topic_suggestions import suggest_topic_contexts, generate_topic_context_summary, _detect_category_semantically, suggest_topics, classify_technical_topic
+from .services import (
+    determine_topic_coding_support,
+    generate_questions_for_topic_safe,
+    generate_topics_from_input,
+    generate_topics_from_skill,
+    generate_topics_from_selected_skills,
+    generate_topic_cards_from_job_designation,
+    get_question_type_for_topic,
+    get_relevant_question_types,
+    get_relevant_question_types_from_domain,
+    infer_language_from_skill,
+    suggest_time_and_score,
+)
+from .topic_service_v2 import (
+    generate_questions_for_row_v2,
+    generate_questions_for_topic_v2,
+    generate_topics_v2,
+)
+from ....utils.mongo import convert_object_ids, serialize_document, to_object_id
+from ....utils.responses import success_response
+from ....models.aptitude_topics import (
+    APTITUDE_MAIN_TOPICS,
+    APTITUDE_TOPICS_STRUCTURE,
+    get_aptitude_subtopics,
+    get_aptitude_question_types,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1/assessments", tags=["assessments"])
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _check_assessment_access(assessment: Dict[str, Any], current_user: Dict[str, Any]) -> None:
+    if current_user.get("role") == "super_admin":
+        return
+    
+    # Normalize organization IDs to strings for comparison
+    assessment_org = assessment.get("organization")
+    if assessment_org is not None:
+        # Convert ObjectId to string if needed
+        assessment_org = str(assessment_org)
+    
+    user_org = current_user.get("organization")
+    if user_org is not None:
+        # Already a string from serialization, but ensure it's a string
+        user_org = str(user_org)
+    
+    # Allow access if organizations match (including both None)
+    if assessment_org == user_org:
+        return
+    
+    # If assessment has no organization, allow access if user is the creator
+    if assessment_org is None:
+        assessment_created_by = assessment.get("createdBy")
+        user_id = current_user.get("id")
+        if assessment_created_by is not None and user_id is not None:
+            # Convert both to strings for comparison (createdBy is ObjectId, user_id is string)
+            if str(assessment_created_by) == str(user_id):
+                return
+    
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Access denied. You can only access your organization's assessments.",
+    )
+
+
+async def _get_assessment(db: AsyncIOMotorDatabase, assessment_id: str) -> Dict[str, Any]:
+    try:
+        oid = to_object_id(assessment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid assessment ID") from exc
+
+    assessment = await db.assessments.find_one({"_id": oid})
+    if not assessment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found")
+    return assessment
+
+
+async def _save_assessment(db: AsyncIOMotorDatabase, assessment: Dict[str, Any]) -> None:
+    assessment_id = assessment.get("_id")
+    if not assessment_id:
+        raise RuntimeError("Assessment document missing _id")
+    assessment["updatedAt"] = _now_utc()
+    await db.assessments.replace_one({"_id": assessment_id}, assessment)
+
+
+async def _find_or_get_existing_draft(
+    db: AsyncIOMotorDatabase,
+    current_user: Dict[str, Any],
+    assessment_id: str = None
+) -> Dict[str, Any] | None:
+    """
+    Find existing draft assessment for the user.
+    Priority:
+    1. If assessment_id is provided, return that assessment if it's a draft
+    2. Otherwise, find the most recent draft for this user
+    
+    Returns None if no draft exists.
+    """
+    user_id = to_object_id(current_user.get("id"))
+    user_org = current_user.get("organization")
+    
+    # If assessment_id is provided, check if it's a draft for this user
+    if assessment_id:
+        try:
+            assessment = await _get_assessment(db, assessment_id)
+            # Check if it's a draft and belongs to this user
+            if assessment.get("status") == "draft":
+                assessment_created_by = assessment.get("createdBy")
+                if assessment_created_by and str(assessment_created_by) == str(user_id):
+                    return assessment
+        except HTTPException:
+            pass  # Assessment doesn't exist or access denied
+    
+    # Find the most recent draft for this user
+    query = {
+        "createdBy": user_id,
+        "status": "draft"
+    }
+    
+    # If user has organization, also match by organization
+    if user_org:
+        query["organization"] = to_object_id(user_org)
+    
+    # Get the most recent draft (sorted by updatedAt descending)
+    draft = await db.assessments.find_one(
+        query,
+        sort=[("updatedAt", -1)]
+    )
+    
+    return draft
+
+
+def _ensure_topic_structure(topic: Dict[str, Any]) -> Dict[str, Any]:
+    topic.setdefault("questions", [])
+    topic.setdefault("questionConfigs", [])
+    topic.setdefault("questionTypes", [])
+    return topic
+
+
+def _is_aptitude_skill(skill: str) -> bool:
+    """Check if a skill is aptitude-related."""
+    skill_lower = skill.lower().strip()
+    aptitude_keywords = ["aptitude", "apti"]
+    
+    # Check for aptitude keywords
+    if any(keyword in skill_lower for keyword in aptitude_keywords):
+        return True
+    
+    # Check if skill matches aptitude main topics
+    aptitude_main_topics_lower = [topic.lower() for topic in APTITUDE_MAIN_TOPICS]
+    for apt_topic in aptitude_main_topics_lower:
+        if apt_topic in skill_lower or skill_lower in apt_topic:
+            return True
+    
+    # Check for common variations
+    if "quantitative" in skill_lower or "logical reasoning" in skill_lower or "verbal ability" in skill_lower:
+        return True
+    
+    return False
+
+
+def _is_aptitude_requested(job_designation: str, selected_skills: List[str]) -> bool:
+    """Check if aptitude assessment is requested based on job designation or selected skills."""
+    # Normalize inputs for case-insensitive matching
+    job_designation_lower = job_designation.lower().strip()
+    
+    # Check job designation
+    aptitude_keywords = ["aptitude", "apti"]
+    if any(keyword in job_designation_lower for keyword in aptitude_keywords):
+        return True
+    
+    # Check selected skills
+    for skill in selected_skills:
+        if _is_aptitude_skill(skill):
+            return True
+    
+    return False
+
+
+def _separate_skills(selected_skills: List[str]) -> tuple[List[str], List[str]]:
+    """Separate selected skills into aptitude skills and technical skills.
+    
+    Returns:
+        Tuple of (aptitude_skills, technical_skills)
+    """
+    aptitude_skills = []
+    technical_skills = []
+    
+    for skill in selected_skills:
+        if _is_aptitude_skill(skill):
+            aptitude_skills.append(skill)
+        else:
+            technical_skills.append(skill)
+    
+    return aptitude_skills, technical_skills
+
+
+@router.post("/generate-topics-old")
+async def generate_topics_old(
+    payload: GenerateTopicsRequestOld,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    # Validate assessment type
+    valid_types = {"aptitude", "technical"}
+    assessment_types = set(payload.assessmentType)
+    if not assessment_types.issubset(valid_types):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid assessment type. Must be one or more of: {valid_types}",
+        )
+
+    # Validate required fields based on assessment type
+    if "technical" in assessment_types:
+        if not payload.jobRole or not payload.experience or not payload.skills or len(payload.skills) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Job role, experience, and at least one skill are required for technical assessments",
+            )
+        if not payload.numTopics or payload.numTopics < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Number of topics is required and must be at least 1 for technical assessments",
+            )
+
+    if "aptitude" in assessment_types:
+        if not payload.aptitudeConfig:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Aptitude configuration is required for aptitude assessments",
+            )
+        # Check if at least one aptitude category is enabled
+        apt_config = payload.aptitudeConfig
+        has_enabled = (
+            (apt_config.quantitative and apt_config.quantitative.enabled)
+            or (apt_config.logicalReasoning and apt_config.logicalReasoning.enabled)
+            or (apt_config.verbalAbility and apt_config.verbalAbility.enabled)
+            or (apt_config.numericalReasoning and apt_config.numericalReasoning.enabled)
+        )
+        if not has_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least one aptitude category must be enabled",
+            )
+
+    topic_docs: List[Dict[str, Any]] = []
+    custom_topics: List[str] = []
+    title_parts: List[str] = []
+    description_parts: List[str] = []
+
+    # Handle Aptitude topics
+    if "aptitude" in assessment_types and payload.aptitudeConfig:
+        apt_config = payload.aptitudeConfig
+        aptitude_category_map = {
+            "quantitative": "Quantitative",
+            "logicalReasoning": "Logical Reasoning",
+            "verbalAbility": "Verbal Ability",
+            "numericalReasoning": "Numerical Reasoning",
+        }
+
+        for key, category_name in aptitude_category_map.items():
+            category_config = getattr(apt_config, key, None)
+            if category_config and category_config.enabled:
+                # Aptitude topics don't support coding
+                coding_supported = await determine_topic_coding_support(category_name)
+                topic_docs.append(
+                    {
+                        "topic": category_name,
+                        "numQuestions": category_config.numQuestions,
+                        "questionTypes": ["MCQ"],
+                        "difficulty": category_config.difficulty,
+                        "source": "AI",
+                        "category": "aptitude",
+                        "questions": [],
+                        "questionConfigs": [],
+                        "coding_supported": coding_supported,
+                    }
+                )
+                custom_topics.append(category_name)
+                title_parts.append(category_name)
+                description_parts.append(f"{category_name} ({category_config.difficulty})")
+
+    # Handle Technical topics
+    if "technical" in assessment_types:
+        # Sanitize user inputs
+        sanitized_job_role = sanitize_text_field(payload.jobRole)
+        sanitized_skills = [sanitize_text_field(skill) for skill in payload.skills]
+        
+        topics = await generate_topics_from_input(sanitized_job_role, payload.experience, sanitized_skills, payload.numTopics)
+        # Sanitize generated topics
+        sanitized_topics = [sanitize_text_field(topic) for topic in topics]
+        # Determine coding support for each topic
+        technical_topic_docs = []
+        for t in sanitized_topics:
+            coding_supported = await determine_topic_coding_support(t)
+            technical_topic_docs.append({
+                "topic": t,
+                "numQuestions": 0,
+                "questionTypes": [],
+                "difficulty": "Medium",
+                "source": "AI",
+                "category": "technical",
+                "questions": [],
+                "questionConfigs": [],
+                "coding_supported": coding_supported,
+            })
+        topic_docs.extend(technical_topic_docs)
+        custom_topics.extend(sanitized_topics)
+        title_parts.append(sanitized_job_role)
+        description_parts.append(f"{sanitized_job_role} test for {payload.experience} exp level")
+
+    # Build title and description
+    # Sanitize title parts to prevent XSS
+    sanitized_title_parts = [sanitize_text_field(part) for part in title_parts]
+    sanitized_description_parts = [sanitize_text_field(part) for part in description_parts]
+    
+    if len(sanitized_title_parts) == 1:
+        title = f"{sanitized_title_parts[0]} Assessment"
+    elif len(sanitized_title_parts) == 2:
+        title = f"{sanitized_title_parts[0]} & {sanitized_title_parts[1]} Assessment"
+    else:
+        title = "Assessment"
+
+    description = ". ".join(sanitized_description_parts) if sanitized_description_parts else "Assessment"
+
+    assessment_doc: Dict[str, Any] = {
+        "title": title,
+        "description": description,
+        "topics": topic_docs,
+        "customTopics": custom_topics,
+        "assessmentType": list(assessment_types),
+        "status": "draft",
+        "createdBy": to_object_id(current_user.get("id")),
+        "organization": to_object_id(current_user.get("organization")) if current_user.get("organization") else None,
+        "isGenerated": False,
+        "createdAt": _now_utc(),
+        "updatedAt": _now_utc(),
+    }
+
+    # Store configuration
+    if "technical" in assessment_types:
+        assessment_doc["technicalConfig"] = {
+            "jobRole": payload.jobRole,
+            "experience": payload.experience,
+            "skills": payload.skills,
+        }
+
+    if "aptitude" in assessment_types and payload.aptitudeConfig:
+        apt_config_dict: Dict[str, Any] = {}
+        if payload.aptitudeConfig.quantitative:
+            apt_config_dict["quantitative"] = payload.aptitudeConfig.quantitative.model_dump()
+        if payload.aptitudeConfig.logicalReasoning:
+            apt_config_dict["logicalReasoning"] = payload.aptitudeConfig.logicalReasoning.model_dump()
+        if payload.aptitudeConfig.verbalAbility:
+            apt_config_dict["verbalAbility"] = payload.aptitudeConfig.verbalAbility.model_dump()
+        if payload.aptitudeConfig.numericalReasoning:
+            apt_config_dict["numericalReasoning"] = payload.aptitudeConfig.numericalReasoning.model_dump()
+        assessment_doc["aptitudeConfig"] = apt_config_dict
+
+    result = await db.assessments.insert_one(assessment_doc)
+    assessment_doc["_id"] = result.inserted_id
+    return success_response("Topics generated successfully", serialize_document(assessment_doc))
+
+
+@router.post("/update-topics")
+async def update_topic_settings(
+    payload: UpdateTopicSettingsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    if not payload.updatedTopics:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid input")
+
+    assessment = await _get_assessment(db, payload.assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topics = assessment.get("topics", [])
+    for update in payload.updatedTopics:
+        # Sanitize topic name
+        sanitized_topic = sanitize_text_field(update.topic)
+        topic_obj = next((t for t in topics if t.get("topic") == sanitized_topic), None)
+        if not topic_obj:
+            continue
+        topic_obj = _ensure_topic_structure(topic_obj)
+        
+        # Update topic name if sanitized
+        if sanitized_topic != update.topic:
+            topic_obj["topic"] = sanitized_topic
+
+        if update.numQuestions is not None:
+            topic_obj["numQuestions"] = update.numQuestions
+        if update.questionTypes is not None:
+            topic_obj["questionTypes"] = update.questionTypes
+        if update.difficulty:
+            topic_obj["difficulty"] = sanitize_text_field(update.difficulty) if update.difficulty else update.difficulty
+
+        if update.questions:
+            for idx, question_config in enumerate(update.questions):
+                if idx < len(topic_obj.get("questions", [])):
+                    existing_question = topic_obj["questions"][idx]
+                    existing_question.update(question_config.model_dump(exclude_unset=True))
+
+        if update.questionConfigs:
+            topic_obj["questionConfigs"] = [qc.model_dump(exclude_unset=True) for qc in update.questionConfigs]
+
+    assessment["topics"] = topics
+    await _save_assessment(db, assessment)
+    # Serialize topics to convert ObjectIds and datetimes to JSON-serializable formats
+    serialized_topics = convert_object_ids(assessment["topics"])
+    return success_response("Topic settings updated successfully", serialized_topics)
+
+
+@router.post("/add-topic")
+async def add_custom_topics(
+    payload: AddCustomTopicsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    if not payload.newTopics:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid input")
+
+    assessment = await _get_assessment(db, payload.assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topics = assessment.get("topics", [])
+    custom_topics = set(assessment.get("customTopics", []))
+
+    for topic_data in payload.newTopics:
+        if isinstance(topic_data, str):
+            # Sanitize topic name
+            topic_name = sanitize_text_field(topic_data)
+            exists = any(t.get("topic") == topic_name for t in topics)
+            if not exists:
+                # Automatically determine if topic supports coding
+                coding_supported = await determine_topic_coding_support(topic_name)
+                topics.append(
+                    {
+                        "topic": topic_name,
+                        "numQuestions": 0,
+                        "questionTypes": [],
+                        "difficulty": "Medium",
+                        "source": "User",
+                        "questions": [],
+                        "questionConfigs": [],
+                        "coding_supported": coding_supported,
+                    }
+                )
+            custom_topics.add(topic_name)
+        else:
+            topic_dict = topic_data.model_dump(exclude_unset=True)
+            # Sanitize topic name and difficulty
+            topic_name = sanitize_text_field(topic_dict.get("topic", ""))
+            sanitized_difficulty = sanitize_text_field(topic_dict.get("difficulty", "Medium")) if topic_dict.get("difficulty") else "Medium"
+            exists = any(t.get("topic") == topic_name for t in topics)
+            if not exists:
+                topics.append(
+                    {
+                        "topic": topic_name,
+                        "numQuestions": topic_dict.get("numQuestions", 0),
+                        "questionTypes": topic_dict.get("questionTypes", []),
+                        "difficulty": sanitized_difficulty,
+                        "source": "User",
+                        "questions": [],
+                        "questionConfigs": topic_dict.get("questionConfigs", []),
+                    }
+                )
+            custom_topics.add(topic_name)
+
+    assessment["topics"] = topics
+    assessment["customTopics"] = list(custom_topics)
+    await _save_assessment(db, assessment)
+    # Serialize topics to convert ObjectIds and datetimes to JSON-serializable formats
+    serialized_topics = convert_object_ids(assessment["topics"])
+    return success_response("Custom topics added successfully", serialized_topics)
+
+
+@router.delete("/remove-topic")
+async def remove_custom_topics(
+    payload: RemoveCustomTopicsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    if not payload.topicsToRemove:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid input")
+
+    assessment = await _get_assessment(db, payload.assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topics_to_remove = set(payload.topicsToRemove)
+    
+    # Remove topics from topics array
+    assessment["topics"] = [t for t in assessment.get("topics", []) if t.get("topic") not in topics_to_remove]
+    
+    # Remove topics from customTopics array
+    assessment["customTopics"] = [t for t in assessment.get("customTopics", []) if t not in topics_to_remove]
+    
+    # Remove questions that belong to removed topics
+    # Questions are stored in assessment["questions"] array, and each question has a "topic" field
+    if "questions" in assessment and isinstance(assessment["questions"], list):
+        assessment["questions"] = [
+            q for q in assessment["questions"] 
+            if q.get("topic") not in topics_to_remove
+        ]
+    
+    # Also remove questions from topic objects themselves
+    for topic in assessment.get("topics", []):
+        if isinstance(topic, dict) and "questions" in topic:
+            if isinstance(topic["questions"], list):
+                # Keep only questions that don't belong to removed topics
+                # (though this shouldn't be necessary if questions are properly structured)
+                topic["questions"] = [
+                    q for q in topic["questions"]
+                    if q.get("topic") not in topics_to_remove
+                ]
+
+    await _save_assessment(db, assessment)
+    # Serialize topics to convert ObjectIds and datetimes to JSON-serializable formats
+    serialized_topics = convert_object_ids(assessment["topics"])
+    return success_response("Topics removed successfully", serialized_topics)
+
+
+# New flow endpoints
+@router.post("/generate-topic-cards")
+async def generate_topic_cards_endpoint(
+    payload: GenerateTopicCardsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Generate topic cards (technologies/skills) from job designation."""
+    try:
+        # Sanitize input to prevent XSS
+        sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
+        sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
+        experience_min = payload.experienceMin if payload.experienceMin is not None else 0
+        experience_max = payload.experienceMax if payload.experienceMax is not None else 10
+        experience_mode = payload.experienceMode if payload.experienceMode else "corporate"
+        
+        # Validate experience mode
+        if experience_mode not in ["corporate", "student"]:
+            raise HTTPException(status_code=400, detail="experienceMode must be either 'corporate' or 'student'")
+        
+        cards = await generate_topic_cards_from_job_designation(
+            sanitized_job_designation, 
+            experience_min, 
+            experience_max,
+            experience_mode,
+            sanitized_title
+        )
+        
+        return success_response(
+            "Topic cards generated successfully",
+            {
+                "cards": cards,
+            }
+        )
+    except HTTPException:
+        # Re-raise HTTPExceptions as-is (they already have proper status codes and messages)
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating topic cards: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate topic cards: {str(exc)}") from exc
+
+
+@router.post("/generate-topics-from-skill")
+async def generate_topics_from_skill_endpoint(
+    payload: GenerateTopicsFromSkillRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Generate topics from skill(s) input. Handles both single skill and comma-separated multiple skills."""
+    try:
+        # Parse skills: if comma-separated, split into list; otherwise treat as single skill
+        skill_input = payload.skill.strip()
+        if "," in skill_input:
+            # Multiple skills (comma-separated) - use generate_topics_from_selected_skills
+            skills_list = [s.strip() for s in skill_input.split(",") if s.strip()]
+            if not skills_list:
+                raise HTTPException(status_code=400, detail="No valid skills provided")
+            
+            # Filter out aptitude skills (only use technical skills for topic generation)
+            _, technical_skills = _separate_skills(skills_list)
+            if not technical_skills:
+                raise HTTPException(status_code=400, detail="No technical skills found. Please provide technical skills for topic generation.")
+            
+            experience_mode = payload.experienceMode if hasattr(payload, 'experienceMode') and payload.experienceMode else "corporate"
+            topics = await generate_topics_from_selected_skills(
+                technical_skills,
+                payload.experienceMin,
+                payload.experienceMax,
+                experience_mode
+            )
+            # Get question types from the first skill (or combine if needed)
+            question_types = await get_relevant_question_types(technical_skills[0] if technical_skills else skill_input)
+        else:
+            # Single skill - use generate_topics_from_skill
+            experience_mode = payload.experienceMode if hasattr(payload, 'experienceMode') and payload.experienceMode else "corporate"
+            topics = await generate_topics_from_skill(payload.skill, payload.experienceMin, payload.experienceMax, experience_mode)
+            question_types = await get_relevant_question_types(payload.skill)
+        
+        return success_response(
+            "Topics generated successfully",
+            {
+                "topics": topics,
+                "questionTypes": question_types,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating topics from skill: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to generate topics") from exc
+
+
+@router.post("/validate-question-type")
+async def validate_question_type_endpoint(
+    payload: ValidateQuestionTypeRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """
+    Validate if a question type is appropriate for a given topic.
+    Specifically validates that 'coding' type is only used for topics that support Judge0 execution.
+    """
+    try:
+        # Sanitize input to prevent XSS
+        sanitized_topic = sanitize_text_field(payload.topic)
+        question_type = payload.questionType.strip()
+        
+        if not sanitized_topic or not sanitized_topic.strip():
+            raise HTTPException(status_code=400, detail="Topic name is required")
+        
+        if question_type not in ["MCQ", "Subjective", "Pseudo Code", "Descriptive", "coding"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid question type: {question_type}. Must be one of: MCQ, Subjective, Pseudo Code, Descriptive, coding"
+            )
+        
+        # Special validation for coding type
+        if question_type == "coding":
+            coding_supported = await determine_topic_coding_support(sanitized_topic)
+            if not coding_supported:
+                # Also determine the appropriate question type for this topic
+                suggested_type = await get_question_type_for_topic(sanitized_topic)
+                return success_response(
+                    "Question type validation failed",
+                    {
+                        "valid": False,
+                        "reason": f"Topic '{sanitized_topic}' does not support coding questions that can be executed by Judge0. Topics related to frameworks, UI/UX, theory, or non-executable concepts do not support coding type.",
+                        "suggestedType": suggested_type,
+                        "codingSupported": False,
+                    }
+                )
+            return success_response(
+                "Question type is valid",
+                {
+                    "valid": True,
+                    "codingSupported": True,
+                }
+            )
+        
+        # For non-coding types, they're generally valid for any topic
+        # But we can still check if the topic would be better suited for coding
+        coding_supported = await determine_topic_coding_support(sanitized_topic)
+        suggested_type = await get_question_type_for_topic(sanitized_topic)
+        
+        return success_response(
+            "Question type is valid",
+            {
+                "valid": True,
+                "codingSupported": coding_supported,
+                "suggestedType": suggested_type,
+                "note": f"Topic supports coding: {coding_supported}. Suggested type: {suggested_type}" if coding_supported and question_type != "coding" else None,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error validating question type: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to validate question type: {str(exc)}") from exc
+
+
+@router.post("/regenerate-single-topic")
+async def regenerate_single_topic_endpoint(
+    payload: RegenerateSingleTopicRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Regenerate a new topic name based on skills, update question type and coding support, delete its questions."""
+    try:
+        # Sanitize input to prevent XSS
+        old_topic_name = sanitize_text_field(payload.topic)
+        
+        if not old_topic_name or not old_topic_name.strip():
+            raise HTTPException(status_code=400, detail="Topic name is required")
+        
+        new_topic_name = old_topic_name
+        question_type = "MCQ"
+        coding_supported = False
+        
+        # If assessmentId is provided, regenerate topic based on skills and update the assessment
+        if payload.assessmentId:
+            assessment = await _get_assessment(db, payload.assessmentId)
+            _check_assessment_access(assessment, current_user)
+            
+            # Get skills and experience from assessment
+            selected_skills = assessment.get("selectedSkills", [])
+            experience_min = assessment.get("experienceMin", 0)
+            experience_max = assessment.get("experienceMax", 10)
+            
+            # Find the topic to regenerate
+            topics = assessment.get("topics", [])
+            topic_obj = next((t for t in topics if t.get("topic") == old_topic_name), None)
+            
+            if topic_obj:
+                # Only regenerate technical topics (not aptitude)
+                if not topic_obj.get("isAptitude", False) and selected_skills:
+                    # Generate a new topic based on skills
+                    try:
+                        # Filter out aptitude skills
+                        _, technical_skills = _separate_skills(selected_skills)
+                        if technical_skills:
+                            # Generate new topics from skills
+                            # Get experience mode from assessment
+                            exp_mode = assessment.get("experienceMode", "corporate")
+                            new_topics = await generate_topics_from_selected_skills(
+                                technical_skills,
+                                str(experience_min),
+                                str(experience_max),
+                                exp_mode
+                            )
+                            # Use the first generated topic as the new topic name
+                            if new_topics and len(new_topics) > 0:
+                                new_topic_name = sanitize_text_field(new_topics[0])
+                                # Update the topic name in the assessment
+                                topic_obj["topic"] = new_topic_name
+                    except Exception as e:
+                        logger.warning(f"Failed to generate new topic name: {e}. Keeping original topic name.")
+                        # If generation fails, keep the old topic name
+                        new_topic_name = old_topic_name
+                
+                # Clear questions for this topic
+                topic_obj["questions"] = []
+                topic_obj["numQuestions"] = 0
+                
+                # Get question type and coding support for the new topic
+                # Uses get_question_type_for_topic which now properly returns MCQ/Subjective for appropriate topics
+                question_type, coding_supported = await asyncio.gather(
+                    get_question_type_for_topic(new_topic_name),
+                    determine_topic_coding_support(new_topic_name),
+                    return_exceptions=True
+                )
+                
+                # Handle exceptions gracefully
+                if isinstance(question_type, Exception):
+                    logger.warning(f"Failed to determine question type for topic '{new_topic_name}': {question_type}")
+                    question_type = "MCQ"  # Safe fallback
+                if isinstance(coding_supported, Exception):
+                    logger.warning(f"Failed to determine coding support for topic '{new_topic_name}': {coding_supported}")
+                    coding_supported = False  # Safe fallback
+                
+                # Update topic with new question type and coding support
+                topic_obj["questionTypes"] = [question_type]
+                topic_obj["coding_supported"] = coding_supported
+                
+                # Save the assessment
+                await _save_assessment(db, assessment)
+        else:
+            # If no assessmentId, just get question type and coding support for the topic
+            # Uses get_question_type_for_topic which now properly returns MCQ/Subjective for appropriate topics
+            question_type, coding_supported = await asyncio.gather(
+                get_question_type_for_topic(new_topic_name),
+                determine_topic_coding_support(new_topic_name),
+                return_exceptions=True
+            )
+            
+            # Handle exceptions gracefully
+            if isinstance(question_type, Exception):
+                logger.warning(f"Failed to determine question type for topic '{new_topic_name}': {question_type}")
+                question_type = "MCQ"  # Safe fallback
+            if isinstance(coding_supported, Exception):
+                logger.warning(f"Failed to determine coding support for topic '{new_topic_name}': {coding_supported}")
+                coding_supported = False  # Safe fallback
+        
+        # If question type is "coding" but topic doesn't support coding, change to a safe default
+        # The improved get_question_type_for_topic should rarely return "coding" for non-coding topics,
+        # but this is a safety check
+        if question_type == "coding" and not coding_supported:
+            logger.warning(f"Topic '{new_topic_name}' was assigned 'coding' but doesn't support coding. Changing to 'Subjective'.")
+            question_type = "Subjective"  # Safe fallback for non-coding topics
+        
+        return success_response(
+            "Topic regenerated successfully",
+            {
+                "topic": new_topic_name,
+                "questionType": question_type,
+                "coding_supported": coding_supported,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error regenerating single topic: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate topic: {str(exc)}") from exc
+
+
+@router.post("/delete-topic-questions")
+async def delete_topic_questions(
+    payload: DeleteTopicQuestionsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Delete questions for a specific topic or all topics."""
+    try:
+        assessment = await _get_assessment(db, payload.assessmentId)
+        _check_assessment_access(assessment, current_user)
+        
+        topics = assessment.get("topics", [])
+        
+        if payload.topic:
+            # Delete questions for a specific topic only
+            topic_obj = next((t for t in topics if t.get("topic") == payload.topic), None)
+            if topic_obj:
+                topic_obj["questions"] = []
+                topic_obj["numQuestions"] = 0
+            
+            # Clear preview questions for this specific topic only (not all preview questions)
+            preview_questions = assessment.get("previewQuestions", [])
+            if preview_questions and isinstance(preview_questions, list):
+                filtered_preview_questions = [
+                    q for q in preview_questions 
+                    if q.get("topic") != payload.topic
+                ]
+                assessment["previewQuestions"] = filtered_preview_questions
+                logger.info(f"Deleted preview questions for topic '{payload.topic}'. Remaining preview questions: {len(filtered_preview_questions)}")
+        else:
+            # Delete questions for all topics
+            for topic_obj in topics:
+                topic_obj["questions"] = []
+                topic_obj["numQuestions"] = 0
+            
+            # Clear all preview questions only when deleting all topics
+            assessment["previewQuestions"] = []
+        
+        await _save_assessment(db, assessment)
+        
+        return success_response(
+            "Questions deleted successfully",
+            {"deleted": True}
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error deleting topic questions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete questions: {str(exc)}") from exc
+
+
+@router.post("/create-assessment-from-job-designation")
+async def create_assessment_from_job_designation(
+    payload: CreateAssessmentFromJobDesignationRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Create a new assessment with topics from job designation and selected skills, or update existing draft if one exists."""
+    try:
+        # SINGLE DRAFT LOGIC: Check for existing draft first
+        existing_assessment = None
+        if hasattr(payload, 'assessmentId') and payload.assessmentId:
+            # If assessmentId is provided, try to use that specific draft
+            try:
+                existing_assessment = await _get_assessment(db, payload.assessmentId)
+                _check_assessment_access(existing_assessment, current_user)
+                # Only use it if it's a draft
+                if existing_assessment.get("status") != "draft":
+                    logger.warning(f"Assessment {payload.assessmentId} is not a draft, will find/create new draft")
+                    existing_assessment = None
+                else:
+                    logger.info(f"Updating existing draft {payload.assessmentId} with new topics")
+            except HTTPException:
+                existing_assessment = None
+            except Exception as exc:
+                logger.warning(f"Error fetching assessment {payload.assessmentId}: {exc}")
+                existing_assessment = None
+        
+        # If no specific assessmentId provided or it doesn't exist, find existing draft
+        if not existing_assessment:
+            existing_assessment = await _find_or_get_existing_draft(db, current_user, payload.assessmentId if hasattr(payload, 'assessmentId') else None)
+            if existing_assessment:
+                logger.info(f"Found existing draft {existing_assessment['_id']}, updating instead of creating new")
+        # Sanitize user inputs to prevent XSS
+        sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
+        sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
+        experience_mode = payload.experienceMode if hasattr(payload, 'experienceMode') and payload.experienceMode else "corporate"
+        
+        # Validate experience mode
+        if experience_mode not in ["corporate", "student"]:
+            experience_mode = "corporate"  # Default fallback
+        
+        # Infer coding language from job designation and skills
+        coding_language = infer_language_from_skill(
+            job_designation=sanitized_job_designation,
+            selected_skills=sanitized_skills
+        )
+        
+        # Separate skills into aptitude and technical skills
+        aptitude_skills, technical_skills = _separate_skills(sanitized_skills)
+        
+        # Check if aptitude is requested (from job designation or skills)
+        is_aptitude = _is_aptitude_requested(sanitized_job_designation, sanitized_skills)
+        
+        # Build topics list
+        topic_docs = []
+        custom_topics = []
+        assessment_types = []
+        all_question_types = []
+        has_technical_topics = False
+        
+        # Generate aptitude topics if requested
+        if is_aptitude:
+            aptitude_topics = APTITUDE_MAIN_TOPICS.copy()
+            
+            for main_topic in aptitude_topics:
+                sanitized_main_topic = sanitize_text_field(main_topic)
+                sub_topics = get_aptitude_subtopics(main_topic)
+                
+                topic_doc = {
+                    "topic": sanitized_main_topic,
+                    "numQuestions": 0,
+                    "questionTypes": ["MCQ"],  # Aptitude topics use MCQ
+                    "difficulty": "Medium",
+                    "source": "Predefined",
+                    "category": "aptitude",
+                    "questions": [],
+                    "questionConfigs": [],
+                    "isAptitude": True,  # Flag to identify aptitude topics
+                    "subTopics": sub_topics,  # List of available sub-topics
+                    "aptitudeStructure": APTITUDE_TOPICS_STRUCTURE[main_topic],  # Full structure for frontend
+                }
+                topic_docs.append(topic_doc)
+                custom_topics.append(sanitized_main_topic)
+            
+            assessment_types.append("aptitude")
+            all_question_types.append("MCQ")
+        
+        # Generate technical topics if there are technical skills
+        if technical_skills:
+            # Generate topics from technical skills only
+            technical_topics = await generate_topics_from_selected_skills(
+                technical_skills, 
+                payload.experienceMin, 
+                payload.experienceMax,
+                experience_mode
+            )
+            
+            # Process topics in parallel to determine question types and coding support (optimized)
+            topic_processing_tasks = []
+            for topic in technical_topics:
+                sanitized_topic = sanitize_text_field(topic)
+                # Create tasks for parallel processing
+                topic_processing_tasks.append({
+                    "topic": sanitized_topic,
+                    "question_type_task": get_question_type_for_topic(sanitized_topic),
+                    "coding_support_task": determine_topic_coding_support(sanitized_topic),
+                })
+            
+            # Execute all tasks in parallel for better performance
+            for task_info in topic_processing_tasks:
+                question_type, coding_supported = await asyncio.gather(
+                    task_info["question_type_task"],
+                    task_info["coding_support_task"],
+                    return_exceptions=True
+                )
+                
+                # Handle exceptions gracefully
+                if isinstance(question_type, Exception):
+                    logger.warning(f"Failed to determine question type for topic '{task_info['topic']}': {question_type}")
+                    question_type = "MCQ"  # Safe fallback
+                if isinstance(coding_supported, Exception):
+                    logger.warning(f"Failed to determine coding support for topic '{task_info['topic']}': {coding_supported}")
+                    coding_supported = False  # Safe fallback
+                
+                # If question type is "coding" but topic doesn't support coding, change to a safe default
+                if question_type == "coding" and not coding_supported:
+                    logger.warning(f"Topic '{task_info['topic']}' was assigned 'coding' but doesn't support coding. Changing to 'Subjective'.")
+                    question_type = "Subjective"  # Safe fallback for non-coding topics
+                
+                topic_doc = {
+                    "topic": task_info["topic"],
+                    "numQuestions": 0,
+                    "questionTypes": [question_type],  # Topic-specific question type
+                    "difficulty": "Medium",  # Default difficulty
+                    "source": "AI",
+                    "category": "technical",
+                    "questions": [],
+                    "questionConfigs": [],
+                    "isAptitude": False,  # Flag to identify technical topics
+                    "coding_supported": coding_supported,
+                }
+                topic_docs.append(topic_doc)
+                custom_topics.append(task_info["topic"])
+                
+                # Add question type to all_question_types (avoid duplicates)
+                if question_type not in all_question_types:
+                    all_question_types.append(question_type)
+            
+            assessment_types.append("technical")
+            has_technical_topics = True
+        
+        # If no topics were generated, raise an error
+        if not topic_docs:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No valid skills selected. Please select at least one technical skill or aptitude."
+            )
+        
+        # Build description
+        if is_aptitude and has_technical_topics:
+            technical_skills_str = ", ".join(technical_skills)
+            description = f"Mixed Assessment (Aptitude + Technical) for {sanitized_job_designation} - Technical Skills: {technical_skills_str} (Experience: {payload.experienceMin}-{payload.experienceMax} years)"
+        elif is_aptitude:
+            description = f"Aptitude Assessment for {sanitized_job_designation} (Experience: {payload.experienceMin}-{payload.experienceMax} years)"
+        else:
+            technical_skills_str = ", ".join(technical_skills)
+            description = f"Assessment for {sanitized_job_designation} - Skills: {technical_skills_str} (Experience: {payload.experienceMin}-{payload.experienceMax} years)"
+        
+        # Ensure we have at least one question type
+        if not all_question_types:
+            all_question_types = ["Subjective"]  # Fallback
+        
+        # Generate a default title if not provided
+        default_title = f"Assessment for {sanitized_job_designation}"
+        if is_aptitude and has_technical_topics:
+            default_title = f"Mixed Assessment: {sanitized_job_designation}"
+        elif is_aptitude:
+            default_title = f"Aptitude Assessment: {sanitized_job_designation}"
+        
+        if existing_assessment:
+            # UPDATE EXISTING ASSESSMENT: Replace all topics and clear questions
+            existing_assessment["topics"] = topic_docs  # Replace all topics
+            existing_assessment["customTopics"] = custom_topics
+            existing_assessment["assessmentType"] = assessment_types if assessment_types else ["technical"]
+            existing_assessment["updatedAt"] = _now_utc()
+            existing_assessment["jobDesignation"] = sanitized_job_designation
+            existing_assessment["selectedSkills"] = sanitized_skills
+            existing_assessment["experienceMin"] = payload.experienceMin
+            existing_assessment["experienceMax"] = payload.experienceMax
+            existing_assessment["experienceMode"] = experience_mode
+            existing_assessment["availableQuestionTypes"] = all_question_types
+            existing_assessment["isAptitudeAssessment"] = is_aptitude
+            existing_assessment["codingLanguage"] = coding_language
+            
+            # Clear all questions from all topics (regeneration means fresh start)
+            for topic_doc in topic_docs:
+                topic_doc["questions"] = []
+                topic_doc["numQuestions"] = 0
+                topic_doc["questionConfigs"] = []
+            
+            # Clear preview questions as well
+            existing_assessment["previewQuestions"] = []
+            
+            # Update the assessment in database
+            await _save_assessment(db, existing_assessment)
+            assessment_doc = existing_assessment
+            
+            logger.info(f"Updated assessment {payload.assessmentId} with {len(topic_docs)} new topics. Cleared all questions.")
+        else:
+            # CREATE NEW ASSESSMENT
+            assessment_doc: Dict[str, Any] = {
+                "title": default_title,  # Set default title based on job designation
+                "description": description,  # Use generated description
+                "topics": topic_docs,
+                "customTopics": custom_topics,
+                "assessmentType": assessment_types if assessment_types else ["technical"],
+                "status": "draft",
+                "createdBy": to_object_id(current_user.get("id")),
+                "organization": to_object_id(current_user.get("organization")) if current_user.get("organization") else None,
+                "isGenerated": False,
+                "createdAt": _now_utc(),
+                "updatedAt": _now_utc(),
+                "jobDesignation": sanitized_job_designation,
+                "selectedSkills": sanitized_skills,
+                "experienceMin": payload.experienceMin,
+                "experienceMax": payload.experienceMax,
+                "experienceMode": experience_mode,
+                "availableQuestionTypes": all_question_types,
+                "isAptitudeAssessment": is_aptitude,  # Flag for frontend (true if aptitude is included)
+                "codingLanguage": coding_language,  # Store inferred coding language
+            }
+            
+            result = await db.assessments.insert_one(assessment_doc)
+            assessment_doc["_id"] = result.inserted_id
+        
+        return success_response(
+            "Assessment created successfully" if not existing_assessment else "Assessment topics regenerated successfully",
+            {
+                "assessment": serialize_document(assessment_doc),
+                "questionTypes": assessment_doc.get("availableQuestionTypes", ["MCQ"]),
+            }
+        )
+    except Exception as exc:
+        logger.error(f"Error creating assessment from job designation: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to create assessment") from exc
+
+
+@router.post("/create-assessment-from-skill")
+async def create_assessment_from_skill(
+    payload: GenerateTopicsFromSkillRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Create a new assessment with topics from skill input, or update existing draft if one exists."""
+    try:
+        # SINGLE DRAFT LOGIC: Check for existing draft first
+        existing_assessment = await _find_or_get_existing_draft(db, current_user)
+        if existing_assessment:
+            logger.info(f"Found existing draft {existing_assessment['_id']}, updating instead of creating new")
+        
+        experience_mode = payload.experienceMode if hasattr(payload, 'experienceMode') and payload.experienceMode else "corporate"
+        topics = await generate_topics_from_skill(payload.skill, payload.experienceMin, payload.experienceMax, experience_mode)
+        question_types = await get_relevant_question_types(payload.skill)
+        
+        # Sanitize user inputs to prevent XSS
+        sanitized_skill = sanitize_text_field(payload.skill)
+        sanitized_topics = [sanitize_text_field(topic) for topic in topics]
+        
+        if existing_assessment:
+            # UPDATE EXISTING DRAFT
+            existing_assessment["title"] = f"{sanitized_skill} Assessment"
+            existing_assessment["description"] = f"Assessment for {sanitized_skill} (Experience: {payload.experienceMin}-{payload.experienceMax} years)"
+            existing_assessment["topics"] = [
+                {
+                    "topic": topic,
+                    "numQuestions": 0,
+                    "questionTypes": [],
+                    "difficulty": "Medium",
+                    "source": "AI",
+                    "category": "technical",
+                    "questions": [],
+                    "questionConfigs": [],
+                }
+                for topic in sanitized_topics
+            ]
+            existing_assessment["customTopics"] = sanitized_topics
+            existing_assessment["assessmentType"] = ["technical"]
+            existing_assessment["status"] = "draft"
+            existing_assessment["skill"] = sanitized_skill
+            existing_assessment["experienceMin"] = payload.experienceMin
+            existing_assessment["experienceMax"] = payload.experienceMax
+            existing_assessment["availableQuestionTypes"] = question_types
+            existing_assessment["updatedAt"] = _now_utc()
+            
+            await _save_assessment(db, existing_assessment)
+            assessment_doc = existing_assessment
+        else:
+            # CREATE NEW DRAFT
+            assessment_doc: Dict[str, Any] = {
+                "title": f"{sanitized_skill} Assessment",
+                "description": f"Assessment for {sanitized_skill} (Experience: {payload.experienceMin}-{payload.experienceMax} years)",
+                "topics": [
+                    {
+                        "topic": topic,
+                        "numQuestions": 0,
+                        "questionTypes": [],
+                        "difficulty": "Medium",
+                        "source": "AI",
+                        "category": "technical",
+                        "questions": [],
+                        "questionConfigs": [],
+                    }
+                    for topic in sanitized_topics
+                ],
+                "customTopics": sanitized_topics,
+                "assessmentType": ["technical"],
+                "status": "draft",
+                "createdBy": to_object_id(current_user.get("id")),
+                "organization": to_object_id(current_user.get("organization")) if current_user.get("organization") else None,
+                "isGenerated": False,
+                "createdAt": _now_utc(),
+                "updatedAt": _now_utc(),
+                "skill": sanitized_skill,
+                "experienceMin": payload.experienceMin,
+                "experienceMax": payload.experienceMax,
+                "availableQuestionTypes": question_types,
+            }
+            
+            result = await db.assessments.insert_one(assessment_doc)
+            assessment_doc["_id"] = result.inserted_id
+        
+        return success_response(
+            "Assessment created successfully",
+            {
+                "assessment": serialize_document(assessment_doc),
+                "questionTypes": question_types,
+            }
+        )
+    except Exception as exc:
+        logger.error(f"Error creating assessment from skill: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to create assessment") from exc
+
+
+@router.post("/suggest-time-score")
+async def suggest_time_score(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Get AI suggestions for time and score for a question."""
+    question = payload.get("question")
+    if not question:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is required")
+    
+    try:
+        suggestion = await suggest_time_and_score(question)
+        return success_response("Time and score suggested successfully", suggestion)
+    except Exception as exc:
+        logger.error(f"Error suggesting time and score: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to suggest time and score") from exc
+
+
+# NOTE: generate-questions-from-config endpoint moved to api/v2/assessments/routers.py
+
+
+def _build_generation_config(topic_obj: Dict[str, Any]) -> Dict[str, Any]:
+    config = {"numQuestions": topic_obj.get("numQuestions", 0)}
+    question_configs = topic_obj.get("questionConfigs") or []
+    
+    # For aptitude topics, always use MCQ only
+    if topic_obj.get("category") == "aptitude":
+        num_questions = topic_obj.get("numQuestions", 0)
+        difficulty = topic_obj.get("difficulty", "Medium")
+        for index in range(num_questions):
+            config[f"Q{index + 1}type"] = "MCQ"
+            config[f"Q{index + 1}difficulty"] = difficulty
+        return config
+    
+    if question_configs:
+        for index, q_config in enumerate(question_configs):
+            config[f"Q{index + 1}type"] = q_config.get("type", "Subjective")
+            config[f"Q{index + 1}difficulty"] = q_config.get("difficulty", "Medium")
+    else:
+        question_types = topic_obj.get("questionTypes") or []
+        # For technical topics, use only the first question type if multiple are selected
+        q_type = question_types[0] if question_types else "Subjective"
+        for index in range(topic_obj.get("numQuestions", 0)):
+            config[f"Q{index + 1}type"] = q_type
+            config[f"Q{index + 1}difficulty"] = topic_obj.get("difficulty", "Medium")
+    return config
+
+
+# Rate limiting for AI generation (3 requests/min/user)
+# Import will be added at top of file
+@router.post("/generate-questions")
+async def generate_questions(
+    payload: GenerateQuestionsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, payload.assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topics = [
+        t
+        for t in assessment.get("topics", [])
+        if t.get("numQuestions", 0) > 0
+        and (
+            (t.get("questionTypes") and len(t["questionTypes"]) > 0)
+            or (t.get("questionConfigs") and len(t["questionConfigs"]) > 0)
+        )
+    ]
+    if not topics:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid topics for question generation")
+
+    results = []
+    failed_topics = []
+    
+    for topic in topics:
+        topic = _ensure_topic_structure(topic)
+        config = _build_generation_config(topic)
+        expected_count = topic.get("numQuestions", 0)
+        
+        # Retry logic for each topic
+        max_retries = 2
+        generated_questions = []
+        
+        for retry in range(max_retries):
+            try:
+                generated_questions = await generate_questions_for_topic_safe(topic.get("topic"), config)
+                # Check if we got enough questions
+                if len(generated_questions) >= expected_count:
+                    break
+                elif retry < max_retries - 1:
+                    logger.warning(f"Topic '{topic.get('topic')}' generated only {len(generated_questions)}/{expected_count} questions. Retrying...")
+                    await asyncio.sleep(1)  # Brief delay before retry
+                else:
+                    logger.warning(f"Topic '{topic.get('topic')}' generated only {len(generated_questions)}/{expected_count} questions after retries.")
+            except Exception as exc:
+                logger.error(f"Error generating questions for topic '{topic.get('topic')}': {exc}")
+                if retry < max_retries - 1:
+                    await asyncio.sleep(1)
+                else:
+                    failed_topics.append(topic.get("topic"))
+                    break
+        
+        # If we got some questions but not all, still use what we have
+        if generated_questions:
+            existing_questions = topic.get("questions", [])
+            merged_questions: List[Dict[str, Any]] = []
+            for index, new_question in enumerate(generated_questions):
+                if index < len(existing_questions):
+                    merged = existing_questions[index].copy()
+                    merged.update(new_question)
+                else:
+                    merged = new_question
+                
+                # Auto-generate time and score if not already set
+                if "time" not in merged or "score" not in merged:
+                    try:
+                        time_score = await suggest_time_and_score(merged)
+                        merged["time"] = time_score.get("time", 10)
+                        merged["score"] = time_score.get("score", 5)
+                    except Exception as exc:
+                        logger.warning(f"Failed to generate time/score for question, using defaults: {exc}")
+                        merged["time"] = merged.get("time", 10)
+                        merged["score"] = merged.get("score", 5)
+                
+                merged_questions.append(merged)
+            topic["questions"] = merged_questions
+            results.append({"topic": topic.get("topic"), "questions": merged_questions, "expected": expected_count, "generated": len(merged_questions)})
+        else:
+            failed_topics.append(topic.get("topic"))
+    
+    # Save assessment even if some topics failed
+    assessment["isGenerated"] = True
+    assessment["status"] = "draft"
+    await _save_assessment(db, assessment)
+    
+    if failed_topics:
+        logger.warning(f"Failed to generate questions for topics: {failed_topics}")
+        if not results:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate questions for all topics: {', '.join(failed_topics)}"
+            )
+    
+    return success_response(
+        "Questions generated and saved successfully",
+        {
+            "results": results,
+            "failedTopics": failed_topics if failed_topics else None,
+            "summary": {
+                "totalTopics": len(topics),
+                "successfulTopics": len(results),
+                "failedTopics": len(failed_topics),
+                "totalQuestions": sum(len(r["questions"]) for r in results)
+            }
+        }
+    )
+
+
+@router.put("/update-questions")
+async def update_questions(
+    payload: UpdateQuestionsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, payload.assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topic = next((t for t in assessment.get("topics", []) if t.get("topic") == payload.topic), None)
+    if not topic:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found in assessment")
+
+    # Update questions, preserving all properties including time and score
+    topic["questions"] = [q.model_dump(exclude_unset=True) for q in payload.updatedQuestions]
+    assessment["status"] = "draft"
+    await _save_assessment(db, assessment)
+    return success_response(
+        "Updated questions saved successfully",
+        {
+            "topic": topic.get("topic"),
+            "questions": topic["questions"],
+            "totalQuestions": len(topic["questions"]),
+        },
+    )
+
+
+@router.put("/update-single-question")
+async def update_single_question(
+    payload: UpdateSingleQuestionRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, payload.assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topic = next((t for t in assessment.get("topics", []) if t.get("topic") == payload.topic), None)
+    if not topic:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found in assessment")
+
+    questions = topic.get("questions", [])
+    if payload.questionIndex >= len(questions):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question not found")
+
+    updated_question = questions[payload.questionIndex]
+    updated_question.update(payload.updatedQuestion.model_dump(exclude_unset=True))
+    updated_question["updatedAt"] = _now_utc()
+    assessment["status"] = "draft"
+    await _save_assessment(db, assessment)
+    return success_response(
+        "Question updated successfully",
+        {
+            "topic": topic.get("topic"),
+            "questionIndex": payload.questionIndex,
+            "question": updated_question,
+        },
+    )
+
+
+@router.post("/add-question")
+async def add_new_question(
+    payload: AddNewQuestionRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, payload.assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topic = next((t for t in assessment.get("topics", []) if t.get("topic") == payload.topic), None)
+    if not topic:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found in assessment")
+
+    topic = _ensure_topic_structure(topic)
+    question = payload.newQuestion.model_dump(exclude_unset=True)
+    question["createdAt"] = _now_utc()
+    question["updatedAt"] = _now_utc()
+    topic["questions"].append(question)
+    assessment["status"] = "draft"
+    await _save_assessment(db, assessment)
+    return success_response(
+        "Question added successfully",
+        {
+            "topic": topic.get("topic"),
+            "question": question,
+            "questionIndex": len(topic["questions"]) - 1,
+            "totalQuestions": len(topic["questions"]),
+        },
+    )
+
+
+@router.delete("/delete-question")
+async def delete_question(
+    payload: DeleteQuestionRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, payload.assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topic = next((t for t in assessment.get("topics", []) if t.get("topic") == payload.topic), None)
+    if not topic:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found in assessment")
+
+    questions = topic.get("questions", [])
+    if payload.questionIndex >= len(questions):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question not found")
+
+    deleted_question = questions.pop(payload.questionIndex)
+    assessment["status"] = "draft"
+    await _save_assessment(db, assessment)
+    return success_response(
+        "Question deleted successfully",
+        {
+            "topic": topic.get("topic"),
+            "deletedQuestion": deleted_question,
+            "totalQuestions": len(questions),
+        },
+    )
+
+
+@router.post("/finalize-assessment")
+async def finalize_assessment(
+    payload: FinalizeAssessmentRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Finalize assessment by converting draft to ready status.
+    SINGLE DRAFT LOGIC: Converts the existing draft, does NOT create new assessment.
+    """
+    try:
+        assessment = await _get_assessment(db, payload.assessmentId)
+        _check_assessment_access(assessment, current_user)
+        
+        # Ensure it's a draft before finalizing
+        if assessment.get("status") not in {"draft", "ready"}:
+            raise HTTPException(status_code=400, detail="Only draft assessments can be finalized")
+
+        # CONVERT DRAFT TO FINAL: Update status and add finalized timestamp
+        assessment["status"] = "ready"
+        if payload.title:
+            assessment["title"] = sanitize_text_field(payload.title)
+        if payload.description:
+            assessment["description"] = sanitize_text_field(payload.description)
+        if payload.questionTypeTimes:
+            assessment["questionTypeTimes"] = payload.questionTypeTimes
+        if payload.enablePerSectionTimers is not None:
+            assessment["enablePerSectionTimers"] = payload.enablePerSectionTimers
+        if payload.passPercentage is not None:
+            assessment["passPercentage"] = payload.passPercentage
+        assessment["finalizedAt"] = _now_utc()
+        assessment["updatedAt"] = _now_utc()
+        
+        # Generate assessment token if it doesn't exist
+        if not assessment.get("assessmentToken"):
+            assessment["assessmentToken"] = secrets.token_urlsafe(32)
+        
+        # Save the converted draft (same document, status changed to "ready")
+        await _save_assessment(db, assessment)
+        
+        # Serialize the assessment document before returning
+        serialized_assessment = serialize_document(assessment)
+        if serialized_assessment is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to serialize assessment document",
+            )
+        
+        return success_response("Assessment finalized successfully", serialized_assessment)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error finalizing assessment: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to finalize assessment: {str(exc)}",
+        ) from exc
+
+
+@router.get("/get-questions")
+async def get_questions_by_topic(
+    assessmentId: str = Query(..., alias="assessmentId"),
+    topic: str = Query(...),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, assessmentId)
+    _check_assessment_access(assessment, current_user)
+
+    topic_obj = next((t for t in assessment.get("topics", []) if t.get("topic") == topic), None)
+    if not topic_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found")
+    return success_response("Questions fetched successfully", topic_obj.get("questions", []))
+
+
+@router.get("/{assessment_id}/header")
+async def get_assessment_header(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+
+    data = {
+        "id": str(assessment.get("_id")),
+        "title": assessment.get("title"),
+        "status": assessment.get("status"),
+        "hasSchedule": bool(assessment.get("schedule")),
+    }
+    return success_response("Assessment header fetched successfully", data)
+
+
+@router.get("/{assessment_id}/schedule")
+async def get_assessment_schedule(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+
+    data = {
+        "assessmentId": str(assessment.get("_id")),
+        "title": assessment.get("title"),
+        "status": assessment.get("status"),
+        "schedule": assessment.get("schedule"),
+    }
+    return success_response("Assessment schedule fetched successfully", data)
+
+
+@router.get("/get-current-draft")
+async def get_current_draft(
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Get the current draft assessment for the user. Returns None if no draft exists."""
+    try:
+        draft = await _find_or_get_existing_draft(db, current_user)
+        if draft:
+            return success_response("Draft found", serialize_document(draft))
+        else:
+            return success_response("No draft found", None)
+    except Exception as exc:
+        logger.error(f"Error fetching current draft: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to fetch draft") from exc
+
+
+@router.put("/update-draft")
+async def update_assessment_draft(
+    payload: UpdateAssessmentDraftRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Update assessment draft data (preserves placeholder data). SINGLE DRAFT: Always updates the same draft."""
+    # SINGLE DRAFT LOGIC: If assessmentId is provided, use it. Otherwise, find existing draft.
+    if payload.assessmentId:
+        assessment = await _get_assessment(db, payload.assessmentId)
+        _check_assessment_access(assessment, current_user)
+        # Ensure it's a draft
+        if assessment.get("status") != "draft":
+            raise HTTPException(status_code=400, detail="Assessment is not a draft")
+    else:
+        # Find existing draft
+        assessment = await _find_or_get_existing_draft(db, current_user)
+        if not assessment:
+            raise HTTPException(status_code=404, detail="No draft found. Please create an assessment first.")
+    
+    # Update title and description (even if empty/placeholder)
+    if payload.title is not None:
+        assessment["title"] = sanitize_text_field(payload.title) if payload.title else ""
+    if payload.description is not None:
+        assessment["description"] = sanitize_text_field(payload.description) if payload.description else ""
+    
+    # Update job designation and skills
+    if payload.jobDesignation is not None:
+        assessment["jobDesignation"] = sanitize_text_field(payload.jobDesignation) if payload.jobDesignation else ""
+    if payload.selectedSkills is not None:
+        assessment["selectedSkills"] = [sanitize_text_field(skill) for skill in payload.selectedSkills] if payload.selectedSkills else []
+    if payload.experienceMin is not None:
+        assessment["experienceMin"] = payload.experienceMin
+    if payload.experienceMax is not None:
+        assessment["experienceMax"] = payload.experienceMax
+    if payload.experienceMode is not None:
+        # Validate experience mode
+        if payload.experienceMode not in ["corporate", "student"]:
+            raise HTTPException(status_code=400, detail="experienceMode must be either 'corporate' or 'student'")
+        assessment["experienceMode"] = payload.experienceMode
+    
+    # Update topics if provided
+    if payload.topics is not None:
+        # Convert topic configs to the format expected by the assessment
+        updated_topics = []
+        for topic_config in payload.topics:
+            topic_name = sanitize_text_field(topic_config.get("topic", ""))
+            if not topic_name:
+                continue
+                
+            # Check if topic already exists
+            existing_topic = next((t for t in assessment.get("topics", []) if t.get("topic") == topic_name), None)
+            
+            if existing_topic:
+                # Update existing topic
+                topic_obj = existing_topic
+            else:
+                # Create new topic
+                topic_obj = {
+                    "topic": topic_name,
+                    "numQuestions": 0,
+                    "questionTypes": [],
+                    "difficulty": "Medium",
+                    "source": "manual",
+                    "category": "technical",
+                    "questions": [],
+                    "questionConfigs": [],
+                }
+            
+            # Update topic with question type configs
+            question_type_configs = topic_config.get("questionTypeConfigs", [])
+            if question_type_configs:
+                topic_obj["questionTypes"] = [qtc.get("questionType") for qtc in question_type_configs if qtc.get("questionType")]
+                topic_obj["questionConfigs"] = []
+                total_questions = 0
+                
+                for qtc in question_type_configs:
+                    q_type = qtc.get("questionType", "MCQ")
+                    difficulty = qtc.get("difficulty", "Medium")
+                    num_questions = qtc.get("numQuestions", 1)
+                    
+                    for i in range(num_questions):
+                        q_config = {
+                            "questionNumber": total_questions + i + 1,
+                            "type": q_type,
+                            "difficulty": difficulty,
+                        }
+                        if q_type == "coding":
+                            q_config["judge0_enabled"] = qtc.get("judge0_enabled", True)
+                            if qtc.get("language"):
+                                q_config["language"] = qtc.get("language")
+                        topic_obj["questionConfigs"].append(q_config)
+                    
+                    total_questions += num_questions
+                
+                topic_obj["numQuestions"] = total_questions
+                topic_obj["difficulty"] = question_type_configs[0].get("difficulty", "Medium")
+            
+            # Handle aptitude topic fields
+            if topic_config.get("isAptitude"):
+                topic_obj["isAptitude"] = True
+                topic_obj["category"] = "aptitude"
+                if topic_config.get("subTopic"):
+                    topic_obj["subTopic"] = sanitize_text_field(topic_config.get("subTopic"))
+                if topic_config.get("aptitudeStructure"):
+                    topic_obj["aptitudeStructure"] = topic_config.get("aptitudeStructure")
+                if topic_config.get("availableSubTopics"):
+                    topic_obj["availableSubTopics"] = topic_config.get("availableSubTopics")
+            else:
+                # Handle technical topic fields
+                topic_obj["isAptitude"] = False
+                topic_obj["category"] = "technical"
+                # Preserve coding_supported if provided
+                if topic_config.get("coding_supported") is not None:
+                    topic_obj["coding_supported"] = topic_config.get("coding_supported")
+            
+            updated_topics.append(topic_obj)
+        
+        # Update assessment topics
+        assessment["topics"] = updated_topics
+    
+    # Update topics_v2 if provided (new structure)
+    if payload.topics_v2 is not None:
+        assessment["topics_v2"] = payload.topics_v2
+    
+    # Update preview questions if provided
+    if payload.previewQuestions is not None:
+        assessment["previewQuestions"] = payload.previewQuestions
+    
+    # Update questions if provided
+    if payload.questions is not None:
+        assessment["questions"] = payload.questions
+        if payload.questionTypeTimes is not None:
+            assessment["questionTypeTimes"] = payload.questionTypeTimes
+        if payload.enablePerSectionTimers is not None:
+            assessment["enablePerSectionTimers"] = payload.enablePerSectionTimers
+        if payload.sectionTimers is not None:
+            assessment["sectionTimers"] = payload.sectionTimers
+        if payload.scoringRules is not None:
+            assessment["scoringRules"] = payload.scoringRules
+        if payload.passPercentage is not None:
+            assessment["passPercentage"] = payload.passPercentage
+    
+    # Update schedule if provided
+    if payload.schedule is not None:
+        assessment["schedule"] = payload.schedule
+    
+    # Update candidates if provided
+    if payload.candidates is not None:
+        assessment["candidates"] = payload.candidates
+    
+    # Update assessment URL if provided
+    if payload.assessmentUrl is not None:
+        assessment["assessmentUrl"] = payload.assessmentUrl
+    
+    # Ensure status remains draft
+    assessment["status"] = "draft"
+    assessment["updatedAt"] = _now_utc()
+    
+    await _save_assessment(db, assessment)
+    return success_response("Draft updated successfully", serialize_document(assessment))
+
+
+@router.post("/update-schedule-and-candidates")
+async def update_schedule_and_candidates(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Update assessment schedule and candidates."""
+    assessment_id = payload.get("assessmentId")
+    if not assessment_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Assessment ID is required")
+    
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+
+    # Update schedule
+    schedule = {
+        "startTime": payload.get("startTime"),
+        "endTime": payload.get("endTime"),
+        "timezone": "Asia/Kolkata",  # IST
+    }
+    assessment["schedule"] = schedule
+    
+    # Store timer mode information
+    timer_mode = payload.get("timerMode")
+    if timer_mode == "section":
+        assessment["timerMode"] = "section"
+        assessment["sectionTotalTime"] = payload.get("sectionTotalTime")
+        assessment["scheduledWindowTime"] = payload.get("scheduledWindowTime")
+    elif timer_mode == "scheduleOnly":
+        assessment["timerMode"] = "scheduleOnly"
+        assessment["examDuration"] = payload.get("examDuration")
+    # If timerMode is not provided, keep existing or default to scheduleOnly for backward compatibility
+    elif "timerMode" not in assessment:
+        assessment["timerMode"] = "scheduleOnly"
+        try:
+            # Parse ISO format datetime strings
+            start_time_str = payload.get("startTime", "").replace("Z", "+00:00")
+            end_time_str = payload.get("endTime", "").replace("Z", "+00:00")
+            start_dt = datetime.fromisoformat(start_time_str)
+            end_dt = datetime.fromisoformat(end_time_str)
+            scheduled_window = (end_dt - start_dt).total_seconds() / 60
+            assessment["examDuration"] = scheduled_window
+        except (ValueError, AttributeError, TypeError):
+            # If parsing fails, don't set examDuration
+            logger.warning(f"Failed to parse datetime strings for examDuration calculation: startTime={payload.get('startTime')}, endTime={payload.get('endTime')}")
+
+    # Update candidates - NORMALIZE EMAIL AND NAME
+    candidates = payload.get("candidates", [])
+    normalized_candidates = []
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            # Normalize email (lowercase + strip) and name (strip)
+            normalized_candidate = {
+                "email": candidate.get("email", "").strip().lower(),
+                "name": candidate.get("name", "").strip(),
+            }
+            # Preserve any other fields from the original candidate object
+            for key, value in candidate.items():
+                if key not in ["email", "name"]:
+                    normalized_candidate[key] = value
+            normalized_candidates.append(normalized_candidate)
+        else:
+            # If it's not a dict, keep it as-is (shouldn't happen, but defensive coding)
+            normalized_candidates.append(candidate)
+    
+    assessment["candidates"] = normalized_candidates
+
+    # Update assessment URL and token
+    assessment["assessmentUrl"] = payload.get("assessmentUrl")
+    assessment["examAccessUrl"] = payload.get("assessmentUrl")  # Store as examAccessUrl for future-proofing
+    assessment["assessmentToken"] = payload.get("token")
+    
+    # Store access mode
+    access_mode = payload.get("accessMode", "private")
+    assessment["accessMode"] = access_mode
+    
+    # Store invitation template if provided
+    if payload.get("invitationTemplate"):
+        assessment["invitationTemplate"] = payload.get("invitationTemplate")
+
+    await _save_assessment(db, assessment)
+    return success_response("Schedule and candidates updated successfully", serialize_document(assessment))
+
+@router.post("/send-invitations")
+async def send_invitations(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Send email invitations to candidates using SendGrid with custom template."""
+    from ....utils.email import get_email_service
+    
+    assessment_id = payload.get("assessmentId")
+    if not assessment_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Assessment ID is required")
+    
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+    
+    candidates = payload.get("candidates", [])
+    exam_url = payload.get("examUrl")
+    template = payload.get("template", {})
+    
+    if not candidates or not exam_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Candidates and exam URL are required")
+    
+    # Get template values
+    logo_url = template.get("logoUrl", "")
+    company_name = template.get("companyName", "")
+    message = template.get("message", "You have been invited to take an assessment. Please click the link below to start.")
+    footer = template.get("footer", "")
+    sent_by = template.get("sentBy", "AI Assessment Platform")
+    
+    # Get email service and verify it's configured
+    from ....config.settings import get_settings
+    settings = get_settings()
+    
+    # Check if SendGrid is configured
+    if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="SendGrid is not configured. Please set SENDGRID_API_KEY and SENDGRID_FROM_EMAIL environment variables."
+        )
+    
+    email_service = get_email_service()
+    
+    sent_count = 0
+    failed_emails = []
+    error_messages = []
+    skipped_emails = []  # Already invited candidates
+    
+    # Get existing candidates from assessment to check invite status
+    existing_candidates = assessment.get("candidates", [])
+    existing_candidates_dict = {
+        c.get("email", "").strip().lower(): c 
+        for c in existing_candidates 
+        if c.get("email")
+    }
+    
+    for candidate in candidates:
+        email = candidate.get("email", "").strip().lower()
+        name = candidate.get("name", "").strip()
+        
+        if not email or not name:
+            failed_emails.append(email or "unknown")
+            error_messages.append(f"Invalid candidate data: email={email}, name={name}")
+            continue
+        
+        # Check if candidate has already been invited (unless forceResend is true)
+        force_resend = payload.get("forceResend", False)
+        existing_candidate = existing_candidates_dict.get(email)
+        if existing_candidate and existing_candidate.get("invited") and not force_resend:
+            # Candidate already received an invitation, skip (unless force resend)
+            skipped_emails.append(email)
+            logger.info(f"Skipping invitation to {email} - already invited on {existing_candidate.get('inviteSentAt', 'unknown date')}")
+            continue
+        
+        # Encode candidate info in URL for auto-fill
+        import urllib.parse
+        encoded_email = urllib.parse.quote(email)
+        encoded_name = urllib.parse.quote(name)
+        exam_url_with_params = f"{exam_url}?email={encoded_email}&name={encoded_name}"
+        
+        # Replace placeholders in message
+        email_body = message
+        email_body = email_body.replace("{{candidate_name}}", name)
+        email_body = email_body.replace("{{candidate_email}}", email)
+        email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+        email_body = email_body.replace("{{company_name}}", company_name)
+        email_body = email_body.replace("{{custom_message}}", message)
+        
+        # Build HTML email with candidate details displayed
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ text-align: center; margin-bottom: 30px; }}
+                .logo {{ max-width: 200px; margin-bottom: 20px; }}
+                .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+                .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
+                .candidate-info p {{ margin: 5px 0; }}
+                .candidate-info strong {{ color: #1e293b; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                    {f'<h1>{company_name}</h1>' if company_name else ''}
+                </div>
+                <div class="content">
+                    <p>Dear {name},</p>
+                    <p>{email_body}</p>
+                    
+                    <div class="candidate-info">
+                        <p><strong>Your Details:</strong></p>
+                        <p><strong>Name:</strong> {name}</p>
+                        <p><strong>Email:</strong> {email}</p>
+                        <p style="font-size: 0.875rem; color: #64748b; margin-top: 10px;">
+                            These details will be auto-filled when you start the assessment.
+                        </p>
+                    </div>
+                    
+                    <div style="text-align: center;">
+                        <a href="{exam_url_with_params}" class="button">Start Assessment</a>
+                    </div>
+                </div>
+                {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                <div class="footer">
+                    <p>Sent by {sent_by}</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        subject = f"Assessment Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+        
+        try:
+            logger.info(f"Attempting to send invitation email to {email} via {settings.email_provider}")
+            await email_service.send_email(email, subject, html_content)
+            logger.info(f"Email sent successfully to {email}")
+            sent_count += 1
+            
+            # Update candidate invite status in assessment
+            candidates_list = assessment.get("candidates", [])
+            for idx, c in enumerate(candidates_list):
+                if c.get("email", "").lower() == email:
+                    candidates_list[idx]["invited"] = True
+                    candidates_list[idx]["inviteSentAt"] = datetime.now(timezone.utc).isoformat()
+                    break
+            
+            assessment["candidates"] = candidates_list
+            await _save_assessment(db, assessment)
+            
+        except Exception as exc:
+            error_msg = f"Failed to send invitation to {email}: {str(exc)}"
+            logger.error(error_msg, exc_info=True)
+            failed_emails.append(email)
+            error_messages.append(error_msg)
+    
+    # Only raise error if all candidates failed (not if some were skipped)
+    if sent_count == 0 and len(failed_emails) > 0 and len(skipped_emails) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to send all invitations. Errors: {', '.join(error_messages[:3])}"
+        )
+    
+    message = f"Invitations sent to {sent_count} candidate(s)"
+    if len(skipped_emails) > 0:
+        message += f". {len(skipped_emails)} already invited (skipped): {', '.join(skipped_emails[:5])}"
+    if len(failed_emails) > 0:
+        message += f". {len(failed_emails)} failed: {', '.join(failed_emails[:5])}"
+    
+    return success_response(
+        message,
+        {
+            "sentCount": sent_count,
+            "failedCount": len(failed_emails),
+            "skippedCount": len(skipped_emails),
+            "failedEmails": failed_emails,
+            "skippedEmails": skipped_emails,
+            "errorMessages": error_messages,
+        }
+    )
+
+
+@router.put("/{assessment_id}/update-schedule")
+async def update_assessment_schedule(
+    assessment_id: str,
+    payload: ScheduleUpdateRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+
+    start_time = payload.startTime
+    end_time = payload.endTime
+    if start_time >= end_time:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Start time must be before end time")
+
+    schedule = {
+        "startTime": start_time,
+        "endTime": end_time,
+        "duration": payload.duration,
+        "durationUnit": payload.durationUnit or "hours",
+        "attemptCount": payload.attemptCount or 1,
+        "proctoringOptions": payload.proctoringOptions.model_dump(exclude_unset=True)
+        if payload.proctoringOptions
+        else {
+            "enabled": False,
+            "webcamRequired": False,
+            "screenRecording": False,
+            "browserLock": False,
+            "fullScreenMode": False,
+        },
+        "vpnRequired": payload.vpnRequired or False,
+        "linkSharingEnabled": payload.linkSharingEnabled or False,
+        "mailFeedbackReport": payload.mailFeedbackReport or False,
+        "candidateQuestions": payload.candidateQuestions.model_dump(exclude_unset=True)
+        if payload.candidateQuestions
+        else {
+            "allowed": True,
+            "maxQuestions": 3,
+            "timeLimit": 5,
+            "questions": [],
+        },
+        "instructions": payload.instructions,
+        "timezone": payload.timezone or "UTC",
+        "isActive": bool(payload.isActive),
+    }
+
+    assessment["schedule"] = schedule
+    if assessment.get("status") in {"draft", "ready"}:
+        assessment["status"] = "scheduled"
+    await _save_assessment(db, assessment)
+    return success_response(
+        "Assessment schedule updated successfully",
+        {"assessmentId": str(assessment.get("_id")), "schedule": schedule, "status": assessment.get("status")},
+    )
+
+
+@router.get("/{assessment_id}/topics")
+async def get_topics(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+    return success_response("Topics fetched successfully", assessment.get("topics", []))
+
+
+@router.get("/{assessment_id}/answer-logs")
+async def get_answer_logs(
+    assessment_id: str,
+    candidateEmail: str = Query(...),
+    candidateName: str = Query(...),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Get answer logs for a specific candidate."""
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(assessment, current_user)
+
+        # Match the format used in log-answer endpoint: email_lowercase_name_stripped
+        # Format: email.strip().lower() + "_" + name.strip()
+        # CRITICAL: Must match EXACTLY the format in log-answer endpoint
+        candidate_key = f"{candidateEmail.strip().lower()}_{candidateName.strip()}"
+        logger.info(f"Fetching answer logs for candidate key: '{candidate_key}' (email='{candidateEmail}', name='{candidateName}')")
+        
+        answer_logs = assessment.get("answerLogs")
+        if not answer_logs or not isinstance(answer_logs, dict):
+            logger.info(f"No answerLogs found in assessment or answerLogs is not a dict. Type: {type(answer_logs)}")
+            logger.info(f"Assessment ID: {assessment_id}, Full assessment keys: {list(assessment.keys())}")
+            # Don't return early - continue to process questions from candidateResponses (especially MCQs)
+            answer_logs = {}
+        
+        logger.info(f"Answer logs keys in database: {list(answer_logs.keys())}")
+        logger.info(f"Looking for candidate key: '{candidate_key}'")
+        
+        # Try exact match first
+        candidate_logs = answer_logs.get(candidate_key, {})
+        
+        # If not found, try to find a similar key (for debugging)
+        if not candidate_logs or not isinstance(candidate_logs, dict):
+            logger.warning(f"No logs found for candidate key '{candidate_key}'. Available keys: {list(answer_logs.keys())}")
+            # Try to find a key that's close (for debugging)
+            if answer_logs:
+                for key in answer_logs.keys():
+                    if candidate_key.lower() in key.lower() or key.lower() in candidate_key.lower():
+                        logger.info(f"Found similar key: '{key}' (searching for '{candidate_key}')")
+            # Don't return early - continue to process questions from candidateResponses (especially MCQs)
+            candidate_logs = {}
+        
+        logger.info(f"Found candidate logs with question keys: {list(candidate_logs.keys())}")
+
+        # Collect all questions to map question indices
+        all_questions = []
+        for topic in assessment.get("topics", []):
+            if not topic or not isinstance(topic, dict):
+                continue
+            topic_questions = topic.get("questions", [])
+            if topic_questions and isinstance(topic_questions, list):
+                for question in topic_questions:
+                    if question and isinstance(question, dict):
+                        all_questions.append(question)
+
+        # Get AI evaluation results and submitted answers from candidate responses
+        candidate_responses = assessment.get("candidateResponses", {})
+        ai_evaluation = {}
+        submitted_answers = {}  # {questionIndex: answer}
+        if isinstance(candidate_responses, dict):
+            candidate_response = candidate_responses.get(candidate_key, {})
+            if isinstance(candidate_response, dict):
+                ai_evaluation = candidate_response.get("aiEvaluation", {})
+                # Get submitted answers
+                answers_list = candidate_response.get("answers", [])
+                if isinstance(answers_list, list):
+                    for ans in answers_list:
+                        if isinstance(ans, dict):
+                            q_idx = ans.get("questionIndex")
+                            if q_idx is not None:
+                                submitted_answers[q_idx] = ans.get("answer", "")
+
+        # Format logs with question details
+        # First, process questions that have logs
+        questions_with_logs = set()
+        formatted_logs = []
+        for question_index_str, log_entries in candidate_logs.items():
+            try:
+                if not isinstance(log_entries, list):
+                    logger.warning(f"Log entries for question {question_index_str} is not a list, skipping")
+                    continue
+                    
+                question_index = int(question_index_str)
+                if 0 <= question_index < len(all_questions):
+                    question = all_questions[question_index]
+                    # Serialize log entries to ensure they're JSON-serializable
+                    # Use array index + 1 as version fallback to handle any race conditions during write
+                    serialized_logs = []
+                    for idx, log_entry in enumerate(log_entries):
+                        if isinstance(log_entry, dict):
+                            # Use stored version if available, otherwise use array index + 1
+                            # This ensures versions are always correct even if there was a race condition
+                            stored_version = log_entry.get("version", 0)
+                            version = stored_version if stored_version > 0 else (idx + 1)
+                            serialized_logs.append({
+                                "answer": str(log_entry.get("answer", "")),
+                                "questionType": str(log_entry.get("questionType", "")),
+                                "timestamp": str(log_entry.get("timestamp", "")),
+                                "version": int(version),
+                            })
+                    
+                    # Get AI evaluation for this question
+                    question_ai_eval = ai_evaluation.get(str(question_index)) or ai_evaluation.get(question_index)
+                    ai_score = None
+                    ai_feedback = None
+                    if question_ai_eval and isinstance(question_ai_eval, dict):
+                        ai_score = question_ai_eval.get("score")
+                        ai_feedback = question_ai_eval.get("feedback")
+                    
+                    # For MCQ questions, check if answer is correct
+                    is_mcq_correct = None
+                    if question.get("type") == "MCQ":
+                        correct_answer = question.get("correctAnswer", "")
+                        # Get the last answer from logs
+                        if serialized_logs and len(serialized_logs) > 0:
+                            last_log = serialized_logs[-1]  # Last version
+                            candidate_answer = last_log.get("answer", "").strip()
+                            is_mcq_correct = (candidate_answer == correct_answer) if correct_answer else None
+                    
+                    formatted_logs.append({
+                        "questionIndex": question_index,
+                        "questionText": str(question.get("questionText", "")),
+                        "questionType": str(question.get("type", "")),
+                        "logs": serialized_logs,  # Already in order (version 1, 2, 3, etc.)
+                        "aiScore": ai_score,  # AI evaluated score (for last version)
+                        "aiFeedback": ai_feedback,
+                        "maxScore": question.get("score", 5),
+                        "isMcqCorrect": is_mcq_correct,  # For MCQ: True/False, for others: None
+                        "correctAnswer": question.get("correctAnswer") if question.get("type") == "MCQ" else None,
+                        "options": question.get("options", []) if question.get("type") == "MCQ" else None,  # MCQ options
+                    })
+                    questions_with_logs.add(question_index)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid question index in logs: {question_index_str}, error: {e}")
+                continue
+            except Exception as e:
+                logger.warning(f"Error processing log entry for question {question_index_str}: {e}")
+                continue
+
+        # Add questions that don't have logs but have submitted answers (especially MCQ)
+        # Also include ALL MCQ questions even if they have no logs or submitted answers
+        # Get submission time from candidate response
+        submission_time = None
+        if isinstance(candidate_responses, dict):
+            candidate_response = candidate_responses.get(candidate_key, {})
+            if isinstance(candidate_response, dict):
+                submitted_at = candidate_response.get("submittedAt")
+                if submitted_at:
+                    submission_time = submitted_at
+        if not submission_time:
+            submission_time = datetime.now(timezone.utc).isoformat()
+        
+        for idx, question in enumerate(all_questions):
+            if idx not in questions_with_logs and isinstance(question, dict):
+                # Check if there's a submitted answer for this question
+                submitted_answer = submitted_answers.get(idx)
+                
+                # For MCQ questions, ALWAYS include them (even if no logs and no submitted answer)
+                # For other question types, only include if there's a submitted answer
+                is_mcq = question.get("type") == "MCQ"
+                should_include = submitted_answer is not None or is_mcq
+                
+                if should_include:
+                    # Create a log entry from submitted answer (or empty for MCQ without answer)
+                    serialized_logs = []
+                    answer_to_use = str(submitted_answer) if submitted_answer is not None else ""
+                    # Always create a log entry for MCQs, even if answer is empty
+                    if answer_to_use or is_mcq:
+                        # Create a single log entry for the submitted answer
+                        serialized_logs.append({
+                            "answer": answer_to_use,
+                            "questionType": str(question.get("type", "")),
+                            "timestamp": submission_time,
+                            "version": 1,
+                        })
+                    
+                    # Get AI evaluation for this question
+                    question_ai_eval = ai_evaluation.get(str(idx)) or ai_evaluation.get(idx)
+                    ai_score = None
+                    ai_feedback = None
+                    if question_ai_eval and isinstance(question_ai_eval, dict):
+                        ai_score = question_ai_eval.get("score")
+                        ai_feedback = question_ai_eval.get("feedback")
+                    
+                    # For MCQ questions, check if answer is correct
+                    is_mcq_correct = None
+                    if is_mcq:
+                        correct_answer = question.get("correctAnswer", "")
+                        if answer_to_use:
+                            is_mcq_correct = (answer_to_use.strip() == correct_answer) if correct_answer else None
+                        else:
+                            is_mcq_correct = False  # No answer provided = incorrect
+                    
+                    formatted_logs.append({
+                        "questionIndex": idx,
+                        "questionText": str(question.get("questionText", "")),
+                        "questionType": str(question.get("type", "")),
+                        "logs": serialized_logs,
+                        "aiScore": ai_score,
+                        "aiFeedback": ai_feedback,
+                        "maxScore": question.get("score", 5),
+                        "isMcqCorrect": is_mcq_correct,
+                        "correctAnswer": question.get("correctAnswer") if is_mcq else None,
+                        "options": question.get("options", []) if is_mcq else None,
+                    })
+
+        # Sort by question index
+        formatted_logs.sort(key=lambda x: x["questionIndex"])
+
+        return success_response("Answer logs fetched successfully", formatted_logs)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error fetching answer logs: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch answer logs: {str(exc)}",
+        ) from exc
+
+
+@router.get("/{assessment_id}/candidate-results")
+async def get_candidate_results(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Get candidate results for an assessment."""
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+
+    candidate_responses = assessment.get("candidateResponses", {})
+    results = []
+    
+    for key, response in candidate_responses.items():
+        results.append({
+            "email": response.get("email"),
+            "name": response.get("name"),
+            "score": response.get("score", 0),
+            "maxScore": response.get("maxScore", 0),
+            "attempted": response.get("attempted", 0),
+            "notAttempted": response.get("notAttempted", 0),
+            "correctAnswers": response.get("correctAnswers", 0),
+            "submittedAt": response.get("submittedAt"),
+            "startedAt": response.get("startedAt"),  # Candidate's actual start time
+            # AI evaluation data
+            "aiScore": response.get("aiScore", 0),
+            "percentageScored": response.get("percentageScored", 0),
+            "passPercentage": response.get("passPercentage"),
+            "passed": response.get("passed", False),
+        })
+    
+    return success_response("Candidate results fetched successfully", results)
+
+
+@router.get("/{assessment_id}/questions", response_model=None)
+async def get_all_questions(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    logger.info(f"[get_all_questions] GET /api/assessments/{assessment_id}/questions - Request received")
+    print(f"[get_all_questions] GET /api/assessments/{assessment_id}/questions - Request received")
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+    except HTTPException as e:
+        logger.error(f"[get_all_questions] Error getting assessment {assessment_id}: {e.detail}")
+        print(f"[get_all_questions] Error getting assessment {assessment_id}: {e.detail}")
+        raise
+    _check_assessment_access(assessment, current_user)
+
+    # Generate assessment token if it doesn't exist and assessment is ready/active
+    if assessment.get("status") != "draft" and not assessment.get("assessmentToken"):
+        assessment["assessmentToken"] = secrets.token_urlsafe(32)
+        await _save_assessment(db, assessment)
+
+    questions_with_topics: List[Dict[str, Any]] = []
+    for topic in assessment.get("topics", []):
+        topic_questions = topic.get("questions") or []
+        for index, question in enumerate(topic_questions):
+            question_with_topic = question.copy()
+            question_with_topic.update(
+                {
+                    "topic": topic.get("topic"),
+                    "topicDifficulty": topic.get("difficulty"),
+                    "topicSource": topic.get("source"),
+                    "questionIndex": index,
+                }
+            )
+            questions_with_topics.append(question_with_topic)
+
+    # Serialize full assessment with all fields for draft loading
+    # Convert topics to serializable format
+    serialized_topics = convert_object_ids(assessment.get("topics", []))
+    # Convert topics_v2 to serializable format (if exists)
+    serialized_topics_v2 = convert_object_ids(assessment.get("topics_v2", []))
+    
+    data = {
+        "assessment": {
+            "id": str(assessment.get("_id")),
+            "title": assessment.get("title"),
+            "description": assessment.get("description"),
+            "status": assessment.get("status"),
+            "totalQuestions": len(questions_with_topics),
+            "schedule": assessment.get("schedule"),
+            "assessmentToken": assessment.get("assessmentToken"),
+            # Include all assessment fields needed for draft loading
+            "jobDesignation": assessment.get("jobDesignation"),
+            "selectedSkills": assessment.get("selectedSkills"),
+            "experienceMin": assessment.get("experienceMin"),
+            "experienceMax": assessment.get("experienceMax"),
+            "experienceMode": assessment.get("experienceMode"),
+            "availableQuestionTypes": assessment.get("availableQuestionTypes"),
+            "isAptitudeAssessment": assessment.get("isAptitudeAssessment"),
+            "topics": serialized_topics,  # Include full topic objects with all fields (questionConfigs, isAptitude, coding_supported, etc.)
+            "topics_v2": serialized_topics_v2,  # Include topics_v2 (new format) for draft loading
+            "fullTopicRegenLocked": assessment.get("fullTopicRegenLocked", False),
+            "allQuestionsGenerated": assessment.get("allQuestionsGenerated", False),
+            "previewQuestions": assessment.get("previewQuestions"),
+            "passPercentage": assessment.get("passPercentage"),
+            "questionTypeTimes": assessment.get("questionTypeTimes"),
+            "enablePerSectionTimers": assessment.get("enablePerSectionTimers"),
+            "candidates": assessment.get("candidates"),
+            "assessmentUrl": assessment.get("assessmentUrl"),
+            "accessMode": assessment.get("accessMode"),
+            "invitationTemplate": assessment.get("invitationTemplate"),
+            "currentStation": assessment.get("currentStation"),
+        },
+        "topics": [
+            {
+                "topic": topic.get("topic"),
+                "numQuestions": topic.get("numQuestions"),
+                "questionTypes": topic.get("questionTypes"),
+                "difficulty": topic.get("difficulty"),
+                "source": topic.get("source"),
+                "questionCount": len(topic.get("questions") or []),
+            }
+            for topic in assessment.get("topics", [])
+        ],
+        "questions": questions_with_topics,
+    }
+    return success_response("All questions fetched successfully", data)
+
+
+@router.get("")
+async def get_all_assessments_with_schedule(
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    try:
+        query: Dict[str, Any] = {}
+        if current_user.get("role") != "super_admin":
+            user_org = current_user.get("organization")
+            user_id = current_user.get("id")
+            
+            # Build query based on user's organization
+            if user_org:
+                # User has organization - query by organization
+                try:
+                    query["organization"] = to_object_id(user_org)
+                except ValueError:
+                    # Invalid organization ID - fall back to createdBy
+                    if user_id:
+                        try:
+                            query["createdBy"] = to_object_id(user_id)
+                        except ValueError:
+                            pass
+            else:
+                # User has no organization - query by createdBy
+                if user_id:
+                    try:
+                        query["createdBy"] = to_object_id(user_id)
+                    except ValueError:
+                        pass
+
+        # Fetch assessments with required fields - optimized query
+        # Limit to prevent loading too many documents at once (safety limit)
+        cursor = db.assessments.find(query, {"title": 1, "status": 1, "schedule": 1, "createdAt": 1, "updatedAt": 1, "organization": 1, "createdBy": 1}).limit(1000)
+        all_docs = await cursor.to_list(length=1000)  # Fetch all at once with limit
+        
+        assessments = []
+        
+        # Process documents in batch
+        for doc in all_docs:
+            try:
+                # Quick access check - skip if user doesn't have access
+                # Only check if query didn't already filter by organization/createdBy
+                if current_user.get("role") != "super_admin":
+                    try:
+                        _check_assessment_access(doc, current_user)
+                    except HTTPException:
+                        continue  # Skip this assessment
+                
+                schedule = doc.get("schedule")
+                assessment_data = {
+                    "id": str(doc.get("_id")),
+                    "title": doc.get("title", ""),
+                    "status": doc.get("status", "draft"),
+                    "hasSchedule": bool(schedule),
+                    "scheduleStatus": None,
+                    "createdAt": doc.get("createdAt"),
+                    "updatedAt": doc.get("updatedAt"),
+                }
+                
+                if schedule:
+                    assessment_data["scheduleStatus"] = {
+                        "startTime": schedule.get("startTime"),
+                        "endTime": schedule.get("endTime"),
+                        "duration": schedule.get("duration"),
+                        "isActive": schedule.get("isActive", False),
+                    }
+                
+                # Serialize datetime and ObjectId fields recursively
+                assessments.append(convert_object_ids(assessment_data))
+            except HTTPException:
+                # Access denied - skip this assessment
+                continue
+            except Exception as exc:
+                logger.warning("Error processing assessment document: %s", exc)
+                # Skip this assessment if there's an error processing it
+                continue
+
+        return success_response("Assessments with schedule status fetched successfully", assessments)
+    except Exception as exc:
+        logger.exception("Error fetching assessments: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch assessments: {str(exc)}",
+        ) from exc
+
+
+@router.delete("/{assessment_id}")
+async def delete_assessment(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Delete an assessment. Only users with access to the assessment can delete it."""
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(assessment, current_user)
+
+        # Delete the assessment
+        result = await db.assessments.delete_one({"_id": to_object_id(assessment_id)})
+        
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found or already deleted",
+            )
+
+        return success_response("Assessment deleted successfully", {"assessmentId": assessment_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error deleting assessment: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete assessment: {str(exc)}",
+        ) from exc
+
+
+# ============================================
+# NEW TOPIC GENERATION ENDPOINTS (v2)
+# ============================================
+
+@router.post("/generate-topics")
+async def generate_topics_endpoint_v2(
+    payload: GenerateTopicsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Generate topics using new v2 architecture.
+    Returns topics with strict data model structure.
+    SINGLE DRAFT LOGIC: If assessmentId is provided, updates that draft. Otherwise, finds or creates draft.
+    """
+    try:
+        # CREATE NEW vs EDIT DRAFT LOGIC:
+        # - If assessmentId is provided: Update that specific draft (edit mode)
+        # - If assessmentId is NOT provided: Always create a NEW draft (new assessment flow)
+        existing_assessment = None
+        if payload.assessmentId:
+            # Edit mode: Update the specific assessment
+            try:
+                existing_assessment = await _get_assessment(db, payload.assessmentId)
+                _check_assessment_access(existing_assessment, current_user)
+                if existing_assessment.get("status") != "draft":
+                    logger.warning(f"Assessment {payload.assessmentId} is not a draft, will create new draft")
+                    existing_assessment = None
+                else:
+                    logger.info(f"Edit mode: Updating existing draft {payload.assessmentId}")
+            except HTTPException:
+                existing_assessment = None
+        # If no assessmentId provided, this is a NEW assessment - always create new draft
+        # Do NOT look for existing drafts - user explicitly wants a new assessment
+        
+        # Sanitize inputs
+        sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
+        sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
+        sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
+        
+        # Validate experience mode
+        if payload.experienceMode not in ["corporate", "student"]:
+            raise HTTPException(status_code=400, detail="experienceMode must be 'corporate' or 'student'")
+        
+        # Infer coding language from job designation and skills
+        coding_language = infer_language_from_skill(
+            job_designation=sanitized_job_designation,
+            selected_skills=sanitized_skills
+        )
+        
+        # Generate topics
+        topics = await generate_topics_v2(
+            assessment_title=sanitized_title,
+            job_designation=sanitized_job_designation,
+            selected_skills=sanitized_skills,
+            experience_min=payload.experienceMin,
+            experience_max=payload.experienceMax,
+            experience_mode=payload.experienceMode
+        )
+        
+        # If existing draft found, update it. Otherwise, create new draft.
+        if existing_assessment:
+            # UPDATE EXISTING DRAFT
+            # topics is already List[Dict[str, Any]], no need to call .dict()
+            existing_assessment["topics_v2"] = topics
+            existing_assessment["jobDesignation"] = sanitized_job_designation
+            existing_assessment["selectedSkills"] = sanitized_skills
+            existing_assessment["experienceMin"] = payload.experienceMin
+            existing_assessment["experienceMax"] = payload.experienceMax
+            existing_assessment["experienceMode"] = payload.experienceMode
+            existing_assessment["codingLanguage"] = coding_language
+            if sanitized_title:
+                existing_assessment["title"] = sanitized_title
+            existing_assessment["status"] = "draft"
+            existing_assessment["updatedAt"] = _now_utc()
+            
+            await _save_assessment(db, existing_assessment)
+            assessment_id = str(existing_assessment["_id"])
+        else:
+            # CREATE NEW DRAFT
+            # topics is already List[Dict[str, Any]], no need to call .dict()
+            assessment_doc: Dict[str, Any] = {
+                "title": sanitized_title or f"Assessment for {sanitized_job_designation}",
+                "description": f"Assessment for {sanitized_job_designation} - Skills: {', '.join(sanitized_skills)}",
+                "topics_v2": topics,
+                "jobDesignation": sanitized_job_designation,
+                "selectedSkills": sanitized_skills,
+                "experienceMin": payload.experienceMin,
+                "experienceMax": payload.experienceMax,
+                "experienceMode": payload.experienceMode,
+                "codingLanguage": coding_language,
+                "status": "draft",
+                "createdBy": to_object_id(current_user.get("id")),
+                "organization": to_object_id(current_user.get("organization")) if current_user.get("organization") else None,
+                "createdAt": _now_utc(),
+                "updatedAt": _now_utc(),
+            }
+            result = await db.assessments.insert_one(assessment_doc)
+            assessment_id = str(result.inserted_id)
+        
+        return success_response(
+            "Topics generated successfully",
+            {
+                "topics": topics,  # Already List[Dict[str, Any]]
+                "assessmentId": assessment_id
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating topics: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate topics: {str(exc)}") from exc
+
+
+@router.post("/regenerate-topic")
+async def regenerate_topic_endpoint_v2(
+    payload: RegenerateTopicRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Regenerate a single topic.
+    Only allowed when topic.locked == False AND fullTopicRegenLocked == False.
+    """
+    try:
+        # Get assessment
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        # Get topics_v2
+        topics_v2 = assessment.get("topics_v2", [])
+        topic_index = None
+        for idx, topic in enumerate(topics_v2):
+            if topic.get("id") == payload.topicId:
+                topic_index = idx
+                break
+        
+        if topic_index is None:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        # Check if topic is locked
+        if topics_v2[topic_index].get("locked", False):
+            raise HTTPException(status_code=400, detail="Topic is locked and cannot be regenerated")
+        
+        # Check if full topic regeneration is locked
+        if assessment.get("fullTopicRegenLocked", False):
+            raise HTTPException(status_code=400, detail="Topic regeneration is locked after preview")
+        
+        # Sanitize inputs
+        sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
+        sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
+        sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
+        
+        # Generate new topic
+        new_topics = await generate_topics_v2(
+            assessment_title=sanitized_title,
+            job_designation=sanitized_job_designation,
+            selected_skills=sanitized_skills,
+            experience_min=payload.experienceMin,
+            experience_max=payload.experienceMax,
+            experience_mode=payload.experienceMode
+        )
+        
+        if not new_topics:
+            raise HTTPException(status_code=500, detail="Failed to generate new topic")
+        
+        # Replace topic at same position, reset state
+        new_topic = new_topics[0]
+        new_topic["id"] = payload.topicId  # Keep same ID
+        new_topic["locked"] = False
+        # Reset all questionRows - keep only the first auto-generated one
+        if new_topic.get("questionRows"):
+            first_row = new_topic["questionRows"][0]
+            first_row["status"] = "pending"
+            first_row["locked"] = False
+            first_row["questions"] = []
+            new_topic["questionRows"] = [first_row]  # Remove manually added rows
+        
+        topics_v2[topic_index] = new_topic
+        
+        # Update assessment
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response(
+            "Topic regenerated successfully",
+            {"topic": new_topic}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error regenerating topic: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate topic: {str(exc)}") from exc
+
+
+@router.post("/generate-question")
+async def generate_question_endpoint_v2(
+    payload: GenerateQuestionRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Generate questions for a single question row (preview).
+    After generation: row.status = "generated", row.locked = True, topic.locked = True
+    Sets fullTopicRegenLocked = True on assessment.
+    """
+    try:
+        # Get assessment
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        # Get topics_v2
+        topics_v2 = assessment.get("topics_v2", [])
+        topic_index = None
+        for idx, topic in enumerate(topics_v2):
+            if topic.get("id") == payload.topicId:
+                topic_index = idx
+                break
+        
+        if topic_index is None:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        topic = topics_v2[topic_index]
+        
+        # Find the question row
+        question_rows = topic.get("questionRows", [])
+        row_index = None
+        for idx, row in enumerate(question_rows):
+            if row.get("rowId") == payload.rowId:
+                row_index = idx
+                break
+        
+        if row_index is None:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        row = question_rows[row_index]
+        
+        # Check if already generated
+        if row.get("status") == "generated" and row.get("questions") and len(row.get("questions", [])) > 0:
+            return success_response(
+                "Questions already generated",
+                {"questions": row.get("questions", []), "row": row, "topic": topic}
+            )
+        
+        # Check if locked (but allow if questions don't exist yet)
+        if row.get("locked", False) and row.get("questions") and len(row.get("questions", [])) > 0:
+            raise HTTPException(status_code=400, detail="Row is locked and already has questions")
+        if topic.get("locked", False) and row.get("questions") and len(row.get("questions", [])) > 0:
+            raise HTTPException(status_code=400, detail="Topic is locked and row already has questions")
+        
+        # Validate required fields
+        if not payload.questionType:
+            raise HTTPException(status_code=400, detail="questionType is required")
+        if not payload.difficulty:
+            raise HTTPException(status_code=400, detail="difficulty is required")
+        if not payload.questionsCount or payload.questionsCount < 1:
+            raise HTTPException(status_code=400, detail="questionsCount must be at least 1")
+        
+        logger.info(f"Generating {payload.questionsCount} {payload.questionType} question(s) for topic: {payload.topicLabel}, difficulty: {payload.difficulty}, canUseJudge0: {payload.canUseJudge0}")
+        
+        # Get coding language from assessment (fallback to python)
+        coding_language = assessment.get("codingLanguage", "python")
+        
+        # Generate questions
+        questions = await generate_questions_for_row_v2(
+            topic_label=payload.topicLabel,
+            question_type=payload.questionType,
+            difficulty=payload.difficulty,
+            questions_count=payload.questionsCount,
+            can_use_judge0=payload.canUseJudge0,
+            coding_language=coding_language
+        )
+        
+        if not questions or len(questions) == 0:
+            logger.error(f"No questions generated for topic: {payload.topicLabel}, type: {payload.questionType}")
+            raise HTTPException(status_code=500, detail="Failed to generate questions - no questions returned")
+        
+        # Update row
+        row["questions"] = questions
+        row["status"] = "generated"
+        row["locked"] = True
+        
+        # Lock topic and full topic regeneration
+        topic["locked"] = True
+        assessment["fullTopicRegenLocked"] = True
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {
+                "topics_v2": topics_v2,
+                "fullTopicRegenLocked": True,
+                "updatedAt": assessment["updatedAt"]
+            }}
+        )
+        
+        return success_response(
+            "Questions generated successfully",
+            {"questions": questions, "row": row, "topic": topic}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating questions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate questions: {str(exc)}") from exc
+
+
+@router.post("/generate-all-questions")
+async def generate_all_questions_endpoint_v2(
+    payload: GenerateAllQuestionsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Generate questions for all pending topics.
+    After completion: lock all topics, disable all buttons.
+    Sets allQuestionsGenerated = True on assessment.
+    """
+    try:
+        # Get assessment
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = payload.topics
+        
+        # Convert Pydantic models to dicts if needed
+        topics_list = [topic if isinstance(topic, dict) else topic.model_dump() for topic in topics_v2]
+        
+        # Get coding language from assessment (fallback to python)
+        coding_language = assessment.get("codingLanguage", "python")
+        
+        # Generate questions only for pending rows
+        generated_count = 0
+        for topic in topics_list:
+            question_rows = topic.get("questionRows", [])
+            for row in question_rows:
+                if row.get("status") == "pending" and not row.get("questions") and not row.get("locked"):
+                    try:
+                        questions = await generate_questions_for_row_v2(
+                            topic_label=topic["label"],
+                            question_type=row["questionType"],
+                            difficulty=row["difficulty"],
+                            questions_count=row["questionsCount"],
+                            can_use_judge0=row.get("canUseJudge0", False),
+                            coding_language=coding_language
+                        )
+                        
+                        row["questions"] = questions
+                        row["status"] = "generated"
+                        row["locked"] = True
+                        generated_count += 1
+                    except Exception as exc:
+                        logger.error(f"Error generating questions for row {row.get('rowId')}: {exc}")
+                        # Continue with other rows
+            
+            # Lock topic if any row was generated
+            if any(r.get("locked") for r in question_rows):
+                topic["locked"] = True
+        
+        # Lock all topics and set flags
+        for topic in topics_list:
+            topic["locked"] = True
+        
+        # Update assessment
+        assessment["topics_v2"] = topics_list
+        assessment["allQuestionsGenerated"] = True
+        assessment["fullTopicRegenLocked"] = True
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {
+                "topics_v2": topics_list,
+                "allQuestionsGenerated": True,
+                "fullTopicRegenLocked": True,
+                "updatedAt": assessment["updatedAt"]
+            }}
+        )
+        
+        return success_response(
+            f"Generated questions for {generated_count} question rows",
+            {"topics": topics_list, "generatedCount": generated_count}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating all questions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate all questions: {str(exc)}") from exc
+
+
+@router.post("/add-question-row")
+async def add_question_row_endpoint(
+    payload: AddQuestionRowRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Add a new question row to a topic."""
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        if topic.get("locked"):
+            raise HTTPException(status_code=400, detail="Topic is locked")
+        
+        # Get first row's canUseJudge0 as default
+        first_row = topic.get("questionRows", [{}])[0] if topic.get("questionRows") else {}
+        can_use_judge0 = first_row.get("canUseJudge0", False)
+        
+        # Check if topic is in special category (aptitude, communication, logical_reasoning)
+        topic_category = topic.get("category", "technical")
+        special_categories = ["aptitude", "communication", "logical_reasoning"]
+        is_special_category = topic_category in special_categories
+        
+        # Get allowed question types from topic (for soft skills)
+        allowed_question_types = topic.get("allowedQuestionTypes", [])
+        if allowed_question_types and len(allowed_question_types) > 0:
+            # Use first allowed type as default for soft skills
+            default_question_type = allowed_question_types[0]
+        elif not is_special_category and first_row:
+            # For technical topics, use first row's question type or MCQ
+            default_question_type = first_row.get("questionType", "MCQ")
+        else:
+            # Default to MCQ for special categories
+            default_question_type = "MCQ"
+        
+        # Create new row
+        import uuid
+        new_row = {
+            "rowId": str(uuid.uuid4()),
+            "questionType": default_question_type,
+            "difficulty": "Easy",
+            "questionsCount": 1,
+            "canUseJudge0": False if is_special_category else can_use_judge0,  # Special categories never use Judge0
+            "status": "pending",
+            "locked": False,
+            "questions": []
+        }
+        
+        topic.setdefault("questionRows", []).append(new_row)
+        
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response("Question row added successfully", {"row": new_row, "topic": topic})
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error adding question row: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add question row: {str(exc)}") from exc
+
+
+@router.post("/remove-question-row")
+async def remove_question_row_endpoint(
+    payload: RemoveQuestionRowRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Remove a question row from a topic."""
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        question_rows = topic.get("questionRows", [])
+        if len(question_rows) <= 1:
+            raise HTTPException(status_code=400, detail="Cannot remove the last question row")
+        
+        row = next((r for r in question_rows if r.get("rowId") == payload.rowId), None)
+        if not row:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        if row.get("locked"):
+            raise HTTPException(status_code=400, detail="Question row is locked")
+        
+        # Remove row
+        topic["questionRows"] = [r for r in question_rows if r.get("rowId") != payload.rowId]
+        
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response("Question row removed successfully", {"topic": topic})
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error removing question row: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to remove question row: {str(exc)}") from exc
+
+
+@router.post("/regenerate-single-question")
+async def regenerate_single_question_endpoint(
+    payload: RegenerateSingleQuestionRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Regenerate a single question within a row."""
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        question_rows = topic.get("questionRows", [])
+        row = next((r for r in question_rows if r.get("rowId") == payload.rowId), None)
+        if not row:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        questions = row.get("questions", [])
+        if payload.questionIndex >= len(questions):
+            raise HTTPException(status_code=400, detail="Question index out of range")
+        
+        # Regenerate single question
+        new_questions = await generate_questions_for_row_v2(
+            topic_label=topic["label"],
+            question_type=row["questionType"],
+            difficulty=row["difficulty"],
+            questions_count=1,
+            can_use_judge0=row.get("canUseJudge0", False)
+        )
+        
+        if new_questions:
+            questions[payload.questionIndex] = new_questions[0]
+            row["questions"] = questions
+        
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response("Question regenerated successfully", {"row": row})
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error regenerating question: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate question: {str(exc)}") from exc
+
+
+@router.put("/update-single-question-v2")
+async def update_single_question_endpoint_v2(
+    payload: UpdateSingleQuestionRequestV2,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Update a single question within a row (topicsV2 structure)."""
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        question_rows = topic.get("questionRows", [])
+        row = next((r for r in question_rows if r.get("rowId") == payload.rowId), None)
+        if not row:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        questions = row.get("questions", [])
+        if payload.questionIndex >= len(questions):
+            raise HTTPException(status_code=400, detail="Question index out of range")
+        
+        # Update the question
+        questions[payload.questionIndex] = payload.question
+        row["questions"] = questions
+        
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response("Question updated successfully", {"row": row, "topic": topic})
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error updating single question: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update single question: {str(exc)}") from exc
+
+
+@router.post("/suggest-topic-contexts")
+async def suggest_topic_contexts_endpoint(
+    partial_input: str = Query(..., min_length=2),
+    category: str = Query(..., pattern=r"^(aptitude|communication|logical_reasoning)$"),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Get semantic topic suggestions based on partial user input."""
+    try:
+        suggestions = await suggest_topic_contexts(partial_input, category)
+        return success_response("Suggestions generated", {"suggestions": suggestions})
+    except Exception as exc:
+        logger.error(f"Error generating topic suggestions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate suggestions: {str(exc)}") from exc
+
+
+@router.post("/generate-topic-context")
+async def generate_topic_context_endpoint(
+    topic_name: str = Query(..., min_length=1),
+    category: str = Query(..., pattern=r"^(aptitude|communication|logical_reasoning)$"),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Generate context summary and suggested question type for a topic."""
+    try:
+        context_data = await generate_topic_context_summary(topic_name, category)
+        return success_response("Context generated", context_data)
+    except Exception as exc:
+        logger.error(f"Error generating topic context: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate context: {str(exc)}") from exc
+
+
+@router.post("/detect-topic-category")
+async def detect_topic_category_endpoint(
+    topic_name: str = Query(..., min_length=1),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Detect topic category (aptitude, communication, logical_reasoning, or technical) using semantic understanding."""
+    try:
+        category = await _detect_category_semantically(topic_name)
+        return success_response("Category detected", {"category": category})
+    except Exception as exc:
+        logger.error(f"Error detecting topic category: {exc}", exc_info=True)
+        # Fallback to technical
+        return success_response("Category detected", {"category": "technical"})
+
+
+@router.post("/topics/suggest")
+async def suggest_topics_endpoint(
+    payload: SuggestTopicsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Get AI-powered topic suggestions based on category and partial query."""
+    try:
+        suggestions = await suggest_topics(payload.category, payload.query)
+        return success_response("Suggestions generated", {"suggestions": suggestions})
+    except Exception as exc:
+        logger.error(f"Error generating topic suggestions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate suggestions: {str(exc)}") from exc
+
+
+@router.post("/topics/classify-technical-topic")
+async def classify_technical_topic_endpoint(
+    payload: ClassifyTechnicalTopicRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Classify a technical topic to determine question type, Judge0 support, and context."""
+    try:
+        classification = await classify_technical_topic(payload.topic)
+        return success_response("Topic classified", classification)
+    except Exception as exc:
+        logger.error(f"Error classifying technical topic: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to classify topic: {str(exc)}") from exc
+
+
+
+
+        all_questions = []
+        for topic in assessment.get("topics", []):
+            if not topic or not isinstance(topic, dict):
+                continue
+            topic_questions = topic.get("questions", [])
+            if topic_questions and isinstance(topic_questions, list):
+                for question in topic_questions:
+                    if question and isinstance(question, dict):
+                        all_questions.append(question)
+
+        # Get AI evaluation results and submitted answers from candidate responses
+        candidate_responses = assessment.get("candidateResponses", {})
+        ai_evaluation = {}
+        submitted_answers = {}  # {questionIndex: answer}
+        if isinstance(candidate_responses, dict):
+            candidate_response = candidate_responses.get(candidate_key, {})
+            if isinstance(candidate_response, dict):
+                ai_evaluation = candidate_response.get("aiEvaluation", {})
+                # Get submitted answers
+                answers_list = candidate_response.get("answers", [])
+                if isinstance(answers_list, list):
+                    for ans in answers_list:
+                        if isinstance(ans, dict):
+                            q_idx = ans.get("questionIndex")
+                            if q_idx is not None:
+                                submitted_answers[q_idx] = ans.get("answer", "")
+
+        # Format logs with question details
+        # First, process questions that have logs
+        questions_with_logs = set()
+        formatted_logs = []
+        for question_index_str, log_entries in candidate_logs.items():
+            try:
+                if not isinstance(log_entries, list):
+                    logger.warning(f"Log entries for question {question_index_str} is not a list, skipping")
+                    continue
+                    
+                question_index = int(question_index_str)
+                if 0 <= question_index < len(all_questions):
+                    question = all_questions[question_index]
+                    # Serialize log entries to ensure they're JSON-serializable
+                    # Use array index + 1 as version fallback to handle any race conditions during write
+                    serialized_logs = []
+                    for idx, log_entry in enumerate(log_entries):
+                        if isinstance(log_entry, dict):
+                            # Use stored version if available, otherwise use array index + 1
+                            # This ensures versions are always correct even if there was a race condition
+                            stored_version = log_entry.get("version", 0)
+                            version = stored_version if stored_version > 0 else (idx + 1)
+                            serialized_logs.append({
+                                "answer": str(log_entry.get("answer", "")),
+                                "questionType": str(log_entry.get("questionType", "")),
+                                "timestamp": str(log_entry.get("timestamp", "")),
+                                "version": int(version),
+                            })
+                    
+                    # Get AI evaluation for this question
+                    question_ai_eval = ai_evaluation.get(str(question_index)) or ai_evaluation.get(question_index)
+                    ai_score = None
+                    ai_feedback = None
+                    if question_ai_eval and isinstance(question_ai_eval, dict):
+                        ai_score = question_ai_eval.get("score")
+                        ai_feedback = question_ai_eval.get("feedback")
+                    
+                    # For MCQ questions, check if answer is correct
+                    is_mcq_correct = None
+                    if question.get("type") == "MCQ":
+                        correct_answer = question.get("correctAnswer", "")
+                        # Get the last answer from logs
+                        if serialized_logs and len(serialized_logs) > 0:
+                            last_log = serialized_logs[-1]  # Last version
+                            candidate_answer = last_log.get("answer", "").strip()
+                            is_mcq_correct = (candidate_answer == correct_answer) if correct_answer else None
+                    
+                    formatted_logs.append({
+                        "questionIndex": question_index,
+                        "questionText": str(question.get("questionText", "")),
+                        "questionType": str(question.get("type", "")),
+                        "logs": serialized_logs,  # Already in order (version 1, 2, 3, etc.)
+                        "aiScore": ai_score,  # AI evaluated score (for last version)
+                        "aiFeedback": ai_feedback,
+                        "maxScore": question.get("score", 5),
+                        "isMcqCorrect": is_mcq_correct,  # For MCQ: True/False, for others: None
+                        "correctAnswer": question.get("correctAnswer") if question.get("type") == "MCQ" else None,
+                        "options": question.get("options", []) if question.get("type") == "MCQ" else None,  # MCQ options
+                    })
+                    questions_with_logs.add(question_index)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid question index in logs: {question_index_str}, error: {e}")
+                continue
+            except Exception as e:
+                logger.warning(f"Error processing log entry for question {question_index_str}: {e}")
+                continue
+
+        # Add questions that don't have logs but have submitted answers (especially MCQ)
+        # Also include ALL MCQ questions even if they have no logs or submitted answers
+        # Get submission time from candidate response
+        submission_time = None
+        if isinstance(candidate_responses, dict):
+            candidate_response = candidate_responses.get(candidate_key, {})
+            if isinstance(candidate_response, dict):
+                submitted_at = candidate_response.get("submittedAt")
+                if submitted_at:
+                    submission_time = submitted_at
+        if not submission_time:
+            submission_time = datetime.now(timezone.utc).isoformat()
+        
+        for idx, question in enumerate(all_questions):
+            if idx not in questions_with_logs and isinstance(question, dict):
+                # Check if there's a submitted answer for this question
+                submitted_answer = submitted_answers.get(idx)
+                
+                # For MCQ questions, ALWAYS include them (even if no logs and no submitted answer)
+                # For other question types, only include if there's a submitted answer
+                is_mcq = question.get("type") == "MCQ"
+                should_include = submitted_answer is not None or is_mcq
+                
+                if should_include:
+                    # Create a log entry from submitted answer (or empty for MCQ without answer)
+                    serialized_logs = []
+                    answer_to_use = str(submitted_answer) if submitted_answer is not None else ""
+                    # Always create a log entry for MCQs, even if answer is empty
+                    if answer_to_use or is_mcq:
+                        # Create a single log entry for the submitted answer
+                        serialized_logs.append({
+                            "answer": answer_to_use,
+                            "questionType": str(question.get("type", "")),
+                            "timestamp": submission_time,
+                            "version": 1,
+                        })
+                    
+                    # Get AI evaluation for this question
+                    question_ai_eval = ai_evaluation.get(str(idx)) or ai_evaluation.get(idx)
+                    ai_score = None
+                    ai_feedback = None
+                    if question_ai_eval and isinstance(question_ai_eval, dict):
+                        ai_score = question_ai_eval.get("score")
+                        ai_feedback = question_ai_eval.get("feedback")
+                    
+                    # For MCQ questions, check if answer is correct
+                    is_mcq_correct = None
+                    if is_mcq:
+                        correct_answer = question.get("correctAnswer", "")
+                        if answer_to_use:
+                            is_mcq_correct = (answer_to_use.strip() == correct_answer) if correct_answer else None
+                        else:
+                            is_mcq_correct = False  # No answer provided = incorrect
+                    
+                    formatted_logs.append({
+                        "questionIndex": idx,
+                        "questionText": str(question.get("questionText", "")),
+                        "questionType": str(question.get("type", "")),
+                        "logs": serialized_logs,
+                        "aiScore": ai_score,
+                        "aiFeedback": ai_feedback,
+                        "maxScore": question.get("score", 5),
+                        "isMcqCorrect": is_mcq_correct,
+                        "correctAnswer": question.get("correctAnswer") if is_mcq else None,
+                        "options": question.get("options", []) if is_mcq else None,
+                    })
+
+        # Sort by question index
+        formatted_logs.sort(key=lambda x: x["questionIndex"])
+
+        return success_response("Answer logs fetched successfully", formatted_logs)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error fetching answer logs: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch answer logs: {str(exc)}",
+        ) from exc
+
+
+@router.get("/{assessment_id}/candidate-results")
+async def get_candidate_results(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Get candidate results for an assessment."""
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+
+    candidate_responses = assessment.get("candidateResponses", {})
+    results = []
+    
+    for key, response in candidate_responses.items():
+        results.append({
+            "email": response.get("email"),
+            "name": response.get("name"),
+            "score": response.get("score", 0),
+            "maxScore": response.get("maxScore", 0),
+            "attempted": response.get("attempted", 0),
+            "notAttempted": response.get("notAttempted", 0),
+            "correctAnswers": response.get("correctAnswers", 0),
+            "submittedAt": response.get("submittedAt"),
+            "startedAt": response.get("startedAt"),  # Candidate's actual start time
+            # AI evaluation data
+            "aiScore": response.get("aiScore", 0),
+            "percentageScored": response.get("percentageScored", 0),
+            "passPercentage": response.get("passPercentage"),
+            "passed": response.get("passed", False),
+        })
+    
+    return success_response("Candidate results fetched successfully", results)
+
+
+@router.get("/{assessment_id}/questions", response_model=None)
+async def get_all_questions(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    logger.info(f"[get_all_questions] GET /api/assessments/{assessment_id}/questions - Request received")
+    print(f"[get_all_questions] GET /api/assessments/{assessment_id}/questions - Request received")
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+    except HTTPException as e:
+        logger.error(f"[get_all_questions] Error getting assessment {assessment_id}: {e.detail}")
+        print(f"[get_all_questions] Error getting assessment {assessment_id}: {e.detail}")
+        raise
+    _check_assessment_access(assessment, current_user)
+
+    # Generate assessment token if it doesn't exist and assessment is ready/active
+    if assessment.get("status") != "draft" and not assessment.get("assessmentToken"):
+        assessment["assessmentToken"] = secrets.token_urlsafe(32)
+        await _save_assessment(db, assessment)
+
+    questions_with_topics: List[Dict[str, Any]] = []
+    for topic in assessment.get("topics", []):
+        topic_questions = topic.get("questions") or []
+        for index, question in enumerate(topic_questions):
+            question_with_topic = question.copy()
+            question_with_topic.update(
+                {
+                    "topic": topic.get("topic"),
+                    "topicDifficulty": topic.get("difficulty"),
+                    "topicSource": topic.get("source"),
+                    "questionIndex": index,
+                }
+            )
+            questions_with_topics.append(question_with_topic)
+
+    # Serialize full assessment with all fields for draft loading
+    # Convert topics to serializable format
+    serialized_topics = convert_object_ids(assessment.get("topics", []))
+    # Convert topics_v2 to serializable format (if exists)
+    serialized_topics_v2 = convert_object_ids(assessment.get("topics_v2", []))
+    
+    data = {
+        "assessment": {
+            "id": str(assessment.get("_id")),
+            "title": assessment.get("title"),
+            "description": assessment.get("description"),
+            "status": assessment.get("status"),
+            "totalQuestions": len(questions_with_topics),
+            "schedule": assessment.get("schedule"),
+            "assessmentToken": assessment.get("assessmentToken"),
+            # Include all assessment fields needed for draft loading
+            "jobDesignation": assessment.get("jobDesignation"),
+            "selectedSkills": assessment.get("selectedSkills"),
+            "experienceMin": assessment.get("experienceMin"),
+            "experienceMax": assessment.get("experienceMax"),
+            "experienceMode": assessment.get("experienceMode"),
+            "availableQuestionTypes": assessment.get("availableQuestionTypes"),
+            "isAptitudeAssessment": assessment.get("isAptitudeAssessment"),
+            "topics": serialized_topics,  # Include full topic objects with all fields (questionConfigs, isAptitude, coding_supported, etc.)
+            "topics_v2": serialized_topics_v2,  # Include topics_v2 (new format) for draft loading
+            "fullTopicRegenLocked": assessment.get("fullTopicRegenLocked", False),
+            "allQuestionsGenerated": assessment.get("allQuestionsGenerated", False),
+            "previewQuestions": assessment.get("previewQuestions"),
+            "passPercentage": assessment.get("passPercentage"),
+            "questionTypeTimes": assessment.get("questionTypeTimes"),
+            "enablePerSectionTimers": assessment.get("enablePerSectionTimers"),
+            "candidates": assessment.get("candidates"),
+            "assessmentUrl": assessment.get("assessmentUrl"),
+            "accessMode": assessment.get("accessMode"),
+            "invitationTemplate": assessment.get("invitationTemplate"),
+            "currentStation": assessment.get("currentStation"),
+        },
+        "topics": [
+            {
+                "topic": topic.get("topic"),
+                "numQuestions": topic.get("numQuestions"),
+                "questionTypes": topic.get("questionTypes"),
+                "difficulty": topic.get("difficulty"),
+                "source": topic.get("source"),
+                "questionCount": len(topic.get("questions") or []),
+            }
+            for topic in assessment.get("topics", [])
+        ],
+        "questions": questions_with_topics,
+    }
+    return success_response("All questions fetched successfully", data)
+
+
+@router.get("")
+async def get_all_assessments_with_schedule(
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    try:
+        query: Dict[str, Any] = {}
+        if current_user.get("role") != "super_admin":
+            user_org = current_user.get("organization")
+            user_id = current_user.get("id")
+            
+            # Build query based on user's organization
+            if user_org:
+                # User has organization - query by organization
+                try:
+                    query["organization"] = to_object_id(user_org)
+                except ValueError:
+                    # Invalid organization ID - fall back to createdBy
+                    if user_id:
+                        try:
+                            query["createdBy"] = to_object_id(user_id)
+                        except ValueError:
+                            pass
+            else:
+                # User has no organization - query by createdBy
+                if user_id:
+                    try:
+                        query["createdBy"] = to_object_id(user_id)
+                    except ValueError:
+                        pass
+
+        # Fetch assessments with required fields - optimized query
+        # Limit to prevent loading too many documents at once (safety limit)
+        cursor = db.assessments.find(query, {"title": 1, "status": 1, "schedule": 1, "createdAt": 1, "updatedAt": 1, "organization": 1, "createdBy": 1}).limit(1000)
+        all_docs = await cursor.to_list(length=1000)  # Fetch all at once with limit
+        
+        assessments = []
+        
+        # Process documents in batch
+        for doc in all_docs:
+            try:
+                # Quick access check - skip if user doesn't have access
+                # Only check if query didn't already filter by organization/createdBy
+                if current_user.get("role") != "super_admin":
+                    try:
+                        _check_assessment_access(doc, current_user)
+                    except HTTPException:
+                        continue  # Skip this assessment
+                
+                schedule = doc.get("schedule")
+                assessment_data = {
+                    "id": str(doc.get("_id")),
+                    "title": doc.get("title", ""),
+                    "status": doc.get("status", "draft"),
+                    "hasSchedule": bool(schedule),
+                    "scheduleStatus": None,
+                    "createdAt": doc.get("createdAt"),
+                    "updatedAt": doc.get("updatedAt"),
+                }
+                
+                if schedule:
+                    assessment_data["scheduleStatus"] = {
+                        "startTime": schedule.get("startTime"),
+                        "endTime": schedule.get("endTime"),
+                        "duration": schedule.get("duration"),
+                        "isActive": schedule.get("isActive", False),
+                    }
+                
+                # Serialize datetime and ObjectId fields recursively
+                assessments.append(convert_object_ids(assessment_data))
+            except HTTPException:
+                # Access denied - skip this assessment
+                continue
+            except Exception as exc:
+                logger.warning("Error processing assessment document: %s", exc)
+                # Skip this assessment if there's an error processing it
+                continue
+
+        return success_response("Assessments with schedule status fetched successfully", assessments)
+    except Exception as exc:
+        logger.exception("Error fetching assessments: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch assessments: {str(exc)}",
+        ) from exc
+
+
+@router.delete("/{assessment_id}")
+async def delete_assessment(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Delete an assessment. Only users with access to the assessment can delete it."""
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(assessment, current_user)
+
+        # Delete the assessment
+        result = await db.assessments.delete_one({"_id": to_object_id(assessment_id)})
+        
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found or already deleted",
+            )
+
+        return success_response("Assessment deleted successfully", {"assessmentId": assessment_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error deleting assessment: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete assessment: {str(exc)}",
+        ) from exc
+
+
+# ============================================
+# NEW TOPIC GENERATION ENDPOINTS (v2)
+# ============================================
+
+@router.post("/generate-topics")
+async def generate_topics_endpoint_v2(
+    payload: GenerateTopicsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Generate topics using new v2 architecture.
+    Returns topics with strict data model structure.
+    SINGLE DRAFT LOGIC: If assessmentId is provided, updates that draft. Otherwise, finds or creates draft.
+    """
+    try:
+        # CREATE NEW vs EDIT DRAFT LOGIC:
+        # - If assessmentId is provided: Update that specific draft (edit mode)
+        # - If assessmentId is NOT provided: Always create a NEW draft (new assessment flow)
+        existing_assessment = None
+        if payload.assessmentId:
+            # Edit mode: Update the specific assessment
+            try:
+                existing_assessment = await _get_assessment(db, payload.assessmentId)
+                _check_assessment_access(existing_assessment, current_user)
+                if existing_assessment.get("status") != "draft":
+                    logger.warning(f"Assessment {payload.assessmentId} is not a draft, will create new draft")
+                    existing_assessment = None
+                else:
+                    logger.info(f"Edit mode: Updating existing draft {payload.assessmentId}")
+            except HTTPException:
+                existing_assessment = None
+        # If no assessmentId provided, this is a NEW assessment - always create new draft
+        # Do NOT look for existing drafts - user explicitly wants a new assessment
+        
+        # Sanitize inputs
+        sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
+        sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
+        sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
+        
+        # Validate experience mode
+        if payload.experienceMode not in ["corporate", "student"]:
+            raise HTTPException(status_code=400, detail="experienceMode must be 'corporate' or 'student'")
+        
+        # Infer coding language from job designation and skills
+        coding_language = infer_language_from_skill(
+            job_designation=sanitized_job_designation,
+            selected_skills=sanitized_skills
+        )
+        
+        # Generate topics
+        topics = await generate_topics_v2(
+            assessment_title=sanitized_title,
+            job_designation=sanitized_job_designation,
+            selected_skills=sanitized_skills,
+            experience_min=payload.experienceMin,
+            experience_max=payload.experienceMax,
+            experience_mode=payload.experienceMode
+        )
+        
+        # If existing draft found, update it. Otherwise, create new draft.
+        if existing_assessment:
+            # UPDATE EXISTING DRAFT
+            # topics is already List[Dict[str, Any]], no need to call .dict()
+            existing_assessment["topics_v2"] = topics
+            existing_assessment["jobDesignation"] = sanitized_job_designation
+            existing_assessment["selectedSkills"] = sanitized_skills
+            existing_assessment["experienceMin"] = payload.experienceMin
+            existing_assessment["experienceMax"] = payload.experienceMax
+            existing_assessment["experienceMode"] = payload.experienceMode
+            existing_assessment["codingLanguage"] = coding_language
+            if sanitized_title:
+                existing_assessment["title"] = sanitized_title
+            existing_assessment["status"] = "draft"
+            existing_assessment["updatedAt"] = _now_utc()
+            
+            await _save_assessment(db, existing_assessment)
+            assessment_id = str(existing_assessment["_id"])
+        else:
+            # CREATE NEW DRAFT
+            # topics is already List[Dict[str, Any]], no need to call .dict()
+            assessment_doc: Dict[str, Any] = {
+                "title": sanitized_title or f"Assessment for {sanitized_job_designation}",
+                "description": f"Assessment for {sanitized_job_designation} - Skills: {', '.join(sanitized_skills)}",
+                "topics_v2": topics,
+                "jobDesignation": sanitized_job_designation,
+                "selectedSkills": sanitized_skills,
+                "experienceMin": payload.experienceMin,
+                "experienceMax": payload.experienceMax,
+                "experienceMode": payload.experienceMode,
+                "codingLanguage": coding_language,
+                "status": "draft",
+                "createdBy": to_object_id(current_user.get("id")),
+                "organization": to_object_id(current_user.get("organization")) if current_user.get("organization") else None,
+                "createdAt": _now_utc(),
+                "updatedAt": _now_utc(),
+            }
+            result = await db.assessments.insert_one(assessment_doc)
+            assessment_id = str(result.inserted_id)
+        
+        return success_response(
+            "Topics generated successfully",
+            {
+                "topics": topics,  # Already List[Dict[str, Any]]
+                "assessmentId": assessment_id
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating topics: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate topics: {str(exc)}") from exc
+
+
+@router.post("/regenerate-topic")
+async def regenerate_topic_endpoint_v2(
+    payload: RegenerateTopicRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Regenerate a single topic.
+    Only allowed when topic.locked == False AND fullTopicRegenLocked == False.
+    """
+    try:
+        # Get assessment
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        # Get topics_v2
+        topics_v2 = assessment.get("topics_v2", [])
+        topic_index = None
+        for idx, topic in enumerate(topics_v2):
+            if topic.get("id") == payload.topicId:
+                topic_index = idx
+                break
+        
+        if topic_index is None:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        # Check if topic is locked
+        if topics_v2[topic_index].get("locked", False):
+            raise HTTPException(status_code=400, detail="Topic is locked and cannot be regenerated")
+        
+        # Check if full topic regeneration is locked
+        if assessment.get("fullTopicRegenLocked", False):
+            raise HTTPException(status_code=400, detail="Topic regeneration is locked after preview")
+        
+        # Sanitize inputs
+        sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
+        sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
+        sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
+        
+        # Generate new topic
+        new_topics = await generate_topics_v2(
+            assessment_title=sanitized_title,
+            job_designation=sanitized_job_designation,
+            selected_skills=sanitized_skills,
+            experience_min=payload.experienceMin,
+            experience_max=payload.experienceMax,
+            experience_mode=payload.experienceMode
+        )
+        
+        if not new_topics:
+            raise HTTPException(status_code=500, detail="Failed to generate new topic")
+        
+        # Replace topic at same position, reset state
+        new_topic = new_topics[0]
+        new_topic["id"] = payload.topicId  # Keep same ID
+        new_topic["locked"] = False
+        # Reset all questionRows - keep only the first auto-generated one
+        if new_topic.get("questionRows"):
+            first_row = new_topic["questionRows"][0]
+            first_row["status"] = "pending"
+            first_row["locked"] = False
+            first_row["questions"] = []
+            new_topic["questionRows"] = [first_row]  # Remove manually added rows
+        
+        topics_v2[topic_index] = new_topic
+        
+        # Update assessment
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response(
+            "Topic regenerated successfully",
+            {"topic": new_topic}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error regenerating topic: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate topic: {str(exc)}") from exc
+
+
+@router.post("/generate-question")
+async def generate_question_endpoint_v2(
+    payload: GenerateQuestionRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Generate questions for a single question row (preview).
+    After generation: row.status = "generated", row.locked = True, topic.locked = True
+    Sets fullTopicRegenLocked = True on assessment.
+    """
+    try:
+        # Get assessment
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        # Get topics_v2
+        topics_v2 = assessment.get("topics_v2", [])
+        topic_index = None
+        for idx, topic in enumerate(topics_v2):
+            if topic.get("id") == payload.topicId:
+                topic_index = idx
+                break
+        
+        if topic_index is None:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        topic = topics_v2[topic_index]
+        
+        # Find the question row
+        question_rows = topic.get("questionRows", [])
+        row_index = None
+        for idx, row in enumerate(question_rows):
+            if row.get("rowId") == payload.rowId:
+                row_index = idx
+                break
+        
+        if row_index is None:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        row = question_rows[row_index]
+        
+        # Check if already generated
+        if row.get("status") == "generated" and row.get("questions") and len(row.get("questions", [])) > 0:
+            return success_response(
+                "Questions already generated",
+                {"questions": row.get("questions", []), "row": row, "topic": topic}
+            )
+        
+        # Check if locked (but allow if questions don't exist yet)
+        if row.get("locked", False) and row.get("questions") and len(row.get("questions", [])) > 0:
+            raise HTTPException(status_code=400, detail="Row is locked and already has questions")
+        if topic.get("locked", False) and row.get("questions") and len(row.get("questions", [])) > 0:
+            raise HTTPException(status_code=400, detail="Topic is locked and row already has questions")
+        
+        # Validate required fields
+        if not payload.questionType:
+            raise HTTPException(status_code=400, detail="questionType is required")
+        if not payload.difficulty:
+            raise HTTPException(status_code=400, detail="difficulty is required")
+        if not payload.questionsCount or payload.questionsCount < 1:
+            raise HTTPException(status_code=400, detail="questionsCount must be at least 1")
+        
+        logger.info(f"Generating {payload.questionsCount} {payload.questionType} question(s) for topic: {payload.topicLabel}, difficulty: {payload.difficulty}, canUseJudge0: {payload.canUseJudge0}")
+        
+        # Get coding language from assessment (fallback to python)
+        coding_language = assessment.get("codingLanguage", "python")
+        
+        # Generate questions
+        questions = await generate_questions_for_row_v2(
+            topic_label=payload.topicLabel,
+            question_type=payload.questionType,
+            difficulty=payload.difficulty,
+            questions_count=payload.questionsCount,
+            can_use_judge0=payload.canUseJudge0,
+            coding_language=coding_language
+        )
+        
+        if not questions or len(questions) == 0:
+            logger.error(f"No questions generated for topic: {payload.topicLabel}, type: {payload.questionType}")
+            raise HTTPException(status_code=500, detail="Failed to generate questions - no questions returned")
+        
+        # Update row
+        row["questions"] = questions
+        row["status"] = "generated"
+        row["locked"] = True
+        
+        # Lock topic and full topic regeneration
+        topic["locked"] = True
+        assessment["fullTopicRegenLocked"] = True
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {
+                "topics_v2": topics_v2,
+                "fullTopicRegenLocked": True,
+                "updatedAt": assessment["updatedAt"]
+            }}
+        )
+        
+        return success_response(
+            "Questions generated successfully",
+            {"questions": questions, "row": row, "topic": topic}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating questions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate questions: {str(exc)}") from exc
+
+
+@router.post("/generate-all-questions")
+async def generate_all_questions_endpoint_v2(
+    payload: GenerateAllQuestionsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Generate questions for all pending topics.
+    After completion: lock all topics, disable all buttons.
+    Sets allQuestionsGenerated = True on assessment.
+    """
+    try:
+        # Get assessment
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = payload.topics
+        
+        # Convert Pydantic models to dicts if needed
+        topics_list = [topic if isinstance(topic, dict) else topic.model_dump() for topic in topics_v2]
+        
+        # Get coding language from assessment (fallback to python)
+        coding_language = assessment.get("codingLanguage", "python")
+        
+        # Generate questions only for pending rows
+        generated_count = 0
+        for topic in topics_list:
+            question_rows = topic.get("questionRows", [])
+            for row in question_rows:
+                if row.get("status") == "pending" and not row.get("questions") and not row.get("locked"):
+                    try:
+                        questions = await generate_questions_for_row_v2(
+                            topic_label=topic["label"],
+                            question_type=row["questionType"],
+                            difficulty=row["difficulty"],
+                            questions_count=row["questionsCount"],
+                            can_use_judge0=row.get("canUseJudge0", False),
+                            coding_language=coding_language
+                        )
+                        
+                        row["questions"] = questions
+                        row["status"] = "generated"
+                        row["locked"] = True
+                        generated_count += 1
+                    except Exception as exc:
+                        logger.error(f"Error generating questions for row {row.get('rowId')}: {exc}")
+                        # Continue with other rows
+            
+            # Lock topic if any row was generated
+            if any(r.get("locked") for r in question_rows):
+                topic["locked"] = True
+        
+        # Lock all topics and set flags
+        for topic in topics_list:
+            topic["locked"] = True
+        
+        # Update assessment
+        assessment["topics_v2"] = topics_list
+        assessment["allQuestionsGenerated"] = True
+        assessment["fullTopicRegenLocked"] = True
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {
+                "topics_v2": topics_list,
+                "allQuestionsGenerated": True,
+                "fullTopicRegenLocked": True,
+                "updatedAt": assessment["updatedAt"]
+            }}
+        )
+        
+        return success_response(
+            f"Generated questions for {generated_count} question rows",
+            {"topics": topics_list, "generatedCount": generated_count}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating all questions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate all questions: {str(exc)}") from exc
+
+
+@router.post("/add-question-row")
+async def add_question_row_endpoint(
+    payload: AddQuestionRowRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Add a new question row to a topic."""
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        if topic.get("locked"):
+            raise HTTPException(status_code=400, detail="Topic is locked")
+        
+        # Get first row's canUseJudge0 as default
+        first_row = topic.get("questionRows", [{}])[0] if topic.get("questionRows") else {}
+        can_use_judge0 = first_row.get("canUseJudge0", False)
+        
+        # Check if topic is in special category (aptitude, communication, logical_reasoning)
+        topic_category = topic.get("category", "technical")
+        special_categories = ["aptitude", "communication", "logical_reasoning"]
+        is_special_category = topic_category in special_categories
+        
+        # Get allowed question types from topic (for soft skills)
+        allowed_question_types = topic.get("allowedQuestionTypes", [])
+        if allowed_question_types and len(allowed_question_types) > 0:
+            # Use first allowed type as default for soft skills
+            default_question_type = allowed_question_types[0]
+        elif not is_special_category and first_row:
+            # For technical topics, use first row's question type or MCQ
+            default_question_type = first_row.get("questionType", "MCQ")
+        else:
+            # Default to MCQ for special categories
+            default_question_type = "MCQ"
+        
+        # Create new row
+        import uuid
+        new_row = {
+            "rowId": str(uuid.uuid4()),
+            "questionType": default_question_type,
+            "difficulty": "Easy",
+            "questionsCount": 1,
+            "canUseJudge0": False if is_special_category else can_use_judge0,  # Special categories never use Judge0
+            "status": "pending",
+            "locked": False,
+            "questions": []
+        }
+        
+        topic.setdefault("questionRows", []).append(new_row)
+        
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response("Question row added successfully", {"row": new_row, "topic": topic})
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error adding question row: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add question row: {str(exc)}") from exc
+
+
+@router.post("/remove-question-row")
+async def remove_question_row_endpoint(
+    payload: RemoveQuestionRowRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Remove a question row from a topic."""
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        question_rows = topic.get("questionRows", [])
+        if len(question_rows) <= 1:
+            raise HTTPException(status_code=400, detail="Cannot remove the last question row")
+        
+        row = next((r for r in question_rows if r.get("rowId") == payload.rowId), None)
+        if not row:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        if row.get("locked"):
+            raise HTTPException(status_code=400, detail="Question row is locked")
+        
+        # Remove row
+        topic["questionRows"] = [r for r in question_rows if r.get("rowId") != payload.rowId]
+        
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response("Question row removed successfully", {"topic": topic})
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error removing question row: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to remove question row: {str(exc)}") from exc
+
+
+@router.post("/regenerate-single-question")
+async def regenerate_single_question_endpoint(
+    payload: RegenerateSingleQuestionRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Regenerate a single question within a row."""
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        question_rows = topic.get("questionRows", [])
+        row = next((r for r in question_rows if r.get("rowId") == payload.rowId), None)
+        if not row:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        questions = row.get("questions", [])
+        if payload.questionIndex >= len(questions):
+            raise HTTPException(status_code=400, detail="Question index out of range")
+        
+        # Regenerate single question
+        new_questions = await generate_questions_for_row_v2(
+            topic_label=topic["label"],
+            question_type=row["questionType"],
+            difficulty=row["difficulty"],
+            questions_count=1,
+            can_use_judge0=row.get("canUseJudge0", False)
+        )
+        
+        if new_questions:
+            questions[payload.questionIndex] = new_questions[0]
+            row["questions"] = questions
+        
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response("Question regenerated successfully", {"row": row})
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error regenerating question: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate question: {str(exc)}") from exc
+
+
+@router.put("/update-single-question-v2")
+async def update_single_question_endpoint_v2(
+    payload: UpdateSingleQuestionRequestV2,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Update a single question within a row (topicsV2 structure)."""
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        question_rows = topic.get("questionRows", [])
+        row = next((r for r in question_rows if r.get("rowId") == payload.rowId), None)
+        if not row:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        questions = row.get("questions", [])
+        if payload.questionIndex >= len(questions):
+            raise HTTPException(status_code=400, detail="Question index out of range")
+        
+        # Update the question
+        questions[payload.questionIndex] = payload.question
+        row["questions"] = questions
+        
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response("Question updated successfully", {"row": row, "topic": topic})
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error updating single question: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update single question: {str(exc)}") from exc
+
+
+@router.post("/suggest-topic-contexts")
+async def suggest_topic_contexts_endpoint(
+    partial_input: str = Query(..., min_length=2),
+    category: str = Query(..., pattern=r"^(aptitude|communication|logical_reasoning)$"),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Get semantic topic suggestions based on partial user input."""
+    try:
+        suggestions = await suggest_topic_contexts(partial_input, category)
+        return success_response("Suggestions generated", {"suggestions": suggestions})
+    except Exception as exc:
+        logger.error(f"Error generating topic suggestions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate suggestions: {str(exc)}") from exc
+
+
+@router.post("/generate-topic-context")
+async def generate_topic_context_endpoint(
+    topic_name: str = Query(..., min_length=1),
+    category: str = Query(..., pattern=r"^(aptitude|communication|logical_reasoning)$"),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Generate context summary and suggested question type for a topic."""
+    try:
+        context_data = await generate_topic_context_summary(topic_name, category)
+        return success_response("Context generated", context_data)
+    except Exception as exc:
+        logger.error(f"Error generating topic context: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate context: {str(exc)}") from exc
+
+
+@router.post("/detect-topic-category")
+async def detect_topic_category_endpoint(
+    topic_name: str = Query(..., min_length=1),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Detect topic category (aptitude, communication, logical_reasoning, or technical) using semantic understanding."""
+    try:
+        category = await _detect_category_semantically(topic_name)
+        return success_response("Category detected", {"category": category})
+    except Exception as exc:
+        logger.error(f"Error detecting topic category: {exc}", exc_info=True)
+        # Fallback to technical
+        return success_response("Category detected", {"category": "technical"})
+
+
+@router.post("/topics/suggest")
+async def suggest_topics_endpoint(
+    payload: SuggestTopicsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Get AI-powered topic suggestions based on category and partial query."""
+    try:
+        suggestions = await suggest_topics(payload.category, payload.query)
+        return success_response("Suggestions generated", {"suggestions": suggestions})
+    except Exception as exc:
+        logger.error(f"Error generating topic suggestions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate suggestions: {str(exc)}") from exc
+
+
+@router.post("/topics/classify-technical-topic")
+async def classify_technical_topic_endpoint(
+    payload: ClassifyTechnicalTopicRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """Classify a technical topic to determine question type, Judge0 support, and context."""
+    try:
+        classification = await classify_technical_topic(payload.topic)
+        return success_response("Topic classified", classification)
+    except Exception as exc:
+        logger.error(f"Error classifying technical topic: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to classify topic: {str(exc)}") from exc
+
+
