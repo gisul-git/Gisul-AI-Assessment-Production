@@ -40,6 +40,7 @@ class CustomMCQTestSettings(BaseModel):
     """Test settings for custom MCQ test."""
     title: str = Field(..., description="Test title")
     description: Optional[str] = Field(None, description="Test description")
+    instructions: Optional[str] = Field(None, description="Test instructions")
     passingPercentage: float = Field(50.0, ge=0, le=100, description="Passing percentage")
     shuffleQuestions: bool = Field(False, description="Shuffle questions within sections")
     shuffleOptions: bool = Field(False, description="Shuffle options for each question")
@@ -104,4 +105,39 @@ class CSVValidationResponse(BaseModel):
     errors: List[str] = Field(default_factory=list)
     questions: List[Dict[str, Any]] = Field(default_factory=list)
     sections: List[str] = Field(default_factory=list)
+
+
+class DraftData(BaseModel):
+    """Draft data structure for Custom MCQ Test."""
+    csvRawData: Optional[str] = Field(None, description="Raw CSV content")
+    parsedQuestions: List[Dict[str, Any]] = Field(default_factory=list, description="Parsed questions from CSV")
+    sections: List[Dict[str, Any]] = Field(default_factory=list, description="Section structure")
+    settings: Optional[Dict[str, Any]] = Field(None, description="Test settings")
+    scheduling: Optional[Dict[str, Any]] = Field(None, description="Schedule settings")
+    candidates: List[Dict[str, Any]] = Field(default_factory=list, description="Candidate list")
+    proctoringSettings: Optional[Dict[str, Any]] = Field(None, description="Proctoring settings")
+
+
+class CreateDraftRequest(BaseModel):
+    """Request to create a new draft."""
+    title: Optional[str] = Field(None, description="Optional title for the draft")
+
+
+class UpdateDraftRequest(BaseModel):
+    """Request to update a draft."""
+    draftData: DraftData
+    progressStep: int = Field(..., ge=1, le=7, description="Current step (1-7)")
+    timestamp: Optional[str] = Field(None, description="Optional timestamp")
+
+
+class PublishDraftRequest(BaseModel):
+    """Request to publish a draft."""
+    # All fields from CreateCustomMCQTestRequest are required for publishing
+    settings: CustomMCQTestSettings
+    sections: List[Section]
+    timerSettings: TimerSettings
+    proctoringSettings: ProctoringSettings
+    schedule: ScheduleSettings
+    accessMode: str = Field("private", description="'private' or 'public'")
+    candidates: Optional[List[CandidateInfo]] = Field(None, description="List of candidates (for private mode)")
 

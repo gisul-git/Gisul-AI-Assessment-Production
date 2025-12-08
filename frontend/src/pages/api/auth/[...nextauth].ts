@@ -37,7 +37,7 @@ export const authOptions: NextAuthOptions = {
       },
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) {
-          throw new Error("Email and password are required");
+          return null; // Return null instead of throwing for invalid credentials
         }
 
         try {
@@ -48,7 +48,8 @@ export const authOptions: NextAuthOptions = {
 
           const data = response.data?.data;
           if (!data?.token || !data?.user) {
-            throw new Error("Invalid response from authentication service");
+            console.error("Invalid response from authentication service:", response.data);
+            return null; // Return null for invalid response
           }
 
           const backendUser: BackendUser = {
@@ -64,7 +65,24 @@ export const authOptions: NextAuthOptions = {
           } as BackendUser;
           return backendUser;
         } catch (error: any) {
-          throw new Error(error?.message ?? "Authentication failed");
+          // Log the error for debugging
+          console.error("Credentials authentication error:", {
+            message: error?.message,
+            response: error?.response?.data,
+            status: error?.response?.status,
+            code: error?.code,
+          });
+
+          // Extract error message from backend response
+          const errorMessage = 
+            error?.response?.data?.detail || 
+            error?.response?.data?.message || 
+            error?.message || 
+            "Invalid email or password";
+
+          // Throw error with message - NextAuth will catch this and pass it to the frontend
+          // The error message will be available in result.error in the signIn callback
+          throw new Error(errorMessage);
         }
       },
     }),

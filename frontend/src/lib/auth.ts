@@ -1,5 +1,6 @@
 import { GetServerSidePropsContext, GetServerSidePropsResult } from "next";
 import { getServerSession } from "next-auth";
+// Dynamic route import - using relative path from src/lib to src/pages/api/auth
 import { authOptions } from "../pages/api/auth/[...nextauth]";
 
 /**

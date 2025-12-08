@@ -181,7 +181,7 @@ async def get_assessment_full(
     try:
         assessment_id = to_object_id(assessmentId)
         assessment = await db.assessments.find_one({"_id": assessment_id})
-        
+
         if not assessment:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -191,9 +191,8 @@ async def get_assessment_full(
         # Serialize and return assessment
         assessment_serialized = serialize_document(assessment)
         
-        return success_response({
-            "assessment": assessment_serialized
-        })
+        # Return the assessment directly in data (not nested in assessment key)
+        return success_response(assessment_serialized)
         
     except HTTPException:
         raise
@@ -378,4 +377,88 @@ async def submit_answers(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to submit answers: {str(e)}"
+        )
+
+
+class SaveCandidateInfoRequest(BaseModel):
+    """Request to save candidate information."""
+    assessmentId: str
+    token: str
+    email: str
+    name: str
+    phone: Optional[str] = None
+    hasResume: bool = False
+
+
+@router.post("/save-candidate-info")
+async def save_candidate_info(
+    request: SaveCandidateInfoRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Save candidate information (email, name, phone, resume status).
+    This is called from the candidate requirements page.
+    """
+    try:
+        assessment_id = to_object_id(request.assessmentId)
+        assessment = await db.assessments.find_one({"_id": assessment_id})
+        
+        if not assessment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found"
+            )
+        
+        # Store candidate info in candidateResponses
+        candidate_key = f"{request.email.lower()}_{request.name.strip().lower()}"
+        
+        if "candidateResponses" not in assessment:
+            assessment["candidateResponses"] = {}
+        
+        if candidate_key not in assessment["candidateResponses"]:
+            assessment["candidateResponses"][candidate_key] = {
+                "logs": [],
+                "answers": {},
+            }
+        
+        # Store candidate info
+        assessment["candidateResponses"][candidate_key]["candidateInfo"] = {
+            "email": request.email.lower().strip(),
+            "name": request.name.strip(),
+            "phone": request.phone.strip() if request.phone else None,
+            "hasResume": request.hasResume,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        # Log the event
+        if "logs" not in assessment["candidateResponses"][candidate_key]:
+            assessment["candidateResponses"][candidate_key]["logs"] = []
+        
+        assessment["candidateResponses"][candidate_key]["logs"].append({
+            "eventType": "CANDIDATE_INFO_SAVED",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "email": request.email,
+                "name": request.name,
+                "hasPhone": bool(request.phone),
+                "hasResume": request.hasResume,
+            }
+        })
+        
+        await db.assessments.update_one(
+            {"_id": assessment_id},
+            {"$set": {"candidateResponses": assessment["candidateResponses"]}}
+        )
+        
+        return success_response({
+            "message": "Candidate information saved successfully"
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error saving candidate info: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save candidate info: {str(e)}"
         )

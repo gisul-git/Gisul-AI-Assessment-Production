@@ -22,6 +22,7 @@ interface Assessment {
   createdAt?: string;
   updatedAt?: string;
   type?: 'assessment' | 'dsa' | 'custom_mcq'; // Add type to distinguish
+  isDraft?: boolean; // Add isDraft to interface
 }
 
 interface DashboardPageProps {
@@ -145,7 +146,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         const customMcqTests = customMcqResponse.value.data.data.map((test: any) => ({
           id: test.id,
           title: test.title || 'Untitled Custom MCQ Test',
-          status: test.status || 'draft',
+          status: test.isDraft ? 'draft' : (test.status || 'published'),
+          isDraft: test.isDraft || false,
           hasSchedule: false, // Custom MCQ tests have schedule in schedule object
           createdAt: test.createdAt,
           updatedAt: test.createdAt,
@@ -601,7 +603,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       if (assessment.type === 'dsa') {
                         router.push(`/dsa/tests`);
                       } else if (assessment.type === 'custom_mcq') {
-                        router.push(`/custom-mcq/${assessment.id}`);
+                        // Route to create page with testId for editing (works for both draft and published)
+                        router.push(`/custom-mcq/create?testId=${assessment.id}`);
                       } else if (assessment.status === 'draft') {
                         router.push(`/assessments/create-new?id=${assessment.id}`);
                       } else {
@@ -630,18 +633,34 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       </h3>
                       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
                         {assessment.type === 'custom_mcq' && (
-                          <span
-                            className="badge"
-                            style={{
-                              backgroundColor: "#10b981",
-                              color: "#ffffff",
-                              fontSize: "0.75rem",
-                              padding: "0.25rem 0.5rem",
-                              borderRadius: "0.25rem",
-                            }}
-                          >
-                            Custom MCQ
-                          </span>
+                          <>
+                            <span
+                              className="badge"
+                              style={{
+                                backgroundColor: "#10b981",
+                                color: "#ffffff",
+                                fontSize: "0.75rem",
+                                padding: "0.25rem 0.5rem",
+                                borderRadius: "0.25rem",
+                              }}
+                            >
+                              Custom MCQ
+                            </span>
+                            {assessment.isDraft && (
+                              <span
+                                className="badge"
+                                style={{
+                                  backgroundColor: "#fbbf24",
+                                  color: "#ffffff",
+                                  fontSize: "0.75rem",
+                                  padding: "0.25rem 0.5rem",
+                                  borderRadius: "0.25rem",
+                                }}
+                              >
+                                Draft
+                              </span>
+                            )}
+                          </>
                         )}
                         {assessment.type === 'dsa' && (
                           <span
@@ -685,7 +704,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       )}
                     </div>
                     <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem", paddingTop: "1rem", borderTop: "1px solid #E8FAF0" }}>
-                      {assessment.status === 'draft' && (
+                      {(assessment.status === 'draft' || assessment.type === 'custom_mcq') && (
                         <button
                           type="button"
                           className="btn-secondary"
@@ -697,7 +716,11 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           }}
                           onClick={(e) => {
                             e.stopPropagation();
-                            router.push(`/assessments/create-new?id=${assessment.id}`);
+                            if (assessment.type === 'custom_mcq') {
+                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                            } else {
+                              router.push(`/assessments/create-new?id=${assessment.id}`);
+                            }
                           }}
                         >
                           Edit
