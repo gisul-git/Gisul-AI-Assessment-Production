@@ -3,20 +3,6 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "../auth/[...nextauth]";
 import fastApiClient from "../../../lib/fastapi";
 
-interface SendInvitationsPayload {
-  assessmentId: string;
-  candidates: Array<{ email: string; name: string }>;
-  examUrl: string;
-  template?: {
-    logoUrl?: string;
-    companyName?: string;
-    message?: string;
-    footer?: string;
-    sentBy?: string;
-  };
-  forceResend?: boolean;
-}
-
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -28,12 +14,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const payload = req.body as SendInvitationsPayload;
+  const { draftId } = req.query;
 
-  if (!payload.assessmentId || !payload.candidates || !payload.examUrl) {
-    return res.status(400).json({ 
-      message: "Missing required fields: assessmentId, candidates, and examUrl are required" 
-    });
+  if (!draftId || typeof draftId !== "string") {
+    return res.status(400).json({ message: "Draft ID is required" });
   }
 
   try {
@@ -42,20 +26,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(401).json({ message: "Authentication token not found" });
     }
 
-    const response = await fastApiClient.post("/api/v1/assessments/send-invitations", payload, {
+    const response = await fastApiClient.post(`/api/v1/custom-mcq/update-draft/${draftId}`, req.body, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
     });
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
-    console.error("Error in send-invitations API route:", error);
+    console.error("Error in update-draft API route:", error);
     const statusCode = error?.response?.status || 500;
     const errorMessage =
       error?.response?.data?.detail ||
       error?.response?.data?.message ||
       error?.message ||
-      "Failed to send invitations";
+      "Failed to update draft";
     return res.status(statusCode).json({
       success: false,
       message: errorMessage,

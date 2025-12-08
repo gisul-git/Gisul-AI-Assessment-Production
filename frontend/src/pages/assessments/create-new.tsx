@@ -1644,8 +1644,15 @@ export default function CreateNewAssessmentPage() {
         if (assessment.jobDesignation) {
           setJobDesignation(assessment.jobDesignation);
         }
-        if (assessment.selectedSkills) {
-          setSelectedSkills(assessment.selectedSkills);
+        if (assessment.selectedSkills && Array.isArray(assessment.selectedSkills)) {
+          // Only set if not already set to prevent duplicates when navigating back
+          setSelectedSkills(prev => {
+            // If already loaded, don't overwrite (prevents duplicates)
+            if (prev.length > 0) {
+              return prev;
+            }
+            return assessment.selectedSkills;
+          });
         }
         if (assessment.experienceMin !== undefined) {
           setExperienceMin(assessment.experienceMin);
@@ -5833,58 +5840,65 @@ export default function CreateNewAssessmentPage() {
               </div>
 
               <div style={{ display: "flex", gap: "1rem", marginTop: "2rem" }}>
-                {isEditMode ? (
-                  <>
-                    {/* In edit mode, show Next button to proceed to Station 2 */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        // Navigate to Station 2 (Configure Topics)
-                        setCurrentStation(2);
-                      }}
-                      className="btn-primary"
-                      style={{ flex: 1 }}
-                    >
-                      Next
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        if (selectedSkills.length === 0) {
-                          setError("Please select at least one skill to assess");
-                          return;
-                        }
-                        if (!jobDesignation.trim()) {
-                          setError("Please enter a job designation");
-                          return;
-                        }
-                        await handleGenerateTopics();
-                      }}
-                      className="btn-primary"
-                      disabled={loading || selectedSkills.length === 0 || !jobDesignation.trim()}
-                      style={{ flex: 1 }}
-                    >
-                      {loading ? "Generating Topics..." : "Generate Topics"}
-                    </button>
-                    {(selectedSkills.length === 0 || !jobDesignation.trim()) && (
-                      <div style={{ 
-                        fontSize: "0.875rem", 
-                        color: "#dc2626", 
-                        marginTop: "0.5rem",
-                        textAlign: "center"
-                      }}>
-                        {selectedSkills.length === 0 && !jobDesignation.trim() 
-                          ? "Please select at least one skill and enter a job designation"
-                          : selectedSkills.length === 0 
-                          ? "Please select at least one skill"
-                          : "Please enter a job designation"}
-                      </div>
-                    )}
-                  </>
-                )}
+                {/* Check if topics have been generated (either in edit mode or after generating topics) */}
+                {(() => {
+                  // If topicsV2 has any topics, it means topics have been generated
+                  // This is simpler and more reliable than checking question status
+                  const hasGeneratedTopics = topicsV2 && topicsV2.length > 0;
+                  
+                  return isEditMode || hasGeneratedTopics ? (
+                    <>
+                      {/* Show Next button if in edit mode or if topics have been generated */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // Navigate to Station 2 (Configure Topics)
+                          setCurrentStation(2);
+                        }}
+                        className="btn-primary"
+                        style={{ flex: 1 }}
+                      >
+                        Next
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (selectedSkills.length === 0) {
+                            setError("Please select at least one skill to assess");
+                            return;
+                          }
+                          if (!jobDesignation.trim()) {
+                            setError("Please enter a job designation");
+                            return;
+                          }
+                          await handleGenerateTopics();
+                        }}
+                        className="btn-primary"
+                        disabled={loading || selectedSkills.length === 0 || !jobDesignation.trim()}
+                        style={{ flex: 1 }}
+                      >
+                        {loading ? "Generating Topics..." : "Generate Topics"}
+                      </button>
+                      {(selectedSkills.length === 0 || !jobDesignation.trim()) && (
+                        <div style={{ 
+                          fontSize: "0.875rem", 
+                          color: "#dc2626", 
+                          marginTop: "0.5rem",
+                          textAlign: "center"
+                        }}>
+                          {selectedSkills.length === 0 && !jobDesignation.trim() 
+                            ? "Please select at least one skill and enter a job designation"
+                            : selectedSkills.length === 0 
+                            ? "Please select at least one skill"
+                            : "Please enter a job designation"}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           )}

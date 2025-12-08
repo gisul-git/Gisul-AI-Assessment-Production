@@ -23,6 +23,10 @@ from .schemas import (
     ProctoringSettings,
     ScheduleSettings,
     TimerSettings,
+    CreateDraftRequest,
+    UpdateDraftRequest,
+    PublishDraftRequest,
+    DraftData,
 )
 from .services import (
     generate_csv_template,
@@ -45,17 +49,23 @@ def _check_test_access(test: Dict[str, Any], current_user: Dict[str, Any]) -> No
     if current_user.get("role") == "super_admin":
         return
     
-    # Normalize organization IDs to strings for comparison
-    test_org = test.get("organization")
-    if test_org is not None:
-        test_org = str(test_org)
+    # Check if user created this test
+    test_created_by = test.get("createdBy")
+    user_id = current_user.get("id")
     
-    user_org = current_user.get("organization")
-    if user_org is not None:
-        user_org = str(user_org)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this test"
+        )
     
-    # Allow access if organizations match
-    if test_org != user_org:
+    # Normalize IDs to strings for comparison (handle both ObjectId and string)
+    if test_created_by is not None:
+        test_created_by = str(test_created_by)
+    user_id_str = str(user_id)
+    
+    # Allow access only if user created the test
+    if test_created_by != user_id_str:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this test"
@@ -141,6 +151,7 @@ async def create_custom_mcq_test(
             "type": "custom_mcq",  # Distinguish from AI assessments
             "title": payload.settings.title,
             "description": payload.settings.description,
+            "instructions": getattr(payload.settings, 'instructions', None),
             "passingPercentage": payload.settings.passingPercentage,
             "shuffleQuestions": payload.settings.shuffleQuestions,
             "shuffleOptions": payload.settings.shuffleOptions,
@@ -192,7 +203,7 @@ async def create_custom_mcq_test(
             ],
             "candidateResponses": {},
             "answerLogs": {},
-            "createdBy": current_user["id"],
+            "createdBy": to_object_id(current_user["id"]),  # Store as ObjectId for consistency
             "organization": current_user.get("organization"),
             "createdAt": _now_utc().isoformat(),
             "updatedAt": _now_utc().isoformat(),
@@ -245,7 +256,15 @@ async def list_custom_mcq_tests(
         # Build query based on user role
         query: Dict[str, Any] = {}
         if current_user.get("role") != "super_admin":
-            query["organization"] = current_user.get("organization")
+            # Filter by createdBy to ensure users only see their own tests
+            user_id = current_user.get("id")
+            if user_id:
+                try:
+                    # Try to convert to ObjectId if it's a valid ObjectId string
+                    query["createdBy"] = to_object_id(user_id)
+                except (ValueError, TypeError):
+                    # If conversion fails, use as string (for backward compatibility)
+                    query["createdBy"] = str(user_id)
         
         # Fetch tests
         cursor = db.custom_mcq_tests.find(query).sort("createdAt", -1).skip(skip).limit(limit)
@@ -260,8 +279,11 @@ async def list_custom_mcq_tests(
                 "description": test.get("description"),
                 "totalMarks": test.get("totalMarks", 0),
                 "status": test.get("status", "draft"),
+                "isDraft": test.get("isDraft", False),
+                "progressStep": test.get("progressStep", 1),
                 "createdAt": test.get("createdAt"),
                 "sectionsCount": len(test.get("sections", [])),
+                "type": test.get("type", "custom_mcq"),
             })
         
         return success_response("Tests fetched successfully", test_list)
@@ -300,6 +322,114 @@ async def get_custom_mcq_test(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch test: {str(exc)}"
+        ) from exc
+
+
+@router.put("/{test_id}")
+async def update_custom_mcq_test(
+    test_id: str,
+    payload: CreateCustomMCQTestRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Update an existing custom MCQ test."""
+    try:
+        oid = to_object_id(test_id)
+        test = await db.custom_mcq_tests.find_one({"_id": oid})
+        
+        if not test:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
+        
+        _check_test_access(test, current_user)
+        
+        # Calculate total marks
+        total_marks = 0
+        for section in payload.sections:
+            for question in section.questions:
+                total_marks += question.marks
+        
+        # Build update document
+        update_doc = {
+            "title": payload.settings.title,
+            "description": payload.settings.description,
+            "instructions": payload.settings.instructions,
+            "passingPercentage": payload.settings.passingPercentage,
+            "shuffleQuestions": payload.settings.shuffleQuestions,
+            "shuffleOptions": payload.settings.shuffleOptions,
+            "allowNegativeMarking": payload.settings.allowNegativeMarking,
+            "attemptLimit": payload.settings.attemptLimit,
+            "sections": [
+                {
+                    "name": section.name,
+                    "timeLimit": section.timeLimit,
+                    "questions": [
+                        {
+                            "question": q.question,
+                            "options": {
+                                "A": q.optionA,
+                                "B": q.optionB,
+                                "C": q.optionC,
+                                "D": q.optionD,
+                            },
+                            "correctAnswer": q.correctAnswer,
+                            "marks": q.marks,
+                        }
+                        for q in section.questions
+                    ],
+                }
+                for section in payload.sections
+            ],
+            "totalMarks": total_marks,
+            "timerMode": payload.timerSettings.timerMode,
+            "examDuration": payload.timerSettings.examDuration,
+            "sectionTimes": payload.timerSettings.sectionTimes or {},
+            "proctoring": payload.proctoringSettings.dict(),
+            "schedule": {
+                "startTime": payload.schedule.startTime.isoformat(),
+                "endTime": payload.schedule.endTime.isoformat(),
+                "candidateRequirements": payload.schedule.candidateRequirements or {},
+            },
+            "accessMode": payload.accessMode,
+            "candidates": [
+                {
+                    "name": c.name,
+                    "email": c.email.lower().strip(),
+                    "phone": c.phone,
+                    "invited": c.email.lower().strip() in [existing.get("email", "").lower() for existing in test.get("candidates", [])],
+                    "inviteSentAt": next((existing.get("inviteSentAt") for existing in test.get("candidates", []) if existing.get("email", "").lower() == c.email.lower().strip()), None),
+                    "status": next((existing.get("status", "pending") for existing in test.get("candidates", []) if existing.get("email", "").lower() == c.email.lower().strip()), "pending"),
+                }
+                for c in (payload.candidates or [])
+            ],
+            "updatedAt": _now_utc().isoformat(),
+        }
+        
+        # Update test document
+        await db.custom_mcq_tests.update_one(
+            {"_id": oid},
+            {"$set": update_doc}
+        )
+        
+        logger.info(f"Custom MCQ test updated: {test_id} by user {current_user['id']}")
+        
+        # Get updated test to return
+        updated_test = await db.custom_mcq_tests.find_one({"_id": oid})
+        updated_test["_id"] = str(updated_test["_id"])
+        
+        return success_response(
+            "Custom MCQ test updated successfully",
+            {
+                "testId": test_id,
+                "test": updated_test,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error updating custom MCQ test: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update test: {str(exc)}"
         ) from exc
 
 
@@ -427,6 +557,261 @@ async def submit_test_answers(
         logger.exception(f"Error submitting test: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to submit test: {str(exc)}"
+              detail=f"Failed to submit test: {str(exc)}"
+              ) from exc
+
+
+# =====================================================================
+# DRAFT MANAGEMENT ENDPOINTS
+# =====================================================================
+
+@router.post("/create-draft")
+async def create_draft(
+    payload: CreateDraftRequest = Body(default=CreateDraftRequest(title=None)),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Create a new empty draft for Custom MCQ Test."""
+    try:
+        draft_doc = {
+            "type": "custom_mcq",
+            "isDraft": True,
+            "title": payload.title or "Untitled Test",
+            "status": "draft",
+            "draftData": {
+                "csvRawData": None,
+                "parsedQuestions": [],
+                "sections": [],
+                "settings": None,
+                "scheduling": None,
+                "candidates": [],
+                "proctoringSettings": None,
+            },
+            "progressStep": 1,
+            "createdBy": to_object_id(current_user["id"]),
+            "organization": current_user.get("organization"),
+            "createdAt": _now_utc().isoformat(),
+            "updatedAt": _now_utc().isoformat(),
+        }
+        
+        result = await db.custom_mcq_tests.insert_one(draft_doc)
+        draft_id = str(result.inserted_id)
+        
+        logger.info(f"Custom MCQ draft created: {draft_id} by user {current_user['id']}")
+        
+        return success_response(
+            "Draft created successfully",
+            {
+                "draftId": draft_id,
+            }
+        )
+    except Exception as exc:
+        logger.exception(f"Error creating draft: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create draft: {str(exc)}"
+        ) from exc
+
+
+@router.post("/update-draft/{draft_id}")
+async def update_draft(
+    draft_id: str,
+    payload: UpdateDraftRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Update a draft with current progress."""
+    try:
+        oid = to_object_id(draft_id)
+        draft = await db.custom_mcq_tests.find_one({"_id": oid})
+        
+        if not draft:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        
+        _check_test_access(draft, current_user)
+        
+        # Update only draftData and progressStep, keep isDraft = True
+        update_doc = {
+            "draftData": payload.draftData.dict(),
+            "progressStep": payload.progressStep,
+            "updatedAt": _now_utc().isoformat(),
+        }
+        
+        # If title is provided in draftData.settings, update it
+        if payload.draftData.settings and payload.draftData.settings.get("title"):
+            update_doc["title"] = payload.draftData.settings.get("title")
+        
+        await db.custom_mcq_tests.update_one(
+            {"_id": oid},
+            {"$set": update_doc}
+        )
+        
+        logger.info(f"Draft updated: {draft_id} at step {payload.progressStep}")
+        
+        return success_response("Draft updated successfully", {"draftId": draft_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error updating draft: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update draft: {str(exc)}"
+        ) from exc
+
+
+@router.get("/draft/{draft_id}")
+async def get_draft(
+    draft_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Get a draft with full draftData for editing."""
+    try:
+        oid = to_object_id(draft_id)
+        draft = await db.custom_mcq_tests.find_one({"_id": oid})
+        
+        if not draft:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        
+        _check_test_access(draft, current_user)
+        
+        # Convert ObjectId to string
+        draft["_id"] = str(draft["_id"])
+        
+        return success_response("Draft fetched successfully", draft)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error fetching draft: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch draft: {str(exc)}"
+        ) from exc
+
+
+@router.post("/publish/{draft_id}")
+async def publish_draft(
+    draft_id: str,
+    payload: PublishDraftRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Convert draft into finalized CustomTest."""
+    try:
+        oid = to_object_id(draft_id)
+        draft = await db.custom_mcq_tests.find_one({"_id": oid})
+        
+        if not draft:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        
+        _check_test_access(draft, current_user)
+        
+        # Calculate total marks
+        total_marks = 0
+        for section in payload.sections:
+            for question in section.questions:
+                total_marks += question.marks
+        
+        # Generate test token
+        test_token = secrets.token_urlsafe(32)
+        
+        # Build finalized test document
+        test_doc = {
+            "type": "custom_mcq",
+            "isDraft": False,
+            "title": payload.settings.title,
+            "description": payload.settings.description,
+            "instructions": payload.settings.instructions if hasattr(payload.settings, 'instructions') else None,
+            "passingPercentage": payload.settings.passingPercentage,
+            "shuffleQuestions": payload.settings.shuffleQuestions,
+            "shuffleOptions": payload.settings.shuffleOptions,
+            "allowNegativeMarking": payload.settings.allowNegativeMarking,
+            "attemptLimit": payload.settings.attemptLimit,
+            "sections": [
+                {
+                    "name": section.name,
+                    "timeLimit": section.timeLimit,
+                    "questions": [
+                        {
+                            "question": q.question,
+                            "options": {
+                                "A": q.optionA,
+                                "B": q.optionB,
+                                "C": q.optionC,
+                                "D": q.optionD,
+                            },
+                            "correctAnswer": q.correctAnswer,
+                            "marks": q.marks,
+                        }
+                        for q in section.questions
+                    ],
+                }
+                for section in payload.sections
+            ],
+            "totalMarks": total_marks,
+            "timerMode": payload.timerSettings.timerMode,
+            "examDuration": payload.timerSettings.examDuration,
+            "sectionTimes": payload.timerSettings.sectionTimes or {},
+            "proctoring": payload.proctoringSettings.dict(),
+            "schedule": {
+                "startTime": payload.schedule.startTime.isoformat(),
+                "endTime": payload.schedule.endTime.isoformat(),
+                "candidateRequirements": payload.schedule.candidateRequirements or {},
+            },
+            "accessMode": payload.accessMode,
+            "testToken": test_token,
+            "candidates": [
+                {
+                    "name": c.name,
+                    "email": c.email.lower().strip(),
+                    "phone": c.phone,
+                    "invited": False,
+                    "inviteSentAt": None,
+                    "status": "pending",
+                }
+                for c in (payload.candidates or [])
+            ],
+            "candidateResponses": {},
+            "answerLogs": {},
+            "createdBy": to_object_id(current_user["id"]),
+            "organization": current_user.get("organization"),
+            "createdAt": draft.get("createdAt", _now_utc().isoformat()),
+            "updatedAt": _now_utc().isoformat(),
+            "status": "published",
+            # Keep draftData for history (optional - can be removed)
+            # "draftData": draft.get("draftData"),
+        }
+        
+        # Generate test access URL
+        from ....config.settings import get_settings
+        settings = get_settings()
+        base_url = getattr(settings, 'frontend_url', 'http://localhost:3000')
+        test_url = f"{base_url}/custom-mcq/test/{draft_id}/{test_token}"
+        
+        test_doc["examAccessUrl"] = test_url
+        
+        # Update the draft to finalized test
+        await db.custom_mcq_tests.update_one(
+            {"_id": oid},
+            {"$set": test_doc}
+        )
+        
+        logger.info(f"Draft published: {draft_id} by user {current_user['id']}")
+        
+        return success_response(
+            "Draft published successfully",
+            {
+                "testId": draft_id,
+                "testToken": test_token,
+                "testUrl": test_url,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error publishing draft: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to publish draft: {str(exc)}"
         ) from exc
 

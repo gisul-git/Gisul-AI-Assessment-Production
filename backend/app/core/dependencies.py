@@ -13,7 +13,7 @@ from ..utils.mongo import serialize_document
 
 
 def _oauth_scheme(auto_error: bool) -> OAuth2PasswordBearer:
-    return OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=auto_error)
+    return OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=auto_error)
 
 
 oauth2_scheme = _oauth_scheme(auto_error=True)

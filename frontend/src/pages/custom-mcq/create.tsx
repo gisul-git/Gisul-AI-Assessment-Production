@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useRouter } from 'next/router'
 import { useSession } from 'next-auth/react'
 import { GetServerSideProps } from 'next'
@@ -88,6 +88,331 @@ export default function CreateCustomMCQTest({ session: serverSession }: Dashboar
   // Access Mode
   const [accessMode, setAccessMode] = useState<'private' | 'public'>('private')
   const [candidates, setCandidates] = useState<Array<{ name: string; email: string; phone?: string }>>([])
+  
+  // Candidate input fields (for adding new candidate)
+  const [newCandidateName, setNewCandidateName] = useState('')
+  const [newCandidateEmail, setNewCandidateEmail] = useState('')
+  
+  // Test URL display state
+  const [testUrl, setTestUrl] = useState<string | null>(null)
+  const [showTestUrl, setShowTestUrl] = useState(false)
+  
+  // Edit mode state
+  const [testId, setTestId] = useState<string | null>(null)
+  const [draftId, setDraftId] = useState<string | null>(null)
+  const [isLoadingTest, setIsLoadingTest] = useState(false)
+  const [isDraft, setIsDraft] = useState(false)
+  const [savingDraft, setSavingDraft] = useState(false)
+  const [draftSaved, setDraftSaved] = useState(false)
+  const autosaveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Create draft on mount if not editing
+  useEffect(() => {
+    const { testId: queryTestId } = router.query
+    if (!queryTestId && !draftId) {
+      createDraft()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Load existing test/draft data when testId is in query params
+  useEffect(() => {
+    const { testId: queryTestId } = router.query
+    if (queryTestId && typeof queryTestId === 'string' && !testId) {
+      setTestId(queryTestId)
+      loadExistingTest(queryTestId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.query])
+
+  const createDraft = async () => {
+    try {
+      const response = await axios.post('/api/custom-mcq/create-draft', {
+        title: assessmentInfo.title || null,
+      })
+      if (response.data?.success && response.data?.data?.draftId) {
+        setDraftId(response.data.data.draftId)
+        setIsDraft(true)
+      }
+    } catch (error: any) {
+      console.error('Error creating draft:', error)
+    }
+  }
+
+  const loadExistingTest = async (id: string) => {
+    setIsLoadingTest(true)
+    try {
+      // First try to load as draft
+      let response
+      try {
+        response = await axios.get(`/api/custom-mcq/get-draft?testId=${id}`)
+        if (response.data?.success && response.data?.data) {
+          const draft = response.data.data
+          setIsDraft(draft.isDraft || false)
+          setDraftId(id)
+          
+          // Load from draftData
+          const draftData = draft.draftData || {}
+          
+          // Load assessment info
+          if (draftData.settings) {
+            setAssessmentInfo({
+              title: draftData.settings.title || draft.title || '',
+              description: draftData.settings.description || '',
+              instructions: draftData.settings.instructions || '',
+            })
+            
+            setTestSettings({
+              passingPercentage: draftData.settings.passingPercentage || 50,
+              shuffleQuestions: draftData.settings.shuffleQuestions || false,
+              shuffleOptions: draftData.settings.shuffleOptions || false,
+              allowNegativeMarking: draftData.settings.allowNegativeMarking || false,
+              attemptLimit: draftData.settings.attemptLimit || 1,
+            })
+          } else {
+            setAssessmentInfo({
+              title: draft.title || '',
+              description: draft.description || '',
+              instructions: draft.instructions || '',
+            })
+          }
+          
+          // Load CSV raw data
+          if (draftData.csvRawData) {
+            setCsvContent(draftData.csvRawData)
+          }
+          
+          // Load parsed questions
+          if (draftData.parsedQuestions && draftData.parsedQuestions.length > 0) {
+            setValidatedQuestions(draftData.parsedQuestions)
+          }
+          
+          // Load sections
+          if (draftData.sections && draftData.sections.length > 0) {
+            setSections(draftData.sections)
+          }
+          
+          // Load scheduling
+          if (draftData.scheduling) {
+            const startTime = draftData.scheduling.startTime ? new Date(draftData.scheduling.startTime).toISOString().slice(0, 16) : ''
+            const endTime = draftData.scheduling.endTime ? new Date(draftData.scheduling.endTime).toISOString().slice(0, 16) : ''
+            setSchedule({ startTime, endTime })
+          }
+          
+          // Load candidates
+          if (draftData.candidates && Array.isArray(draftData.candidates)) {
+            setCandidates(draftData.candidates)
+          }
+          
+          // Load proctoring settings
+          if (draftData.proctoringSettings) {
+            setProctoringSettings(draftData.proctoringSettings)
+          }
+          
+          // Load timer settings
+          if (draftData.settings?.timerMode) {
+            setTimerMode(draftData.settings.timerMode)
+            setExamDuration(draftData.settings.examDuration || 60)
+            setSectionTimes(draftData.settings.sectionTimes || {})
+          }
+          
+          // Navigate to correct step
+          if (draft.progressStep) {
+            setCurrentStep(draft.progressStep)
+          }
+          
+          setIsLoadingTest(false)
+          return
+        }
+      } catch (draftError) {
+        // If draft load fails, try loading as regular test
+        console.log('Not a draft, loading as regular test')
+      }
+      
+      // Load as regular test
+      response = await axios.get(`/api/custom-mcq/${id}`)
+      if (response.data?.success && response.data?.data) {
+        const test = response.data.data
+        setIsDraft(test.isDraft || false)
+        if (test.isDraft) {
+          setDraftId(id)
+        } else {
+          setTestId(id)
+        }
+        
+        // Load assessment info
+        setAssessmentInfo({
+          title: test.title || '',
+          description: test.description || '',
+          instructions: test.instructions || '',
+        })
+        
+        // Load test settings
+        setTestSettings({
+          passingPercentage: test.passingPercentage || 50,
+          shuffleQuestions: test.shuffleQuestions || false,
+          shuffleOptions: test.shuffleOptions || false,
+          allowNegativeMarking: test.allowNegativeMarking || false,
+          attemptLimit: test.attemptLimit || 1,
+        })
+        
+        // Load timer settings
+        setTimerMode(test.timerMode || 'single-exam')
+        setExamDuration(test.examDuration || 60)
+        setSectionTimes(test.sectionTimes || {})
+        
+        // Load proctoring settings
+        if (test.proctoring) {
+          setProctoringSettings({
+            enabled: test.proctoring.enabled || false,
+            multiFaceDetection: test.proctoring.multiFaceDetection || false,
+            fullscreenMonitoring: test.proctoring.fullscreenMonitoring || false,
+            copyPasteBlocking: test.proctoring.copyPasteBlocking || false,
+            tabSwitchDetection: test.proctoring.tabSwitchDetection || false,
+            frameMatchRecognition: test.proctoring.frameMatchRecognition || false,
+            externalDeviceDetection: test.proctoring.externalDeviceDetection || false,
+            browserExtensionMonitoring: test.proctoring.browserExtensionMonitoring || false,
+            concentrationTracking: test.proctoring.concentrationTracking || false,
+            liveCameraAndScreenMonitoring: test.proctoring.liveCameraAndScreenMonitoring || false,
+          })
+        }
+        
+        // Load schedule
+        if (test.schedule) {
+          const startTime = test.schedule.startTime ? new Date(test.schedule.startTime).toISOString().slice(0, 16) : ''
+          const endTime = test.schedule.endTime ? new Date(test.schedule.endTime).toISOString().slice(0, 16) : ''
+          setSchedule({ startTime, endTime })
+        }
+        
+        // Load access mode and candidates
+        setAccessMode(test.accessMode || 'private')
+        if (test.candidates && Array.isArray(test.candidates)) {
+          setCandidates(test.candidates.map((c: any) => ({
+            name: c.name || '',
+            email: c.email || '',
+            phone: c.phone || '',
+          })))
+        }
+        
+        // Load sections and questions
+        if (test.sections && Array.isArray(test.sections)) {
+          const loadedSections: Section[] = test.sections.map((section: any) => ({
+            name: section.name || '',
+            timeLimit: section.timeLimit,
+            questions: section.questions.map((q: any) => ({
+              section: section.name || '',
+              question: q.question || '',
+              optionA: q.options?.A || '',
+              optionB: q.options?.B || '',
+              optionC: q.options?.C || '',
+              optionD: q.options?.D || '',
+              correctAnswer: q.correctAnswer || 'A',
+              marks: q.marks || 1,
+            })),
+          }))
+          
+          setSections(loadedSections)
+          
+          // Flatten questions for validatedQuestions
+          const allQuestions: MCQQuestion[] = []
+          loadedSections.forEach(section => {
+            section.questions.forEach(q => {
+              allQuestions.push(q)
+            })
+          })
+          setValidatedQuestions(allQuestions)
+          
+          // Determine which step to show based on what's configured
+          if (loadedSections.length > 0) {
+            setCurrentStep(3) // Show preview/edit step
+          } else if (assessmentInfo.title) {
+            setCurrentStep(2) // Show CSV upload step
+          }
+        }
+      }
+    } catch (error: any) {
+      console.error('Error loading test:', error)
+      alert(error.response?.data?.message || 'Failed to load test')
+    } finally {
+      setIsLoadingTest(false)
+    }
+  }
+
+  // Autosave draft function
+  const saveDraft = async () => {
+    const currentDraftId = draftId || testId
+    if (!currentDraftId || !isDraft) return
+
+    setSavingDraft(true)
+    setDraftSaved(false)
+
+    try {
+      const draftData = {
+        csvRawData: csvContent,
+        parsedQuestions: validatedQuestions,
+        sections: sections,
+        settings: {
+          ...assessmentInfo,
+          ...testSettings,
+          timerMode,
+          examDuration,
+          sectionTimes,
+        },
+        scheduling: schedule,
+        candidates: candidates,
+        proctoringSettings: proctoringSettings,
+      }
+
+      await axios.post(`/api/custom-mcq/update-draft?draftId=${currentDraftId}`, {
+        draftData,
+        progressStep: currentStep,
+        timestamp: new Date().toISOString(),
+      })
+
+      setDraftSaved(true)
+      setTimeout(() => setDraftSaved(false), 2000)
+    } catch (error: any) {
+      console.error('Error saving draft:', error)
+    } finally {
+      setSavingDraft(false)
+    }
+  }
+
+  // Debounced autosave
+  const debouncedSaveDraft = () => {
+    if (autosaveTimeoutRef.current) {
+      clearTimeout(autosaveTimeoutRef.current)
+    }
+    autosaveTimeoutRef.current = setTimeout(() => {
+      saveDraft()
+    }, 800)
+  }
+
+  // Autosave on any change
+  useEffect(() => {
+    if (draftId || (testId && isDraft)) {
+      debouncedSaveDraft()
+    }
+    return () => {
+      if (autosaveTimeoutRef.current) {
+        clearTimeout(autosaveTimeoutRef.current)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    csvContent,
+    validatedQuestions,
+    sections,
+    assessmentInfo,
+    testSettings,
+    timerMode,
+    examDuration,
+    sectionTimes,
+    schedule,
+    candidates,
+    proctoringSettings,
+    currentStep,
+  ])
 
   const handleDownloadTemplate = async () => {
     setIsDownloadingTemplate(true)
@@ -235,6 +560,41 @@ export default function CreateCustomMCQTest({ session: serverSession }: Dashboar
     setValidatedQuestions([...validatedQuestions, newQuestion])
   }
 
+  const handleAddCandidate = () => {
+    if (!newCandidateName.trim() || !newCandidateEmail.trim()) {
+      return
+    }
+
+    // Check for duplicate email
+    const emailExists = candidates.some(
+      c => c.email.toLowerCase().trim() === newCandidateEmail.toLowerCase().trim()
+    )
+    
+    if (emailExists) {
+      alert('A candidate with this email already exists')
+      return
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    if (!emailRegex.test(newCandidateEmail.trim())) {
+      alert('Please enter a valid email address')
+      return
+    }
+
+    setCandidates([
+      ...candidates,
+      {
+        name: newCandidateName.trim(),
+        email: newCandidateEmail.trim().toLowerCase(),
+      }
+    ])
+
+    // Clear input fields
+    setNewCandidateName('')
+    setNewCandidateEmail('')
+  }
+
   const handleCreateTest = async () => {
     // Validate all required fields
     if (!assessmentInfo.title.trim()) {
@@ -293,22 +653,37 @@ export default function CreateCustomMCQTest({ session: serverSession }: Dashboar
         candidates: accessMode === 'private' ? candidates : undefined,
       }
 
-      const response = await axios.post('/api/custom-mcq/create-test', payload)
+      let response
+      if (testId) {
+        // Update existing test
+        response = await axios.put(`/api/custom-mcq/${testId}`, payload)
+      } else {
+        // Create new test
+        response = await axios.post('/api/custom-mcq/create-test', payload)
+      }
 
       if (response.data?.success) {
-        const testUrl = response.data.data.testUrl
-        const testId = response.data.data.testId
+        const url = response.data.data.testUrl || response.data.data.test?.examAccessUrl
+        const createdTestId = response.data.data.testId || testId
         
-        // Show success message with URL
-        const message = `Custom MCQ Test created successfully!\n\nTest URL:\n${testUrl}\n\nThis URL has been copied to your clipboard.`
-        alert(message)
-        
-        // Copy URL to clipboard
-        if (navigator.clipboard) {
-          navigator.clipboard.writeText(testUrl).catch(console.error)
+        if (url) {
+          setTestUrl(url)
+          setShowTestUrl(true)
+          
+          // Copy URL to clipboard
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(url).catch(console.error)
+          }
         }
         
-        router.push('/dashboard')
+        // Show success message (without URL in alert)
+        const message = testId 
+          ? 'Custom MCQ Test updated successfully!'
+          : 'Custom MCQ Test created successfully!'
+        alert(message)
+        
+        // Don't redirect immediately - let user see the URL
+        // router.push('/dashboard')
       }
     } catch (error: any) {
       console.error('Error creating test:', error)
@@ -326,6 +701,25 @@ export default function CreateCustomMCQTest({ session: serverSession }: Dashboar
     'Add Candidates',
     'Schedule Test',
   ]
+
+  if (isLoadingTest) {
+    return (
+      <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', padding: '2rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ 
+            width: '48px', 
+            height: '48px', 
+            border: '4px solid #e2e8f0',
+            borderTopColor: '#6953a3',
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite',
+            margin: '0 auto 1rem'
+          }} />
+          <p style={{ color: '#64748b' }}>Loading test data...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', padding: '2rem' }}>
@@ -345,7 +739,16 @@ export default function CreateCustomMCQTest({ session: serverSession }: Dashboar
             <ArrowLeft size={20} />
           </button>
           <h1 style={{ margin: 0, fontSize: '1.5rem', color: '#1a1625', fontWeight: 700 }}>
-            Create Custom MCQ Test (CSV)
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+              <span>
+                {testId || draftId ? (isDraft ? 'Edit Draft - Custom MCQ Test' : 'Edit Custom MCQ Test') : 'Create Custom MCQ Test (CSV)'}
+              </span>
+              {(savingDraft || draftSaved) && (
+                <span style={{ fontSize: '0.875rem', color: savingDraft ? '#3b82f6' : '#10b981' }}>
+                  {savingDraft ? 'Saving draft...' : draftSaved ? '✓ Draft saved' : ''}
+                </span>
+              )}
+            </div>
           </h1>
         </div>
 
@@ -918,100 +1321,116 @@ export default function CreateCustomMCQTest({ session: serverSession }: Dashboar
 
               {accessMode === 'private' && (
                 <div>
-                  <div style={{ marginBottom: '1rem' }}>
-                    <button
-                      onClick={() => setCandidates([...candidates, { name: '', email: '', phone: '' }])}
+                  {/* Add Candidate Input Section */}
+                  <div style={{ 
+                    border: '1px solid #e2e8f0', 
+                    borderRadius: '0.5rem', 
+                    padding: '1rem', 
+                    marginBottom: '1.5rem',
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr auto',
+                    gap: '1rem',
+                    alignItems: 'center',
+                  }}>
+                    <input
+                      type="text"
+                      placeholder="Candidate Name"
+                      value={newCandidateName}
+                      onChange={(e) => setNewCandidateName(e.target.value)}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter' && newCandidateName.trim() && newCandidateEmail.trim()) {
+                          handleAddCandidate()
+                        }
+                      }}
                       style={{
-                        padding: '0.5rem 1rem',
-                        backgroundColor: '#10b981',
+                        padding: '0.75rem',
+                        border: '1px solid #e2e8f0',
+                        borderRadius: '0.5rem',
+                        fontSize: '0.95rem',
+                      }}
+                    />
+                    <input
+                      type="email"
+                      placeholder="Candidate Email"
+                      value={newCandidateEmail}
+                      onChange={(e) => setNewCandidateEmail(e.target.value)}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter' && newCandidateName.trim() && newCandidateEmail.trim()) {
+                          handleAddCandidate()
+                        }
+                      }}
+                      style={{
+                        padding: '0.75rem',
+                        border: '1px solid #e2e8f0',
+                        borderRadius: '0.5rem',
+                        fontSize: '0.95rem',
+                      }}
+                    />
+                    <button
+                      onClick={handleAddCandidate}
+                      disabled={!newCandidateName.trim() || !newCandidateEmail.trim()}
+                      style={{
+                        padding: '0.75rem 1.5rem',
+                        backgroundColor: newCandidateName.trim() && newCandidateEmail.trim() ? '#10b981' : '#9ca3af',
                         color: '#ffffff',
                         border: 'none',
                         borderRadius: '0.5rem',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.5rem',
+                        cursor: newCandidateName.trim() && newCandidateEmail.trim() ? 'pointer' : 'not-allowed',
+                        fontSize: '0.95rem',
+                        fontWeight: 600,
+                        whiteSpace: 'nowrap',
                       }}
                     >
-                      <Plus size={16} />
-                      Add Candidate
+                      Add
                     </button>
                   </div>
 
-                  {candidates.map((candidate, index) => (
-                    <div
-                      key={index}
-                      style={{
-                        border: '1px solid #e2e8f0',
-                        borderRadius: '0.5rem',
-                        padding: '1rem',
-                        marginBottom: '1rem',
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr 1fr auto',
-                        gap: '1rem',
-                        alignItems: 'center',
-                      }}
-                    >
-                      <input
-                        type="text"
-                        placeholder="Name"
-                        value={candidate.name}
-                        onChange={(e) => {
-                          const updated = [...candidates]
-                          updated[index].name = e.target.value
-                          setCandidates(updated)
-                        }}
-                        style={{
-                          padding: '0.5rem',
-                          border: '1px solid #e2e8f0',
-                          borderRadius: '0.25rem',
-                        }}
-                      />
-                      <input
-                        type="email"
-                        placeholder="Email"
-                        value={candidate.email}
-                        onChange={(e) => {
-                          const updated = [...candidates]
-                          updated[index].email = e.target.value
-                          setCandidates(updated)
-                        }}
-                        style={{
-                          padding: '0.5rem',
-                          border: '1px solid #e2e8f0',
-                          borderRadius: '0.25rem',
-                        }}
-                      />
-                      <input
-                        type="tel"
-                        placeholder="Phone (optional)"
-                        value={candidate.phone || ''}
-                        onChange={(e) => {
-                          const updated = [...candidates]
-                          updated[index].phone = e.target.value
-                          setCandidates(updated)
-                        }}
-                        style={{
-                          padding: '0.5rem',
-                          border: '1px solid #e2e8f0',
-                          borderRadius: '0.25rem',
-                        }}
-                      />
-                      <button
-                        onClick={() => setCandidates(candidates.filter((_, i) => i !== index))}
-                        style={{
-                          padding: '0.5rem',
-                          backgroundColor: '#fef2f2',
-                          color: '#dc2626',
-                          border: 'none',
-                          borderRadius: '0.25rem',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <Trash2 size={16} />
-                      </button>
+                  {/* Candidates List */}
+                  {candidates.length > 0 && (
+                    <div style={{ marginBottom: '1rem' }}>
+                      <h3 style={{ marginBottom: '1rem', fontSize: '1rem', fontWeight: 600, color: '#1a1625' }}>
+                        Added Candidates ({candidates.length})
+                      </h3>
+                      {candidates.map((candidate, index) => (
+                        <div
+                          key={index}
+                          style={{
+                            border: '1px solid #e2e8f0',
+                            borderRadius: '0.5rem',
+                            padding: '1rem',
+                            marginBottom: '0.75rem',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            backgroundColor: '#f8fafc',
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 600, color: '#1a1625', marginBottom: '0.25rem' }}>
+                              {candidate.name}
+                            </div>
+                            <div style={{ fontSize: '0.875rem', color: '#64748b' }}>
+                              {candidate.email}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => setCandidates(candidates.filter((_, i) => i !== index))}
+                            style={{
+                              padding: '0.5rem',
+                              backgroundColor: '#fef2f2',
+                              color: '#dc2626',
+                              border: 'none',
+                              borderRadius: '0.25rem',
+                              cursor: 'pointer',
+                            }}
+                            title="Remove candidate"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
               )}
             </div>
@@ -1056,6 +1475,96 @@ export default function CreateCustomMCQTest({ session: serverSession }: Dashboar
             </div>
           )}
         </div>
+
+        {/* Test URL Display (shown after creation) */}
+        {showTestUrl && testUrl && (
+          <div style={{
+            marginBottom: '2rem',
+            padding: '1.5rem',
+            backgroundColor: '#f0fdf4',
+            border: '2px solid #10b981',
+            borderRadius: '0.75rem',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '1rem' }}>
+              <div>
+                <h3 style={{ margin: 0, marginBottom: '0.5rem', fontSize: '1.125rem', fontWeight: 600, color: '#065f46' }}>
+                  ✓ Test {testId ? 'Updated' : 'Created'} Successfully!
+                </h3>
+                <p style={{ margin: 0, fontSize: '0.875rem', color: '#047857' }}>
+                  Test URL has been copied to your clipboard
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowTestUrl(false)
+                  router.push('/dashboard')
+                }}
+                style={{
+                  padding: '0.5rem 1rem',
+                  backgroundColor: '#10b981',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '0.5rem',
+                  cursor: 'pointer',
+                  fontSize: '0.875rem',
+                  fontWeight: 600,
+                }}
+              >
+                Go to Dashboard
+              </button>
+            </div>
+            <div style={{
+              padding: '1rem',
+              backgroundColor: '#ffffff',
+              border: '1px solid #10b981',
+              borderRadius: '0.5rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '1rem',
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 600, color: '#374151', marginBottom: '0.5rem' }}>
+                  Test URL:
+                </label>
+                <input
+                  type="text"
+                  value={testUrl}
+                  readOnly
+                  style={{
+                    width: '100%',
+                    padding: '0.75rem',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '0.5rem',
+                    fontSize: '0.875rem',
+                    backgroundColor: '#f9fafb',
+                    fontFamily: 'monospace',
+                  }}
+                />
+              </div>
+              <button
+                onClick={() => {
+                  if (navigator.clipboard) {
+                    navigator.clipboard.writeText(testUrl)
+                    alert('URL copied to clipboard!')
+                  }
+                }}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  backgroundColor: '#6953a3',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '0.5rem',
+                  cursor: 'pointer',
+                  fontSize: '0.875rem',
+                  fontWeight: 600,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Copy URL
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Navigation Buttons */}
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
@@ -1115,16 +1624,18 @@ export default function CreateCustomMCQTest({ session: serverSession }: Dashboar
           {currentStep === totalSteps && (
             <button
               onClick={handleCreateTest}
+              disabled={isLoadingTest}
               style={{
                 padding: '0.75rem 1.5rem',
                 backgroundColor: '#10b981',
                 color: '#ffffff',
                 border: 'none',
                 borderRadius: '0.5rem',
-                cursor: 'pointer',
+                cursor: isLoadingTest ? 'not-allowed' : 'pointer',
+                opacity: isLoadingTest ? 0.6 : 1,
               }}
             >
-              Create Test
+              {isLoadingTest ? 'Loading...' : testId ? 'Update Test' : 'Create Test'}
             </button>
           )}
         </div>
