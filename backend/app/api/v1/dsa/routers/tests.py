@@ -188,36 +188,76 @@ async def get_tests(
         raise HTTPException(status_code=401, detail="Authentication required")
     
     db = get_database()
-    # Filter tests by the current user - STRICT: only return tests with created_by matching current user
-    user_id = current_user.get("id") or current_user.get("_id")
-    if not user_id:
-        logger.error(f"[get_tests] CRITICAL: Invalid user ID in current_user. Keys: {list(current_user.keys())}")
-        logger.error(f"[get_tests] CRITICAL: current_user content: {current_user}")
-        raise HTTPException(status_code=400, detail="Invalid user ID - authentication failed")
-    user_id = str(user_id).strip()  # Ensure no whitespace
     
-    # CRITICAL: Log the user_id being used for filtering
-    # Using print() as well to ensure visibility in console
-    print(f"[get_tests] SECURITY: Filtering tests for authenticated user_id: '{user_id}'")
-    logger.info(f"[get_tests] SECURITY: Filtering tests for authenticated user_id: '{user_id}'")
-    
-    print(f"[get_tests] Fetching tests for user_id: '{user_id}' (type: {type(user_id).__name__})")
-    logger.info(f"[get_tests] Fetching tests for user_id: '{user_id}' (type: {type(user_id).__name__})")
-    print(f"[get_tests] Current user data: id={current_user.get('id')}, _id={current_user.get('_id')}, email={current_user.get('email')}")
-    logger.info(f"[get_tests] Current user data: id={current_user.get('id')}, _id={current_user.get('_id')}, email={current_user.get('email')}")
-    
-    # ABSOLUTE SECURITY: Use explicit $and with $exists to ensure field exists
-    # This is the STRICTEST possible query - will NEVER match documents without created_by
-    # CRITICAL: Normalize user_id to string for comparison (handles ObjectId vs string)
-    user_id_normalized = str(user_id).strip()
-    
-    # Build strict query - exact string match (we store created_by as string)
-    base_conditions = [
-        {"created_by": {"$exists": True}},
-        {"created_by": {"$ne": None}},
-        {"created_by": {"$ne": ""}},
-        {"created_by": user_id_normalized}  # Exact string match
-    ]
+    # Check if user is super_admin - if so, get all super_admin user IDs
+    if current_user.get("role") == "super_admin":
+        # Import main database to query users collection
+        # Note: tests.py is in dsa/routers/, so we need 5 dots to reach app/
+        from .....db.mongo import get_database as get_main_database
+        
+        # Get main database connection
+        main_db = get_main_database()
+        
+        # Get current user ID for logging purposes
+        user_id = current_user.get("id") or current_user.get("_id")
+        user_id = str(user_id).strip() if user_id else "super_admin"
+        user_id_normalized = user_id  # Define for logging consistency
+        
+        # Query users collection to get all super_admin user IDs
+        super_admin_cursor = main_db.users.find(
+            {"role": "super_admin"},
+            {"_id": 1}
+        )
+        super_admin_ids = [str(doc["_id"]) async for doc in super_admin_cursor]
+        
+        if super_admin_ids:
+            # Filter tests where created_by is in the list of super_admin IDs (as strings)
+            user_id_normalized_list = [str(sid).strip() for sid in super_admin_ids]
+            base_conditions = [
+                {"created_by": {"$exists": True}},
+                {"created_by": {"$ne": None}},
+                {"created_by": {"$ne": ""}},
+                {"created_by": {"$in": user_id_normalized_list}}  # Match any super_admin ID
+            ]
+        else:
+            # No super_admins found - return empty result
+            base_conditions = [
+                {"created_by": {"$exists": True}},
+                {"created_by": {"$ne": None}},
+                {"created_by": {"$ne": ""}},
+                {"created_by": {"$in": []}}  # Empty list - no matches
+            ]
+    else:
+        # Filter tests by the current user - STRICT: only return tests with created_by matching current user
+        user_id = current_user.get("id") or current_user.get("_id")
+        if not user_id:
+            logger.error(f"[get_tests] CRITICAL: Invalid user ID in current_user. Keys: {list(current_user.keys())}")
+            logger.error(f"[get_tests] CRITICAL: current_user content: {current_user}")
+            raise HTTPException(status_code=400, detail="Invalid user ID - authentication failed")
+        user_id = str(user_id).strip()  # Ensure no whitespace
+        
+        # CRITICAL: Log the user_id being used for filtering
+        # Using print() as well to ensure visibility in console
+        print(f"[get_tests] SECURITY: Filtering tests for authenticated user_id: '{user_id}'")
+        logger.info(f"[get_tests] SECURITY: Filtering tests for authenticated user_id: '{user_id}'")
+        
+        print(f"[get_tests] Fetching tests for user_id: '{user_id}' (type: {type(user_id).__name__})")
+        logger.info(f"[get_tests] Fetching tests for user_id: '{user_id}' (type: {type(user_id).__name__})")
+        print(f"[get_tests] Current user data: id={current_user.get('id')}, _id={current_user.get('_id')}, email={current_user.get('email')}")
+        logger.info(f"[get_tests] Current user data: id={current_user.get('id')}, _id={current_user.get('_id')}, email={current_user.get('email')}")
+        
+        # ABSOLUTE SECURITY: Use explicit $and with $exists to ensure field exists
+        # This is the STRICTEST possible query - will NEVER match documents without created_by
+        # CRITICAL: Normalize user_id to string for comparison (handles ObjectId vs string)
+        user_id_normalized = str(user_id).strip()
+        
+        # Build strict query - exact string match (we store created_by as string)
+        base_conditions = [
+            {"created_by": {"$exists": True}},
+            {"created_by": {"$ne": None}},
+            {"created_by": {"$ne": ""}},
+            {"created_by": user_id_normalized}  # Exact string match
+        ]
     
     if active_only:
         base_conditions.append({"is_active": True})

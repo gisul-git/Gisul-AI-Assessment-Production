@@ -2508,7 +2508,22 @@ async def get_all_assessments_with_schedule(
 ):
     try:
         query: Dict[str, Any] = {}
-        if current_user.get("role") != "super_admin":
+        if current_user.get("role") == "super_admin":
+            # For super_admin: only show assessments created by super_admins (any super_admin)
+            # Query users collection to get all super_admin user IDs
+            super_admin_cursor = db.users.find(
+                {"role": "super_admin"},
+                {"_id": 1}
+            )
+            super_admin_ids = [doc["_id"] async for doc in super_admin_cursor]
+            
+            if super_admin_ids:
+                # Filter assessments where createdBy is in the list of super_admin IDs
+                query["createdBy"] = {"$in": super_admin_ids}
+            else:
+                # No super_admins found - return empty result
+                query["createdBy"] = {"$in": []}
+        else:
             user_org = current_user.get("organization")
             user_id = current_user.get("id")
             
@@ -3621,7 +3636,22 @@ async def get_all_assessments_with_schedule(
 ):
     try:
         query: Dict[str, Any] = {}
-        if current_user.get("role") != "super_admin":
+        if current_user.get("role") == "super_admin":
+            # For super_admin: only show assessments created by super_admins (any super_admin)
+            # Query users collection to get all super_admin user IDs
+            super_admin_cursor = db.users.find(
+                {"role": "super_admin"},
+                {"_id": 1}
+            )
+            super_admin_ids = [doc["_id"] async for doc in super_admin_cursor]
+            
+            if super_admin_ids:
+                # Filter assessments where createdBy is in the list of super_admin IDs
+                query["createdBy"] = {"$in": super_admin_ids}
+            else:
+                # No super_admins found - return empty result
+                query["createdBy"] = {"$in": []}
+        else:
             user_org = current_user.get("organization")
             user_id = current_user.get("id")
             
