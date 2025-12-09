@@ -64,7 +64,27 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 async def not_found_handler(request: Request, exc: Any) -> JSONResponse:
-    """Handle 404 errors."""
+    """Handle 404 errors only."""
+    # Only handle 404 status codes, let other HTTPExceptions pass through with their original messages
+    if hasattr(exc, "status_code") and exc.status_code == 404:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "success": False,
+                "message": f"Route {request.url.path} not found",
+            },
+        )
+    # For non-404 HTTPExceptions, return the original error message
+    if hasattr(exc, "status_code") and hasattr(exc, "detail"):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "success": False,
+                "message": str(exc.detail),
+                "detail": str(exc.detail),
+            },
+        )
+    # Fallback for actual 404s
     return JSONResponse(
         status_code=404,
         content={

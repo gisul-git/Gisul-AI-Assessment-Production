@@ -5,6 +5,7 @@ import { getProviders, signIn } from "next-auth/react";
 import Image from "next/image";
 import Link from "next/link";
 import axios from "axios";
+import fastApiClient from "../../lib/fastapi";
 
 interface SignInPageProps {
   providers: Awaited<ReturnType<typeof getProviders>>;
@@ -166,30 +167,95 @@ export default function SignInPage({ providers }: SignInPageProps) {
     setLoading(true);
     setError(null);
 
-    const result = await signIn("credentials", {
-      redirect: false,
-      email,
-      password,
-      callbackUrl,
-    });
+    try {
+      // First check if MFA is required by calling backend directly
+      const loginResponse = await fastApiClient.post("/api/v1/auth/login", {
+        email,
+        password,
+      });
 
-    setLoading(false);
-
-    if (result?.error) {
-      if (result.error.includes("Email not verified") || result.error.includes("email verification")) {
-        setShowVerification(true);
-        setTimeRemaining(60);
-        setCodeExpired(false);
-        await handleSendVerificationCode();
-      } else {
-        setError(result.error);
+      // Check if MFA is required - check multiple possible response structures
+      const responseData = loginResponse.data;
+      const requireMfa = responseData?.data?.require_mfa || responseData?.require_mfa;
+      
+      if (requireMfa) {
+        // Store email for MFA page
+        if (typeof window !== "undefined") {
+          sessionStorage.setItem("super_admin_email", email);
+          // Use window.location for immediate redirect to prevent any code execution after
+          window.location.href = `/super-admin/mfa?email=${encodeURIComponent(email)}`;
+        }
+        setLoading(false);
+        return; // IMPORTANT: Return early to prevent NextAuth call
       }
-      return;
-    }
 
-    // Redirect immediately to dashboard to prevent showing home page
-    // Dashboard will handle role-based redirects if needed (e.g., super_admin)
-    window.location.replace("/dashboard");
+      // If no MFA required, proceed with normal NextAuth signin
+      const result = await signIn("credentials", {
+        redirect: false,
+        email,
+        password,
+        callbackUrl,
+      });
+
+      setLoading(false);
+
+      if (result?.error) {
+        if (result.error.includes("Email not verified") || result.error.includes("email verification")) {
+          setShowVerification(true);
+          setTimeRemaining(60);
+          setCodeExpired(false);
+          await handleSendVerificationCode();
+        } else {
+          setError(result.error);
+        }
+        return;
+      }
+
+      // Redirect immediately to dashboard
+      window.location.replace("/dashboard");
+    } catch (err: any) {
+      setLoading(false);
+      
+      // Check if the error response contains require_mfa (in case axios throws an error)
+      const errorData = err?.response?.data;
+      const requireMfaFromError = errorData?.data?.require_mfa || errorData?.require_mfa;
+      
+      if (requireMfaFromError) {
+        if (typeof window !== "undefined") {
+          sessionStorage.setItem("super_admin_email", email);
+          window.location.href = `/super-admin/mfa?email=${encodeURIComponent(email)}`;
+        }
+        return; // IMPORTANT: Return early to prevent NextAuth call
+      }
+
+      // Check for backend connection errors
+      if (err?.code === "ECONNREFUSED" || err?.code === "ENOTFOUND" || err?.message?.includes("not found")) {
+        setError("Cannot connect to backend server. Please ensure the backend is running on http://localhost:8000");
+        return; // Don't try NextAuth if backend is down
+      }
+
+      // For other errors, try NextAuth as fallback
+      const result = await signIn("credentials", {
+        redirect: false,
+        email,
+        password,
+        callbackUrl,
+      });
+
+      if (result?.error) {
+        if (result.error.includes("Email not verified") || result.error.includes("email verification")) {
+          setShowVerification(true);
+          setTimeRemaining(60);
+          setCodeExpired(false);
+          await handleSendVerificationCode();
+        } else {
+          const errorMessage = err?.response?.data?.detail || err?.response?.data?.message || err?.message || result.error;
+          setError(errorMessage);
+        }
+      } else {
+        window.location.replace("/dashboard");
+      }
+    }
   };
 
   return (

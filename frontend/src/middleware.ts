@@ -17,6 +17,7 @@ export default withAuth(
           "/",
           "/auth/signin",
           "/auth/signup",
+          "/super-admin/mfa",  // MFA page - user is in the middle of login flow
           "/api/auth",
           "/api/assessment",
           "/api/proctor",  // Proctoring API routes (validated server-side)

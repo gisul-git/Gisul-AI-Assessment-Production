@@ -524,11 +524,16 @@ async def send_verification_code(
 
         user_name = pending_signup_data.get("name") if pending_signup_data else None
 
-        # Check if the pending signup code has expired
+        # Check if the pending signup code has expired or is missing (cleared by verify-email-code)
         now = datetime.now(timezone.utc)
         expires_at = verification.get("expiresAt")
+        code = verification.get("code")
         
-        if expires_at:
+        # If code or expiresAt is missing, it means verify-email-code cleared it (expired code was entered)
+        # In that case, we can just resend without deleting
+        if not code or not expires_at:
+            logger.info("Verification code missing (cleared), resending for pending signup: %s", normalized_email)
+        elif expires_at:
             # Ensure expires_at is timezone-aware for comparison
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -590,9 +595,21 @@ async def verify_email_code(
             expires_at = expires_at.astimezone(timezone.utc)
         
         if expires_at < now:
-            # Code has expired, delete it
-            await db.email_verifications.delete_one({"email": email})
-            logger.info("Expired verification code deleted during verification attempt: %s", email)
+            # Code has expired
+            # If this is a pending signup, preserve the pendingSignup data for resend functionality
+            # Otherwise, delete the entire record
+            if verification.get("pendingSignup"):
+                # For pending signups, just clear the code/expiration but keep pendingSignup data
+                # This allows resend to work properly
+                await db.email_verifications.update_one(
+                    {"email": email},
+                    {"$unset": {"code": "", "expiresAt": "", "attempts": ""}}
+                )
+                logger.info("Expired verification code cleared (pending signup preserved) during verification attempt: %s", email)
+            else:
+                # For existing users, delete the entire record
+                await db.email_verifications.delete_one({"email": email})
+                logger.info("Expired verification code deleted during verification attempt: %s", email)
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Verification code has expired. Please request a new code.")
     
     # Check if code matches
@@ -667,6 +684,26 @@ async def email_login(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email not verified. Please verify your email before signing in.",
+        )
+
+    # Check if user is super_admin - require MFA
+    if user.get("role") == "super_admin":
+        # Check if TOTP secret exists
+        if not user.get("totp_secret"):
+            logger.warning("Super admin %s does not have TOTP secret configured", email)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="TOTP not configured. Please contact administrator.",
+            )
+        # Clear failed attempts
+        await _clear_failed_attempts(db, email)
+        # Return require_mfa flag instead of logging in
+        return success_response(
+            "MFA required",
+            {
+                "require_mfa": True,
+                "email": email,
+            },
         )
 
     # Clear failed attempts on successful login
