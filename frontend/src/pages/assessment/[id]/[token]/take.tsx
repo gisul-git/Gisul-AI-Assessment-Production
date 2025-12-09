@@ -12,6 +12,7 @@ import { useCameraProctor, type CameraProctorViolation } from "@/hooks/useCamera
 import { ProctorToast, FullscreenWarningBanner } from "@/components/proctor";
 import { EditorContainer } from "@/components/dsa/test/EditorContainer";
 import { JUDGE0_ID_TO_LANG_NAME } from "@/lib/dsa/judge0";
+import { normalizeProctorConfig, useProctorEngine } from "@/proctoring";
 
 // Lazy load Monaco Editor
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
@@ -958,7 +959,7 @@ export default function CandidateAssessmentPage() {
     logAnalyticsEvent("TAB_SWITCH", { violation: violation.eventType });
   }, [logAnalyticsEvent]);
 
-  // Initialize proctoring hooks
+  // Initialize proctoring hooks (legacy)
   const proctorEnabled = proctoringSettings.enabled || false;
   const { lastViolation: proctorViolation } = useProctor({
     userId: candidateEmail,
@@ -974,6 +975,40 @@ export default function CandidateAssessmentPage() {
     onViolation: handleCameraViolation,
     enabled: proctoringSettings.multiFaceDetection || false,
   });
+
+  // Unified Proctoring Engine
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const proctorConfig = normalizeProctorConfig(proctoringSettings);
+  const referenceImageUrl = typeof window !== "undefined" 
+    ? sessionStorage.getItem(`referenceFace_${id}`) || undefined
+    : undefined;
+  
+  const handleUnifiedViolation = useCallback((violationType: string, metadata?: Record<string, unknown>) => {
+    console.log("[UnifiedProctor] Violation:", violationType, metadata);
+    // Violations are already logged to backend via the proctor engine
+  }, []);
+
+  const unifiedProctor = useProctorEngine({
+    assessmentId: id as string,
+    candidateEmail: candidateEmail,
+    config: proctorConfig,
+    referenceImageUrl: referenceImageUrl || undefined,
+    onViolation: handleUnifiedViolation,
+    videoElement: videoRef.current,
+    canvasElement: canvasRef.current,
+  });
+
+  // Start unified proctor when assessment is ready
+  useEffect(() => {
+    if (appState === "ready" && proctorEnabled && candidateEmail) {
+      unifiedProctor.start();
+    }
+    
+    return () => {
+      unifiedProctor.stop();
+    };
+  }, [appState, proctorEnabled, candidateEmail, unifiedProctor]);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
 

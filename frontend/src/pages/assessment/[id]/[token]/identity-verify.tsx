@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/router";
-import axios from "axios";
+import IdentityVerification from "@/proctoring/components/IdentityVerification";
 
 interface VerificationStep {
   id: string;
@@ -22,18 +22,14 @@ export default function IdentityVerificationPage() {
   
   const [email, setEmail] = useState<string | null>(null);
   const [name, setName] = useState<string | null>(null);
-  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
-  const [faceCount, setFaceCount] = useState<number>(0);
-  const [brightness, setBrightness] = useState<number>(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const faceDetectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  
   useEffect(() => {
+    // Wait for router to be ready before accessing query params
+    if (!router.isReady) return;
+    
     const storedEmail = sessionStorage.getItem("candidateEmail");
     const storedName = sessionStorage.getItem("candidateName");
     
@@ -67,201 +63,125 @@ export default function IdentityVerificationPage() {
       router.replace(`/assessment/${id}/${token}/candidate-requirements`);
       return;
     }
-  }, [id, token, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady, id, token]);
   
-  // Step A: Capture Photo
+  // Step A: Capture Photo - using IdentityVerification component
   const capturePhoto = useCallback(async (): Promise<boolean> => {
     setSteps(prev => prev.map((step, idx) => 
-      idx === 0 ? { ...step, status: "running", message: "Accessing camera..." } : step
+      idx === 0 ? { ...step, status: "running", message: "Initializing face detection..." } : step
     ));
-    
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: "user" } 
-      });
-      setCameraStream(stream);
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-      
-      // Start face detection
-      faceDetectionIntervalRef.current = setInterval(() => {
-        if (videoRef.current && canvasRef.current) {
-          const video = videoRef.current;
-          const canvas = canvasRef.current;
-          const ctx = canvas.getContext("2d");
-          
-          if (!ctx) return;
-          
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          ctx.drawImage(video, 0, 0);
-          
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const faces = detectFaces(imageData);
-          setFaceCount(faces);
-          
-          // Calculate brightness
-          const avgBrightness = calculateBrightness(imageData);
-          setBrightness(avgBrightness);
-          
-          // Update status message
-          if (faces === 0) {
-            setSteps(prev => prev.map((step, idx) => 
-              idx === 0 ? { ...step, message: "No face detected. Please ensure your face is visible." } : step
-            ));
-          } else if (faces > 1) {
-            setSteps(prev => prev.map((step, idx) => 
-              idx === 0 ? { ...step, message: "Multiple faces detected. Please ensure only you are visible." } : step
-            ));
-          } else {
-            setSteps(prev => prev.map((step, idx) => 
-              idx === 0 ? { ...step, message: "Face detected. Click 'Capture Photo' when ready." } : step
-            ));
-          }
-        }
-      }, 500);
-      
-      return true;
-    } catch (error) {
-      console.error("Error accessing camera:", error);
-      setSteps(prev => prev.map((step, idx) => 
-        idx === 0 ? { ...step, status: "failed", message: "Failed to access camera. Please check permissions." } : step
-      ));
-      return false;
-    }
+    return true; // Component will handle the actual capture
   }, []);
-  
-  const detectFaces = (imageData: ImageData): number => {
-    // Simplified face detection using skin tone detection
-    // In production, use MediaPipe or similar library
-    const data = imageData.data;
-    let skinPixels = 0;
-    let faceRegions = 0;
-    
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      
-      // Skin tone detection (simplified)
-      if (r > 95 && g > 40 && b > 20 && 
-          Math.max(r, g, b) - Math.min(r, g, b) > 15 &&
-          Math.abs(r - g) > 15 && r > g && r > b) {
-        skinPixels++;
-      }
-    }
-    
-    // Estimate face count based on skin pixel clusters
-    const skinRatio = skinPixels / (data.length / 4);
-    if (skinRatio > 0.15) {
-      faceRegions = Math.min(Math.floor(skinRatio * 10), 2);
-    }
-    
-    return faceRegions;
-  };
-  
-  const calculateBrightness = (imageData: ImageData): number => {
-    const data = imageData.data;
-    let sum = 0;
-    
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      sum += (r + g + b) / 3;
-    }
-    
-    return sum / (data.length / 4);
-  };
-  
-  const handleCapturePhoto = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
-    
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    
-    if (!ctx) return;
-    
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
-    
-    const photoData = canvas.toDataURL("image/jpeg", 0.8);
+
+  const handleCaptureComplete = useCallback((photoData: string) => {
     setCapturedPhoto(photoData);
-    
-    // Check face count one more time
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const faces = detectFaces(imageData);
-    
-    if (faces > 1) {
-      setSteps(prev => prev.map((step, idx) => 
-        idx === 0 ? { ...step, status: "failed", message: "Multiple faces detected. Please capture again with only yourself visible." } : step
-      ));
-      setCapturedPhoto(null);
-      return;
-    }
-    
-    // Stop camera stream
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
-      setCameraStream(null);
-    }
-    
-    if (faceDetectionIntervalRef.current) {
-      clearInterval(faceDetectionIntervalRef.current);
-      faceDetectionIntervalRef.current = null;
-    }
-    
-    // Mark step as passed
     setSteps(prev => prev.map((step, idx) => 
       idx === 0 ? { ...step, status: "passed", message: "Photo captured successfully" } : step
     ));
-    
-    // Store photo in sessionStorage
-    sessionStorage.setItem(`capturedPhoto_${id}`, photoData);
-  };
+  }, []);
+
+  const handleCaptureError = useCallback((error: string) => {
+    setSteps(prev => prev.map((step, idx) => 
+      idx === 0 ? { ...step, status: "failed", message: error } : step
+    ));
+  }, []);
   
-  // Step B: Screen Share
+  // Step B: Screen Share - Enforce "Entire Screen" only
   const startScreenShare = useCallback(async (): Promise<boolean> => {
     setSteps(prev => prev.map((step, idx) => 
       idx === 1 ? { ...step, status: "running", message: "Requesting screen share..." } : step
     ));
     
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ 
-        video: { displaySurface: "monitor" } as MediaTrackConstraints,
-        audio: false 
-      });
-      
-      setScreenStream(stream);
-      
-      // Handle screen share end
-      stream.getVideoTracks()[0].addEventListener("ended", () => {
-        setScreenStream(null);
+    const requestScreenShare = async (): Promise<boolean> => {
+      try {
+        // Use getDisplayMedia() normally - browser shows picker UI
+        const stream = await navigator.mediaDevices.getDisplayMedia({ 
+          video: true,
+          audio: false 
+        });
+        
+        // Validate the selection after stream is returned
+        const videoTrack = stream.getVideoTracks()[0];
+        if (!videoTrack) {
+          stream.getTracks().forEach(track => track.stop());
+          setSteps(prev => prev.map((step, idx) => 
+            idx === 1 ? { ...step, status: "failed", message: "No video track found. Please try again." } : step
+          ));
+          return false;
+        }
+        
+        const settings = videoTrack.getSettings();
+        const displaySurface = settings.displaySurface;
+        
+        // Valid values: "monitor" or "screen" (Entire Screen)
+        const isValidSelection = displaySurface === "monitor" || displaySurface === "screen";
+        
+        // Invalid values: "window", "browser", "application", "tab"
+        if (!isValidSelection) {
+          // Immediately stop the invalid stream
+          stream.getTracks().forEach(track => track.stop());
+          
+          // Show rejection message
+          setSteps(prev => prev.map((step, idx) => 
+            idx === 1 ? { 
+              ...step, 
+              status: "failed", 
+              message: "Please select ENTIRE SCREEN to continue." 
+            } : step
+          ));
+          
+          // Re-trigger screen share request (recursive call)
+          // Small delay to allow UI update
+          await new Promise(resolve => setTimeout(resolve, 500));
+          return requestScreenShare();
+        }
+        
+        // Valid selection - proceed
+        setScreenStream(stream);
+        
+        // Handle screen share end
+        videoTrack.addEventListener("ended", () => {
+          setScreenStream(null);
+          setSteps(prev => prev.map((step, idx) => 
+            idx === 1 ? { ...step, status: "failed", message: "Screen share ended. Please share again." } : step
+          ));
+        });
+        
         setSteps(prev => prev.map((step, idx) => 
-          idx === 1 ? { ...step, status: "failed", message: "Screen share ended. Please share again." } : step
+          idx === 1 ? { ...step, status: "passed", message: "Screen share active" } : step
         ));
-      });
-      
-      setSteps(prev => prev.map((step, idx) => 
-        idx === 1 ? { ...step, status: "passed", message: "Screen share active" } : step
-      ));
-      
-      // Store screen share status
-      sessionStorage.setItem(`screenShareCompleted_${id}`, "true");
-      
-      return true;
-    } catch (error) {
-      console.error("Error starting screen share:", error);
-      setSteps(prev => prev.map((step, idx) => 
-        idx === 1 ? { ...step, status: "failed", message: "Failed to start screen share. Please try again." } : step
-      ));
-      return false;
-    }
+        
+        // Store screen share status
+        sessionStorage.setItem(`screenShareCompleted_${id}`, "true");
+        
+        return true;
+      } catch (error: any) {
+        // User cancelled the picker
+        if (error.name === "NotAllowedError" || error.name === "AbortError") {
+          setSteps(prev => prev.map((step, idx) => 
+            idx === 1 ? { 
+              ...step, 
+              status: "failed", 
+              message: "Screen sharing is required. Please select ENTIRE SCREEN to continue." 
+            } : step
+          ));
+          return false;
+        }
+        
+        console.error("Error starting screen share:", error);
+        setSteps(prev => prev.map((step, idx) => 
+          idx === 1 ? { 
+            ...step, 
+            status: "failed", 
+            message: "Failed to start screen share. Please try again." 
+          } : step
+        ));
+        return false;
+      }
+    };
+    
+    return requestScreenShare();
   }, [id]);
   
   // Step C: Fullscreen Mode
@@ -313,13 +233,9 @@ export default function IdentityVerificationPage() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      cameraStream?.getTracks().forEach(track => track.stop());
       screenStream?.getVideoTracks().forEach(track => track.stop());
-      if (faceDetectionIntervalRef.current) {
-        clearInterval(faceDetectionIntervalRef.current);
-      }
     };
-  }, [cameraStream, screenStream]);
+  }, [screenStream]);
   
   // Handle fullscreen exit
   useEffect(() => {
@@ -413,41 +329,13 @@ export default function IdentityVerificationPage() {
               </div>
               
               {steps[0].status === "running" && (
-                <div style={{ marginBottom: "1rem" }}>
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    style={{
-                      width: "100%",
-                      maxWidth: "400px",
-                      borderRadius: "0.5rem",
-                      marginBottom: "1rem"
-                    }}
-                  />
-                  <canvas ref={canvasRef} style={{ display: "none" }} />
-                  <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "1rem" }}>
-                    {steps[0].message}
-                  </div>
-                  {faceCount === 1 && (
-                    <button
-                      onClick={handleCapturePhoto}
-                      style={{
-                        padding: "0.75rem 1.5rem",
-                        backgroundColor: "#6953a3",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        fontSize: "1rem",
-                        fontWeight: 600,
-                        cursor: "pointer"
-                      }}
-                    >
-                      Capture Photo
-                    </button>
-                  )}
-                </div>
+                <IdentityVerification
+                  assessmentId={id as string}
+                  token={token as string}
+                  candidateEmail={email || ""}
+                  onCaptureComplete={handleCaptureComplete}
+                  onError={handleCaptureError}
+                />
               )}
               
               {steps[0].status === "passed" && capturedPhoto && (
