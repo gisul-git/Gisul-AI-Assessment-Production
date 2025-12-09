@@ -15,6 +15,7 @@ import type { SubmissionHistoryEntry } from '../../../components/dsa/test/Editor
 import { OutputConsole } from '../../../components/dsa/test/OutputConsole'
 import { useProctor } from '../../../hooks/useProctor'
 import { useCameraProctor } from '../../../hooks/useCameraProctor'
+import { normalizeProctorConfig, useProctorEngine } from '@/proctoring'
 import { 
   ProctorStatusWidget, 
   FullscreenWarningBanner, 
@@ -131,6 +132,14 @@ export default function TestTakePage() {
   const [latestViolation, setLatestViolation] = useState<any>(null)
   const [debugMode, setDebugMode] = useState(false)
   const editorRef = useRef<HTMLDivElement>(null)
+  
+  // Proctoring settings (simplified - DSA tests may have different proctoring configs)
+  const [proctoringSettings, setProctoringSettings] = useState<any>({
+    enabled: true,
+    multiFaceDetection: cameraProctorEnabled,
+    fullscreenMonitoring: true,
+    tabSwitchDetection: true,
+  })
 
   // Generate boilerplate code when starter code is missing
   const generateBoilerplate = (lang: string, question?: Question): string => {
@@ -416,6 +425,45 @@ export default function TestTakePage() {
     enabled: cameraProctorEnabled,
     debugMode,
   })
+
+  // Unified Proctoring Engine (works alongside existing hooks)
+  const proctorConfig = normalizeProctorConfig(proctoringSettings)
+  const referenceImageUrl = typeof window !== 'undefined' 
+    ? sessionStorage.getItem(`referenceFace_${testId}`) || undefined
+    : undefined
+  
+  const handleUnifiedViolation = (violationType: string, metadata?: Record<string, unknown>) => {
+    setTabSwitchCount((prev) => prev + 1)
+    console.log('[UnifiedProctor] Violation:', violationType, metadata)
+    setLatestViolation({
+      eventType: violationType as any,
+      timestamp: new Date().toISOString(),
+      assessmentId: proctorAssessmentId,
+      userId: proctorUserId,
+      metadata,
+    })
+  }
+
+  const unifiedProctor = useProctorEngine({
+    assessmentId: proctorAssessmentId,
+    candidateEmail: candidateEmail || proctorUserId || '',
+    config: proctorConfig,
+    referenceImageUrl: referenceImageUrl || undefined,
+    onViolation: handleUnifiedViolation,
+    videoElement: videoRef.current,
+    canvasElement: canvasRef.current,
+  })
+
+  // Start unified proctor when test is ready
+  useEffect(() => {
+    if (test && questions.length > 0 && candidateEmail && !submitted) {
+      unifiedProctor.start()
+    }
+    
+    return () => {
+      unifiedProctor.stop()
+    }
+  }, [test, questions.length, candidateEmail, submitted])
 
   // Start camera AFTER test data is loaded AND editor is visible (not immediately on mount)
   // This prevents blocking the initial page load with heavy TensorFlow.js model loading

@@ -1,11 +1,21 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
-
+ 
+/**
+ * Default candidate requirements when assessment data is not available
+ */
+const DEFAULT_REQUIREMENTS = {
+  requireEmail: true,
+  requireName: true,
+  requirePhone: false,
+  requireResume: false,
+};
+ 
 export default function CandidateRequirementsPage() {
   const router = useRouter();
   const { id, token } = router.query;
-  
+ 
   const [email, setEmail] = useState<string>("");
   const [name, setName] = useState<string>("");
   const [phone, setPhone] = useState<string>("");
@@ -13,83 +23,129 @@ export default function CandidateRequirementsPage() {
   const [resumeFileName, setResumeFileName] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [fetchingAssessment, setFetchingAssessment] = useState(true);
   const [assessmentInfo, setAssessmentInfo] = useState<any>(null);
   const [candidateRequirements, setCandidateRequirements] = useState<{
     requireEmail: boolean;
     requireName: boolean;
     requirePhone: boolean;
     requireResume: boolean;
-  }>({
-    requireEmail: true,
-    requireName: true,
-    requirePhone: false,
-    requireResume: false,
-  });
-  
+  }>(DEFAULT_REQUIREMENTS);
+ 
   useEffect(() => {
     const storedEmail = sessionStorage.getItem("candidateEmail");
     const storedName = sessionStorage.getItem("candidateName");
-    
+   
     // Auto-fill from sessionStorage
     if (storedEmail) setEmail(storedEmail);
     if (storedName) setName(storedName);
-    
+   
     if (!storedEmail || !storedName) {
       if (id && token) {
         router.replace(`/assessment/${id}/${token}`);
       }
       return;
     }
-    
+   
     // Check precheck completion
     const precheckCompleted = sessionStorage.getItem(`precheckCompleted_${id}`);
     if (!precheckCompleted && id && token) {
       router.replace(`/precheck/${id}/${token}`);
       return;
     }
-    
+   
     // Check instructions acknowledgment
     const instructionsAcknowledged = sessionStorage.getItem(`instructionsAcknowledged_${id}`);
     if (!instructionsAcknowledged && id && token) {
       router.replace(`/assessment/${id}/${token}/instructions-new`);
       return;
     }
-    
+   
     // Fetch assessment info to get candidate requirements settings
     const fetchAssessment = async () => {
+      if (!id || !token) {
+        setFetchingAssessment(false);
+        return;
+      }
+ 
       try {
+        setFetchingAssessment(true);
+        setError(null);
+ 
         const response = await axios.get(
           `/api/assessment/get-assessment-full?assessmentId=${id}&token=${token}`
         );
-        if (response.data?.success) {
-          const assessment = response.data.data;
-          setAssessmentInfo(assessment);
-          
-          // Load candidate requirements from assessment schedule
-          if (assessment.schedule?.candidateRequirements) {
-            setCandidateRequirements(assessment.schedule.candidateRequirements);
-          }
-          
-          // If no candidate requirements are enabled, skip this page
-          const requirements = assessment.schedule?.candidateRequirements || {};
-          const hasAnyRequirement = requirements.requireEmail || requirements.requireName || 
-                                   requirements.requirePhone || requirements.requireResume;
-          
-          if (!hasAnyRequirement && id && token) {
-            // Skip to identity verification if no requirements
-            router.push(`/assessment/${id}/${token}/identity-verify`);
-          }
+ 
+        const data = response.data;
+        console.log("get-assessment-full raw response:", data);
+ 
+        // 🔑 Normalize all possible response formats
+        const assessment =
+          data?.data ||          // { success, data: {...} }
+          data?.assessment ||    // { assessment: {...} }
+          data?.message ||       // 🔥 Your case: { success, message: {...}, data: null }
+          data;                  // Fallback to data itself
+ 
+        // If we still don't have a usable object, fallback to defaults
+        if (!assessment || typeof assessment !== "object") {
+          console.warn("No assessment found in response, using default requirements");
+          setAssessmentInfo(null);
+          setCandidateRequirements(DEFAULT_REQUIREMENTS);
+          setFetchingAssessment(false);
+          return;
         }
-      } catch (error) {
-        console.error("Error fetching assessment:", error);
+ 
+        // We now have the assessment object
+        setAssessmentInfo(assessment);
+ 
+        // 🔧 FIX: Use optional chaining throughout and provide defaults
+        const schedule = assessment?.schedule;
+        const candidateReqs = schedule?.candidateRequirements;
+ 
+        // 🔧 FIX: If candidateRequirements doesn't exist, use defaults
+        const normalizedRequirements = {
+          requireEmail: candidateReqs?.requireEmail ?? DEFAULT_REQUIREMENTS.requireEmail,
+          requireName: candidateReqs?.requireName ?? DEFAULT_REQUIREMENTS.requireName,
+          requirePhone: candidateReqs?.requirePhone ?? DEFAULT_REQUIREMENTS.requirePhone,
+          requireResume: candidateReqs?.requireResume ?? DEFAULT_REQUIREMENTS.requireResume,
+        };
+ 
+        console.log("Normalized candidate requirements:", normalizedRequirements);
+        setCandidateRequirements(normalizedRequirements);
+ 
+        const hasAnyRequirement =
+          normalizedRequirements.requireEmail ||
+          normalizedRequirements.requireName ||
+          normalizedRequirements.requirePhone ||
+          normalizedRequirements.requireResume;
+ 
+        // If no requirements are enabled, skip this page
+        if (!hasAnyRequirement && id && token) {
+          console.log("No candidate requirements enabled, skipping to identity verification");
+          router.push(`/assessment/${id}/${token}/identity-verify`);
+        }
+       
+        // Clear any previous errors since we successfully loaded the assessment
+        setError(null);
+      } catch (error: any) {
+        console.error("Error fetching assessment:", {
+          message: error?.message,
+          response: error?.response?.data,
+          status: error?.response?.status,
+        });
+ 
+        setError("Failed to load assessment settings. Using default requirements.");
+        setCandidateRequirements(DEFAULT_REQUIREMENTS);
+      } finally {
+        setFetchingAssessment(false);
       }
     };
-    
+   
     if (id && token) {
       fetchAssessment();
     }
   }, [id, token, router]);
-  
+ 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -99,44 +155,44 @@ export default function CandidateRequirementsPage() {
         setError("Please upload a PDF, DOC, or DOCX file");
         return;
       }
-      
+     
       // Validate file size (max 5MB)
       if (file.size > 5 * 1024 * 1024) {
         setError("File size must be less than 5MB");
         return;
       }
-      
+     
       setResumeFile(file);
       setResumeFileName(file.name);
       setError(null);
     }
   };
-  
+ 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    
+   
     // Validate only required fields
     if (candidateRequirements.requireEmail && !email.trim()) {
       setError("Email is required");
       return;
     }
-    
+   
     if (candidateRequirements.requireName && !name.trim()) {
       setError("Full Name is required");
       return;
     }
-    
+   
     if (candidateRequirements.requirePhone && !phone.trim()) {
       setError("Phone Number is required");
       return;
     }
-    
+   
     if (candidateRequirements.requireResume && !resumeFile) {
       setError("Resume upload is required");
       return;
     }
-    
+   
     // Validate email format if email is required
     if (candidateRequirements.requireEmail) {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -145,9 +201,9 @@ export default function CandidateRequirementsPage() {
         return;
       }
     }
-    
+   
     setLoading(true);
-    
+   
     try {
       // Update sessionStorage with candidate info
       sessionStorage.setItem("candidateEmail", email.trim());
@@ -155,7 +211,7 @@ export default function CandidateRequirementsPage() {
       if (phone.trim()) {
         sessionStorage.setItem("candidatePhone", phone.trim());
       }
-      
+     
       // Upload resume if provided
       if (resumeFile) {
         const formData = new FormData();
@@ -164,7 +220,7 @@ export default function CandidateRequirementsPage() {
         formData.append("token", token as string);
         formData.append("email", email.trim());
         formData.append("name", name.trim());
-        
+       
         try {
           await axios.post("/api/assessment/upload-resume", formData, {
             headers: {
@@ -176,8 +232,8 @@ export default function CandidateRequirementsPage() {
           // Don't block submission if resume upload fails
         }
       }
-      
-      // Save candidate requirements to backend (optional - can be stored in candidateResponses)
+     
+      // Save candidate requirements to backend
       try {
         await axios.post("/api/assessment/save-candidate-info", {
           assessmentId: id,
@@ -189,10 +245,12 @@ export default function CandidateRequirementsPage() {
         });
       } catch (saveError: any) {
         console.warn("Failed to save candidate info (non-blocking):", saveError);
-        // Don't block submission if save fails
       }
-      
-      // Route to identity verification (after student info)
+     
+      // Mark this step as completed
+      sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
+     
+      // Route to identity verification
       router.push(`/assessment/${id}/${token}/identity-verify`);
     } catch (err: any) {
       console.error("Error submitting candidate requirements:", err);
@@ -201,10 +259,36 @@ export default function CandidateRequirementsPage() {
       setLoading(false);
     }
   };
-
+ 
+  // Show loading state while fetching assessment
+  if (fetchingAssessment) {
+    return (
+      <div style={{
+        minHeight: "100vh",
+        backgroundColor: "#f7f3e8",
+        padding: "2rem",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center"
+      }}>
+        <div style={{
+          backgroundColor: "#ffffff",
+          borderRadius: "1rem",
+          padding: "2rem",
+          boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
+          textAlign: "center"
+        }}>
+          <div style={{ fontSize: "1.125rem", color: "#64748b" }}>
+            Loading assessment requirements...
+          </div>
+        </div>
+      </div>
+    );
+  }
+ 
   return (
-    <div style={{ 
-      minHeight: "100vh", 
+    <div style={{
+      minHeight: "100vh",
       backgroundColor: "#f7f3e8",
       padding: "2rem"
     }}>
@@ -224,17 +308,32 @@ export default function CandidateRequirementsPage() {
               Please provide the following information to proceed
             </p>
           </div>
-          
+         
+          {/* Assessment fetch error (non-blocking) */}
+          {error && (
+            <div style={{
+              padding: "0.75rem",
+              backgroundColor: "#fef3c7",
+              border: "1px solid #fde68a",
+              borderRadius: "0.5rem",
+              color: "#92400e",
+              marginBottom: "1rem",
+              fontSize: "0.875rem"
+            }}>
+              ⚠️ {error}
+            </div>
+          )}
+         
           {/* Form */}
           <form onSubmit={handleSubmit}>
             <div style={{ display: "grid", gap: "1.5rem", marginBottom: "2rem" }}>
               {/* Email - Only show if required */}
               {candidateRequirements.requireEmail && (
                 <div>
-                  <label style={{ 
-                    display: "block", 
-                    marginBottom: "0.5rem", 
-                    fontWeight: 600, 
+                  <label style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
                     color: "#1e293b",
                     fontSize: "0.95rem"
                   }}>
@@ -259,14 +358,14 @@ export default function CandidateRequirementsPage() {
                   />
                 </div>
               )}
-              
+             
               {/* Name - Only show if required */}
               {candidateRequirements.requireName && (
                 <div>
-                  <label style={{ 
-                    display: "block", 
-                    marginBottom: "0.5rem", 
-                    fontWeight: 600, 
+                  <label style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
                     color: "#1e293b",
                     fontSize: "0.95rem"
                   }}>
@@ -291,14 +390,14 @@ export default function CandidateRequirementsPage() {
                   />
                 </div>
               )}
-              
+             
               {/* Phone - Only show if required */}
               {candidateRequirements.requirePhone && (
                 <div>
-                  <label style={{ 
-                    display: "block", 
-                    marginBottom: "0.5rem", 
-                    fontWeight: 600, 
+                  <label style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
                     color: "#1e293b",
                     fontSize: "0.95rem"
                   }}>
@@ -323,14 +422,14 @@ export default function CandidateRequirementsPage() {
                   />
                 </div>
               )}
-              
+             
               {/* Resume Upload - Only show if required */}
               {candidateRequirements.requireResume && (
                 <div>
-                  <label style={{ 
-                    display: "block", 
-                    marginBottom: "0.5rem", 
-                    fontWeight: 600, 
+                  <label style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
                     color: "#1e293b",
                     fontSize: "0.95rem"
                   }}>
@@ -405,7 +504,7 @@ export default function CandidateRequirementsPage() {
                 </div>
               )}
             </div>
-            
+           
             {/* Error Message */}
             {error && (
               <div style={{
@@ -420,25 +519,25 @@ export default function CandidateRequirementsPage() {
                 {error}
               </div>
             )}
-            
+           
             {/* Submit Button */}
             <button
               type="submit"
-              disabled={loading || 
-                (candidateRequirements.requireEmail && !email.trim()) || 
+              disabled={loading ||
+                (candidateRequirements.requireEmail && !email.trim()) ||
                 (candidateRequirements.requireName && !name.trim()) ||
                 (candidateRequirements.requirePhone && !phone.trim()) ||
                 (candidateRequirements.requireResume && !resumeFile)}
               style={{
                 width: "100%",
                 padding: "1rem 2rem",
-                backgroundColor: (loading || 
-                  (candidateRequirements.requireEmail && !email.trim()) || 
+                backgroundColor: (loading ||
+                  (candidateRequirements.requireEmail && !email.trim()) ||
                   (candidateRequirements.requireName && !name.trim()) ||
                   (candidateRequirements.requirePhone && !phone.trim()) ||
                   (candidateRequirements.requireResume && !resumeFile)) ? "#e2e8f0" : "#6953a3",
-                color: (loading || 
-                  (candidateRequirements.requireEmail && !email.trim()) || 
+                color: (loading ||
+                  (candidateRequirements.requireEmail && !email.trim()) ||
                   (candidateRequirements.requireName && !name.trim()) ||
                   (candidateRequirements.requirePhone && !phone.trim()) ||
                   (candidateRequirements.requireResume && !resumeFile)) ? "#94a3b8" : "#ffffff",
@@ -446,13 +545,13 @@ export default function CandidateRequirementsPage() {
                 borderRadius: "0.5rem",
                 fontSize: "1.125rem",
                 fontWeight: 600,
-                cursor: (loading || 
-                  (candidateRequirements.requireEmail && !email.trim()) || 
+                cursor: (loading ||
+                  (candidateRequirements.requireEmail && !email.trim()) ||
                   (candidateRequirements.requireName && !name.trim()) ||
                   (candidateRequirements.requirePhone && !phone.trim()) ||
                   (candidateRequirements.requireResume && !resumeFile)) ? "not-allowed" : "pointer",
-                boxShadow: (loading || 
-                  (candidateRequirements.requireEmail && !email.trim()) || 
+                boxShadow: (loading ||
+                  (candidateRequirements.requireEmail && !email.trim()) ||
                   (candidateRequirements.requireName && !name.trim()) ||
                   (candidateRequirements.requirePhone && !phone.trim()) ||
                   (candidateRequirements.requireResume && !resumeFile)) ? "none" : "0 4px 6px -1px rgba(105, 83, 163, 0.3)",
@@ -467,3 +566,4 @@ export default function CandidateRequirementsPage() {
     </div>
   );
 }
+ 

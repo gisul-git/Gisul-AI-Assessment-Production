@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from ....db.mongo import get_db
 from ....utils.mongo import serialize_document, to_object_id
 from ....utils.responses import success_response
+from ....utils.face_image_storage import prepare_image_for_storage, validate_face_image
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,7 @@ async def get_assessment_full(
         assessment_serialized = serialize_document(assessment)
         
         # Return the assessment directly in data (not nested in assessment key)
-        return success_response(assessment_serialized)
+        return success_response("Assessment fetched successfully", assessment_serialized)
         
     except HTTPException:
         raise
@@ -390,6 +391,13 @@ class SaveCandidateInfoRequest(BaseModel):
     hasResume: bool = False
 
 
+class SaveReferenceFaceRequest(BaseModel):
+    """Request to save reference face image."""
+    assessmentId: str
+    candidateEmail: str
+    referenceImage: str  # Base64 encoded image
+
+
 @router.post("/save-candidate-info")
 async def save_candidate_info(
     request: SaveCandidateInfoRequest,
@@ -461,4 +469,101 @@ async def save_candidate_info(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to save candidate info: {str(e)}"
+        )
+
+
+@router.post("/save-reference-face")
+async def save_reference_face(
+    request: SaveReferenceFaceRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Save reference face image from identity verification.
+    Stores the image in candidateVerification.referenceImage field.
+    """
+    try:
+        assessment_id = to_object_id(request.assessmentId)
+        assessment = await db.assessments.find_one({"_id": assessment_id})
+        
+        if not assessment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found"
+            )
+        
+        # Store reference image in candidateResponses
+        candidate_key = f"{request.candidateEmail.lower()}_"
+        
+        # Find the candidate key (email might be in different format)
+        candidate_responses = assessment.get("candidateResponses", {})
+        candidate_key_found = None
+        
+        for key in candidate_responses.keys():
+            if request.candidateEmail.lower() in key.lower():
+                candidate_key_found = key
+                break
+        
+        if not candidate_key_found:
+            # Create new candidate entry
+            candidate_key_found = f"{request.candidateEmail.lower()}_unknown"
+        
+        if "candidateResponses" not in assessment:
+            assessment["candidateResponses"] = {}
+        
+        if candidate_key_found not in assessment["candidateResponses"]:
+            assessment["candidateResponses"][candidate_key_found] = {}
+        
+        # Validate and prepare image for storage
+        is_valid, error_msg = validate_face_image(request.referenceImage)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid face image: {error_msg}"
+            )
+        
+        # Prepare image (compress and sanitize)
+        processed_image = prepare_image_for_storage(request.referenceImage)
+        if not processed_image:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to process image for storage"
+            )
+        
+        # Store reference image in candidateVerification
+        if "candidateVerification" not in assessment["candidateResponses"][candidate_key_found]:
+            assessment["candidateResponses"][candidate_key_found]["candidateVerification"] = {}
+        
+        assessment["candidateResponses"][candidate_key_found]["candidateVerification"]["referenceImage"] = processed_image
+        assessment["candidateResponses"][candidate_key_found]["candidateVerification"]["referenceImageSavedAt"] = datetime.now(timezone.utc).isoformat()
+        
+        # Log the event
+        if "logs" not in assessment["candidateResponses"][candidate_key_found]:
+            assessment["candidateResponses"][candidate_key_found]["logs"] = []
+        
+        assessment["candidateResponses"][candidate_key_found]["logs"].append({
+            "eventType": "REFERENCE_PHOTO_CAPTURED",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "email": request.candidateEmail,
+            }
+        })
+        
+        await db.assessments.update_one(
+            {"_id": assessment_id},
+            {"$set": {"candidateResponses": assessment["candidateResponses"]}}
+        )
+        
+        logger.info(f"[Candidate API] Reference face saved for {request.candidateEmail} in assessment {request.assessmentId}")
+        
+        return success_response({
+            "message": "Reference face image saved successfully"
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error saving reference face: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save reference face: {str(e)}"
         )
