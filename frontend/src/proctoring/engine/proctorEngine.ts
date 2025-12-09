@@ -67,6 +67,8 @@ export function createProctorEngine(options: ProctorEngineOptions): ProctorEngin
     onViolation,
     videoElement,
     canvasElement,
+    getVideoElement,
+    getCanvasElement,
   } = options;
 
   // State (will be managed by React hook)
@@ -219,9 +221,9 @@ export function createProctorEngine(options: ProctorEngineOptions): ProctorEngin
         }
       }
 
-      // Face matching
+      // Face matching (works for both centered and off-center single faces)
       if (
-        detectionResult.state === "SINGLE_FACE" &&
+        (detectionResult.state === "SINGLE_FACE_CENTERED" || detectionResult.state === "FACE_OFF_CENTER") &&
         detectionResult.landmarks &&
         referenceLandmarks
       ) {

@@ -74,6 +74,91 @@ export async function initializeFaceDetection(): Promise<boolean> {
 }
 
 /**
+ * Convert landmarks to array format (handles Tensor2D or number[][])
+ */
+function convertLandmarksToArray(landmarks: any): any[] | undefined {
+  if (!landmarks) {
+    return undefined;
+  }
+  
+  // If it's already an array, return it
+  if (Array.isArray(landmarks)) {
+    return landmarks;
+  }
+  
+  // If it's a Tensor, convert to array
+  if (landmarks && typeof landmarks.array === 'function') {
+    return landmarks.arraySync() as any[];
+  }
+  
+  // Try to access as array-like
+  if (landmarks && landmarks.length !== undefined) {
+    return Array.from(landmarks) as any[];
+  }
+  
+  return undefined;
+}
+
+/**
+ * Extract confidence value from probability (handles number or Tensor1D)
+ */
+function extractConfidence(probability: any): number {
+  if (!probability) {
+    return 0.9;
+  }
+  
+  // If it's a number, return it
+  if (typeof probability === 'number') {
+    return probability;
+  }
+  
+  // If it's a Tensor, get the first value
+  if (probability && typeof probability.array === 'function') {
+    const arr = probability.arraySync() as number[];
+    return arr && arr.length > 0 ? arr[0] : 0.9;
+  }
+  
+  // If it's an array-like, get first element
+  if (Array.isArray(probability) && probability.length > 0) {
+    return probability[0];
+  }
+  
+  // If it has index access
+  if (probability && probability[0] !== undefined) {
+    return probability[0];
+  }
+  
+  return 0.9;
+}
+
+/**
+ * Extract coordinate value from point (handles Tensor1D or [number, number])
+ */
+function extractCoordinate(point: any, index: 0 | 1): number {
+  if (!point) {
+    return 0;
+  }
+  
+  // If it's an array, return the index
+  if (Array.isArray(point) && point.length > index) {
+    return point[index];
+  }
+  
+  // If it's a Tensor, convert to array and get index
+  if (point && typeof point.array === 'function') {
+    const arr = point.arraySync() as number[];
+    return arr && arr.length > index ? arr[index] : 0;
+  }
+  
+  // If it has index access
+  if (point && point[index] !== undefined) {
+    return point[index];
+  }
+  
+  return 0;
+}
+
+/**
  * Detect faces in a video element
  */
 export async function detectFaces(videoElement: HTMLVideoElement): Promise<FaceDetectionResult> {
@@ -110,16 +195,18 @@ export async function detectFaces(videoElement: HTMLVideoElement): Promise<FaceD
     } else if (faceCount > 1) {
       // Multiple faces detected
       const faceBoxes: FaceBox[] = predictions.map((p: any) => ({
-        x: p.topLeft[0],
-        y: p.topLeft[1],
-        width: p.bottomRight[0] - p.topLeft[0],
-        height: p.bottomRight[1] - p.topLeft[1],
+        x: extractCoordinate(p.topLeft, 0),
+        y: extractCoordinate(p.topLeft, 1),
+        width: extractCoordinate(p.bottomRight, 0) - extractCoordinate(p.topLeft, 0),
+        height: extractCoordinate(p.bottomRight, 1) - extractCoordinate(p.topLeft, 1),
       }));
+      const firstFaceLandmarks = convertLandmarksToArray(predictions[0].landmarks);
+      const firstFaceConfidence = extractConfidence(predictions[0].probability);
       return {
         state: "MULTIPLE_FACES",
         faceCount: faceCount,
-        landmarks: predictions[0].landmarks, // Return first face landmarks
-        confidence: predictions[0].probability ? predictions[0].probability[0] : 0.9,
+        landmarks: firstFaceLandmarks, // Return first face landmarks
+        confidence: firstFaceConfidence,
         faceBoxes,
       };
     } else {
@@ -127,10 +214,10 @@ export async function detectFaces(videoElement: HTMLVideoElement): Promise<FaceD
       const face = predictions[0];
       
       // Extract bounding box coordinates
-      const bboxX = face.topLeft[0];
-      const bboxY = face.topLeft[1];
-      const bboxWidth = face.bottomRight[0] - face.topLeft[0];
-      const bboxHeight = face.bottomRight[1] - face.topLeft[1];
+      const bboxX = extractCoordinate(face.topLeft, 0);
+      const bboxY = extractCoordinate(face.topLeft, 1);
+      const bboxWidth = extractCoordinate(face.bottomRight, 0) - extractCoordinate(face.topLeft, 0);
+      const bboxHeight = extractCoordinate(face.bottomRight, 1) - extractCoordinate(face.topLeft, 1);
       
       // Normalize coordinates to 0-1 range
       const normalizedX = bboxX / videoWidth;
@@ -156,12 +243,15 @@ export async function detectFaces(videoElement: HTMLVideoElement): Promise<FaceD
         height: bboxHeight,
       };
       
+      const faceLandmarks = convertLandmarksToArray(face.landmarks);
+      const faceConfidence = extractConfidence(face.probability);
+      
       if (isCentered) {
         return {
           state: "SINGLE_FACE_CENTERED",
           faceCount: 1,
-          landmarks: face.landmarks,
-          confidence: face.probability ? face.probability[0] : 0.9,
+          landmarks: faceLandmarks,
+          confidence: faceConfidence,
           faceBoxes: [faceBox],
           centerStatus: "CENTERED",
         };
@@ -169,8 +259,8 @@ export async function detectFaces(videoElement: HTMLVideoElement): Promise<FaceD
         return {
           state: "FACE_OFF_CENTER",
           faceCount: 1,
-          landmarks: face.landmarks,
-          confidence: face.probability ? face.probability[0] : 0.9,
+          landmarks: faceLandmarks,
+          confidence: faceConfidence,
           faceBoxes: [faceBox],
           centerStatus: "OFF_CENTER",
         };
