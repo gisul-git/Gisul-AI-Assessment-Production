@@ -846,7 +846,7 @@ IMPORTANT:
         raise HTTPException(status_code=500, detail=f"Failed to generate MCQ questions: {str(exc)}") from exc
 
 
-async def _generate_subjective_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate") -> List[Dict[str, Any]]:
+async def _generate_subjective_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Subjective questions - PRODUCTION-GRADE REWRITE.
     
@@ -893,6 +893,10 @@ async def _generate_subjective_questions(topic: str, difficulty: str, count: int
     
     difficulty_req = difficulty_requirements.get(difficulty, difficulty_requirements["Medium"])
     
+    additional_req_text = ""
+    if additional_requirements:
+        additional_req_text = f"\n11. Additional Requirements: {additional_requirements}\n"
+    
     prompt = f"""You are an expert technical assessment writer. Generate {count} scenario-based subjective question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -905,8 +909,8 @@ CRITICAL REQUIREMENTS:
 7. Difficulty level: {difficulty}
 8. {difficulty_req}
 9. Experience mode: {experience_mode}
-10. {context_guidance}
-11. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others. Do NOT generate similar or repetitive questions. Vary the scenarios, contexts, stakeholders, and problem types. If generating multiple questions, ensure they cover different aspects or applications of the topic.
+10. {context_guidance}{additional_req_text}
+12. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others. Do NOT generate similar or repetitive questions. Vary the scenarios, contexts, stakeholders, and problem types. If generating multiple questions, ensure they cover different aspects or applications of the topic.
 
 EXAMPLES OF GOOD QUESTIONS:
 - "You are working on a production e-commerce system that processes thousands of orders per minute. During peak hours, you notice the database connection pool is exhausted, causing transaction failures. Describe your approach to diagnose and resolve this issue, considering both immediate fixes and long-term scalability."
@@ -967,7 +971,7 @@ Return ONLY a JSON array with question text."""
         raise HTTPException(status_code=500, detail=f"Failed to generate Subjective questions: {str(exc)}") from exc
 
 
-async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int) -> List[Dict[str, Any]]:
+async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Pseudocode questions - PRODUCTION-GRADE REWRITE.
     
@@ -978,6 +982,10 @@ async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int
     - DO NOT generate the answer
     - Answer will be evaluated by AI scoring model
     """
+    additional_req_text = ""
+    if additional_requirements:
+        additional_req_text = f"\n9. Additional Requirements: {additional_requirements}\n"
+    
     prompt = f"""You are an expert technical assessor. Generate {count} pseudocode question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -988,7 +996,8 @@ CRITICAL REQUIREMENTS:
 5. Include sample input/output scenarios in the question text
 6. The question should ask for pseudocode, not executable code
 7. Avoid syntax tied to any specific programming language
-8. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others. Do NOT generate similar or repetitive questions. Vary the scenarios, problem types, and algorithmic approaches.
+8. Experience mode: {experience_mode}{additional_req_text}
+10. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others. Do NOT generate similar or repetitive questions. Vary the scenarios, problem types, and algorithmic approaches.
 
 DO NOT include:
 - expectedAnswer
@@ -1148,7 +1157,7 @@ def _get_judge0_language_id(language: str) -> int:
     return language_id_map.get(language.lower(), 71)  # Default to Python
 
 
-async def _generate_coding_questions(topic: str, difficulty: str, count: int, can_use_judge0: bool, coding_language: str = "python") -> List[Dict[str, Any]]:
+async def _generate_coding_questions(topic: str, difficulty: str, count: int, can_use_judge0: bool, coding_language: str = "python", experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Coding questions (Judge0-compatible) using DSA module architecture.
     
@@ -1242,18 +1251,59 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                 # Get function signature
                 func_sig = dsa_question.get("function_signature", {})
                 
-                # Build assessment question object
+                # Format function signature as string for frontend editing
+                func_sig_string = ""
+                if func_sig and isinstance(func_sig, dict):
+                    func_name = func_sig.get("name", "function")
+                    params = func_sig.get("parameters", [])
+                    return_type = func_sig.get("return_type", "void")
+                    if params:
+                        param_str = ", ".join([f"{p.get('name', '')}: {p.get('type', '')}" for p in params if isinstance(p, dict)])
+                    else:
+                        param_str = ""
+                    func_sig_string = f"{func_name}({param_str}): {return_type}"
+                
+                # Extract title and problem statement for legacy format
+                title = dsa_question.get("title", topic)
+                problem_statement = dsa_question.get("description", question_text)
+                
+                # Extract input/output format and sample input/output from first example
+                input_format = ""
+                output_format = ""
+                sample_input = ""
+                sample_output = ""
+                if examples and len(examples) > 0:
+                    first_example = examples[0]
+                    sample_input = first_example.get("input", "")
+                    sample_output = first_example.get("output", "")
+                    # Try to infer format from examples
+                    if sample_input:
+                        input_format = "See sample input format below"
+                    if sample_output:
+                        output_format = "See sample output format below"
+                
+                # Build assessment question object with both new and legacy formats
                 assessment_question = {
+                    # New format (DSA-compatible)
                     "questionText": question_text,
                     "starterCode": starter_code,
                     "visibleTestCases": visible_testcases,
                     "hiddenTestCases": hidden_testcases,
                     "constraints": constraints_text,
-                    "functionSignature": func_sig,
+                    "functionSignature": func_sig,  # Keep as object for display
                     "difficulty": difficulty,
                     "explanation": f"This problem tests understanding of {topic} at {difficulty} level.",
                     "language": str(_get_judge0_language_id(coding_language)),  # Store Judge0 language ID
                     "codingLanguage": coding_language,  # Store language name for frontend
+                    # Legacy format (for frontend editing compatibility)
+                    "title": title,
+                    "problemStatement": problem_statement,
+                    "inputFormat": input_format,
+                    "outputFormat": output_format,
+                    "sampleInput": sample_input,
+                    "sampleOutput": sample_output,
+                    # Function signature as string for textarea editing (frontend expects string, not object)
+                    "functionSignatureString": func_sig_string,
                 }
                 
                 questions.append(assessment_question)
@@ -1360,6 +1410,47 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
             # Ensure starter code is in the correct language (fallback to template if missing)
             if not clean_question.get("starterCode"):
                 clean_question["starterCode"] = _get_starter_code_template(coding_language)
+            
+            # Add legacy format fields for frontend compatibility
+            if not clean_question.get("title"):
+                # Extract title from questionText if available, or use topic
+                question_text = clean_question.get("questionText", "")
+                if question_text:
+                    # Try to extract first line as title
+                    first_line = question_text.split("\n")[0].strip()
+                    clean_question["title"] = first_line[:100] if len(first_line) > 100 else first_line or topic
+                else:
+                    clean_question["title"] = topic
+            
+            if not clean_question.get("problemStatement"):
+                clean_question["problemStatement"] = clean_question.get("questionText", "")
+            
+            # Format function signature as string
+            func_sig = clean_question.get("functionSignature")
+            if func_sig and isinstance(func_sig, dict):
+                func_name = func_sig.get("name", "function")
+                params = func_sig.get("parameters", [])
+                return_type = func_sig.get("return_type", "void")
+                if params:
+                    param_str = ", ".join([f"{p.get('name', '')}: {p.get('type', '')}" for p in params if isinstance(p, dict)])
+                else:
+                    param_str = ""
+                clean_question["functionSignatureString"] = f"{func_name}({param_str}): {return_type}"
+            elif func_sig and isinstance(func_sig, str):
+                clean_question["functionSignatureString"] = func_sig
+            
+            # Extract sample input/output from visible test cases
+            visible_tcs = clean_question.get("visibleTestCases", [])
+            if visible_tcs and len(visible_tcs) > 0:
+                first_tc = visible_tcs[0]
+                if not clean_question.get("sampleInput"):
+                    clean_question["sampleInput"] = first_tc.get("input", "")
+                if not clean_question.get("sampleOutput"):
+                    clean_question["sampleOutput"] = first_tc.get("output", first_tc.get("expected_output", ""))
+                if not clean_question.get("inputFormat"):
+                    clean_question["inputFormat"] = "See sample input format below"
+                if not clean_question.get("outputFormat"):
+                    clean_question["outputFormat"] = "See sample output format below"
             
             # Validate required fields
             if clean_question.get("questionText") and clean_question.get("starterCode"):
@@ -1746,7 +1837,7 @@ For Coding: Generate a coding problem with clear description, examples, and cons
         raise HTTPException(status_code=500, detail=f"Failed to regenerate question: {str(exc)}") from exc
 
 
-async def _generate_subjective_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate") -> List[Dict[str, Any]]:
+async def _generate_subjective_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Subjective questions - PRODUCTION-GRADE REWRITE.
     
@@ -1793,6 +1884,10 @@ async def _generate_subjective_questions(topic: str, difficulty: str, count: int
     
     difficulty_req = difficulty_requirements.get(difficulty, difficulty_requirements["Medium"])
     
+    additional_req_text = ""
+    if additional_requirements:
+        additional_req_text = f"\n11. Additional Requirements: {additional_requirements}\n"
+    
     prompt = f"""You are an expert technical assessment writer. Generate {count} scenario-based subjective question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -1805,8 +1900,8 @@ CRITICAL REQUIREMENTS:
 7. Difficulty level: {difficulty}
 8. {difficulty_req}
 9. Experience mode: {experience_mode}
-10. {context_guidance}
-11. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others. Do NOT generate similar or repetitive questions. Vary the scenarios, contexts, stakeholders, and problem types. If generating multiple questions, ensure they cover different aspects or applications of the topic.
+10. {context_guidance}{additional_req_text}
+12. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others. Do NOT generate similar or repetitive questions. Vary the scenarios, contexts, stakeholders, and problem types. If generating multiple questions, ensure they cover different aspects or applications of the topic.
 
 EXAMPLES OF GOOD QUESTIONS:
 - "You are working on a production e-commerce system that processes thousands of orders per minute. During peak hours, you notice the database connection pool is exhausted, causing transaction failures. Describe your approach to diagnose and resolve this issue, considering both immediate fixes and long-term scalability."
@@ -1867,7 +1962,7 @@ Return ONLY a JSON array with question text."""
         raise HTTPException(status_code=500, detail=f"Failed to generate Subjective questions: {str(exc)}") from exc
 
 
-async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int) -> List[Dict[str, Any]]:
+async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Pseudocode questions - PRODUCTION-GRADE REWRITE.
     
@@ -1878,6 +1973,10 @@ async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int
     - DO NOT generate the answer
     - Answer will be evaluated by AI scoring model
     """
+    additional_req_text = ""
+    if additional_requirements:
+        additional_req_text = f"\n9. Additional Requirements: {additional_requirements}\n"
+    
     prompt = f"""You are an expert technical assessor. Generate {count} pseudocode question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -1888,7 +1987,8 @@ CRITICAL REQUIREMENTS:
 5. Include sample input/output scenarios in the question text
 6. The question should ask for pseudocode, not executable code
 7. Avoid syntax tied to any specific programming language
-8. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others. Do NOT generate similar or repetitive questions. Vary the scenarios, problem types, and algorithmic approaches.
+8. Experience mode: {experience_mode}{additional_req_text}
+10. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others. Do NOT generate similar or repetitive questions. Vary the scenarios, problem types, and algorithmic approaches.
 
 DO NOT include:
 - expectedAnswer
@@ -2048,7 +2148,7 @@ def _get_judge0_language_id(language: str) -> int:
     return language_id_map.get(language.lower(), 71)  # Default to Python
 
 
-async def _generate_coding_questions(topic: str, difficulty: str, count: int, can_use_judge0: bool, coding_language: str = "python") -> List[Dict[str, Any]]:
+async def _generate_coding_questions(topic: str, difficulty: str, count: int, can_use_judge0: bool, coding_language: str = "python", experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Coding questions (Judge0-compatible) using DSA module architecture.
     
@@ -2142,18 +2242,59 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                 # Get function signature
                 func_sig = dsa_question.get("function_signature", {})
                 
-                # Build assessment question object
+                # Format function signature as string for frontend editing
+                func_sig_string = ""
+                if func_sig and isinstance(func_sig, dict):
+                    func_name = func_sig.get("name", "function")
+                    params = func_sig.get("parameters", [])
+                    return_type = func_sig.get("return_type", "void")
+                    if params:
+                        param_str = ", ".join([f"{p.get('name', '')}: {p.get('type', '')}" for p in params if isinstance(p, dict)])
+                    else:
+                        param_str = ""
+                    func_sig_string = f"{func_name}({param_str}): {return_type}"
+                
+                # Extract title and problem statement for legacy format
+                title = dsa_question.get("title", topic)
+                problem_statement = dsa_question.get("description", question_text)
+                
+                # Extract input/output format and sample input/output from first example
+                input_format = ""
+                output_format = ""
+                sample_input = ""
+                sample_output = ""
+                if examples and len(examples) > 0:
+                    first_example = examples[0]
+                    sample_input = first_example.get("input", "")
+                    sample_output = first_example.get("output", "")
+                    # Try to infer format from examples
+                    if sample_input:
+                        input_format = "See sample input format below"
+                    if sample_output:
+                        output_format = "See sample output format below"
+                
+                # Build assessment question object with both new and legacy formats
                 assessment_question = {
+                    # New format (DSA-compatible)
                     "questionText": question_text,
                     "starterCode": starter_code,
                     "visibleTestCases": visible_testcases,
                     "hiddenTestCases": hidden_testcases,
                     "constraints": constraints_text,
-                    "functionSignature": func_sig,
+                    "functionSignature": func_sig,  # Keep as object for display
                     "difficulty": difficulty,
                     "explanation": f"This problem tests understanding of {topic} at {difficulty} level.",
                     "language": str(_get_judge0_language_id(coding_language)),  # Store Judge0 language ID
                     "codingLanguage": coding_language,  # Store language name for frontend
+                    # Legacy format (for frontend editing compatibility)
+                    "title": title,
+                    "problemStatement": problem_statement,
+                    "inputFormat": input_format,
+                    "outputFormat": output_format,
+                    "sampleInput": sample_input,
+                    "sampleOutput": sample_output,
+                    # Function signature as string for textarea editing (frontend expects string, not object)
+                    "functionSignatureString": func_sig_string,
                 }
                 
                 questions.append(assessment_question)
@@ -2260,6 +2401,47 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
             # Ensure starter code is in the correct language (fallback to template if missing)
             if not clean_question.get("starterCode"):
                 clean_question["starterCode"] = _get_starter_code_template(coding_language)
+            
+            # Add legacy format fields for frontend compatibility
+            if not clean_question.get("title"):
+                # Extract title from questionText if available, or use topic
+                question_text = clean_question.get("questionText", "")
+                if question_text:
+                    # Try to extract first line as title
+                    first_line = question_text.split("\n")[0].strip()
+                    clean_question["title"] = first_line[:100] if len(first_line) > 100 else first_line or topic
+                else:
+                    clean_question["title"] = topic
+            
+            if not clean_question.get("problemStatement"):
+                clean_question["problemStatement"] = clean_question.get("questionText", "")
+            
+            # Format function signature as string
+            func_sig = clean_question.get("functionSignature")
+            if func_sig and isinstance(func_sig, dict):
+                func_name = func_sig.get("name", "function")
+                params = func_sig.get("parameters", [])
+                return_type = func_sig.get("return_type", "void")
+                if params:
+                    param_str = ", ".join([f"{p.get('name', '')}: {p.get('type', '')}" for p in params if isinstance(p, dict)])
+                else:
+                    param_str = ""
+                clean_question["functionSignatureString"] = f"{func_name}({param_str}): {return_type}"
+            elif func_sig and isinstance(func_sig, str):
+                clean_question["functionSignatureString"] = func_sig
+            
+            # Extract sample input/output from visible test cases
+            visible_tcs = clean_question.get("visibleTestCases", [])
+            if visible_tcs and len(visible_tcs) > 0:
+                first_tc = visible_tcs[0]
+                if not clean_question.get("sampleInput"):
+                    clean_question["sampleInput"] = first_tc.get("input", "")
+                if not clean_question.get("sampleOutput"):
+                    clean_question["sampleOutput"] = first_tc.get("output", first_tc.get("expected_output", ""))
+                if not clean_question.get("inputFormat"):
+                    clean_question["inputFormat"] = "See sample input format below"
+                if not clean_question.get("outputFormat"):
+                    clean_question["outputFormat"] = "See sample output format below"
             
             # Validate required fields
             if clean_question.get("questionText") and clean_question.get("starterCode"):
