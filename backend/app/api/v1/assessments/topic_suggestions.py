@@ -19,6 +19,44 @@ from ....core.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _is_technical_topic(topic: str) -> bool:
+    """
+    Detect if a topic is technical/programming-related.
+    Returns True if the topic appears to be technical, False otherwise.
+    """
+    topic_lower = topic.lower()
+    
+    # Technical keywords that should be blocked
+    technical_keywords = [
+        # Programming languages
+        "java", "python", "javascript", "typescript", "c++", "c#", "cpp", "c ", "go ", "rust", "ruby", "php", "swift", "kotlin", "scala", "r ",
+        # Frameworks and libraries
+        "react", "angular", "vue", "node", "express", "django", "flask", "spring", "laravel", "rails", ".net",
+        # Databases
+        "sql", "mysql", "postgresql", "mongodb", "redis", "oracle", "database", "db ",
+        # Technical concepts
+        "api", "rest", "graphql", "microservice", "docker", "kubernetes", "aws", "azure", "gcp", "cloud",
+        "algorithm", "data structure", "dsa", "leetcode", "coding", "programming", "software engineering",
+        "system design", "architecture", "devops", "ci/cd", "git", "github", "gitlab",
+        # Technical terms
+        "function", "class", "object", "variable", "array", "list", "hash", "tree", "graph", "stack", "queue",
+        "oop", "mvc", "mvp", "mvvm", "design pattern", "refactoring", "testing", "unit test", "integration test",
+        "frontend", "backend", "full stack", "web development", "mobile development"
+    ]
+    
+    # Check if topic contains any technical keywords
+    for keyword in technical_keywords:
+        if keyword in topic_lower:
+            return True
+    
+    # Check if topic is a single programming language name
+    programming_languages = ["java", "python", "javascript", "typescript", "c", "cpp", "c++", "go", "rust", "ruby", "php", "swift", "kotlin", "scala", "r"]
+    if topic_lower.strip() in programming_languages:
+        return True
+    
+    return False
+
+
 def _get_openai_client() -> AsyncOpenAI:
     """Get OpenAI client instance."""
     settings = get_settings()
@@ -47,7 +85,39 @@ async def suggest_topic_contexts(
     
     category_description = category_descriptions.get(category.lower(), "general assessment")
     
-    prompt = f"""You are an expert assessment designer. Generate topic suggestions based on semantic understanding.
+    # Build strict prompt for soft-skill categories
+    soft_skill_categories = ["aptitude", "communication", "logical_reasoning"]
+    is_soft_skill = category.lower() in soft_skill_categories
+    
+    if is_soft_skill:
+        prompt = f"""You are an expert assessment designer. Generate ONLY soft-skill topic suggestions.
+
+User is typing: "{partial_input}"
+Category: {category_description}
+
+CRITICAL RULES - STRICTLY ENFORCE:
+- Generate ONLY non-technical, soft-skill topics
+- ABSOLUTELY FORBIDDEN: programming languages, coding, algorithms, software engineering, technical frameworks
+- Even if user types technical terms, suggest ONLY soft-skill topics related to the category
+
+Generate 4-6 relevant topic suggestions that:
+- Are ONLY soft-skill, non-technical topics
+- Match the semantic meaning of the partial input (interpreted as soft-skill context)
+- Are specific and assessment-ready
+- Fit naturally within the {category_description} category
+- Are domain-agnostic (work for any context)
+
+Return ONLY a JSON array of topic labels:
+[
+  "Topic Suggestion 1",
+  "Topic Suggestion 2",
+  "Topic Suggestion 3",
+  ...
+]
+
+Do NOT include explanations or markdown. Return only the JSON array."""
+    else:
+        prompt = f"""You are an expert assessment designer. Generate topic suggestions based on semantic understanding.
 
 User is typing: "{partial_input}"
 Category: {category_description}
@@ -93,7 +163,18 @@ Do NOT include explanations or markdown. Return only the JSON array."""
         if not isinstance(suggestions, list):
             suggestions = [suggestions] if suggestions else []
         
-        return [{"label": s, "value": s} for s in suggestions if s]
+        # Filter out technical topics for soft-skill categories
+        filtered_suggestions = []
+        for s in suggestions:
+            if s and isinstance(s, str):
+                topic_str = str(s).strip()
+                # For soft-skill categories, filter out technical topics
+                if is_soft_skill and _is_technical_topic(topic_str):
+                    logger.warning(f"Filtered out technical suggestion: {topic_str}")
+                    continue
+                filtered_suggestions.append({"label": topic_str, "value": topic_str})
+        
+        return filtered_suggestions
         
     except Exception as exc:
         logger.error(f"Error generating topic suggestions: {exc}", exc_info=True)
@@ -201,17 +282,57 @@ async def suggest_topics(
         # If query is empty, return popular suggestions for the category
         return await _get_popular_suggestions(category)
     
+    category_lower = category.lower()
+    soft_skill_categories = ["aptitude", "communication", "logical_reasoning"]
+    is_soft_skill = category_lower in soft_skill_categories
+    
     category_descriptions = {
-        "aptitude": "numerical problem-solving, quantitative reasoning, mathematical calculations, percentages, ratios, time/speed/distance, profit/loss",
-        "communication": "written communication, professional correspondence, language skills, writing clarity, comprehension, email etiquette, professional tone",
-        "logical_reasoning": "analytical thinking, pattern recognition, logical problem-solving, puzzles, sequences, deductions, syllogisms",
+        "aptitude": "numerical problem-solving, quantitative reasoning, mathematical calculations, percentages, ratios, time/speed/distance, profit/loss, logical puzzles, quant skills, problem-solving items. NO programming, coding, or software topics.",
+        "communication": "speaking skills, grammar, writing skills, comprehension, listening, professional correspondence, language skills, writing clarity, email etiquette, professional tone. NO technical or programming topics.",
+        "logical_reasoning": "deductions, patterns, non-verbal reasoning, analytical puzzles, syllogisms, sequences, logical problem-solving. NO coding, algorithms, or software engineering topics.",
         "technical": "programming, software engineering, technology, frameworks, tools, systems, implementation, real-world engineering topics",
         "auto": "mixed categories - infer the most suitable category based on the query"
     }
     
-    category_description = category_descriptions.get(category.lower(), "general assessment topics")
+    category_description = category_descriptions.get(category_lower, "general assessment topics")
     
-    prompt = f"""You are an expert in categorizing and generating assessment topics.
+    # Build strict prompt for soft-skill categories
+    if is_soft_skill:
+        prompt = f"""You are an expert in generating SOFT-SKILL assessment topics. Generate ONLY non-technical topics.
+
+CRITICAL RULES - STRICTLY ENFORCE:
+- Category: {category}
+- User entered text: "{query}"
+
+ABSOLUTELY FORBIDDEN - DO NOT SUGGEST:
+- Programming languages (Java, Python, JavaScript, C, C++, etc.)
+- Coding or programming topics
+- Data structures or algorithms
+- System design or software architecture
+- Any software engineering topics
+- Technical frameworks or tools
+
+REQUIRED - ONLY SUGGEST:
+- For aptitude: numerical reasoning, logical puzzles, quant skills, problem-solving items (math-based, NOT coding)
+- For communication: speaking skills, grammar, writing skills, comprehension, listening, professional writing
+- For logical reasoning: deductions, patterns, non-verbal reasoning, analytical puzzles (NOT coding puzzles)
+
+Even if user types technical terms like "java" or "python", suggest ONLY soft-skill topics that relate to the category.
+
+Generate 6-10 suggested topics that:
+- Are ONLY soft-skill, non-technical topics
+- Fit the {category} category perfectly
+- Are relevant to the user's input (but interpret it as soft-skill context)
+- Are concise, specific, and assessment-ready
+- Are NOT repetitive
+- Are appropriate for professional assessments
+
+Return ONLY a JSON array of topic names:
+["Topic A", "Topic B", "Topic C", ...]
+
+Do NOT include explanations or markdown. Return only the JSON array."""
+    else:
+        prompt = f"""You are an expert in categorizing and generating assessment topics.
 
 Given:
 - Selected category: {category}
@@ -259,8 +380,19 @@ Do NOT include explanations or markdown. Return only the JSON array."""
         if not isinstance(suggestions, list):
             suggestions = [suggestions] if suggestions else []
         
+        # Filter out technical topics for soft-skill categories
+        filtered_suggestions = []
+        for s in suggestions:
+            if s and isinstance(s, str):
+                topic_str = str(s).strip()
+                # For soft-skill categories, filter out technical topics
+                if is_soft_skill and _is_technical_topic(topic_str):
+                    logger.warning(f"Filtered out technical suggestion: {topic_str}")
+                    continue
+                filtered_suggestions.append(topic_str)
+        
         # Return only valid strings, limit to 10
-        return [str(s).strip() for s in suggestions if s and isinstance(s, str)][:10]
+        return filtered_suggestions[:10]
         
     except Exception as exc:
         logger.error(f"Error generating topic suggestions: {exc}", exc_info=True)

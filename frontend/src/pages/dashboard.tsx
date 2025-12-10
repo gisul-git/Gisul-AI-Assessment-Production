@@ -102,6 +102,16 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
     };
   }, [session, updateSession]);
 
+  // Refresh assessments when refresh query param is present
+  useEffect(() => {
+    if (router.query.refresh) {
+      // Force fresh fetch from API
+      fetchAssessments();
+      // Remove refresh param from URL
+      router.replace('/dashboard', undefined, { shallow: true });
+    }
+  }, [router.query.refresh]);
+
   const fetchAssessments = async () => {
     try {
       setLoading(true);
@@ -608,6 +618,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       } else if (assessment.status === 'draft') {
                         router.push(`/assessments/create-new?id=${assessment.id}`);
                       } else {
+                        // For active/completed assessments, go to Analytics (NO EDIT)
                         router.push(`/assessments/${assessment.id}/analytics`);
                       }
                     }}
@@ -704,90 +715,233 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       )}
                     </div>
                     <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem", paddingTop: "1rem", borderTop: "1px solid #E8FAF0" }}>
-                      {(assessment.status === 'draft' || assessment.type === 'custom_mcq') && (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          style={{
-                            fontSize: "0.875rem",
-                            padding: "0.5rem 1rem",
-                            marginTop: 0,
-                            width: "100%",
-                          }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (assessment.type === 'custom_mcq') {
-                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
-                            } else {
+                      {/* CASE A: Draft - Show Edit and Delete, HIDE Analytics */}
+                      {assessment.status === 'draft' && assessment.type !== 'dsa' && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              marginTop: 0,
+                              width: "100%",
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
                               router.push(`/assessments/create-new?id=${assessment.id}`);
-                            }
-                          }}
-                        >
-                          Edit
-                        </button>
-                      )}
-                      {assessment.type !== 'dsa' && (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          style={{
-                            fontSize: "0.875rem",
-                            padding: "0.5rem 1rem",
-                            marginTop: 0,
-                            width: "100%",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            gap: "0.5rem",
-                          }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            router.push(`/assessments/${assessment.id}/analytics`);
-                          }}
-                        >
-                          <svg 
-                            width="16" 
-                            height="16" 
-                            viewBox="0 0 24 24" 
-                            fill="none" 
-                            stroke="currentColor" 
-                            strokeWidth="2" 
-                            strokeLinecap="round" 
-                            strokeLinejoin="round"
+                            }}
                           >
-                            <line x1="18" y1="20" x2="18" y2="10" />
-                            <line x1="12" y1="20" x2="12" y2="4" />
-                            <line x1="6" y1="20" x2="6" y2="14" />
-                          </svg>
-                          Analytics
-                        </button>
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              backgroundColor: "#ef4444",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: "pointer",
+                              transition: "background-color 0.2s",
+                              width: "100%",
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = "#dc2626";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = "#ef4444";
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </>
                       )}
-                      <button
-                        type="button"
-                        style={{
-                          fontSize: "0.875rem",
-                          padding: "0.5rem 1rem",
-                          backgroundColor: "#ef4444",
-                          color: "#ffffff",
-                          border: "none",
-                          borderRadius: "0.375rem",
-                          cursor: "pointer",
-                          transition: "background-color 0.2s",
-                          width: "100%",
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.backgroundColor = "#dc2626";
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.backgroundColor = "#ef4444";
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                        }}
-                      >
-                        Delete
-                      </button>
+                      
+                      {/* CASE B: Active - Show Analytics and Delete, HIDE Edit */}
+                      {assessment.status === 'active' && assessment.type !== 'dsa' && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              marginTop: 0,
+                              width: "100%",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              gap: "0.5rem",
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              router.push(`/assessments/${assessment.id}/analytics`);
+                            }}
+                          >
+                            <svg 
+                              width="16" 
+                              height="16" 
+                              viewBox="0 0 24 24" 
+                              fill="none" 
+                              stroke="currentColor" 
+                              strokeWidth="2" 
+                              strokeLinecap="round" 
+                              strokeLinejoin="round"
+                            >
+                              <line x1="18" y1="20" x2="18" y2="10" />
+                              <line x1="12" y1="20" x2="12" y2="4" />
+                              <line x1="6" y1="20" x2="6" y2="14" />
+                            </svg>
+                            Analytics
+                          </button>
+                          <button
+                            type="button"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              backgroundColor: "#ef4444",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: "pointer",
+                              transition: "background-color 0.2s",
+                              width: "100%",
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = "#dc2626";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = "#ef4444";
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
+                      
+                      {/* CASE C: Completed - Show Analytics and Delete, HIDE Edit */}
+                      {assessment.status === 'completed' && assessment.type !== 'dsa' && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              marginTop: 0,
+                              width: "100%",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              gap: "0.5rem",
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              router.push(`/assessments/${assessment.id}/analytics`);
+                            }}
+                          >
+                            <svg 
+                              width="16" 
+                              height="16" 
+                              viewBox="0 0 24 24" 
+                              fill="none" 
+                              stroke="currentColor" 
+                              strokeWidth="2" 
+                              strokeLinecap="round" 
+                              strokeLinejoin="round"
+                            >
+                              <line x1="18" y1="20" x2="18" y2="10" />
+                              <line x1="12" y1="20" x2="12" y2="4" />
+                              <line x1="6" y1="20" x2="6" y2="14" />
+                            </svg>
+                            Analytics
+                          </button>
+                          <button
+                            type="button"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              backgroundColor: "#ef4444",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: "pointer",
+                              transition: "background-color 0.2s",
+                              width: "100%",
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = "#dc2626";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = "#ef4444";
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
+                      
+                      {/* Custom MCQ - Show Edit and Delete */}
+                      {assessment.type === 'custom_mcq' && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              marginTop: 0,
+                              width: "100%",
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                            }}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              backgroundColor: "#ef4444",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: "pointer",
+                              transition: "background-color 0.2s",
+                              width: "100%",
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = "#dc2626";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = "#ef4444";
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 );

@@ -3,11 +3,18 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "../auth/[...nextauth]";
 import fastApiClient from "../../../lib/fastapi";
 
+interface CombinedSkill {
+  skill_name: string;
+  source: "role" | "manual" | "csv";
+  description?: string | null;
+  importance_level?: "Low" | "Medium" | "High" | null;
+}
+
 interface GenerateTopicsPayload {
   assessmentId?: string;
   assessmentTitle?: string;
-  jobDesignation: string;
-  selectedSkills: string[];
+  jobDesignation?: string;
+  combinedSkills: CombinedSkill[];
   experienceMin: number;
   experienceMax: number;
   experienceMode: "corporate" | "student";
@@ -26,12 +33,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const payload = req.body as GenerateTopicsPayload;
 
-  if (!payload.jobDesignation || !payload.jobDesignation.trim()) {
-    return res.status(400).json({ message: "Job designation is required" });
+  if (!payload.combinedSkills || payload.combinedSkills.length === 0) {
+    return res.status(400).json({ message: "At least one skill must be provided in combinedSkills" });
   }
 
-  if (!payload.selectedSkills || payload.selectedSkills.length === 0) {
-    return res.status(400).json({ message: "At least one skill must be selected" });
+  // Validate combined skills structure
+  for (const skill of payload.combinedSkills) {
+    if (!skill.skill_name || !skill.skill_name.trim()) {
+      return res.status(400).json({ message: "Each skill must have a skill_name" });
+    }
+    if (!skill.source || !["role", "manual", "csv"].includes(skill.source)) {
+      return res.status(400).json({ message: "Each skill must have a valid source (role, manual, or csv)" });
+    }
   }
 
   try {
@@ -59,5 +72,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
   }
 }
+
 
 

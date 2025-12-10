@@ -794,17 +794,23 @@ function getQuestionText(question: any, questionType: string): string {
 
 // Helper function to calculate base time per question type (in seconds)
 function getBaseTimePerQuestion(questionType: string): number {
+  // Base time in seconds per question type
+  // Recommended base timing:
+  // MCQ → Maximum 40 seconds per question (base 20s, max 40s with Hard difficulty)
+  // Pseudocode → 5–8 minutes per question (use 6.5 min = 390 seconds)
+  // Subjective → 6–10 minutes per question (use 8 min = 480 seconds)
+  // Coding → 12–20 minutes per question (use 16 min = 960 seconds)
   switch (questionType) {
     case "MCQ":
-      return 60; // 45-75 seconds, using 60 as average
+      return 20; // Base 20 seconds (Easy: 20s, Medium: 30s, Hard: 40s - max 40 seconds)
     case "Subjective":
-      return 150; // 120-180 seconds, using 150 as average
+      return 480; // 8 minutes (6-10 min range)
     case "PseudoCode":
-      return 210; // 180-240 seconds, using 210 as average
+      return 390; // 6.5 minutes (5-8 min range)
     case "Coding":
-      return 450; // 300-600 seconds, using 450 as average
+      return 960; // 16 minutes (12-20 min range)
     default:
-      return 60;
+      return 120; // 2 minutes default
   }
 }
 
@@ -844,7 +850,14 @@ function calculateSectionTimer(
   questions.forEach((q) => {
     const baseTime = getBaseTimePerQuestion(q.questionType);
     const multiplier = getDifficultyMultiplier(q.difficulty);
-    totalSeconds += baseTime * multiplier;
+    let questionTime = baseTime * multiplier;
+    
+    // Cap MCQ questions at 40 seconds maximum
+    if (q.questionType === "MCQ" && questionTime > 40) {
+      questionTime = 40;
+    }
+    
+    totalSeconds += questionTime;
   });
   // Convert to minutes and round up
   return Math.ceil(totalSeconds / 60);
@@ -932,12 +945,18 @@ export default function CreateNewAssessmentPage() {
   const [enablePerSectionTimers, setEnablePerSectionTimers] = useState<boolean>(true); // Default to enabled
   const [hasVisitedConfigureStation, setHasVisitedConfigureStation] = useState(false);
   const [hasVisitedReviewStation, setHasVisitedReviewStation] = useState(false);
+  const [isFinalized, setIsFinalized] = useState(false); // Track if assessment is finalized
   // Edit mode is always enabled - removed isConfigureEditMode state
-  const [previewGenerating, setPreviewGenerating] = useState(false);
-  const [previewQuestions, setPreviewQuestions] = useState<any[]>([]);
-  const [previewProgress, setPreviewProgress] = useState({ current: 0, total: 0 });
-  const [showPreviewModal, setShowPreviewModal] = useState(false);
-  const [currentPreviewIndex, setCurrentPreviewIndex] = useState(0);
+  
+  // CSV Upload state
+  const [activeMethod, setActiveMethod] = useState<"role" | "manual" | "csv">("role");
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvData, setCsvData] = useState<Array<{skill_name: string; skill_description: string; importance_level: string}>>([]);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [csvExperienceMode, setCsvExperienceMode] = useState<"corporate" | "student">("corporate");
+  const [csvExperienceMin, setCsvExperienceMin] = useState(0);
+  const [csvExperienceMax, setCsvExperienceMax] = useState(10);
+  const [generatingFromCsv, setGeneratingFromCsv] = useState(false);
   const [editingQuestionIndex, setEditingQuestionIndex] = useState<number | null>(null);
   const [editingQuestion, setEditingQuestion] = useState<any>(null);
   const [regeneratingQuestionIndex, setRegeneratingQuestionIndex] = useState<number | null>(null);
@@ -958,9 +977,13 @@ export default function CreateNewAssessmentPage() {
     status: "pending" | "generated" | "completed";
     locked: boolean;
     questions: any[];
+    additionalRequirements?: string; // Optional additional requirements for question generation
   }
 
   interface TopicV2 {
+    source?: "role" | "manual" | "csv" | "ai"; // Source of the topic
+    regenerated?: boolean; // Whether topic has been improved
+    previousVersion?: string[]; // History of previous topic labels
     allowedQuestionTypes?: string[]; // Optional: For soft skills (aptitude, communication, logical_reasoning)
     id: string;
     label: string;
@@ -970,6 +993,7 @@ export default function CreateNewAssessmentPage() {
     contextSummary?: string;
     suggestedQuestionType?: "MCQ" | "Subjective";
     coding_supported?: boolean; // Whether this topic supports coding questions
+    status?: "pending" | "generated" | "completed" | "regenerated"; // Topic generation status
   }
 
   const [topicsV2, setTopicsV2] = useState<TopicV2[]>([]);
@@ -987,43 +1011,18 @@ export default function CreateNewAssessmentPage() {
   
   // AI-powered topic suggestions for custom topic input
   const [aiTopicSuggestions, setAiTopicSuggestions] = useState<string[]>([]);
+  const [suggestionsFetched, setSuggestionsFetched] = useState(false); // Track if suggestions have been fetched
   const [loadingAiSuggestions, setLoadingAiSuggestions] = useState(false);
   const [showAiSuggestions, setShowAiSuggestions] = useState(false);
   const [suggestionDebounceTimer, setSuggestionDebounceTimer] = useState<NodeJS.Timeout | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   
-  // Preview modal states - consolidated to prevent UI bouncing
-  const [previewModal, setPreviewModal] = useState<{
-    isOpen: boolean;
-    topicId: string | null;
-    rowId: string | null;
-    topic: TopicV2 | null;
-    row: QuestionRow | null;
-    questionIndex: number;
-    editingQuestion: any | null;
-  }>({
-    isOpen: false,
-    topicId: null,
-    rowId: null,
-    topic: null,
-    row: null,
-    questionIndex: 0,
-    editingQuestion: null,
-  });
-  
-  // Legacy state for backward compatibility (will be removed gradually)
-  const [showSinglePreview, setShowSinglePreview] = useState(false);
-  const [singlePreviewTopic, setSinglePreviewTopic] = useState<TopicV2 | null>(null);
-  const [singlePreviewRow, setSinglePreviewRow] = useState<QuestionRow | null>(null);
-  const [singlePreviewQuestionIndex, setSinglePreviewQuestionIndex] = useState(0);
-  const [editingSingleQuestion, setEditingSingleQuestion] = useState<any | null>(null);
-  
-  const [showBulkPreview, setShowBulkPreview] = useState(false);
-  const [bulkPreviewTopics, setBulkPreviewTopics] = useState<TopicV2[]>([]);
-  const [bulkPreviewCurrentTopicIndex, setBulkPreviewCurrentTopicIndex] = useState(0);
-  const [bulkPreviewCurrentRowIndex, setBulkPreviewCurrentRowIndex] = useState(0);
-  const [bulkPreviewCurrentQuestionIndex, setBulkPreviewCurrentQuestionIndex] = useState(0);
-  const [editingBulkQuestion, setEditingBulkQuestion] = useState<any | null>(null);
+  // Topic validation states
+  const [validatingTopic, setValidatingTopic] = useState(false);
+  const [topicValidationError, setTopicValidationError] = useState<string | null>(null);
+  const [topicValidationTimer, setTopicValidationTimer] = useState<NodeJS.Timeout | null>(null);
+  const [isTopicValid, setIsTopicValid] = useState<boolean | null>(null);
+  const [addingTopic, setAddingTopic] = useState(false); // Loading state for adding topic
 
   // Review Questions page states
   const [sectionTimers, setSectionTimers] = useState<{
@@ -1051,6 +1050,9 @@ export default function CreateNewAssessmentPage() {
   });
   const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null);
   const [editingReviewQuestion, setEditingReviewQuestion] = useState<any | null>(null);
+  // Regenerate question modal state
+  const [regeneratingQuestionId, setRegeneratingQuestionId] = useState<string | null>(null);
+  const [regenerateQuestionFeedback, setRegenerateQuestionFeedback] = useState<string>("");
   const [scheduleTimeMinutes, setScheduleTimeMinutes] = useState<number>(0);
   const [scheduleTimeWarning, setScheduleTimeWarning] = useState<string | null>(null);
   
@@ -1098,14 +1100,40 @@ export default function CreateNewAssessmentPage() {
   const isDraggingRef = useRef(false);
   const dragTargetRef = useRef<"min" | "max" | null>(null);
   const experienceRef = useRef({ min: experienceMin, max: experienceMax });
+  const previousModeRef = useRef<"corporate" | "student">(experienceMode);
 
-  // Update ref when state changes
+  // Update ref when state changes and update slider positions
   useEffect(() => {
     experienceRef.current = { min: experienceMin, max: experienceMax };
-    if (minHandleRef.current && maxHandleRef.current) {
-      const maxValue = experienceMode === "corporate" ? 20 : 4;
-      const minPercent = (experienceMin / maxValue) * 100;
-      const maxPercent = (experienceMax / maxValue) * 100;
+    if (minHandleRef.current && maxHandleRef.current && sliderRef.current) {
+      const maxValue = experienceMode === "corporate" ? 20 : 3;
+      
+      // Only clamp when mode changes
+      let clampedMin = experienceMin;
+      let clampedMax = experienceMax;
+      
+      if (previousModeRef.current !== experienceMode) {
+        // Mode changed - clamp values to new range
+        clampedMin = Math.max(0, Math.min(experienceMin, maxValue));
+        clampedMax = Math.max(clampedMin + 1, Math.min(experienceMax, maxValue));
+        
+        // Update state if values were clamped
+        if (clampedMin !== experienceMin) {
+          setExperienceMin(clampedMin);
+        }
+        if (clampedMax !== experienceMax) {
+          setExperienceMax(clampedMax);
+        }
+        
+        previousModeRef.current = experienceMode;
+      } else {
+        // Normal update - just ensure values are in valid range
+        clampedMin = Math.max(0, Math.min(experienceMin, maxValue));
+        clampedMax = Math.max(clampedMin + 1, Math.min(experienceMax, maxValue));
+      }
+      
+      const minPercent = Math.max(0, Math.min(100, (clampedMin / maxValue) * 100));
+      const maxPercent = Math.max(0, Math.min(100, (clampedMax / maxValue) * 100));
       minHandleRef.current.style.left = `${minPercent}%`;
       maxHandleRef.current.style.left = `${maxPercent}%`;
     }
@@ -1124,8 +1152,8 @@ export default function CreateNewAssessmentPage() {
     const getValueFromPosition = (x: number) => {
       const rect = slider.getBoundingClientRect();
       const percentage = Math.max(0, Math.min(100, ((x - rect.left) / rect.width) * 100));
-      // For corporate: 0-20 years, For student: 0-4 academic years
-      const maxValue = experienceMode === "corporate" ? 20 : 4;
+      // For corporate: 0-20 years, For student: 0-3 academic levels
+      const maxValue = experienceMode === "corporate" ? 20 : 3;
       return Math.round((percentage / 100) * maxValue);
     };
 
@@ -1135,17 +1163,17 @@ export default function CreateNewAssessmentPage() {
       const value = getValueFromPosition(e.clientX);
       const { min: currentMin, max: currentMax } = experienceRef.current;
       
-      const maxValue = experienceMode === "corporate" ? 20 : 4;
+      const maxValue = experienceMode === "corporate" ? 20 : 3;
       if (dragTargetRef.current === "min") {
         const newMin = Math.max(0, Math.min(value, currentMax - 1));
         experienceRef.current.min = newMin;
-        const minPercent = (newMin / maxValue) * 100;
+        const minPercent = Math.max(0, Math.min(100, (newMin / maxValue) * 100));
         minHandle.style.left = `${minPercent}%`;
         setExperienceMin(newMin);
-      } else {
+      } else if (dragTargetRef.current === "max") {
         const newMax = Math.max(currentMin + 1, Math.min(value, maxValue));
         experienceRef.current.max = newMax;
-        const maxPercent = (newMax / maxValue) * 100;
+        const maxPercent = Math.max(0, Math.min(100, (newMax / maxValue) * 100));
         maxHandle.style.left = `${maxPercent}%`;
         setExperienceMax(newMax);
       }
@@ -1175,10 +1203,20 @@ export default function CreateNewAssessmentPage() {
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
 
-    // Initial position
-    const maxValue = experienceMode === "corporate" ? 20 : 4;
-    const minPercent = (experienceMin / maxValue) * 100;
-    const maxPercent = (experienceMax / maxValue) * 100;
+    // Initial position - clamp values first
+    const maxValue = experienceMode === "corporate" ? 20 : 3;
+    const clampedMin = Math.max(0, Math.min(experienceMin, maxValue));
+    const clampedMax = Math.max(clampedMin + 1, Math.min(experienceMax, maxValue));
+    
+    if (clampedMin !== experienceMin) {
+      setExperienceMin(clampedMin);
+    }
+    if (clampedMax !== experienceMax) {
+      setExperienceMax(clampedMax);
+    }
+    
+    const minPercent = Math.max(0, Math.min(100, (clampedMin / maxValue) * 100));
+    const maxPercent = Math.max(0, Math.min(100, (clampedMax / maxValue) * 100));
     minHandle.style.left = `${minPercent}%`;
     maxHandle.style.left = `${maxPercent}%`;
 
@@ -1190,20 +1228,22 @@ export default function CreateNewAssessmentPage() {
     };
   }, [currentStation, experienceMin, experienceMax, experienceMode]);
 
-  // Auto-calculate section timers when topicsV2 changes or when entering Station 3
+  // Auto-calculate section timers from question timers when topicsV2 changes or when entering Station 3
   useEffect(() => {
     if (currentStation !== 3) return;
     
-    // Extract all questions from topicsV2
-    const allQuestions: Array<{
-      question: any;
-      questionType: string;
-      difficulty: string;
-      topicId: string;
-      rowId: string;
-      questionIndex: number;
-      topicLabel: string;
-    }> = [];
+    // Extract all questions from topicsV2 with their timers
+    const questionsByType: {
+      MCQ: Array<{ timer: number }>;
+      Subjective: Array<{ timer: number }>;
+      PseudoCode: Array<{ timer: number }>;
+      Coding: Array<{ timer: number }>;
+    } = {
+      MCQ: [],
+      Subjective: [],
+      PseudoCode: [],
+      Coding: [],
+    };
     
     // Aggregate questions from ALL topics including custom topics
     topicsV2.forEach((topic) => {
@@ -1212,64 +1252,37 @@ export default function CreateNewAssessmentPage() {
         const rowStatus = row.status;
         const isGeneratedOrCompleted = rowStatus === "generated" || rowStatus === "completed";
         if (row.questions && row.questions.length > 0 && isGeneratedOrCompleted) {
-          row.questions.forEach((question, qIdx) => {
-            allQuestions.push({
-              question,
-              questionType: row.questionType,
-              difficulty: row.difficulty,
-              topicId: topic.id,
-              rowId: row.rowId,
-              questionIndex: qIdx,
-              topicLabel: topic.label,
+          const questionType = row.questionType as keyof typeof questionsByType;
+          if (questionsByType[questionType]) {
+            row.questions.forEach((question) => {
+              // Use question timer if available, otherwise calculate default
+              let timer = question.timer;
+              if (!timer || timer < 1) {
+                const baseTime = getBaseTimePerQuestion(row.questionType);
+                const multiplier = getDifficultyMultiplier(row.difficulty);
+                let questionTime = baseTime * multiplier;
+                if (row.questionType === "MCQ" && questionTime > 40) {
+                  questionTime = 40;
+                }
+                timer = Math.max(1, Math.ceil(questionTime / 60));
+              }
+              questionsByType[questionType].push({ timer });
             });
-          });
+          }
         }
       });
     });
     
-    // Group by question type
-    const questionsByType: {
-      MCQ: Array<{ questionType: string; difficulty: string }>;
-      Subjective: Array<{ questionType: string; difficulty: string }>;
-      PseudoCode: Array<{ questionType: string; difficulty: string }>;
-      Coding: Array<{ questionType: string; difficulty: string }>;
-    } = {
-      MCQ: [],
-      Subjective: [],
-      PseudoCode: [],
-      Coding: [],
-    };
-    
-    allQuestions.forEach((q) => {
-      const type = q.questionType as keyof typeof questionsByType;
-      if (questionsByType[type]) {
-        questionsByType[type].push({
-          questionType: q.questionType,
-          difficulty: q.difficulty,
-        });
-      }
-    });
-    
-    // Calculate timers for each section
+    // Calculate section timers as sum of question timers
     const newTimers = {
-      MCQ: calculateSectionTimer(questionsByType.MCQ),
-      Subjective: calculateSectionTimer(questionsByType.Subjective),
-      PseudoCode: calculateSectionTimer(questionsByType.PseudoCode),
-      Coding: calculateSectionTimer(questionsByType.Coding),
+      MCQ: questionsByType.MCQ.reduce((sum, q) => sum + q.timer, 0),
+      Subjective: questionsByType.Subjective.reduce((sum, q) => sum + q.timer, 0),
+      PseudoCode: questionsByType.PseudoCode.reduce((sum, q) => sum + q.timer, 0),
+      Coding: questionsByType.Coding.reduce((sum, q) => sum + q.timer, 0),
     };
     
-    // Only update if values have changed
-    setSectionTimers((prev) => {
-      if (
-        prev.MCQ !== newTimers.MCQ ||
-        prev.Subjective !== newTimers.Subjective ||
-        prev.PseudoCode !== newTimers.PseudoCode ||
-        prev.Coding !== newTimers.Coding
-      ) {
-        return newTimers;
-      }
-      return prev;
-    });
+    // Update section timers
+    setSectionTimers(newTimers);
   }, [currentStation, topicsV2]);
 
   // Auto-calculate initial scores when questions are loaded in Review Questions page
@@ -1364,7 +1377,6 @@ export default function CreateNewAssessmentPage() {
     setTopicConfigs([]);
     setTopicsV2([]);
     setQuestions([]);
-    setPreviewQuestions([]);
     setFullTopicRegenLocked(false);
     setAllQuestionsGenerated(false);
     setCurrentStation(1);
@@ -1374,13 +1386,6 @@ export default function CreateNewAssessmentPage() {
     setLoading(false);
     setGeneratingRowId(null);
     setGeneratingAllQuestions(false);
-    setShowSinglePreview(false);
-    setShowBulkPreview(false);
-    setSinglePreviewTopic(null);
-    setSinglePreviewRow(null);
-    setBulkPreviewTopics([]);
-    setEditingSingleQuestion(null);
-    setEditingBulkQuestion(null);
     setInitialLoadDone(false); // Reset initial load flag
     console.log("✅ All state cleared for new assessment");
   };
@@ -1398,29 +1403,6 @@ export default function CreateNewAssessmentPage() {
       setInitialLoadDone(true); // Allow auto-save immediately for new assessments
     }
   }, [isEditMode, id]);
-
-  // Keep preview index within bounds when questions change (but don't interfere with user navigation)
-  useEffect(() => {
-    const questionsToShow = previewQuestions.length > 0 ? previewQuestions : questions;
-    const totalQuestions = questionsToShow.length;
-    
-    // Only adjust if index is truly out of bounds (don't run on every index change)
-    if (totalQuestions > 0) {
-      setCurrentPreviewIndex((prevIndex) => {
-        // Only adjust if index is out of bounds
-        if (prevIndex >= totalQuestions) {
-          const newIndex = totalQuestions - 1;
-          console.log(`[Preview] Index out of bounds, adjusting: ${prevIndex} -> ${newIndex} (total: ${totalQuestions})`);
-          return newIndex;
-        } else if (prevIndex < 0) {
-          console.log(`[Preview] Index negative, resetting to 0`);
-          return 0;
-        }
-        // Otherwise, preserve the current index (user navigation)
-        return prevIndex;
-      });
-    }
-  }, [previewQuestions.length, questions.length]); // Removed currentPreviewIndex from dependencies
 
   // SINGLE DRAFT LOGIC: Auto-save draft on changes (debounced)
   // Only auto-save if we have an assessmentId (draft exists) AND initial load is complete
@@ -1452,11 +1434,6 @@ export default function CreateNewAssessmentPage() {
         // Add old topics structure if still in use
         if (topicConfigs.length > 0) {
           draftData.topics = topicConfigs;
-        }
-
-        // Add preview questions if available
-        if (previewQuestions.length > 0) {
-          draftData.previewQuestions = previewQuestions;
         }
 
         // Add questions if available
@@ -1528,7 +1505,6 @@ export default function CreateNewAssessmentPage() {
     experienceMode,
     topicsV2,
     topicConfigs,
-    previewQuestions,
     questions,
     questionTypeTimes,
     enablePerSectionTimers,
@@ -1750,6 +1726,15 @@ export default function CreateNewAssessmentPage() {
               topic.questionRows = [];
             }
             
+            // Ensure topic status is preserved or set based on questions
+            if (!topic.status) {
+              // If topic has any generated questions, mark as "generated", otherwise "pending"
+              const hasGeneratedQuestions = topic.questionRows.some((row: any) => 
+                row.questions && row.questions.length > 0 && row.status === "generated"
+              );
+              topic.status = hasGeneratedQuestions ? "generated" : "pending";
+            }
+            
             // Ensure each questionRow has all required fields with defaults
             topic.questionRows.forEach((row: any) => {
               // Ensure status defaults to "pending" if not set
@@ -1774,6 +1759,11 @@ export default function CreateNewAssessmentPage() {
               // Ensure rowId exists
               if (!row.rowId) {
                 row.rowId = `row_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+              }
+              
+              // Ensure additionalRequirements is preserved
+              if (row.additionalRequirements === undefined) {
+                row.additionalRequirements = null;
               }
             });
             
@@ -2030,26 +2020,23 @@ export default function CreateNewAssessmentPage() {
           setPassPercentage(assessment.passPercentage);
         }
         
-        // Load preview questions if available
-        if (assessment.previewQuestions && Array.isArray(assessment.previewQuestions) && assessment.previewQuestions.length > 0) {
-          console.log(`[Preview] Loading ${assessment.previewQuestions.length} preview questions from draft`);
-          setPreviewQuestions(assessment.previewQuestions);
-          setCurrentPreviewIndex(0);
-          
-          // Also convert preview questions to questions for review page if questions don't exist
-          if (!assessmentData.questions || assessmentData.questions.length === 0) {
-            console.log(`[Preview] Converting ${assessment.previewQuestions.length} preview questions to questions for review page`);
-            setQuestions(assessment.previewQuestions);
-          }
-        } else {
-          console.log("[Preview] No preview questions in draft:", {
-            hasPreviewQuestions: !!assessment.previewQuestions,
-            isArray: Array.isArray(assessment.previewQuestions),
-            length: assessment.previewQuestions?.length || 0,
-          });
+        // Load questions if available
+        if (assessment.questions && Array.isArray(assessment.questions) && assessment.questions.length > 0) {
+          setQuestions(assessment.questions);
         }
         
         // SINGLE DRAFT: No need to store in localStorage - backend maintains single draft
+        
+        // Check if assessment is finalized (active or completed)
+        const assessmentStatus = assessment.status || "draft";
+        const finalized = assessmentStatus === "ready" || assessmentStatus === "active" || assessmentStatus === "completed" || assessmentStatus === "scheduled";
+        setIsFinalized(finalized);
+        
+        // If finalized (active or completed), redirect to Analytics page - NO EDIT ALLOWED
+        if (finalized) {
+          router.push(`/assessments/${assessmentId}/analytics`);
+          return;
+        }
         
         // Determine which station to show based on what's been completed
         // PRIORITY: Check topics_v2 first (new format)
@@ -2152,6 +2139,327 @@ export default function CreateNewAssessmentPage() {
 
   const handleRemoveSkill = (skillToRemove: string) => {
     setSelectedSkills(selectedSkills.filter((s) => s !== skillToRemove));
+  };
+
+  // CSV Template Download
+  const downloadCsvTemplate = () => {
+    const csvContent = `skill_name,skill_description,importance_level
+Java OOP,"Encapsulation; polymorphism basics; abstraction fundamentals",High
+React Hooks,"useState and useEffect patterns; lifecycle behavior",Medium
+SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", "skill_requirements_template.csv");
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // CSV File Parsing (handles quoted fields, semicolon-separated descriptions, and strict 3-column validation)
+  const parseCsvFile = (file: File): Promise<Array<{skill_name: string; skill_description: string; importance_level: string}>> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const text = e.target?.result as string;
+          const lines = text.split("\n").filter(line => line.trim());
+          if (lines.length < 2) {
+            reject(new Error("CSV must have at least a header row and one data row"));
+            return;
+          }
+          
+          // Robust CSV parser that handles quoted fields properly (works in Chrome, Edge, Safari, Firefox)
+          const parseCsvLine = (line: string): string[] => {
+            const result: string[] = [];
+            let current = "";
+            let inQuotes = false;
+            
+            for (let i = 0; i < line.length; i++) {
+              const char = line[i];
+              const nextChar = i < line.length - 1 ? line[i + 1] : null;
+              
+              if (char === '"') {
+                // Handle escaped quotes ("")
+                if (inQuotes && nextChar === '"') {
+                  current += '"';
+                  i++; // Skip next quote
+                } else {
+                  inQuotes = !inQuotes;
+                }
+              } else if (char === ',' && !inQuotes) {
+                result.push(current.trim());
+                current = "";
+              } else {
+                current += char;
+              }
+            }
+            // Add the last field
+            result.push(current.trim());
+            return result;
+          };
+          
+          // Parse header
+          const header = parseCsvLine(lines[0]).map(h => h.toLowerCase().replace(/^"|"$/g, "").trim());
+          
+          // STRICT VALIDATION: Must have exactly 3 columns
+          if (header.length !== 3) {
+            reject(new Error("Invalid CSV: Only three columns allowed — skill_name, skill_description, importance_level."));
+            return;
+          }
+          
+          const skillNameIdx = header.indexOf("skill_name");
+          const skillDescIdx = header.indexOf("skill_description");
+          const importanceIdx = header.indexOf("importance_level");
+          
+          if (skillNameIdx === -1 || skillDescIdx === -1 || importanceIdx === -1) {
+            reject(new Error("CSV must have columns: skill_name, skill_description, importance_level"));
+            return;
+          }
+          
+          // Parse data rows
+          const data: Array<{skill_name: string; skill_description: string; importance_level: string}> = [];
+          for (let i = 1; i < lines.length; i++) {
+            const values = parseCsvLine(lines[i]).map(v => {
+              // Remove surrounding quotes if present, but preserve content
+              v = v.trim();
+              if (v.startsWith('"') && v.endsWith('"')) {
+                v = v.slice(1, -1);
+              }
+              // Unescape double quotes
+              v = v.replace(/""/g, '"');
+              return v.trim();
+            });
+            
+            // STRICT VALIDATION: Each row must have exactly 3 columns
+            if (values.length !== 3) {
+              reject(new Error(`Row ${i + 1}: Invalid CSV format. Each row must have exactly 3 columns (found ${values.length}).`));
+              return;
+            }
+            
+            const skillName = values[skillNameIdx]?.trim() || "";
+            const skillDesc = values[skillDescIdx]?.trim() || "";
+            const importance = values[importanceIdx]?.trim() || "";
+            
+            if (!skillName) {
+              reject(new Error(`Row ${i + 1}: skill_name cannot be empty`));
+              return;
+            }
+            
+            if (!["Low", "Medium", "High"].includes(importance)) {
+              reject(new Error(`Row ${i + 1}: importance_level must be Low, Medium, or High (found: "${importance}")`));
+              return;
+            }
+            
+            data.push({
+              skill_name: skillName,
+              skill_description: skillDesc, // Can contain semicolons - that's allowed
+              importance_level: importance
+            });
+          }
+          
+          if (data.length === 0) {
+            reject(new Error("No valid data rows found in CSV"));
+            return;
+          }
+          
+          resolve(data);
+        } catch (err: any) {
+          reject(err);
+        }
+      };
+      reader.onerror = () => reject(new Error("Failed to read CSV file"));
+      reader.readAsText(file);
+    });
+  };
+
+  // Handle Skill Requirements CSV File Upload
+  const handleSkillRequirementsCsvUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    setCsvFile(file);
+    setCsvError(null);
+    
+    try {
+      const parsed = await parseCsvFile(file);
+      setCsvData(parsed);
+    } catch (err: any) {
+      setCsvError(err.message || "Failed to parse CSV file");
+      setCsvData([]);
+    }
+  };
+
+  // Unified topic generation that merges skills from all three methods
+  const handleGenerateTopicsUnified = async () => {
+    // Collect skills from all three sources
+    
+    // Method A (Role-based): Skills from topic cards (auto-generated from job designation)
+    const roleBasedSkills = selectedSkills
+      .filter((skill) => topicCards.includes(skill))
+      .map(skill => ({
+        skill_name: skill.trim(),
+        source: "role" as const,
+        description: null,
+        importance_level: null
+      }));
+
+    // Method B (Manual): Skills manually entered that are NOT in topic cards
+    const manualSkills = selectedSkills
+      .filter((skill) => !topicCards.includes(skill))
+      .map(skill => ({
+        skill_name: skill.trim(),
+        source: "manual" as const,
+        description: null,
+        importance_level: null
+      }));
+
+    // Method C (CSV): Skills from CSV upload
+    const csvSkills = csvData.map(row => ({
+      skill_name: row.skill_name.trim(),
+      source: "csv" as const,
+      description: row.skill_description || null,
+      importance_level: row.importance_level || null
+    }));
+
+    // Merge all skills from all methods that have data
+    const allSkills = [...roleBasedSkills, ...manualSkills, ...csvSkills];
+
+    // Deduplicate by skill_name (case-insensitive) - keep first occurrence
+    const seen = new Set<string>();
+    const combinedSkills = allSkills.filter(skill => {
+      const normalized = skill.skill_name.toLowerCase().trim();
+      if (seen.has(normalized)) {
+        return false; // Skip duplicates
+      }
+      seen.add(normalized);
+      return true;
+    });
+
+    // Validation: Must have at least one skill from any method
+    if (combinedSkills.length === 0) {
+      setError("Please add at least one skill from any method (Role-based, Manual, or CSV)");
+      return;
+    }
+
+    // Log for debugging (can be removed in production)
+    console.log("Generating topics with combined skills:", {
+      roleBased: roleBasedSkills.length,
+      manual: manualSkills.length,
+      csv: csvSkills.length,
+      total: combinedSkills.length,
+      skills: combinedSkills.map(s => `${s.skill_name} (${s.source})`)
+    });
+
+    setLoading(true);
+    setError(null);
+    setCsvError(null);
+
+    try {
+      const response = await axios.post("/api/assessments/generate-topics-v2", {
+        assessmentId: assessmentId || undefined,
+        assessmentTitle: finalTitle.trim() || undefined,
+        jobDesignation: jobDesignation.trim() || undefined,
+        combinedSkills: combinedSkills,
+        experienceMin: experienceMin,
+        experienceMax: experienceMax,
+        experienceMode: experienceMode,
+      });
+
+      if (response.data?.success) {
+        const generatedTopics = response.data.data.topics || [];
+        // Ensure all newly generated topics have status "pending"
+        const topicsWithStatus = generatedTopics.map((topic: TopicV2) => ({
+          ...topic,
+          status: "pending" as const // Newly generated topics are always "pending"
+        }));
+        setTopicsV2(topicsWithStatus);
+        setAssessmentId(response.data.data.assessmentId || assessmentId);
+        setFullTopicRegenLocked(false);
+        setAllQuestionsGenerated(false);
+        setHasVisitedConfigureStation(true);
+        setCurrentStation(2);
+      } else {
+        setError("Failed to generate topics");
+      }
+    } catch (err: any) {
+      console.error("Error generating topics:", err);
+      setError(err.response?.data?.message || err.message || "Failed to generate topics");
+    } finally {
+      setLoading(false);
+      setGeneratingFromCsv(false);
+    }
+  };
+
+  // Generate Topics from CSV Requirements (DEPRECATED - use handleGenerateTopicsUnified)
+  const handleGenerateTopicsFromCsv = async () => {
+    if (csvData.length === 0) {
+      setCsvError("Please upload a valid CSV file first");
+      return;
+    }
+    
+    setGeneratingFromCsv(true);
+    setError(null);
+    setCsvError(null);
+    
+    try {
+      const response = await axios.post("/api/v1/assessments/generate-topics-from-requirements", {
+        experienceMode: experienceMode,
+        experienceMin: experienceMin,
+        experienceMax: experienceMax,
+        requirements: csvData
+      });
+      
+      if (response.data?.success) {
+        const generatedTopics = response.data.data.topics || [];
+        
+        // Update topics_v2 with CSV-generated topics
+        setTopicsV2(generatedTopics);
+        
+        // If editing, update the assessment draft
+        if (isEditMode && assessmentId) {
+          await axios.post("/api/assessments/update-draft", {
+            assessmentId: assessmentId,
+            topics_v2: generatedTopics
+          });
+        } else if (!assessmentId) {
+          // Create new assessment draft with CSV-generated topics
+          const createResponse = await axios.post("/api/assessments/generate-topics", {
+            assessmentTitle: finalTitle.trim() || undefined,
+            jobDesignation: "CSV Requirements",
+            selectedSkills: csvData.map(r => r.skill_name),
+            experienceMin: experienceMin,
+            experienceMax: experienceMax,
+            experienceMode: experienceMode
+          });
+          
+          if (createResponse.data?.success) {
+            setAssessmentId(createResponse.data.data.assessmentId);
+            // Override with CSV-generated topics
+            setTopicsV2(generatedTopics);
+            await axios.post("/api/assessments/update-draft", {
+              assessmentId: createResponse.data.data.assessmentId,
+              topics_v2: generatedTopics
+            });
+          }
+        }
+        
+        // Show success message
+        setError(null);
+        setCsvError(null);
+        // Navigate to Station 2 after successful generation
+        setCurrentStation(2);
+      } else {
+        setCsvError("Failed to generate topics from requirements");
+      }
+    } catch (err: any) {
+      console.error("Error generating topics from CSV:", err);
+      setCsvError(err.response?.data?.message || err.message || "Failed to generate topics from requirements");
+    } finally {
+      setGeneratingFromCsv(false);
+    }
   };
 
   const handleGenerateTopics = async () => {
@@ -2356,13 +2664,13 @@ export default function CreateNewAssessmentPage() {
   
   const handleRegenerateTopicV2 = async (topicId: string) => {
     if (!assessmentId || fullTopicRegenLocked) {
-      setError("Topic regeneration is locked");
+      setError("Topic improvement is locked");
       return;
     }
     
     const topic = topicsV2.find(t => t.id === topicId);
     if (!topic || topic.locked) {
-      setError("Topic is locked and cannot be regenerated");
+      setError("Topic is locked and cannot be improved");
       return;
     }
     
@@ -2373,7 +2681,7 @@ export default function CreateNewAssessmentPage() {
                           topic.questionRows.some(row => row.questions && row.questions.length > 0 && row.status === "generated");
     
     if (isCustomTopic) {
-      setError("Custom topics cannot be regenerated. Use the Preview button on the question row to regenerate individual questions.");
+      setError("Custom topics cannot be improved. Use the Preview button on the question row to regenerate individual questions.");
       return;
     }
     
@@ -2381,322 +2689,101 @@ export default function CreateNewAssessmentPage() {
     setError(null);
     
     try {
-      const response = await axios.post("/api/assessments/regenerate-topic-v2", {
-        assessmentId: assessmentId,
-        topicId: topicId,
-        assessmentTitle: finalTitle.trim() || undefined,
-        jobDesignation: jobDesignation.trim(),
-        selectedSkills: selectedSkills,
-        experienceMin: experienceMin,
-        experienceMax: experienceMax,
-        experienceMode: experienceMode,
-      });
-      
-      if (response.data?.success) {
-        const updatedTopic = response.data.data.topic;
-        setTopicsV2(prev => prev.map(t => t.id === topicId ? updatedTopic : t));
-      } else {
-        setError("Failed to regenerate topic");
+      // Get previous topic label
+      const previousTopicLabel = topic.label || "";
+      if (!previousTopicLabel) {
+        setError("Topic label is missing");
+        return;
       }
-    } catch (err: any) {
-      console.error("Error regenerating topic:", err);
-      setError(err.response?.data?.message || err.message || "Failed to regenerate topic");
-    } finally {
-      setGeneratingRowId(null);
-    }
-  };
-  
-  // handlePreviewTopicV2 is replaced by handlePreviewRow - keeping for backward compatibility but it's not used
-  
-  const handlePreviewRow = async (topicId: string, rowId: string) => {
-    if (!assessmentId) {
-      setError("Assessment ID is required");
-      return;
-    }
-    
-    const topic = topicsV2.find(t => t.id === topicId);
-    if (!topic) {
-      setError("Topic not found");
-      return;
-    }
-    
-    const row = topic.questionRows.find(r => r.rowId === rowId);
-    if (!row) {
-      setError("Question row not found");
-      return;
-    }
-    
-    // If questions already exist, just open the preview modal (NO STATE MUTATION)
-    if (row.questions && row.questions.length > 0) {
-      setPreviewModal({
-        isOpen: true,
-        topicId: topicId,
-        rowId: rowId,
-        topic: topic,
-        row: row,
-        questionIndex: 0,
-        editingQuestion: null,
-      });
-      // Legacy state for backward compatibility
-      setSinglePreviewTopic(topic);
-      setSinglePreviewRow(row);
-      setSinglePreviewQuestionIndex(0);
-      setShowSinglePreview(true);
-      return;
-    }
-    
-    // If row is locked but has no questions, unlock it (data inconsistency fix)
-    // This is the ONLY state update allowed before generation
-    if (row.locked && (!row.questions || row.questions.length === 0)) {
-      setTopicsV2(prev => prev.map(t => {
-        if (t.id === topicId) {
-          return {
-            ...t,
-            questionRows: t.questionRows.map(r => {
-              if (r.rowId === rowId) {
-                return { ...r, locked: false, status: "pending" };
-              }
-              return r;
-            })
+      
+      // Get topic source (default to "manual" if not set)
+      const topicSource = (topic.source || "manual") as "role" | "manual" | "csv";
+      
+      // Reconstruct skill metadata based on source
+      let skillMetadataProvided: any = undefined;
+      
+      if (topicSource === "csv") {
+        // Try to find skill from CSV data
+        const csvSkill = csvData.find(row => 
+          row.skill_name.toLowerCase().trim() === previousTopicLabel.toLowerCase().trim() ||
+          previousTopicLabel.toLowerCase().includes(row.skill_name.toLowerCase().trim())
+        );
+        if (csvSkill) {
+          skillMetadataProvided = {
+            skill_name: csvSkill.skill_name,
+            description: csvSkill.skill_description,
+            importance_level: csvSkill.importance_level
           };
         }
-        return t;
-      }));
-    }
-    
-    // Validate required fields before generating
-    if (!row.questionType || !row.difficulty || !row.questionsCount) {
-      setError("Question type, difficulty, and count are required");
-      return;
-    }
-    
-    // Generate questions - ONLY update generatingRowId (doesn't affect layout)
-    setGeneratingRowId(rowId);
-    setError(null);
-    
-    try {
-      const response = await axios.post("/api/assessments/generate-question", {
+      } else if (topicSource === "role") {
+        // For role-based, try to find in selectedSkills
+        const matchingSkill = selectedSkills.find(skill => 
+          skill.toLowerCase().trim() === previousTopicLabel.toLowerCase().trim() ||
+          previousTopicLabel.toLowerCase().includes(skill.toLowerCase().trim())
+        );
+        if (matchingSkill) {
+          skillMetadataProvided = {
+            skill_name: matchingSkill
+          };
+        }
+      }
+      
+      const response = await axios.post("/api/assessments/improve-topic", {
         assessmentId: assessmentId,
         topicId: topicId,
-        rowId: rowId,
-        topicLabel: topic.label,
-        questionType: row.questionType,
-        difficulty: row.difficulty,
-        questionsCount: row.questionsCount,
-        canUseJudge0: row.canUseJudge0 || false,
-        // Include additional context for better generation
-        category: topic.category || "technical",
+        previousTopicLabel: previousTopicLabel,
+        experienceMode: experienceMode,
         experienceMin: experienceMin,
         experienceMax: experienceMax,
-        experienceMode: experienceMode,
+        source: topicSource,
+        skillMetadataProvided: skillMetadataProvided,
       });
       
       if (response.data?.success) {
-        const updatedRow = response.data.data.row;
-        const updatedTopic = response.data.data.topic;
+        const responseData = response.data.data;
+        const updatedTopicLabel = responseData.updatedTopicLabel || responseData.topic?.label;
         
-        // Update state with generated questions (IMMUTABLE UPDATE - NO MUTATION)
-        const updatedTopics = topicsV2.map(t => {
-          if (t.id === topicId) {
-            return {
-              ...t,
-              locked: updatedTopic.locked || t.locked,
-              questionRows: t.questionRows.map(r => {
-                if (r.rowId === rowId) {
-                  return {
-                    ...updatedRow,
-                    status: "completed" as const, // Mark as completed after generation
-                  };
-                }
-                return r;
-              })
-            };
-          }
-          return t;
-        });
-        
-        setTopicsV2(updatedTopics);
-        
-        // Immediately update assessment draft with the new topic + question
-        if (assessmentId) {
-          try {
-            await axios.put("/api/assessments/update-draft", {
-              assessmentId,
-              topics_v2: updatedTopics,
-            });
-            console.log(`[Custom Topic] Draft updated with generated question for topic ${topicId}, row ${rowId}`);
-          } catch (err: any) {
-            console.error("Error saving draft after row preview:", err);
-            // Don't block UI, just log error
-          }
-        }
-        
-        // Open preview modal with generated questions (NO TOPIC STATE MUTATION)
-        setPreviewModal({
-          isOpen: true,
-          topicId: topicId,
-          rowId: rowId,
-          topic: {
-            ...topic,
-            locked: updatedTopic.locked || topic.locked,
-            questionRows: topic.questionRows.map(r => r.rowId === rowId ? {
-              ...updatedRow,
-              status: "completed" as const,
-            } : r)
-          },
-          row: {
-            ...updatedRow,
-            status: "completed" as const,
-          },
-          questionIndex: 0,
-          editingQuestion: null,
-        });
-        // Legacy state for backward compatibility
-        setSinglePreviewTopic({
-          ...topic,
-          questionRows: topic.questionRows.map(r => r.rowId === rowId ? {
-            ...updatedRow,
-            status: "completed" as const,
-          } : r)
-        });
-        setSinglePreviewRow({
-          ...updatedRow,
-          status: "completed" as const,
-        });
-        setSinglePreviewQuestionIndex(0);
-        setShowSinglePreview(true);
-      } else {
-        setError(response.data?.message || "Failed to generate questions");
-      }
-    } catch (err: any) {
-      console.error("Error generating questions for preview:", err);
-      const errorMessage = err.response?.data?.message || err.response?.data?.detail || err.message || "Failed to generate questions";
-      setError(errorMessage);
-    } finally {
-      setGeneratingRowId(null);
-    }
-  };
-  
-  // ============================================================================
-  // PART 1: PREVIEW ALL BUTTON LOGIC (COMPLETE REWRITE)
-  // ============================================================================
-  const handlePreviewAllQuestionsV2 = async () => {
-    if (!assessmentId) {
-      setError("Assessment ID is required");
-      return;
-    }
-    
-    setError(null);
-    
-    // STEP 1: Collect all rows that need generation (only pending rows)
-    const rowsToGenerate: Array<{ topicId: string; rowId: string; topic: TopicV2; row: QuestionRow }> = [];
-    
-    topicsV2.forEach(topic => {
-      topic.questionRows.forEach(row => {
-        const rowStatus = row.status || "pending";
-        
-        // Only generate pending rows - skip generated/completed rows
-        if (rowStatus === "pending") {
-          rowsToGenerate.push({ topicId: topic.id, rowId: row.rowId, topic, row });
-        }
-      });
-    });
-    
-    // STEP 2: Display existing generated questions immediately
-    // Open bulk preview modal IMMEDIATELY with existing questions
-    setBulkPreviewTopics([...topicsV2]);
-    setBulkPreviewCurrentTopicIndex(0);
-    setBulkPreviewCurrentRowIndex(0);
-    setBulkPreviewCurrentQuestionIndex(0);
-    setShowBulkPreview(true);
-    
-    // If no rows need generation, just show existing questions
-    if (rowsToGenerate.length === 0) {
-      setGeneratingAllQuestions(false);
-      return;
-    }
-    
-    // STEP 4: For questionRows where status = "pending": generate sequentially
-    setGeneratingAllQuestions(true);
-    
-    const updatedTopics = [...topicsV2];
-    
-    for (const { topicId, rowId, topic, row } of rowsToGenerate) {
-      try {
-        const response = await axios.post("/api/assessments/generate-question", {
-          assessmentId: assessmentId,
-          topicId: topicId,
-          rowId: rowId,
-          topicLabel: topic.label,
-          questionType: row.questionType,
-          difficulty: row.difficulty,
-          questionsCount: row.questionsCount,
-          canUseJudge0: row.canUseJudge0 || false,
-          category: topic.category || "technical",
-          experienceMin: experienceMin,
-          experienceMax: experienceMax,
-          experienceMode: experienceMode,
-        });
-        
-        if (response.data?.success) {
-          const updatedRow = response.data.data.row;
-          const updatedTopic = response.data.data.topic;
-          
-          // Update local state
-          const topicIndex = updatedTopics.findIndex(t => t.id === topicId);
-          if (topicIndex !== -1) {
-            const rowIndex = updatedTopics[topicIndex].questionRows.findIndex(r => r.rowId === rowId);
-            if (rowIndex !== -1) {
-              updatedTopics[topicIndex] = {
-                ...updatedTopics[topicIndex],
-                questionRows: updatedTopics[topicIndex].questionRows.map((r, idx) => 
-                  idx === rowIndex ? {
-                    ...updatedRow,
-                    status: "generated" as const, // Mark as generated
-                  } : r
-                ),
-              };
-            }
-          }
-          
-          // STEP 5: Update bulk preview topics LIVE (append newly generated questions)
-          const newBulkTopics = updatedTopics.map(t => {
+        if (updatedTopicLabel) {
+          // Update only the label, preserve everything else
+          setTopicsV2(prev => prev.map(t => {
             if (t.id === topicId) {
+              const previousVersions = t.previousVersion || [];
+              const currentLabel = t.label;
+              if (!previousVersions.includes(currentLabel)) {
+                previousVersions.push(currentLabel);
+              }
               return {
                 ...t,
-                questionRows: t.questionRows.map(r => r.rowId === rowId ? {
-                  ...updatedRow,
-                  status: "generated" as const,
-                } : r),
+                label: updatedTopicLabel,
+                regenerated: true,
+                previousVersion: previousVersions,
+                status: "regenerated" as const // Set status to "regenerated" so questions will be regenerated
               };
             }
             return t;
-          });
+          }));
           
-          setBulkPreviewTopics([...newBulkTopics]);
-          setTopicsV2([...updatedTopics]);
-          
-          // Update assessment draft
-          if (assessmentId) {
-            try {
-              await axios.put("/api/assessments/update-draft", {
-                assessmentId,
-                topics_v2: updatedTopics,
-              });
-            } catch (err: any) {
-              console.error("Error saving draft after generation:", err);
-            }
-          }
+          // Also update topicInputValues to reflect the new label in the input field
+          setTopicInputValues(prev => ({
+            ...prev,
+            [topicId]: updatedTopicLabel
+          }));
+        } else {
+          console.error("No updatedTopicLabel in response:", response.data);
+          setError("Failed to get improved topic label");
         }
-      } catch (err: any) {
-        console.error(`Error generating questions for row ${rowId}:`, err);
-        // Continue with next row - don't block
+      } else {
+        setError("Failed to improve topic");
       }
+    } catch (err: any) {
+      console.error("Error improving topic:", err);
+      setError(err.response?.data?.message || err.message || "Failed to improve topic");
+    } finally {
+      setGeneratingRowId(null);
     }
-    
-    setGeneratingAllQuestions(false);
-    // Modal stays open - user can close manually
   };
+  
+  // Preview functionality removed - handlePreviewRow and handlePreviewAllQuestionsV2 functions removed
   
   // ============================================================================
   // PART 2: REGENERATION LOGIC FOR ALL QUESTION TYPES (INCLUDING CODING)
@@ -2738,16 +2825,19 @@ export default function CreateNewAssessmentPage() {
       // 5. Update UI immediately
       
       // Step 1 & 2: Delete existing questions and set status to pending
+      // Also set topic status to "regenerated" so it will regenerate questions
       const updatedTopics = topicsV2.map(t => {
         if (t.id === topicId) {
           return {
             ...t,
+            status: "regenerated" as const, // Set topic status to "regenerated"
             questionRows: t.questionRows.map(r => {
               if (r.rowId === rowId) {
                 return {
                   ...r,
                   questions: [], // Delete existing questions
                   status: "pending" as const, // Set to pending
+                  locked: false, // Unlock row for regeneration
                 };
               }
               return r;
@@ -2759,20 +2849,21 @@ export default function CreateNewAssessmentPage() {
       setTopicsV2(updatedTopics);
       
       // Step 3: Generate new question for this row ONLY
-      const response = await axios.post("/api/assessments/generate-question", {
-        assessmentId: assessmentId,
-        topicId: topicId,
-        rowId: rowId,
-        topicLabel: topic.label,
-        questionType: row.questionType,
-        difficulty: row.difficulty,
-        questionsCount: row.questionsCount,
-        canUseJudge0: row.canUseJudge0 || false,
-        category: topic.category || "technical",
-        experienceMin: experienceMin,
-        experienceMax: experienceMax,
-        experienceMode: experienceMode,
-      });
+          const response = await axios.post("/api/assessments/generate-question", {
+            assessmentId: assessmentId,
+            topicId: topicId,
+            rowId: rowId,
+            topicLabel: topic.label,
+            questionType: row.questionType,
+            difficulty: row.difficulty,
+            questionsCount: row.questionsCount,
+            canUseJudge0: row.canUseJudge0 || false,
+            category: topic.category || "technical",
+            experienceMin: experienceMin,
+            experienceMax: experienceMax,
+            experienceMode: experienceMode,
+            additionalRequirements: row.additionalRequirements || undefined,
+          });
       
       if (response.data?.success) {
         const updatedRow = response.data.data.row;
@@ -2781,17 +2872,25 @@ export default function CreateNewAssessmentPage() {
         // Step 4 & 5: Replace old question and update UI immediately
         const finalTopics = updatedTopics.map(t => {
           if (t.id === topicId) {
+            const updatedRows = t.questionRows.map(r => {
+              if (r.rowId === rowId) {
+                return {
+                  ...updatedRow,
+                  status: "generated" as const, // Mark as generated after regeneration
+                };
+              }
+              return r;
+            });
+            
+            // Check if all rows have generated questions
+            const allRowsGenerated = updatedRows.every(r => 
+              r.status === "generated" && r.questions && r.questions.length > 0
+            );
+            
             return {
               ...t,
-              questionRows: t.questionRows.map(r => {
-                if (r.rowId === rowId) {
-                  return {
-                    ...updatedRow,
-                    status: "generated" as const, // Mark as generated after regeneration
-                  };
-                }
-                return r;
-              }),
+              questionRows: updatedRows,
+              status: allRowsGenerated ? "generated" as const : (t.status || "pending"), // Update topic status
             };
           }
           return t;
@@ -2811,21 +2910,7 @@ export default function CreateNewAssessmentPage() {
           }
         }
         
-        // If preview modal is open for this row, update it
-        if (previewModal.isOpen && previewModal.topicId === topicId && previewModal.rowId === rowId) {
-          setPreviewModal({
-            ...previewModal,
-            row: {
-              ...updatedRow,
-              status: "generated" as const,
-            },
-            questionIndex: 0,
-          });
-          setSinglePreviewRow({
-            ...updatedRow,
-            status: "generated" as const,
-          });
-        }
+        // Preview modal removed - no longer updating preview state
       } else {
         setError(response.data?.message || "Failed to regenerate question");
       }
@@ -2837,9 +2922,230 @@ export default function CreateNewAssessmentPage() {
     }
   };
   
+  // Auto-generate all pending questions when moving to Review Questions
+  // ONLY generates for topics with status "pending" or "regenerated"
+  // NEVER regenerates topics with status "generated" or "completed"
+  const handleNextToReviewQuestions = async () => {
+    if (!assessmentId) {
+      setError("Assessment ID is required");
+      return;
+    }
+
+    if (!topicsV2 || topicsV2.length === 0) {
+      setError("Please configure at least one topic");
+      return;
+    }
+
+    // Find topics that need question generation (ONLY pending or regenerated)
+    const topicsToGenerate: Array<{
+      topic: TopicV2;
+      rows: Array<{ rowId: string; row: QuestionRow }>;
+    }> = [];
+
+    topicsV2.forEach(topic => {
+      const topicStatus = topic.status || "pending";
+      
+      // ONLY generate for topics with status "pending" or "regenerated"
+      // SKIP topics with status "generated" or "completed"
+      if (topicStatus === "pending" || topicStatus === "regenerated") {
+        const rowsToGenerate: Array<{ rowId: string; row: QuestionRow }> = [];
+        
+        topic.questionRows.forEach(row => {
+          // Only generate for rows that don't have questions or are pending
+          const needsGeneration = 
+            row.status === "pending" || 
+            !row.questions || 
+            row.questions.length === 0;
+          
+          if (needsGeneration && !row.locked) {
+            rowsToGenerate.push({
+              rowId: row.rowId,
+              row
+            });
+          }
+        });
+
+        if (rowsToGenerate.length > 0) {
+          topicsToGenerate.push({
+            topic,
+            rows: rowsToGenerate
+          });
+        }
+      }
+    });
+
+    if (topicsToGenerate.length === 0) {
+      // All topics already have questions generated, just move to next station
+      setCurrentStation(3);
+      return;
+    }
+
+    // Generate questions for all pending/regenerated topics
+    setGeneratingAllQuestions(true);
+    setError(null);
+
+    try {
+      // Generate questions sequentially to avoid overwhelming the API
+      for (const { topic, rows } of topicsToGenerate) {
+        for (const { rowId, row } of rows) {
+          try {
+            const response = await axios.post("/api/assessments/generate-question", {
+              assessmentId: assessmentId,
+              topicId: topic.id,
+              rowId: rowId,
+              topicLabel: topic.label,
+              questionType: row.questionType,
+              difficulty: row.difficulty,
+              questionsCount: row.questionsCount,
+              canUseJudge0: row.canUseJudge0 || false,
+              category: topic.category || "technical",
+              experienceMin: experienceMin,
+              experienceMax: experienceMax,
+              experienceMode: experienceMode,
+              additionalRequirements: row.additionalRequirements || undefined,
+            });
+
+            if (response.data?.success) {
+              const updatedRow = response.data.data.row;
+              
+              // Add timer to each question if not present
+              if (updatedRow.questions && Array.isArray(updatedRow.questions)) {
+                updatedRow.questions = updatedRow.questions.map((q: any) => {
+                  if (!q.timer) {
+                    // Calculate timer based on question type and difficulty
+                    const baseTime = getBaseTimePerQuestion(row.questionType);
+                    const multiplier = getDifficultyMultiplier(row.difficulty);
+                    let questionTime = baseTime * multiplier;
+                    
+                    // Cap MCQ questions at 40 seconds maximum
+                    if (row.questionType === "MCQ" && questionTime > 40) {
+                      questionTime = 40;
+                    }
+                    
+                    // Convert to minutes (minimum 1 minute)
+                    q.timer = Math.max(1, Math.ceil(questionTime / 60));
+                  }
+                  // Initialize oldVersions if not present
+                  if (!q.oldVersions) {
+                    q.oldVersions = [];
+                  }
+                  return q;
+                });
+              }
+              
+              // Update the topic in state
+              setTopicsV2(prev => prev.map(t => 
+                t.id === topic.id 
+                  ? {
+                      ...t,
+                      questionRows: t.questionRows.map(r => 
+                        r.rowId === rowId ? updatedRow : r
+                      ),
+                      // Update topic status to "generated" after successful generation
+                      status: "generated" as const
+                    }
+                  : t
+              ));
+            } else {
+              console.warn(`Failed to generate questions for topic ${topic.label}, row ${rowId}`);
+            }
+          } catch (err: any) {
+            console.error(`Error generating questions for topic ${topic.label}, row ${rowId}:`, err);
+            // Continue with other rows even if one fails
+          }
+        }
+      }
+
+      // Save draft after generation with updated statuses
+      if (assessmentId) {
+        // Reconstruct combinedSkills from current state (same logic as handleGenerateTopicsUnified)
+        const roleBasedSkills = selectedSkills
+          .filter((skill) => topicCards.includes(skill))
+          .map(skill => ({
+            skill_name: skill.trim(),
+            source: "role" as const,
+            description: null,
+            importance_level: null
+          }));
+        
+        const manualSkills = selectedSkills
+          .filter((skill) => !topicCards.includes(skill))
+          .map(skill => ({
+            skill_name: skill.trim(),
+            source: "manual" as const,
+            description: null,
+            importance_level: null
+          }));
+        
+        const csvSkills = csvData.map(row => ({
+          skill_name: row.skill_name.trim(),
+          source: "csv" as const,
+          description: row.skill_description || null,
+          importance_level: row.importance_level || null
+        }));
+        
+        const allSkills = [...roleBasedSkills, ...manualSkills, ...csvSkills];
+        const seen = new Set<string>();
+        const combinedSkills = allSkills.filter(skill => {
+          const normalized = skill.skill_name.toLowerCase().trim();
+          if (seen.has(normalized)) {
+            return false;
+          }
+          seen.add(normalized);
+          return true;
+        });
+        
+        await axios.put("/api/assessments/update-draft", {
+          assessmentId: assessmentId,
+          draft: {
+            topics_v2: topicsV2.map(t => {
+              const topicToGen = topicsToGenerate.find(tg => tg.topic.id === t.id);
+              if (topicToGen) {
+                return {
+                  ...t,
+                  status: "generated" as const,
+                  questionRows: t.questionRows.map(r => {
+                    const rowUpdate = topicToGen.rows.find(ru => ru.rowId === r.rowId);
+                    return rowUpdate ? { ...r, status: "generated" as const } : r;
+                  })
+                };
+              }
+              return t;
+            }),
+            combinedSkills: combinedSkills,
+            experienceMode: experienceMode,
+            experienceMin: experienceMin,
+            experienceMax: experienceMax,
+          }
+        });
+      }
+
+      // Move to Review Questions station
+      setCurrentStation(3);
+    } catch (err: any) {
+      console.error("Error generating questions:", err);
+      setError(err.response?.data?.message || err.message || "Failed to generate some questions. Please try again.");
+    } finally {
+      setGeneratingAllQuestions(false);
+    }
+  };
+
   const handleRegenerateAllTopicsV2 = async () => {
-    if (!assessmentId || fullTopicRegenLocked || allQuestionsGenerated) {
-      setError("Topic regeneration is locked after preview");
+    // Check if any topics have generated questions - if so, disable regenerate all
+    const hasGeneratedQuestions = topicsV2.some(topic => 
+      topic.status === "generated" || topic.status === "completed" ||
+      topic.questionRows.some(row => 
+        row.questions && row.questions.length > 0 && row.status === "generated"
+      )
+    );
+    
+    if (!assessmentId || fullTopicRegenLocked || allQuestionsGenerated || hasGeneratedQuestions) {
+      setError("Topic improvement is locked after questions have been generated. Use 'Regenerate Topic' for individual topics.");
+      return;
+    }
+    
+    if (topicsV2.length === 0) {
+      setError("No topics to improve");
       return;
     }
     
@@ -2847,33 +3153,134 @@ export default function CreateNewAssessmentPage() {
     setError(null);
     
     try {
-      const response = await axios.post("/api/assessments/generate-topics-v2", {
+      // Reconstruct combinedSkills for context
+      const roleBasedSkills = topicCards.map(skill => ({
+        skill_name: skill.trim(),
+        source: "role" as const,
+        description: null,
+        importance_level: null
+      }));
+      
+      const manualSkills = selectedSkills
+        .filter((skill) => !topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "manual" as const,
+          description: null,
+          importance_level: null
+        }));
+      
+      const csvSkills = csvData.map(row => ({
+        skill_name: row.skill_name.trim(),
+        source: "csv" as const,
+        description: row.skill_description || null,
+        importance_level: row.importance_level || null
+      }));
+      
+      const allSkills = [...roleBasedSkills, ...manualSkills, ...csvSkills];
+      const seen = new Set<string>();
+      const combinedSkills = allSkills.filter(skill => {
+        const normalized = skill.skill_name.toLowerCase().trim();
+        if (seen.has(normalized)) {
+          return false;
+        }
+        seen.add(normalized);
+        return true;
+      });
+      
+      // Build previousTopics array with topic info
+      const previousTopics = topicsV2
+        .filter(topic => !topic.locked) // Skip locked topics
+        .map(topic => {
+          // Try to find related skill
+          let relatedSkill: string | undefined = undefined;
+          const topicSource = (topic.source || "manual") as "role" | "manual" | "csv";
+          
+          if (topicSource === "csv") {
+            const csvSkill = csvData.find(row => 
+              row.skill_name.toLowerCase().trim() === topic.label.toLowerCase().trim() ||
+              topic.label.toLowerCase().includes(row.skill_name.toLowerCase().trim())
+            );
+            relatedSkill = csvSkill?.skill_name;
+          } else if (topicSource === "role") {
+            const matchingSkill = selectedSkills.find(skill => 
+              skill.toLowerCase().trim() === topic.label.toLowerCase().trim() ||
+              topic.label.toLowerCase().includes(skill.toLowerCase().trim())
+            );
+            relatedSkill = matchingSkill;
+          } else {
+            // For manual, try to find in selectedSkills
+            const matchingSkill = selectedSkills.find(skill => 
+              skill.toLowerCase().trim() === topic.label.toLowerCase().trim() ||
+              topic.label.toLowerCase().includes(skill.toLowerCase().trim())
+            );
+            relatedSkill = matchingSkill;
+          }
+          
+          return {
+            topicId: topic.id,
+            previousTopicLabel: topic.label,
+            source: topicSource,
+            relatedSkill: relatedSkill
+          };
+        });
+      
+      if (previousTopics.length === 0) {
+        setError("No topics available to improve");
+        return;
+      }
+      
+      const response = await axios.post("/api/assessments/improve-all-topics", {
         assessmentId: assessmentId,
-        assessmentTitle: finalTitle.trim() || undefined,
-        jobDesignation: jobDesignation.trim(),
-        selectedSkills: selectedSkills,
+        experienceMode: experienceMode,
         experienceMin: experienceMin,
         experienceMax: experienceMax,
-        experienceMode: experienceMode,
+        previousTopics: previousTopics,
+        combinedSkills: combinedSkills.length > 0 ? combinedSkills : undefined,
       });
       
       if (response.data?.success) {
-        setTopicsV2(response.data.data.topics || []);
-        setFullTopicRegenLocked(false);
-        setAllQuestionsGenerated(false);
+        const updatedTopics = response.data.data.topics || topicsV2;
+        // Update topics with improved labels, preserve everything else
+        setTopicsV2(prev => prev.map(topic => {
+          const updated = updatedTopics.find((ut: any) => ut.id === topic.id);
+          if (updated) {
+            return {
+              ...topic,
+              label: updated.label,
+              regenerated: true,
+              previousVersion: updated.previousVersion || []
+            };
+          }
+          return topic;
+        }));
       } else {
-        setError("Failed to regenerate topics");
+        setError("Failed to improve topics");
       }
     } catch (err: any) {
-      console.error("Error regenerating topics:", err);
-      setError(err.response?.data?.message || err.message || "Failed to regenerate topics");
+      console.error("Error improving topics:", err);
+      setError(err.response?.data?.message || err.message || "Failed to improve topics");
     } finally {
       setLoading(false);
     }
   };
   
+  // OLD: Keep for backward compatibility with existing UI
   const [selectedCategoryForNewTopic, setSelectedCategoryForNewTopic] = useState<"aptitude" | "communication" | "logical_reasoning" | null>(null);
   const [showTechnicalInput, setShowTechnicalInput] = useState(false);
+  
+  // NEW: Redesigned Add Custom Topic states (for future use)
+  const [selectedCategory, setSelectedCategory] = useState<"aptitude" | "communication" | "logical" | "technical" | null>(null);
+  const [topicInput, setTopicInput] = useState("");
+  const [isAddingTopicNew, setIsAddingTopicNew] = useState(false);
+  const [aiValidationResult, setAiValidationResult] = useState<{
+    isValid: boolean;
+    reason: string;
+    suggestions: string[];
+  } | null>(null);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [loadingValidation, setLoadingValidation] = useState(false);
+  const [validationDebounceTimerNew, setValidationDebounceTimerNew] = useState<NodeJS.Timeout | null>(null);
 
   // Helper function to determine default question type based on category and topic name
   const getDefaultQuestionType = async (
@@ -2924,27 +3331,127 @@ export default function CreateNewAssessmentPage() {
 
   // Ref for the custom topic input field
   const customTopicInputRef = useRef<HTMLInputElement>(null);
+  // Ref for suggestions container (input + dropdown)
+  const suggestionsContainerRef = useRef<HTMLDivElement>(null);
 
-  // Handler for suggestion clicks - fills input field only
+  // Handler for suggestion clicks - fills input field only (user must click Add button manually)
   const handleSuggestionClick = (suggestion: string) => {
-    console.log("Suggestion clicked:", suggestion, "Current value:", customTopicInputV2); // Debug log
+    console.log("Suggestion clicked:", suggestion, "Category:", selectedCategoryForNewTopic); // Debug log
     
-    // Fill the input field with the suggestion
+    // Just fill the input field with the suggestion
     setCustomTopicInputV2(suggestion);
     
-    // Close the suggestion dropdown after a small delay to ensure state update
-    setTimeout(() => {
+    // Mark as valid since it's an AI-generated suggestion (skip validation)
+    setIsTopicValid(true);
+    setTopicValidationError(null);
+    
+    // Close suggestions dropdown and reset fetched flag
       setShowAiSuggestions(false);
       setAiTopicSuggestions([]);
+    setSuggestionsFetched(false); // Reset so suggestions can be fetched again if user edits
       
-      // Focus the input field after setting the value
+    // Focus the input field and move cursor to end
+    setTimeout(() => {
       if (customTopicInputRef.current) {
         customTopicInputRef.current.focus();
-        // Move cursor to end of input
         const length = suggestion.length;
         customTopicInputRef.current.setSelectionRange(length, length);
       }
     }, 50);
+    
+    // User must now manually click the "Add" button to actually add the topic
+  };
+
+  // Validate topic category with debouncing
+  const validateTopicCategory = async (topic: string, category: string) => {
+    if (!topic || !topic.trim() || !category) {
+      setIsTopicValid(null);
+      setTopicValidationError(null);
+      return;
+    }
+    
+    setValidatingTopic(true);
+    setTopicValidationError(null);
+    
+    try {
+      const response = await axios.post("/api/assessments/validate-topic-category", {
+        topic: topic.trim(),
+        category: category,
+      });
+      
+      if (response.data?.success && response.data?.data) {
+        const validationResult = response.data.data;
+        if (validationResult.valid) {
+          setIsTopicValid(true);
+          setTopicValidationError(null);
+        } else {
+          setIsTopicValid(false);
+          setTopicValidationError(validationResult.error || "The entered topic does not match the selected category. Please enter a valid topic.");
+        }
+      } else {
+        setIsTopicValid(false);
+        setTopicValidationError("Unable to validate topic. Please try again.");
+      }
+    } catch (err: any) {
+      console.error("Error validating topic category:", err);
+      setIsTopicValid(false);
+      setTopicValidationError(err.response?.data?.data?.error || "Unable to validate topic. Please try again.");
+    } finally {
+      setValidatingTopic(false);
+    }
+  };
+
+  // Debounced validation handler
+  const handleTopicInputChange = (value: string) => {
+    setCustomTopicInputV2(value);
+    setIsTopicValid(null);
+    setTopicValidationError(null);
+    
+    // Clear existing timer
+    if (topicValidationTimer) {
+      clearTimeout(topicValidationTimer);
+    }
+    
+    // Only validate if category is selected and topic has content
+    if (selectedCategoryForNewTopic && value.trim().length > 0) {
+      const timer = setTimeout(() => {
+        validateTopicCategory(value.trim(), selectedCategoryForNewTopic);
+      }, 150); // 150ms debounce
+      setTopicValidationTimer(timer);
+    }
+  };
+
+  // Helper function to check if topic is technical using OpenAI API (fast, low-token model)
+  const checkIfTechnicalTopic = async (topic: string): Promise<boolean> => {
+    if (!topic || !topic.trim()) return false;
+    
+    try {
+      const response = await axios.post("/api/assessments/check-technical-topic", {
+        topic: topic.trim()
+      });
+      
+      if (response.data?.success && response.data?.data) {
+        return response.data.data.isTechnical || false;
+      }
+      return false; // Default to false on API error
+    } catch (err: any) {
+      console.error("Error checking if topic is technical:", err);
+      return false; // Default to false on error to allow backend validation to catch it
+    }
+  };
+
+  // Helper function to reset UI state on validation failure
+  const resetUIOnValidationFailure = (errorMessage: string) => {
+    setAddingTopic(false);
+    setValidatingTopic(false);
+    setIsTopicValid(false);
+    setTopicValidationError(errorMessage);
+    setCustomTopicInputV2(""); // Clear input field
+    setShowAiSuggestions(false);
+    setAiTopicSuggestions([]);
+    setSuggestionsFetched(false); // Reset fetched flag
+    setToastMessage(errorMessage);
+    setTimeout(() => setToastMessage(null), 5000);
   };
 
   // Separate handler for soft-skill topics to ensure immediate UI update
@@ -2952,6 +3459,11 @@ export default function CreateNewAssessmentPage() {
     if (e) {
       e.preventDefault(); // REQUIRED: Prevent form refresh
       e.stopPropagation(); // Prevent event bubbling
+    }
+    
+    // Prevent multiple simultaneous additions
+    if (addingTopic) {
+      return;
     }
     
     const topicName = customTopicInputV2.trim();
@@ -2972,6 +3484,69 @@ export default function CreateNewAssessmentPage() {
     
     const finalCategory = selectedCategoryForNewTopic;
     
+    // Set loading state
+    setAddingTopic(true);
+    
+    // CLIENT-SIDE VALIDATION: Check if topic is technical using OpenAI (fast, low-token model)
+    try {
+      const isTechnical = await checkIfTechnicalTopic(topicName);
+      if (isTechnical) {
+        const errorMsg = "Invalid topic for selected category. Please enter only aptitude/communication/logical reasoning topics. Technical topics are not allowed.";
+        resetUIOnValidationFailure(errorMsg);
+        return;
+      }
+    } catch (err: any) {
+      console.error("Error checking if topic is technical:", err);
+      // Continue to backend validation if AI check fails
+    }
+    
+    // Validate topic before adding
+    if (isTopicValid === false || validatingTopic) {
+      if (validatingTopic) {
+        setToastMessage("Please wait for validation to complete.");
+        setTimeout(() => setToastMessage(null), 3000);
+        setAddingTopic(false);
+      } else if (topicValidationError) {
+        resetUIOnValidationFailure(topicValidationError);
+      }
+      return;
+    }
+    
+    // If validation hasn't been done yet, do it now
+    if (isTopicValid === null) {
+      setValidatingTopic(true);
+      try {
+        const validationResponse = await axios.post("/api/assessments/validate-topic-category", {
+          topic: topicName.trim(),
+          category: finalCategory,
+        });
+        
+        if (validationResponse.data?.success && validationResponse.data?.data) {
+          const validationResult = validationResponse.data.data;
+          if (!validationResult.valid) {
+            const errorMsg = validationResult.error || "Invalid topic for selected category. Please enter only aptitude/communication/logical reasoning topics.";
+            resetUIOnValidationFailure(errorMsg);
+            return;
+          }
+          // Update state to reflect validation passed
+          setIsTopicValid(true);
+          setTopicValidationError(null);
+        } else {
+          const errorMsg = "Unable to validate topic. Please try again.";
+          resetUIOnValidationFailure(errorMsg);
+          return;
+        }
+      } catch (err: any) {
+        console.error("Error validating topic:", err);
+        const errorMsg = err.response?.data?.data?.error || err.response?.data?.message || "Invalid topic for selected category. Please enter only aptitude/communication/logical reasoning topics.";
+        resetUIOnValidationFailure(errorMsg);
+        return;
+      } finally {
+        setValidatingTopic(false);
+      }
+    }
+    
+    try {
     // 1. Call backend for context (already working)
     let contextData: any = {};
     let defaultQuestionType: "MCQ" | "Subjective" = "MCQ";
@@ -2990,9 +3565,26 @@ export default function CreateNewAssessmentPage() {
       }
     } catch (err: any) {
       console.error("Error getting topic context:", err);
-      // Fallback to defaults - don't block topic creation
+        // If context generation fails, check if it's a validation error
+        const errorMsg = err.response?.data?.data?.error || err.response?.data?.message;
+        if (errorMsg && (errorMsg.toLowerCase().includes("invalid") || errorMsg.toLowerCase().includes("not match"))) {
+          resetUIOnValidationFailure(errorMsg);
+          return;
+        }
+        // Fallback to defaults - don't block topic creation for other errors
       defaultQuestionType = finalCategory === "communication" ? "Subjective" : "MCQ";
     }
+      
+      // Double-check for duplicate before adding (race condition protection)
+      const topicExistsNow = topicsV2.some(t => t.label.toLowerCase() === topicName.toLowerCase());
+      if (topicExistsNow) {
+        setToastMessage("Topic already added.");
+        setTimeout(() => setToastMessage(null), 3000);
+        setAddingTopic(false);
+        setCustomTopicInputV2(""); // Clear input
+        setSuggestionsFetched(false); // Reset fetched flag
+        return;
+      }
     
     // 2. Build valid topic object
     const newTopic: TopicV2 = {
@@ -3024,17 +3616,136 @@ export default function CreateNewAssessmentPage() {
     setCustomTopicInputV2("");
     setShowAiSuggestions(false);
     setAiTopicSuggestions([]);
+      setSuggestionsFetched(false); // Reset fetched flag
     setTopicInputValues(prev => ({ ...prev, [newTopic.id]: topicName }));
+      setIsTopicValid(null);
+      setTopicValidationError(null);
     
     // 5. Save in draft (async, don't block UI)
     if (assessmentId) {
-      axios.put("/api/assessments/update-draft", {
+        await axios.put("/api/assessments/update-draft", {
         assessmentId: assessmentId,
         topics_v2: updatedTopics, // Use calculated updated topics array
-      }).catch((err) => {
-        console.error("Error updating draft:", err);
-        setError("Failed to save topic. Please try again.");
+        });
+      }
+    } catch (err: any) {
+      console.error("Error adding topic:", err);
+      const errorMsg = err.response?.data?.data?.error || err.response?.data?.message || "Failed to add topic. Please try again.";
+      
+      // Check if it's a validation error
+      if (errorMsg.toLowerCase().includes("invalid") || errorMsg.toLowerCase().includes("not match") || errorMsg.toLowerCase().includes("technical")) {
+        resetUIOnValidationFailure(errorMsg);
+      } else {
+        // Generic error - reset UI but keep input for user to edit
+        setAddingTopic(false);
+        setValidatingTopic(false);
+        setIsTopicValid(false);
+        setTopicValidationError(errorMsg);
+        setToastMessage(errorMsg);
+        setTimeout(() => setToastMessage(null), 5000);
+      }
+    } finally {
+      // Always reset adding state, even if error was handled above
+      setAddingTopic(false);
+    }
+  };
+
+  // NEW: AI topic validation and suggestions handler (for redesigned section)
+  const handleTopicInputChangeNew = async (value: string) => {
+    setTopicInput(value);
+    
+    // Only validate for soft skills (aptitude, communication, logical)
+    if (!selectedCategory || selectedCategory === "technical" || value.trim().length < 2) {
+      setAiValidationResult(null);
+      setShowSuggestions(false);
+      return;
+    }
+    
+    // Debounce validation
+    if (validationDebounceTimerNew) {
+      clearTimeout(validationDebounceTimerNew);
+    }
+    
+    const timer = setTimeout(async () => {
+      setLoadingValidation(true);
+      try {
+        const response = await axios.post("/api/assessments/ai/topic-suggestion", {
+          category: selectedCategory,
+          input: value.trim()
+        });
+        
+        if (response.data?.success && response.data?.data) {
+          const result = response.data.data;
+          setAiValidationResult(result);
+          
+          if (result.isValid && result.suggestions.length > 0) {
+            setShowSuggestions(true);
+          } else {
+            setShowSuggestions(false);
+          }
+        }
+      } catch (err: any) {
+        console.error("Error validating topic:", err);
+        setAiValidationResult(null);
+        setShowSuggestions(false);
+      } finally {
+        setLoadingValidation(false);
+      }
+    }, 500);
+    
+    setValidationDebounceTimerNew(timer);
+  };
+
+  // NEW: Add custom topic handler (for redesigned section)
+  const handleAddCustomTopicNew = async () => {
+    if (!selectedCategory || !topicInput.trim() || isAddingTopicNew) return;
+    
+    const topicName = topicInput.trim();
+    
+    // For soft skills, check AI validation
+    if (selectedCategory !== "technical") {
+      if (!aiValidationResult || !aiValidationResult.isValid) {
+        const reason = aiValidationResult?.reason || "Topic is not valid for this category";
+        setToastMessage(`This topic is not relevant to ${selectedCategory}. Reason: ${reason}`);
+        setTimeout(() => setToastMessage(null), 5000);
+        setTopicInput("");
+        setAiValidationResult(null);
+        setShowSuggestions(false);
+        return;
+      }
+    }
+    
+    setIsAddingTopicNew(true);
+    
+    try {
+      const response = await axios.post("/api/assessments/topics/add-custom", {
+        category: selectedCategory,
+        topicName: topicName
       });
+      
+      if (response.data?.success) {
+        // Refresh topics list
+        if (assessmentId) {
+          const assessmentResponse = await axios.get(`/api/assessments/${assessmentId}`);
+          if (assessmentResponse.data?.success && assessmentResponse.data?.data?.assessment?.topics_v2) {
+            setTopicsV2(assessmentResponse.data.data.assessment.topics_v2);
+          }
+        }
+        
+        // Clear input and reset
+        setTopicInput("");
+        setAiValidationResult(null);
+        setShowSuggestions(false);
+        setToastMessage("Topic added successfully!");
+        setTimeout(() => setToastMessage(null), 3000);
+      }
+    } catch (err: any) {
+      console.error("Error adding topic:", err);
+      const errorMsg = err.response?.data?.message || "Failed to add topic. Please try again.";
+      setToastMessage(errorMsg);
+      setTimeout(() => setToastMessage(null), 5000);
+    } finally {
+      setIsAddingTopicNew(false);
     }
   };
 
@@ -3049,6 +3760,11 @@ export default function CreateNewAssessmentPage() {
       return handleAddSoftSkillTopic(event);
     }
     
+    // Prevent multiple simultaneous additions
+    if (addingTopic) {
+      return;
+    }
+    
     const topicName = (topicNameOverride || customTopicInputV2.trim());
     if (!topicName) return;
     
@@ -3060,12 +3776,16 @@ export default function CreateNewAssessmentPage() {
       return;
     }
     
+    // Set loading state
+    setAddingTopic(true);
+    
     let finalCategory: "aptitude" | "communication" | "logical_reasoning" | "technical";
     let defaultQuestionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" = "MCQ";
     let canUseJudge0 = false;
     let contextSummary: string | undefined = undefined;
     let codingSupported = false; // NEW: Track coding support from classification
     
+    try {
     if (isTechnical) {
       finalCategory = "technical";
       
@@ -3090,15 +3810,19 @@ export default function CreateNewAssessmentPage() {
         }
       } catch (err: any) {
         console.error("Error classifying technical topic:", err);
-        // Fallback to safe defaults
-        defaultQuestionType = "MCQ";
-        canUseJudge0 = false;
-        codingSupported = false;
+          const errorMsg = err.response?.data?.message || err.response?.data?.data?.error || "Failed to classify topic. Please try again.";
+          setToastMessage(errorMsg);
+          setTimeout(() => setToastMessage(null), 5000);
+          setLoading(false);
+          // Exit early - the outer finally block will reset addingTopic
+          // The finally block executes even when returning from try block
+          return;
       } finally {
         setLoading(false);
       }
     } else {
       // This should not happen for soft skills (handled by handleAddSoftSkillTopic)
+        setAddingTopic(false);
       return;
     }
     
@@ -3127,6 +3851,7 @@ export default function CreateNewAssessmentPage() {
       contextSummary: contextSummary,
       coding_supported: codingSupported, // NEW: Store coding_supported in topic
       allowedQuestionTypes: allowedQuestionTypes,
+      status: "pending", // NEW: Always "pending" for newly added topics
       questionRows: [{
         rowId: generateId(),
         questionType: defaultQuestionType,
@@ -3144,6 +3869,15 @@ export default function CreateNewAssessmentPage() {
     if (hasGeneratedQuestions) {
       console.log(`[Custom Topic] Added after questions generated - marking as pending, no auto-generation`);
     }
+      
+      // Double-check for duplicate before adding (race condition protection)
+      const topicExistsNow = topicsV2.some(t => t.label.toLowerCase() === topicName.toLowerCase());
+      if (topicExistsNow) {
+        setToastMessage("Topic already added.");
+        setTimeout(() => setToastMessage(null), 3000);
+        // Don't return here - let the finally block handle resetting addingTopic
+        return;
+      }
     
     // CRITICAL: Use functional update to guarantee immediate UI update
     setTopicsV2((prev) => [...prev, newTopic]);
@@ -3158,9 +3892,11 @@ export default function CreateNewAssessmentPage() {
         console.log("Custom topic saved to database:", newTopic.id);
       } catch (err: any) {
         console.error("Error updating draft:", err);
-        setError("Failed to save topic. Please try again.");
+          setToastMessage("Failed to save topic. Please try again.");
+          setTimeout(() => setToastMessage(null), 3000);
         // Remove the topic from state if save failed
         setTopicsV2((prev) => prev.filter(t => t.id !== newTopic.id));
+          // Don't return here - let the finally block handle resetting addingTopic
         return;
       }
     }
@@ -3170,6 +3906,14 @@ export default function CreateNewAssessmentPage() {
     setShowTechnicalInput(false);
     setShowAiSuggestions(false);
     setAiTopicSuggestions([]);
+      setSuggestionsFetched(false); // Reset fetched flag
+    } catch (err: any) {
+      console.error("Error adding technical topic:", err);
+      setToastMessage("Failed to add topic. Please try again.");
+      setTimeout(() => setToastMessage(null), 3000);
+    } finally {
+      setAddingTopic(false);
+    }
   };
   
   const handleRemoveTopicV2 = (topicId: string) => {
@@ -3225,13 +3969,31 @@ export default function CreateNewAssessmentPage() {
   };
 
   // Fetch AI-powered topic suggestions for custom topic input (ONLY for soft skills)
-  const fetchAiTopicSuggestions = async (query: string, category: string) => {
+  // Fetches with debouncing as user types
+  const fetchAiTopicSuggestions = async (query: string, category: string, forceFetch: boolean = false) => {
     // Only fetch suggestions for soft skills (aptitude, communication, logical_reasoning)
     const softSkillCategories = ["aptitude", "communication", "logical_reasoning"];
     if (!softSkillCategories.includes(category)) {
       setShowAiSuggestions(false);
       setAiTopicSuggestions([]);
+      setSuggestionsFetched(false);
       return;
+    }
+    
+    // Allow fetching even with empty query when forceFetch is true (for onFocus)
+    // Otherwise, require at least 2 characters
+    const queryTrimmed = query ? query.trim() : "";
+    
+    if (!forceFetch && queryTrimmed.length < 2) {
+      setShowAiSuggestions(false);
+      setAiTopicSuggestions([]);
+      setSuggestionsFetched(false);
+      return;
+    }
+    
+    // If forceFetch is true, reset the fetched flag
+    if (forceFetch) {
+      setSuggestionsFetched(false);
     }
     
     // Clear existing timer
@@ -3239,30 +4001,69 @@ export default function CreateNewAssessmentPage() {
       clearTimeout(suggestionDebounceTimer);
     }
     
-    // Set new debounced timer (350ms)
+    // Set new debounced timer (500ms) - allows refetching when query changes
+    // If forceFetch is true, use shorter delay (100ms) for immediate response on focus
+    const delay = forceFetch ? 100 : 500;
     const timer = setTimeout(async () => {
+      console.log("fetchAiTopicSuggestions: Starting fetch", { query, category, forceFetch, suggestionsFetched }); // Debug
+      
+      // Always fetch if forceFetch is true, otherwise check if already fetched
+      // Note: We check suggestionsFetched here but it's a closure - this is OK since we reset it above if forceFetch
+      if (!forceFetch && suggestionsFetched) {
+        console.log("fetchAiTopicSuggestions: Skipping - already fetched and not forcing"); // Debug
+        return;
+      }
+      
       setLoadingAiSuggestions(true);
+      setShowAiSuggestions(true); // Show loading state immediately
       try {
+        console.log("fetchAiTopicSuggestions: Making API call", { category, query: queryTrimmed }); // Debug
         const response = await axios.post("/api/assessments/suggest-topics", {
           category: category,
-          query: query.trim()
+          query: queryTrimmed || "" // Allow empty query for general suggestions
         });
         
+        console.log("fetchAiTopicSuggestions: API response", response.data); // Debug
+        
         if (response.data?.success && response.data?.data?.suggestions) {
-          setAiTopicSuggestions(response.data.data.suggestions);
-          setShowAiSuggestions(true);
+          // Filter out technical topics on frontend using OpenAI (async, but we'll do it in parallel)
+          const suggestions = response.data.data.suggestions;
+          console.log("fetchAiTopicSuggestions: Raw suggestions", suggestions); // Debug
+          
+          // Check all suggestions in parallel for better performance (limit to first 10 for performance)
+          const suggestionsToCheck = suggestions.slice(0, 10);
+          const technicalChecks = await Promise.all(
+            suggestionsToCheck.map((suggestion: string) => checkIfTechnicalTopic(suggestion))
+          );
+          
+          const filteredSuggestions = suggestionsToCheck.filter((suggestion: string, index: number) => {
+            return !technicalChecks[index]; // Keep only non-technical suggestions
+          });
+          
+          // Add remaining suggestions without checking (they're likely safe if backend filtered them)
+          const remainingSuggestions = suggestions.slice(10);
+          const allFiltered = [...filteredSuggestions, ...remainingSuggestions];
+          
+          console.log("fetchAiTopicSuggestions: Filtered suggestions", allFiltered); // Debug
+          
+          setAiTopicSuggestions(allFiltered);
+          setShowAiSuggestions(allFiltered.length > 0);
+          setSuggestionsFetched(true); // Mark as fetched for this query
         } else {
+          console.log("fetchAiTopicSuggestions: No suggestions in response"); // Debug
           setAiTopicSuggestions([]);
           setShowAiSuggestions(false);
+          setSuggestionsFetched(true); // Mark as fetched even if empty
         }
       } catch (err: any) {
         console.error("Error fetching AI topic suggestions:", err);
         setAiTopicSuggestions([]);
         setShowAiSuggestions(false);
+        setSuggestionsFetched(true); // Mark as fetched even on error
       } finally {
         setLoadingAiSuggestions(false);
       }
-    }, 350);
+    }, delay);
     
     setSuggestionDebounceTimer(timer);
   };
@@ -3350,6 +4151,30 @@ export default function CreateNewAssessmentPage() {
     };
   }, [suggestionDebounceTimer]);
 
+  // Handle clicks outside suggestions container to auto-close dropdown
+  useEffect(() => {
+    if (!showAiSuggestions) return; // Early return if suggestions not visible
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        suggestionsContainerRef.current &&
+        target &&
+        !suggestionsContainerRef.current.contains(target)
+      ) {
+        setShowAiSuggestions(false);
+      }
+    };
+
+    // Use mousedown instead of click to catch before blur event
+    document.addEventListener('mousedown', handleClickOutside);
+
+    // Cleanup
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showAiSuggestions]);
+
   const handleUpdateTopicV2 = (topicId: string, field: keyof TopicV2, value: any) => {
     setTopicsV2(prev => prev.map(t => {
       if (t.id === topicId) {
@@ -3418,8 +4243,11 @@ export default function CreateNewAssessmentPage() {
         // Update state with the new row
         setTopicsV2(prev => prev.map(t => {
           if (t.id === topicId) {
+            // If topic was "generated" and we're adding a new row, mark as "pending" so it will regenerate
+            const newStatus = t.status === "generated" ? "pending" as const : (t.status || "pending");
             return {
               ...t,
+              status: newStatus,
               questionRows: [...t.questionRows, updatedRow],
             };
           }
@@ -3458,6 +4286,219 @@ export default function CreateNewAssessmentPage() {
     }
   };
   
+  // Handler to update question timer
+  const handleUpdateQuestionTimer = async (topicId: string, rowId: string, questionIndex: number, newTimer: number) => {
+    if (!assessmentId || newTimer < 1) return;
+    
+    try {
+      // Update state immediately for instant UI update
+      setTopicsV2(prev => prev.map(t => {
+        if (t.id === topicId) {
+          return {
+            ...t,
+            questionRows: t.questionRows.map(r => {
+              if (r.rowId === rowId && r.questions && r.questions[questionIndex]) {
+                const updatedQuestions = [...r.questions];
+                updatedQuestions[questionIndex] = {
+                  ...updatedQuestions[questionIndex],
+                  timer: newTimer,
+                };
+                return {
+                  ...r,
+                  questions: updatedQuestions,
+                };
+              }
+              return r;
+            })
+          };
+        }
+        return t;
+      }));
+      
+      // Update draft
+      const updatedTopics = topicsV2.map(t => {
+        if (t.id === topicId) {
+          return {
+            ...t,
+            questionRows: t.questionRows.map(r => {
+              if (r.rowId === rowId && r.questions && r.questions[questionIndex]) {
+                const updatedQuestions = [...r.questions];
+                updatedQuestions[questionIndex] = {
+                  ...updatedQuestions[questionIndex],
+                  timer: newTimer,
+                };
+                return {
+                  ...r,
+                  questions: updatedQuestions,
+                };
+              }
+              return r;
+            })
+          };
+        }
+        return t;
+      });
+      
+      await axios.put("/api/assessments/update-draft", {
+        assessmentId: assessmentId,
+        topics_v2: updatedTopics,
+      });
+    } catch (err: any) {
+      console.error("Error updating question timer:", err);
+      setError(err.response?.data?.message || err.message || "Failed to update question timer");
+    }
+  };
+
+  // Handler to regenerate a single question
+  const handleRegenerateQuestion = async () => {
+    if (!assessmentId || !regeneratingQuestionId) return;
+    
+    try {
+      // Find the question data
+      let qData: any = null;
+      for (const topic of topicsV2) {
+        for (const row of topic.questionRows) {
+          if (row.questions && row.questions.length > 0) {
+            for (let i = 0; i < row.questions.length; i++) {
+              const id = `${topic.id}_${row.rowId}_${i}`;
+              if (id === regeneratingQuestionId) {
+                qData = {
+                  question: row.questions[i],
+                  questionType: row.questionType,
+                  difficulty: row.difficulty,
+                  topicId: topic.id,
+                  rowId: row.rowId,
+                  questionIndex: i,
+                  topicLabel: topic.label,
+                  additionalRequirements: row.additionalRequirements,
+                };
+                break;
+              }
+            }
+          }
+        }
+      }
+      
+      if (!qData) {
+        setError("Question not found");
+        return;
+      }
+      
+      // Get old question text
+      const oldQuestionText = getQuestionText(qData.question, qData.questionType);
+      
+      // Call API to regenerate question
+      const response = await axios.post("/api/assessments/regenerate-question", {
+        assessmentId,
+        topicId: qData.topicId,
+        rowId: qData.rowId,
+        questionIndex: qData.questionIndex,
+        oldQuestion: oldQuestionText,
+        questionType: qData.questionType,
+        difficulty: qData.difficulty,
+        experienceMode,
+        experienceMin,
+        experienceMax,
+        additionalRequirements: qData.additionalRequirements || undefined,
+        feedback: regenerateQuestionFeedback || undefined,
+      });
+      
+      if (response.data?.success) {
+        const updatedQuestion = response.data.data.question;
+        
+        // Update state - preserve timer and score
+        setTopicsV2(prev => prev.map(t => {
+          if (t.id === qData.topicId) {
+            return {
+              ...t,
+              questionRows: t.questionRows.map(r => {
+                if (r.rowId === qData.rowId && r.questions && r.questions[qData.questionIndex]) {
+                  const updatedQuestions = [...r.questions];
+                  const oldQuestion = updatedQuestions[qData.questionIndex];
+                  
+                  // Preserve timer and score, update question content
+                  updatedQuestions[qData.questionIndex] = {
+                    ...updatedQuestion,
+                    timer: oldQuestion.timer || (() => {
+                      const baseTime = getBaseTimePerQuestion(qData.questionType);
+                      const multiplier = getDifficultyMultiplier(qData.difficulty);
+                      let questionTime = baseTime * multiplier;
+                      if (qData.questionType === "MCQ" && questionTime > 40) {
+                        questionTime = 40;
+                      }
+                      return Math.max(1, Math.ceil(questionTime / 60));
+                    })(),
+                    // Preserve oldVersions and add current question to history
+                    oldVersions: [
+                      ...(oldQuestion.oldVersions || []),
+                      {
+                        question: oldQuestion,
+                        timestamp: new Date().toISOString(),
+                      }
+                    ],
+                    status: "regenerated",
+                  };
+                  
+                  return {
+                    ...r,
+                    questions: updatedQuestions,
+                  };
+                }
+                return r;
+              })
+            };
+          }
+          return t;
+        }));
+        
+        // Update draft
+        const updatedTopics = topicsV2.map(t => {
+          if (t.id === qData.topicId) {
+            return {
+              ...t,
+              questionRows: t.questionRows.map(r => {
+                if (r.rowId === qData.rowId && r.questions && r.questions[qData.questionIndex]) {
+                  const updatedQuestions = [...r.questions];
+                  const oldQuestion = updatedQuestions[qData.questionIndex];
+                  updatedQuestions[qData.questionIndex] = {
+                    ...updatedQuestion,
+                    timer: oldQuestion.timer,
+                    oldVersions: [
+                      ...(oldQuestion.oldVersions || []),
+                      {
+                        question: oldQuestion,
+                        timestamp: new Date().toISOString(),
+                      }
+                    ],
+                    status: "regenerated",
+                  };
+                  return {
+                    ...r,
+                    questions: updatedQuestions,
+                  };
+                }
+                return r;
+              })
+            };
+          }
+          return t;
+        });
+        
+        await axios.put("/api/assessments/update-draft", {
+          assessmentId,
+          topics_v2: updatedTopics,
+        });
+        
+        // Close modal
+        setRegeneratingQuestionId(null);
+        setRegenerateQuestionFeedback("");
+      }
+    } catch (err: any) {
+      console.error("Error regenerating question:", err);
+      setError(err.response?.data?.message || err.message || "Failed to regenerate question");
+    }
+  };
+
   // Handler to remove a question from Review Questions page
   const handleRemoveQuestionInReview = async (topicId: string, rowId: string, questionIndex: number) => {
     if (!assessmentId) return;
@@ -3554,6 +4595,10 @@ export default function CreateNewAssessmentPage() {
   const handleUpdateRow = (topicId: string, rowId: string, field: keyof QuestionRow, value: any) => {
     setTopicsV2(prev => prev.map(t => {
       if (t.id === topicId) {
+        const topic = t;
+        const row = topic.questionRows.find(r => r.rowId === rowId);
+        const hasGeneratedQuestions = row?.questions && row.questions.length > 0 && row.status === "generated";
+        
         const updatedRows = t.questionRows.map(r => {
           if (r.rowId === rowId) {
             const updated = { ...r, [field]: value };
@@ -3568,11 +4613,27 @@ export default function CreateNewAssessmentPage() {
                 updated.canUseJudge0 = false;
               }
             }
+            
+            // If questionType or difficulty changes AFTER questions have been generated,
+            // mark row as pending and topic as pending so questions will regenerate
+            if (hasGeneratedQuestions && (field === "questionType" || field === "difficulty")) {
+              updated.status = "pending";
+              updated.questions = []; // Clear existing questions
+            }
+            
             return updated;
           }
           return r;
         });
-        return { ...t, questionRows: updatedRows };
+        
+        // If any row was modified and had generated questions, set topic status to "pending"
+        const shouldMarkTopicPending = row && hasGeneratedQuestions && (field === "questionType" || field === "difficulty");
+        
+        return { 
+          ...t, 
+          questionRows: updatedRows,
+          status: shouldMarkTopicPending ? "pending" as const : (t.status || "pending")
+        };
       }
       return t;
     }));
@@ -3872,9 +4933,7 @@ export default function CreateNewAssessmentPage() {
         setTopicConfigs([...topicConfigs, newTopic]);
         setCustomTopicInput("");
         
-        // Clear preview questions so that preview will regenerate with the new topic
-        // This ensures questions are generated for the newly added topic when preview is clicked
-        setPreviewQuestions([]);
+        // Clear questions so that questions will regenerate with the new topic
         setQuestions([]);
         console.log(`[Add Custom Topic] Cleared preview questions - will regenerate on next preview click to include new topic: ${topicName}`);
       } else {
@@ -3936,7 +4995,6 @@ export default function CreateNewAssessmentPage() {
       
       // Clear questions state immediately
       setQuestions([]);
-      setPreviewQuestions([]);
       
       // Clear topic configs immediately to show loading state
       setTopicConfigs([]);
@@ -4010,12 +5068,7 @@ export default function CreateNewAssessmentPage() {
         topic: topic.topic,
       });
       
-      // Clear preview questions for this topic (they're no longer valid after regeneration)
-      setPreviewQuestions((prev) => {
-        const filtered = prev.filter((q: any) => q.topic !== topic.topic);
-        console.log(`[Preview] Cleared preview questions for topic '${topic.topic}'. Remaining: ${filtered.length}`);
-        return filtered;
-      });
+      // Preview questions removed - no longer clearing preview state
 
       // Then regenerate the topic (get new question type and coding support)
       const response = await axios.post("/api/assessments/regenerate-single-topic", {
@@ -4142,31 +5195,7 @@ export default function CreateNewAssessmentPage() {
             const updatedQuestions = questions.filter((q: any) => q.topic !== topic.topic && q.topic !== newTopicName);
             setQuestions([...updatedQuestions, ...newQuestions]);
             
-            // Also update previewQuestions - remove old and add new for this topic only
-            // Use functional update to ensure we have the latest state
-            setPreviewQuestions((prev) => {
-              const filtered = prev.filter((q: any) => q.topic !== topic.topic && q.topic !== newTopicName);
-              const updated = [...filtered, ...newQuestions];
-              console.log(`[Topic Regeneration] Preview questions update: removed ${prev.length - filtered.length} old questions, added ${newQuestions.length} new questions. Total preview questions: ${updated.length} (was ${prev.length})`);
-              console.log(`[Topic Regeneration] Updated preview questions:`, updated.map((q: any, idx: number) => ({
-                index: idx,
-                topic: q.topic,
-                type: q.type,
-                questionPreview: q.questionText?.substring(0, 30) || q.question?.substring(0, 30) || 'N/A'
-              })));
-              return updated;
-            });
-            
-            // Reset preview index if it's out of bounds after update
-            setTimeout(() => {
-              setPreviewQuestions((current) => {
-                if (currentPreviewIndex >= current.length && current.length > 0) {
-                  console.log(`[Topic Regeneration] Adjusting preview index: ${currentPreviewIndex} -> ${current.length - 1}`);
-                  setCurrentPreviewIndex(current.length - 1);
-                }
-                return current; // Return unchanged to avoid double update
-              });
-            }, 100);
+            // Preview questions removed - no longer updating preview state
             
             console.log(`[Topic Regeneration] Successfully updated: Generated ${newQuestions.length} new questions for topic '${newTopicName}'. Removed old questions for '${topic.topic}'.`);
           } else {
@@ -4356,22 +5385,11 @@ export default function CreateNewAssessmentPage() {
 
     // Check if we need to regenerate questions
     // Only regenerate if:
-    // Check if we have preview questions that can be used instead of regenerating
-    const hasPreviewQuestions = previewQuestions.length > 0;
-    
     // 1. User has visited Review station (came back from Review)
     // 2. Edit mode was active
     // 3. Changes were made (compare with original configs)
     const shouldRegenerate = hasVisitedReviewStation && 
       JSON.stringify(validConfigs) !== JSON.stringify(originalTopicConfigsRef.current);
-
-    // If we have preview questions and no changes, use them instead of regenerating
-    if (hasPreviewQuestions && !shouldRegenerate && questions.length === 0) {
-      console.log(`[Review] Using ${previewQuestions.length} preview questions for review page`);
-      setQuestions(previewQuestions);
-      setCurrentStation(3);
-      return;
-    }
 
     if (shouldRegenerate) {
       setGenerating(true);
@@ -4445,550 +5463,15 @@ export default function CreateNewAssessmentPage() {
     }
   };
 
-  const handlePreviewQuestions = async () => {
-    if (topicConfigs.length === 0) {
-      setError("Please configure at least one topic");
-      return;
-    }
+  // handlePreviewQuestions removed - preview functionality removed
 
-    // Ensure assessmentId exists - if not, try to get it from URL (edit mode) or show error
-    let currentAssessmentId = assessmentId;
-    if (!currentAssessmentId && isEditMode && id && typeof id === 'string') {
-      currentAssessmentId = id;
-      setAssessmentId(id);
-    }
-    
-    if (!currentAssessmentId) {
-      setError("Assessment not found. Please generate topics first.");
-      return;
-    }
-
-    // Filter out topics with empty names
-    const validConfigs = topicConfigs.filter((tc) => tc.topic.trim() !== "");
-    if (validConfigs.length === 0) {
-      setError("Please enter at least one topic name");
-      return;
-    }
-
-    // Validate configurations
-    const invalidConfigs = validConfigs.filter(
-      (tc) => {
-        if (!tc.questionTypeConfigs || tc.questionTypeConfigs.length === 0) {
-          return true;
-        }
-        const invalidConfigs = tc.questionTypeConfigs.filter(
-          (qtc) => !qtc.questionType || !qtc.difficulty || qtc.numQuestions < 1
-        );
-        if (invalidConfigs.length > 0) {
-          return true;
-        }
-        const aptitudeInvalid = tc.isAptitude && !tc.subTopic;
-        return aptitudeInvalid;
-      }
-    );
-    if (invalidConfigs.length > 0) {
-      setError("Please complete all configurations for all topics.");
-      return;
-    }
-
-    // If generation is in progress, just reopen the modal to show progress
-    if (previewGenerating) {
-      setShowPreviewModal(true);
-      return;
-    }
-
-    // Check if preview questions already exist in state
-    // If topics have changed (e.g., new topic added), we need to regenerate
-    if (previewQuestions.length > 0) {
-      // Count expected questions based on current topicConfigs
-      const expectedQuestionCount = validConfigs.reduce((sum, tc) => {
-        return sum + (tc.questionTypeConfigs?.reduce((qSum, qtc) => qSum + (qtc.numQuestions || 0), 0) || 0);
-      }, 0);
-      
-      // If we have significantly fewer questions than expected, regenerate to include new topics
-      // This handles the case where a new topic was added after questions were generated
-      if (previewQuestions.length < expectedQuestionCount * 0.8) {
-        console.log(`[Preview] Question count mismatch detected - regenerating. Current: ${previewQuestions.length}, Expected: ${expectedQuestionCount}`);
-        // Clear preview questions to force regeneration
-        setPreviewQuestions([]);
-        setQuestions([]);
-      } else {
-        console.log(`[Preview] Using existing ${previewQuestions.length} preview questions from state - skipping regeneration`);
-        setShowPreviewModal(true);
-        setCurrentPreviewIndex(0);
-        return;
-      }
-    }
-
-    // Try to load existing preview questions from draft/backend - if found, check if topics match
-    if (currentAssessmentId) {
-      try {
-        const response = await axios.get(`/api/assessments/get-questions?assessmentId=${currentAssessmentId}`);
-        console.log("[Preview] Checking for existing questions in backend for assessment:", currentAssessmentId);
-        
-        // Check for preview questions first (most reliable)
-        if (response.data?.success) {
-          const assessment = response.data.data?.assessment || response.data.data;
-          
-          // Get current topic names from validConfigs
-          const currentTopicNames = new Set(validConfigs.map(tc => tc.topic.trim().toLowerCase()));
-          
-          // Get topic names from existing questions (if any)
-          const existingQuestions = assessment?.previewQuestions || assessment?.questions || [];
-          const existingTopicNames = new Set(
-            existingQuestions
-              .map((q: any) => q.topic?.trim().toLowerCase())
-              .filter((t: string) => t)
-          );
-          
-          // Check if topics match - if new topics were added, regenerate
-          const topicsMatch = 
-            currentTopicNames.size === existingTopicNames.size &&
-            Array.from(currentTopicNames).every(topic => existingTopicNames.has(topic));
-          
-          console.log(`[Preview] Topic comparison: Current topics (${currentTopicNames.size}):`, Array.from(currentTopicNames));
-          console.log(`[Preview] Topic comparison: Existing topics (${existingTopicNames.size}):`, Array.from(existingTopicNames));
-          console.log(`[Preview] Topics match: ${topicsMatch}`);
-          
-          if (!topicsMatch) {
-            console.log(`[Preview] Topics don't match - new topic(s) detected. Will regenerate to include all topics.`);
-            // Don't load existing questions - proceed to regeneration
-          } else if (assessment?.previewQuestions && Array.isArray(assessment.previewQuestions) && assessment.previewQuestions.length > 0) {
-            console.log(`[Preview] Found ${assessment.previewQuestions.length} existing preview questions in backend - topics match, loading and skipping regeneration`);
-            setPreviewQuestions(assessment.previewQuestions);
-            // Also set questions if they don't exist
-            if (!assessment.questions || assessment.questions.length === 0) {
-              setQuestions(assessment.previewQuestions);
-            }
-            setCurrentPreviewIndex(0);
-            setShowPreviewModal(true);
-            return;
-          } else if (existingQuestions.length > 0) {
-            // Check regular questions if preview questions don't exist
-            const questionsList = assessment?.questions || response.data.data?.questions;
-            if (questionsList && Array.isArray(questionsList) && questionsList.length > 0) {
-              console.log(`[Preview] Found ${questionsList.length} existing questions in backend - topics match, using as preview and skipping regeneration`);
-              setPreviewQuestions(questionsList);
-              setQuestions(questionsList);
-              setCurrentPreviewIndex(0);
-              setShowPreviewModal(true);
-              return;
-            }
-          }
-        }
-        
-        console.log("[Preview] No existing questions found in backend or topics don't match - will generate new ones");
-      } catch (err: any) {
-        console.error("Error loading existing preview questions:", err);
-        // Continue to generate new questions if loading fails
-      }
-    }
-    
-    // If we reach here, no existing questions were found - proceed with generation
-    console.log("[Preview] No existing questions found - proceeding with generation");
-
-    // Transform topics to flat structure - include ALL question type configs with numQuestions > 0
-    const flattenedTopics = validConfigs.flatMap((tc) => {
-      // Filter out question type configs with numQuestions = 0
-      const validQuestionTypeConfigs = (tc.questionTypeConfigs || []).filter(
-        (qtc) => qtc.numQuestions > 0
-      );
-      
-      return validQuestionTypeConfigs.flatMap((qtc) => {
-        // Create one entry per question (not per question type)
-        const questions = [];
-        for (let i = 1; i <= qtc.numQuestions; i++) {
-          questions.push({
-            topic: tc.topic,
-            questionType: qtc.questionType,
-            difficulty: qtc.difficulty,
-            numQuestions: 1, // Each entry represents 1 question
-            isAptitude: tc.isAptitude,
-            subTopic: tc.subTopic,
-            language: qtc.language,
-            judge0_enabled: qtc.judge0_enabled,
-            questionNumber: i, // Track which question number this is for this topic/type combo
-          });
-        }
-        return questions;
-      });
-    });
-
-    // Calculate total questions
-    const totalQuestions = flattenedTopics.length;
-    console.log(`[Preview] Starting generation: ${validConfigs.length} topics, ${totalQuestions} total questions to generate`);
-    console.log(`[Preview] Flattened topics breakdown:`, flattenedTopics.map(t => ({
-      topic: t.topic,
-      questionType: t.questionType,
-      difficulty: t.difficulty,
-      questionNumber: t.questionNumber
-    })));
-    
-    setPreviewProgress({ current: 0, total: totalQuestions });
-    setPreviewGenerating(true);
-    setPreviewQuestions([]);
-    setCurrentPreviewIndex(0);
-    setShowPreviewModal(true);
-    setError(null);
-
-    try {
-      const allPreviewQuestions: any[] = [];
-      let currentIndex = 0;
-
-      // Create a flat list of all question generation tasks
-      // flattenedTopics already has one entry per question, so we can use it directly
-      const questionTasks: Array<{ topicConfig: any; questionNumber: number; taskIndex: number }> = flattenedTopics.map((topicConfig, idx) => {
-        // topicConfig already represents a single question task
-        return {
-          topicConfig: {
-            topic: topicConfig.topic,
-            questionType: topicConfig.questionType,
-            difficulty: topicConfig.difficulty,
-            numQuestions: 1, // Each task generates 1 question
-            isAptitude: topicConfig.isAptitude,
-            subTopic: topicConfig.subTopic,
-            language: topicConfig.language,
-            judge0_enabled: topicConfig.judge0_enabled,
-          },
-          questionNumber: topicConfig.questionNumber || 1,
-          taskIndex: idx, // Add unique task index
-        };
-      });
-      
-      console.log(`[Preview] Created ${questionTasks.length} question tasks from ${validConfigs.length} topics`);
-      console.log(`[Preview] Task breakdown:`, questionTasks.map((t, idx) => 
-        `${idx + 1}. ${t.topicConfig.topic} - ${t.topicConfig.questionType} (Q${t.questionNumber})`
-      ));
-
-      // Generate first 2 questions immediately (in parallel)
-      const firstBatch = questionTasks.slice(0, Math.min(2, questionTasks.length));
-      console.log(`[Preview] Generating first batch: ${firstBatch.length} questions`);
-      
-      const firstBatchPromises = firstBatch.map((task, idx) => {
-        console.log(`[Preview] First batch task ${idx + 1}: ${task.topicConfig.topic} - ${task.topicConfig.questionType} (Q${task.questionNumber}, taskIndex=${task.taskIndex})`);
-        return generateSingleQuestion(task.topicConfig, task.questionNumber, currentAssessmentId).then((question) => {
-          // Add task index to question for tracking
-          if (question) {
-            question._taskIndex = task.taskIndex;
-            question._questionNumber = task.questionNumber;
-          }
-          return question;
-        });
-      });
-
-      // Wait for first batch and collect results
-      const firstBatchResults = await Promise.all(firstBatchPromises);
-      
-      // Add all first batch questions to the array (check for duplicates)
-      console.log(`[Preview] First batch results: ${firstBatchResults.length} questions received`);
-      firstBatchResults.forEach((question, idx) => {
-        if (question) {
-          console.log(`[Preview] First batch result ${idx + 1}: topic=${question.topic}, type=${question.type}, hasText=${!!(question.questionText || question.question)}`);
-          
-          // Check if this question already exists (avoid duplicates)
-          // Use task index if available, otherwise use question text + topic + type
-          const questionExists = allPreviewQuestions.some((q: any) => {
-            // If both have task indices, compare by task index
-            if (q._taskIndex !== undefined && question._taskIndex !== undefined) {
-              return q._taskIndex === question._taskIndex;
-            }
-            // Otherwise, compare by question text, topic, and type
-            const qText = q.questionText || q.question || '';
-            const newQText = question.questionText || question.question || '';
-            return qText === newQText && q.topic === question.topic && q.type === question.type;
-          });
-          
-          if (questionExists) {
-            console.warn(`[Preview] First batch: Question ${idx + 1} already exists, skipping duplicate. Current array length: ${allPreviewQuestions.length}`);
-            // Still increment counter for attempt tracking
-            currentIndex++;
-          } else {
-            allPreviewQuestions.push(question);
-            currentIndex++;
-            console.log(`[Preview] First batch: Added question ${currentIndex}/${totalQuestions} - ${question.topic || 'Unknown'} - ${question.type || 'Unknown'}. Array now has ${allPreviewQuestions.length} questions`);
-          }
-        } else {
-          console.warn(`[Preview] First batch: Failed to generate question ${idx + 1}`);
-          // Increment counter even for failed attempts
-          currentIndex++;
-        }
-      });
-      
-      console.log(`[Preview] First batch complete: ${allPreviewQuestions.length} questions in array, currentIndex=${currentIndex}`);
-      
-      // Update state once with all first batch questions
-      setPreviewProgress({ current: currentIndex, total: totalQuestions });
-      const firstBatchQuestions = [...allPreviewQuestions];
-      setPreviewQuestions(firstBatchQuestions);
-      console.log(`[Preview] First batch: Updated state with ${firstBatchQuestions.length} questions`);
-      setShowPreviewModal(true);
-
-      // Queue the rest to generate one after another
-      const remainingTasks = questionTasks.slice(firstBatch.length);
-      console.log(`[Preview] Generating remaining ${remainingTasks.length} questions sequentially`);
-      
-      for (let taskIdx = 0; taskIdx < remainingTasks.length; taskIdx++) {
-        const task = remainingTasks[taskIdx];
-        console.log(`[Preview] Sequential task ${taskIdx + 1}/${remainingTasks.length}: ${task.topicConfig.topic} - ${task.topicConfig.questionType} (Q${task.questionNumber})`);
-        
-        const question = await generateSingleQuestion(task.topicConfig, task.questionNumber, currentAssessmentId);
-        if (question) {
-          // Add task index to question for tracking
-          question._taskIndex = task.taskIndex;
-          question._questionNumber = task.questionNumber;
-          
-          // Check if this question already exists (avoid duplicates) - check by task index
-          const questionExists = allPreviewQuestions.some((q: any) => {
-            return q._taskIndex === task.taskIndex;
-          });
-          
-          if (questionExists) {
-            console.warn(`[Preview] Sequential: Question with taskIndex ${task.taskIndex} already exists, skipping duplicate`);
-          } else {
-            allPreviewQuestions.push(question);
-            currentIndex++;
-            
-            // Update progress
-            setPreviewProgress({ current: currentIndex, total: totalQuestions });
-            
-            // Update state with new array reference
-            const updatedQuestions = [...allPreviewQuestions];
-            setPreviewQuestions(updatedQuestions);
-            
-            // Preserve current preview index when adding new questions
-            // Don't change the index - let the user navigate freely
-            // The index will be adjusted by the useEffect if it goes out of bounds
-            
-            console.log(`[Preview] Sequential: Added question ${currentIndex}/${totalQuestions} at array index ${updatedQuestions.length - 1}. Topic: ${question.topic || 'Unknown'}, Type: ${question.type || 'Unknown'}, taskIndex: ${task.taskIndex}`);
-            console.log(`[Preview] Sequential: Question array now has ${updatedQuestions.length} questions:`, updatedQuestions.map((q: any, idx: number) => ({
-              arrayIndex: idx,
-              taskIndex: q._taskIndex,
-              topic: q.topic,
-              type: q.type,
-              preview: (q.questionText || q.question || '').substring(0, 30)
-            })));
-          }
-          
-          // Keep modal open during generation
-          setShowPreviewModal(true);
-          
-          // Small delay to ensure React processes the state update before next question
-          await new Promise(resolve => setTimeout(resolve, 100));
-          
-          // Note: Preview questions will be saved automatically when navigating away (browser back or Back to Dashboard button)
-        } else {
-          console.warn(`[Preview] Sequential: Failed to generate question ${currentIndex + 1}/${totalQuestions} for topic ${task.topicConfig.topic} - ${task.topicConfig.questionType}`);
-          // Even if question generation failed, increment the attempt counter
-          // This ensures progress reflects all attempts, not just successes
-          currentIndex++;
-          setPreviewProgress({ current: currentIndex, total: totalQuestions });
-        }
-      }
-
-      // Final update to ensure all questions are in state
-      setPreviewQuestions((prev) => {
-        const final = [...allPreviewQuestions];
-        console.log(`[Preview] Final: Setting previewQuestions to ${final.length} questions (prev had ${prev.length})`);
-        
-        // Also update questions state for review page
-        if (final.length > 0) {
-          console.log(`[Preview] Also updating questions state with ${final.length} questions for review page`);
-          setQuestions(final);
-        }
-        
-        return final;
-      });
-      
-      // Preserve current index when generation completes (don't reset to 0 if user navigated)
-      setCurrentPreviewIndex((prevIndex) => {
-        const finalCount = allPreviewQuestions.length;
-        if (finalCount > 0 && prevIndex >= finalCount) {
-          // If index is out of bounds, adjust to last question
-          return finalCount - 1;
-        }
-        // Otherwise, preserve the current index (user might have navigated)
-        return prevIndex;
-      });
-      
-      // Keep modal open after generation completes
-      setShowPreviewModal(true);
-      
-      // Note: Preview questions will be saved automatically when navigating away (browser back or Back to Dashboard button)
-    } catch (err: any) {
-      console.error("Error generating preview questions:", err);
-      setError(err.response?.data?.message || err.message || "Failed to generate preview questions");
-      setShowPreviewModal(false);
-    } finally {
-      setPreviewGenerating(false);
-    }
-  };
-
-  const generateSingleQuestion = async (topicConfig: any, questionNumber: number, assessmentIdToUse?: string): Promise<any | null> => {
-    const idToUse = assessmentIdToUse || assessmentId;
-    if (!idToUse) {
-      console.error("Assessment ID is required for generating preview questions");
-      return null;
-    }
-    
-    try {
-      const response = await axios.post("/api/assessments/generate-questions-from-config", {
-        assessmentId: idToUse,
-        skill: selectedSkills.join(", "),
-        topics: [{
-          ...topicConfig,
-          numQuestions: 1, // Generate only 1 question
-        }],
-      });
-
-      if (response.data?.success && response.data.data.topics) {
-        // Handle case where backend returns multiple topics (shouldn't happen, but handle it)
-        // Also handle case where a topic has multiple questions
-        const topics = response.data.data.topics;
-        console.log(`[generateSingleQuestion] Backend returned ${topics.length} topic(s) for ${topicConfig.topic}`);
-        
-        // Iterate through all topics to find questions
-        for (const topic of topics) {
-          if (topic.questions && Array.isArray(topic.questions) && topic.questions.length > 0) {
-            // If we find questions, return the first one
-            // Log if there are multiple questions
-            if (topic.questions.length > 1) {
-              console.warn(`[generateSingleQuestion] Topic ${topic.topic} has ${topic.questions.length} questions, returning first one`);
-            }
-            const question = topic.questions[0];
-            console.log(`[generateSingleQuestion] Returning question from topic: ${topic.topic}, question type: ${question.type || 'unknown'}`);
-            return question;
-          }
-        }
-        
-        // If no questions found in any topic, log warning
-        console.warn(`[generateSingleQuestion] No questions found in response for topic ${topicConfig.topic}`);
-      }
-      return null;
-    } catch (err: any) {
-      console.error(`Error generating question ${questionNumber} for topic ${topicConfig.topic}:`, err);
-      return null;
-    }
-  };
+  // generateSingleQuestion removed - was only used for preview functionality
 
   const handleRemoveQuestion = (questionIndex: number) => {
     setQuestions(questions.filter((_, idx) => idx !== questionIndex));
   };
 
-  const handleEditQuestion = (questionIndex: number) => {
-    const question = previewQuestions[questionIndex];
-    if (question) {
-      setEditingQuestion({ ...question });
-      setEditingQuestionIndex(questionIndex);
-    }
-  };
-
-  const handleSaveEditedQuestion = async () => {
-    if (editingQuestionIndex === null || !editingQuestion || !assessmentId) {
-      return;
-    }
-
-    try {
-      const question = previewQuestions[editingQuestionIndex];
-      const topic = question.topic;
-
-      // Update the question in preview questions
-      const updated = [...previewQuestions];
-      updated[editingQuestionIndex] = { ...editingQuestion };
-      setPreviewQuestions(updated);
-
-      // Note: Draft will be saved automatically when navigating away (browser back or Back to Dashboard button)
-
-      setEditingQuestionIndex(null);
-      setEditingQuestion(null);
-      setError(null);
-    } catch (err: any) {
-      console.error("Error saving edited question:", err);
-      setError(err.response?.data?.message || err.message || "Failed to save edited question");
-    }
-  };
-
-  const handleRegenerateQuestion = async (questionIndex: number) => {
-    if (!assessmentId) {
-      setError("Assessment ID not found");
-      return;
-    }
-
-    setRegeneratingQuestionIndex(questionIndex);
-    setError(null);
-
-    try {
-      const question = previewQuestions[questionIndex];
-      if (!question) {
-        setError("Question not found");
-        return;
-      }
-
-      // Get skills from assessment if not in state
-      let skillsToUse = selectedSkills;
-      if (!skillsToUse || skillsToUse.length === 0) {
-        try {
-          const assessmentResponse = await axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`);
-          if (assessmentResponse.data?.success) {
-            const assessment = assessmentResponse.data.data.assessment || assessmentResponse.data.data;
-            if (assessment.selectedSkills && assessment.selectedSkills.length > 0) {
-              skillsToUse = assessment.selectedSkills;
-            }
-          }
-        } catch (err) {
-          console.error("Error fetching skills:", err);
-        }
-      }
-
-      if (!skillsToUse || skillsToUse.length === 0) {
-        setError("No skills found. Please go back to Station 1 and select skills.");
-        setRegeneratingQuestionIndex(null);
-        return;
-      }
-
-      // Generate a new question with the same topic and type
-      const topicConfig = {
-        topic: question.topic,
-        questionType: question.type,
-        difficulty: question.difficulty || "Medium",
-        numQuestions: 1,
-        isAptitude: question.isAptitude || false,
-        subTopic: question.subTopic,
-        language: question.language,
-        judge0_enabled: question.judge0_enabled,
-      };
-
-      const response = await axios.post("/api/assessments/generate-questions-from-config", {
-        assessmentId,
-        skill: skillsToUse.join(", "),
-        topics: [topicConfig],
-      });
-
-      if (response.data?.success && response.data.data.topics) {
-        const topic = response.data.data.topics[0];
-        if (topic.questions && topic.questions.length > 0) {
-          const newQuestion = topic.questions[0];
-          // Preserve the topic and other metadata
-          newQuestion.topic = question.topic;
-          
-          // Update the question in preview questions
-          const updated = [...previewQuestions];
-          updated[questionIndex] = newQuestion;
-          setPreviewQuestions(updated);
-
-          // Note: Draft will be saved automatically when navigating away (browser back or Back to Dashboard button)
-        } else {
-          setError("Failed to generate new question");
-        }
-      } else {
-        setError("Failed to regenerate question");
-      }
-    } catch (err: any) {
-      console.error("Error regenerating question:", err);
-      setError(err.response?.data?.message || err.message || "Failed to regenerate question");
-    } finally {
-      setRegeneratingQuestionIndex(null);
-    }
-  };
+  // Preview-related functions removed: handleEditQuestion, handleSaveEditedQuestion, handleRegenerateQuestion
 
   // Email validation function
   const validateEmail = (email: string): boolean => {
@@ -5017,8 +5500,8 @@ export default function CreateNewAssessmentPage() {
     }
     
     // Check if email already exists (case insensitive)
-    if (candidates.some((c) => c.email.toLowerCase() === email)) {
-      setEmailValidationError("This email is already added");
+    if (candidates.some((c) => c.email.toLowerCase() === email.toLowerCase())) {
+      setEmailValidationError("This candidate already exists in the list.");
       return;
     }
     
@@ -5202,11 +5685,6 @@ export default function CreateNewAssessmentPage() {
       // Add topics if configured
       if (topicConfigs.length > 0) {
         draftData.topics = topicConfigs;
-      }
-
-      // Add preview questions if available
-      if (previewQuestions.length > 0) {
-        draftData.previewQuestions = previewQuestions;
       }
 
       // Add questions if available (from Station 3)
@@ -5561,58 +6039,7 @@ export default function CreateNewAssessmentPage() {
                 />
               </div>
 
-              <div style={{ marginBottom: "2rem" }}>
-                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                  Job Designation / Domain *
-                </label>
-                  <input
-                    type="text"
-                    value={jobDesignation}
-                    onChange={(e) => setJobDesignation(e.target.value)}
-                    placeholder="e.g., Software Engineering, Aptitude, Data Scientist, Frontend Developer"
-                    style={{
-                    width: "100%",
-                      padding: "0.75rem",
-                      border: "1px solid #e2e8f0",
-                      borderRadius: "0.5rem",
-                      fontSize: "1rem",
-                    }}
-                  />
-              </div>
-
-              {/* Topic Cards Display */}
-              {topicCards.length > 0 && (isEditMode || !hasVisitedConfigureStation) && (
-                <div style={{ marginBottom: "2rem" }}>
-                  <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
-                    Related Technologies & Skills
-                  </label>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
-                    {topicCards.map((card) => (
-                      <button
-                        key={card}
-                        type="button"
-                        onClick={() => handleCardClick(card)}
-                        disabled={!isEditMode && selectedSkills.includes(card)}
-                        style={{
-                          padding: "0.5rem 1rem",
-                          border: `1px solid ${selectedSkills.includes(card) ? "#6953a3" : "#e2e8f0"}`,
-                          borderRadius: "0.5rem",
-                          backgroundColor: selectedSkills.includes(card) ? "#eff6ff" : "#ffffff",
-                          color: selectedSkills.includes(card) ? "#1e40af" : "#475569",
-                          cursor: (!isEditMode && selectedSkills.includes(card)) ? "default" : "pointer",
-                          fontSize: "0.875rem",
-                          fontWeight: selectedSkills.includes(card) ? 600 : 400,
-                          opacity: (!isEditMode && selectedSkills.includes(card)) ? 0.7 : 1,
-                        }}
-                      >
-                        {card} {selectedSkills.includes(card) && "✓"}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Experience Mode Selection */}
+              {/* Experience Mode and Range - Shared across all methods */}
               <div style={{ marginBottom: "2rem" }}>
                 <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
                   Experience Mode <span style={{ color: "#dc2626" }}>*</span>
@@ -5635,13 +6062,12 @@ export default function CreateNewAssessmentPage() {
                       checked={experienceMode === "corporate"}
                       onChange={(e) => {
                         setExperienceMode(e.target.value as "corporate" | "student");
-                        // Reset experience range when switching modes
                         if (e.target.value === "corporate") {
                           setExperienceMin(0);
                           setExperienceMax(10);
                         } else {
                           setExperienceMin(0);
-                          setExperienceMax(3); // Default to 1st-4th year for students
+                          setExperienceMax(3);
                         }
                       }}
                       style={{ cursor: "pointer" }}
@@ -5665,10 +6091,9 @@ export default function CreateNewAssessmentPage() {
                       checked={experienceMode === "student"}
                       onChange={(e) => {
                         setExperienceMode(e.target.value as "corporate" | "student");
-                        // Reset experience range when switching modes
                         if (e.target.value === "student") {
                           setExperienceMin(0);
-                          setExperienceMax(3); // Default to 1st-4th year for students
+                          setExperienceMax(3);
                         } else {
                           setExperienceMin(0);
                           setExperienceMax(10);
@@ -5761,13 +6186,303 @@ export default function CreateNewAssessmentPage() {
                 )}
               </div>
 
-              {/* Skills we want to assess section */}
+              {/* Three-Tab Interface for Skill Definition Methods */}
               <div style={{ marginBottom: "2rem" }}>
                 <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
-                  Skills we want to assess *
+                  Define Skill Requirements
                 </label>
-                {selectedSkills.length > 0 && (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginBottom: "1rem" }}>
+                
+                {/* Tabs */}
+                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1.5rem", borderBottom: "2px solid #e2e8f0" }}>
+                  <button
+                    type="button"
+                    onClick={() => setActiveMethod("role")}
+                    style={{
+                      padding: "0.75rem 1.5rem",
+                      border: "none",
+                      borderBottom: activeMethod === "role" ? "3px solid #6953a3" : "3px solid transparent",
+                      backgroundColor: "transparent",
+                      color: activeMethod === "role" ? "#6953a3" : "#64748b",
+                      fontWeight: activeMethod === "role" ? 600 : 400,
+                      cursor: "pointer",
+                      fontSize: "0.875rem",
+                    }}
+                  >
+                    Method A: Role-Based Auto Generation
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveMethod("manual")}
+                    style={{
+                      padding: "0.75rem 1.5rem",
+                      border: "none",
+                      borderBottom: activeMethod === "manual" ? "3px solid #6953a3" : "3px solid transparent",
+                      backgroundColor: "transparent",
+                      color: activeMethod === "manual" ? "#6953a3" : "#64748b",
+                      fontWeight: activeMethod === "manual" ? 600 : 400,
+                      cursor: "pointer",
+                      fontSize: "0.875rem",
+                    }}
+                  >
+                    Method B: Manual Selection
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveMethod("csv")}
+                    style={{
+                      padding: "0.75rem 1.5rem",
+                      border: "none",
+                      borderBottom: activeMethod === "csv" ? "3px solid #6953a3" : "3px solid transparent",
+                      backgroundColor: "transparent",
+                      color: activeMethod === "csv" ? "#6953a3" : "#64748b",
+                      fontWeight: activeMethod === "csv" ? 600 : 400,
+                      cursor: "pointer",
+                      fontSize: "0.875rem",
+                    }}
+                  >
+                    Method C: Upload CSV Requirements
+                  </button>
+                </div>
+
+                {/* Tab Content */}
+                {activeMethod === "role" && (
+                  <div>
+                    <div style={{ marginBottom: "2rem" }}>
+                      <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                        Job Designation / Domain *
+                      </label>
+                      <input
+                        type="text"
+                        value={jobDesignation}
+                        onChange={(e) => setJobDesignation(e.target.value)}
+                        placeholder="e.g., Software Engineering, Aptitude, Data Scientist, Frontend Developer"
+                        style={{
+                          width: "100%",
+                          padding: "0.75rem",
+                          border: "1px solid #e2e8f0",
+                          borderRadius: "0.5rem",
+                          fontSize: "1rem",
+                        }}
+                      />
+                    </div>
+
+                    {/* Topic Cards Display */}
+                    {topicCards.length > 0 && (isEditMode || !hasVisitedConfigureStation) && (
+                      <div style={{ marginBottom: "2rem" }}>
+                        <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                          Related Technologies & Skills
+                        </label>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
+                          {topicCards.map((card) => (
+                            <button
+                              key={card}
+                              type="button"
+                              onClick={() => handleCardClick(card)}
+                              disabled={!isEditMode && selectedSkills.includes(card)}
+                              style={{
+                                padding: "0.5rem 1rem",
+                                border: `1px solid ${selectedSkills.includes(card) ? "#6953a3" : "#e2e8f0"}`,
+                                borderRadius: "0.5rem",
+                                backgroundColor: selectedSkills.includes(card) ? "#eff6ff" : "#ffffff",
+                                color: selectedSkills.includes(card) ? "#1e40af" : "#475569",
+                                cursor: (!isEditMode && selectedSkills.includes(card)) ? "default" : "pointer",
+                                fontSize: "0.875rem",
+                                fontWeight: selectedSkills.includes(card) ? 600 : 400,
+                                opacity: (!isEditMode && selectedSkills.includes(card)) ? 0.7 : 1,
+                              }}
+                            >
+                              {card} {selectedSkills.includes(card) && "✓"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                  </div>
+                )}
+
+                {activeMethod === "manual" && (
+                  <div>
+                    <div style={{ marginBottom: "2rem" }}>
+                      <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                        Skills we want to assess *
+                      </label>
+                      {selectedSkills.length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginBottom: "1rem" }}>
+                          {selectedSkills.map((skill) => (
+                            <div
+                              key={skill}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "0.5rem",
+                                backgroundColor: "#eff6ff",
+                                color: "#1e40af",
+                                padding: "0.5rem 1rem",
+                                borderRadius: "0.5rem",
+                                fontSize: "0.875rem",
+                                fontWeight: 500,
+                              }}
+                            >
+                              {skill}
+                              {(isEditMode || !hasVisitedConfigureStation) && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveSkill(skill)}
+                                  style={{
+                                    background: "none",
+                                    border: "none",
+                                    color: "#1e40af",
+                                    cursor: "pointer",
+                                    padding: 0,
+                                    fontSize: "1.125rem",
+                                    lineHeight: 1,
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {(isEditMode || !hasVisitedConfigureStation) && (
+                        <div style={{ display: "flex", gap: "0.5rem" }}>
+                          <input
+                            type="text"
+                            value={manualSkillInput}
+                            onChange={(e) => setManualSkillInput(e.target.value)}
+                            onKeyPress={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                handleAddManualSkill();
+                              }
+                            }}
+                            placeholder="Enter technology name (e.g., Python, React, HTML)"
+                            style={{
+                              flex: 1,
+                              padding: "0.75rem",
+                              border: "1px solid #e2e8f0",
+                              borderRadius: "0.5rem",
+                              fontSize: "1rem",
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={handleAddManualSkill}
+                            className="btn-secondary"
+                            disabled={!manualSkillInput.trim()}
+                            style={{ marginTop: 0, whiteSpace: "nowrap", padding: "0.75rem 1.5rem" }}
+                          >
+                            Add
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                  </div>
+                )}
+
+                {activeMethod === "csv" && (
+                  <div>
+                    <div style={{ marginBottom: "1.5rem" }}>
+                      <button
+                        type="button"
+                        onClick={downloadCsvTemplate}
+                        className="btn-secondary"
+                        style={{ marginBottom: "1rem" }}
+                      >
+                        Download CSV Template
+                      </button>
+                      <div style={{ 
+                        marginTop: "0.75rem", 
+                        padding: "0.75rem", 
+                        backgroundColor: "#f0f9ff", 
+                        border: "1px solid #bae6fd", 
+                        borderRadius: "0.5rem",
+                        fontSize: "0.875rem",
+                        color: "#0369a1"
+                      }}>
+                        <strong>CSV Format Instructions:</strong>
+                        <ul style={{ margin: "0.5rem 0 0 1.5rem", padding: 0 }}>
+                          <li>Only three columns allowed: <strong>skill_name</strong>, <strong>skill_description</strong>, <strong>importance_level</strong></li>
+                          <li>If you have multiple descriptions for a skill, separate them using semicolons (;) within the same cell</li>
+                          <li>Do NOT add extra columns. Keep exactly three columns</li>
+                          <li>skill_description will be automatically wrapped in quotes in the template</li>
+                          <li>importance_level must be: <strong>Low</strong>, <strong>Medium</strong>, or <strong>High</strong></li>
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div style={{ marginBottom: "2rem" }}>
+                      <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                        Upload Requirements File (CSV) *
+                      </label>
+                      <input
+                        type="file"
+                        accept=".csv"
+                        onChange={handleSkillRequirementsCsvUpload}
+                        style={{
+                          width: "100%",
+                          padding: "0.75rem",
+                          border: "1px solid #e2e8f0",
+                          borderRadius: "0.5rem",
+                          fontSize: "1rem",
+                        }}
+                      />
+                      {csvError && (
+                        <div style={{ marginTop: "0.5rem", color: "#dc2626", fontSize: "0.875rem" }}>
+                          {csvError}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* CSV Preview Table */}
+                    {csvData.length > 0 && (
+                      <div style={{ marginBottom: "2rem" }}>
+                        <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                          Preview Requirements
+                        </label>
+                        <div style={{ overflowX: "auto", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr style={{ backgroundColor: "#f8fafc" }}>
+                                <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
+                                  Skill Name
+                                </th>
+                                <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
+                                  Description
+                                </th>
+                                <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
+                                  Importance Level
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {csvData.map((row, idx) => (
+                                <tr key={idx}>
+                                  <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>{row.skill_name}</td>
+                                  <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>{row.skill_description || "-"}</td>
+                                  <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>{row.importance_level}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                  </div>
+                )}
+              </div>
+
+              {/* Skills Display (for Role-Based and Manual methods) */}
+              {(activeMethod === "role" || activeMethod === "manual") && selectedSkills.length > 0 && (
+                <div style={{ marginBottom: "2rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                    Selected Skills *
+                  </label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
                     {selectedSkills.map((skill) => (
                       <div
                         key={skill}
@@ -5804,40 +6519,8 @@ export default function CreateNewAssessmentPage() {
                       </div>
                     ))}
                   </div>
-                )}
-                {(isEditMode || !hasVisitedConfigureStation) && (
-                  <div style={{ display: "flex", gap: "0.5rem" }}>
-                    <input
-                      type="text"
-                      value={manualSkillInput}
-                      onChange={(e) => setManualSkillInput(e.target.value)}
-                      onKeyPress={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          handleAddManualSkill();
-                        }
-                      }}
-                      placeholder="Enter technology name (e.g., Python, React, HTML)"
-                      style={{
-                        flex: 1,
-                        padding: "0.75rem",
-                        border: "1px solid #e2e8f0",
-                        borderRadius: "0.5rem",
-                        fontSize: "1rem",
-                      }}
-                    />
-                    <button
-                      type="button"
-                      onClick={handleAddManualSkill}
-                      className="btn-secondary"
-                      disabled={!manualSkillInput.trim()}
-                      style={{ marginTop: 0, whiteSpace: "nowrap", padding: "0.75rem 1.5rem" }}
-                    >
-                      Add
-                    </button>
-                  </div>
-                )}
-              </div>
+                </div>
+              )}
 
               <div style={{ display: "flex", gap: "1rem", marginTop: "2rem" }}>
                 {/* Check if topics have been generated (either in edit mode or after generating topics) */}
@@ -5865,35 +6548,61 @@ export default function CreateNewAssessmentPage() {
                     <>
                       <button
                         type="button"
-                        onClick={async () => {
-                          if (selectedSkills.length === 0) {
-                            setError("Please select at least one skill to assess");
-                            return;
-                          }
-                          if (!jobDesignation.trim()) {
-                            setError("Please enter a job designation");
-                            return;
-                          }
-                          await handleGenerateTopics();
-                        }}
+                        onClick={handleGenerateTopicsUnified}
                         className="btn-primary"
-                        disabled={loading || selectedSkills.length === 0 || !jobDesignation.trim()}
+                        disabled={
+                          loading || 
+                          generatingFromCsv ||
+                          // Must have at least one skill from any method (role-based, manual, or CSV)
+                          (selectedSkills.length === 0 && csvData.length === 0) ||
+                          // If role-based method has skills selected, job designation is required for context
+                          (selectedSkills.length > 0 && topicCards.length > 0 && !jobDesignation.trim())
+                        }
                         style={{ flex: 1 }}
                       >
-                        {loading ? "Generating Topics..." : "Generate Topics"}
+                        {(loading || generatingFromCsv) ? "Generating Topics..." : "Generate Topics"}
                       </button>
-                      {(selectedSkills.length === 0 || !jobDesignation.trim()) && (
+                      {(selectedSkills.length === 0 && csvData.length === 0) && (
                         <div style={{ 
                           fontSize: "0.875rem", 
                           color: "#dc2626", 
                           marginTop: "0.5rem",
-                          textAlign: "center"
+                          textAlign: "center",
+                          width: "100%"
                         }}>
-                          {selectedSkills.length === 0 && !jobDesignation.trim() 
-                            ? "Please select at least one skill and enter a job designation"
-                            : selectedSkills.length === 0 
-                            ? "Please select at least one skill"
-                            : "Please enter a job designation"}
+                          Please add at least one skill from any method (Role-based, Manual, or CSV)
+                        </div>
+                      )}
+                      {selectedSkills.length > 0 && topicCards.length > 0 && !jobDesignation.trim() && (
+                        <div style={{ 
+                          fontSize: "0.875rem", 
+                          color: "#dc2626", 
+                          marginTop: "0.5rem",
+                          textAlign: "center",
+                          width: "100%"
+                        }}>
+                          Job designation is required when using role-based skills
+                        </div>
+                      )}
+                      {(selectedSkills.length > 0 || csvData.length > 0) && (
+                        <div style={{ 
+                          fontSize: "0.875rem", 
+                          color: "#64748b", 
+                          marginTop: "0.5rem",
+                          textAlign: "center",
+                          width: "100%",
+                          fontStyle: "italic"
+                        }}>
+                          {(() => {
+                            const roleCount = selectedSkills.filter(s => topicCards.includes(s)).length;
+                            const manualCount = selectedSkills.filter(s => !topicCards.includes(s)).length;
+                            const csvCount = csvData.length;
+                            const parts = [];
+                            if (roleCount > 0) parts.push(`${roleCount} role-based`);
+                            if (manualCount > 0) parts.push(`${manualCount} manual`);
+                            if (csvCount > 0) parts.push(`${csvCount} CSV`);
+                            return `Will generate topics for: ${parts.join(", ")} skill${parts.length > 1 ? "s" : ""}`;
+                          })()}
                         </div>
                       )}
                     </>
@@ -5965,23 +6674,6 @@ export default function CreateNewAssessmentPage() {
                 </div>
               )}
 
-              {/* Preview All Questions Button */}
-              <div style={{ marginBottom: "1.5rem", display: "flex", justifyContent: "flex-end", gap: "1rem" }}>
-                <button
-                  type="button"
-                  onClick={handlePreviewAllQuestionsV2}
-                  disabled={topicsV2.length === 0 || generatingAllQuestions}
-                  className="btn-secondary"
-                  style={{ 
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    opacity: (topicsV2.length === 0 || generatingAllQuestions) ? 0.5 : 1
-                  }}
-                >
-                  {generatingAllQuestions ? "Generating Questions..." : "Preview All Questions"}
-                </button>
-              </div>
 
 
 
@@ -6003,7 +6695,7 @@ export default function CreateNewAssessmentPage() {
                         Questions Count
                       </th>
                       <th style={{ padding: "1rem", textAlign: "left", borderBottom: "2px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
-                        Status
+                        Additional Requirements
                       </th>
                       <th style={{ padding: "1rem", textAlign: "left", borderBottom: "2px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
                         Actions
@@ -6033,7 +6725,7 @@ export default function CreateNewAssessmentPage() {
                                   ...(row.canUseJudge0 ? ["Coding"] : [])
                                 ];
                           
-                          return (
+                          return [
                             <tr key={`${topic.id}-${row.rowId}`} style={{ borderBottom: "1px solid #e2e8f0" }}>
                               <td style={{ padding: "1rem", verticalAlign: "top" }}>
                                 {isFirstRow && (
@@ -6079,9 +6771,14 @@ export default function CreateNewAssessmentPage() {
                                       );
                                     })()}
                                     <div style={{ position: "relative" }}>
+                                      <label htmlFor={`topic-input-${topic.id}`} className="sr-only">
+                                        Topic Name
+                                      </label>
                                       <input
+                                        id={`topic-input-${topic.id}`}
+                                        name={`topic-input-${topic.id}`}
                                         type="text"
-                                        value={topicInputValues[topic.id] !== undefined ? topicInputValues[topic.id] : topic.label}
+                                        value={topicInputValues[topic.id] !== undefined ? (topicInputValues[topic.id] || "") : (topic.label || "")}
                                         onChange={(e) => handleTopicNameChange(topic.id, e.target.value)}
                                         onFocus={() => {
                                           const specialCategories = ["aptitude", "communication", "logical_reasoning"] as const;
@@ -6158,7 +6855,12 @@ export default function CreateNewAssessmentPage() {
                               </td>
                               <td style={{ padding: "1rem" }}>
                                 <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                                  <label htmlFor={`question-type-${topic.id}-${row.rowId}`} className="sr-only">
+                                    Question Type
+                                  </label>
                                   <select
+                                    id={`question-type-${topic.id}-${row.rowId}`}
+                                    name={`question-type-${topic.id}-${row.rowId}`}
                                     value={row.questionType}
                                     onChange={(e) => {
                                       const newType = e.target.value as "MCQ" | "Subjective" | "PseudoCode" | "Coding";
@@ -6258,7 +6960,12 @@ export default function CreateNewAssessmentPage() {
                                 </div>
                               </td>
                               <td style={{ padding: "1rem" }}>
+                                <label htmlFor={`difficulty-${topic.id}-${row.rowId}`} className="sr-only">
+                                  Difficulty Level
+                                </label>
                                 <select
+                                  id={`difficulty-${topic.id}-${row.rowId}`}
+                                  name={`difficulty-${topic.id}-${row.rowId}`}
                                   value={row.difficulty}
                                   onChange={(e) => handleUpdateRow(topic.id, row.rowId, "difficulty", e.target.value)}
                                   disabled={row.locked}
@@ -6281,7 +6988,12 @@ export default function CreateNewAssessmentPage() {
                                 </select>
                               </td>
                               <td style={{ padding: "1rem" }}>
+                                <label htmlFor={`questions-count-${topic.id}-${row.rowId}`} className="sr-only">
+                                  Questions Count
+                                </label>
                                 <input
+                                  id={`questions-count-${topic.id}-${row.rowId}`}
+                                  name={`questions-count-${topic.id}-${row.rowId}`}
                                   type="number"
                                   min="1"
                                   max="20"
@@ -6300,99 +7012,35 @@ export default function CreateNewAssessmentPage() {
                                   }}
                                 />
                               </td>
-                              <td style={{ padding: "1rem" }}>
-                                <span style={{
-                                  padding: "0.25rem 0.75rem",
-                                  borderRadius: "0.375rem",
-                                  fontSize: "0.75rem",
-                                  fontWeight: 500,
-                                }}>
-                                  {(() => {
-                                    const rowStatus = row.status;
-                                    const isGeneratedOrCompleted = rowStatus === "generated" || rowStatus === "completed";
-                                    return (
-                                      <span style={{
-                                        backgroundColor: isGeneratedOrCompleted ? "#d1fae5" : "#fef3c7",
-                                        color: isGeneratedOrCompleted ? "#065f46" : "#92400e",
-                                      }}>
-                                        {isGeneratedOrCompleted ? "Generated" : "Pending"}
-                                      </span>
-                                    );
-                                  })()}
-                                </span>
-                                {row.locked && (
-                                  <span style={{ marginLeft: "0.5rem", fontSize: "0.75rem", color: "#64748b" }}>
-                                    (Locked)
-                                  </span>
-                                )}
+                              <td style={{ padding: "1rem", verticalAlign: "top" }}>
+                                <label htmlFor={`additional-requirements-${topic.id}-${row.rowId}`} className="sr-only">
+                                  Additional Requirements
+                                </label>
+                                <textarea
+                                  id={`additional-requirements-${topic.id}-${row.rowId}`}
+                                  name={`additional-requirements-${topic.id}-${row.rowId}`}
+                                  value={row.additionalRequirements || ""}
+                                  onChange={(e) => handleUpdateRow(topic.id, row.rowId, "additionalRequirements", e.target.value)}
+                                  disabled={row.locked}
+                                  placeholder="Optional: Add requirements..."
+                                  style={{
+                                    width: "100%",
+                                    minHeight: "60px",
+                                    padding: "0.5rem",
+                                    border: "1px solid #e2e8f0",
+                                    borderRadius: "0.5rem",
+                                    fontSize: "0.875rem",
+                                    fontFamily: "inherit",
+                                    backgroundColor: row.locked ? "#f1f5f9" : "#ffffff",
+                                    cursor: row.locked ? "not-allowed" : "text",
+                                    opacity: row.locked ? 0.6 : 1,
+                                    resize: "vertical",
+                                  }}
+                                />
                               </td>
                               <td style={{ padding: "1rem" }}>
                                 <div style={{ display: "flex", gap: "0.5rem", flexDirection: "column" }}>
-                                  {(() => {
-                                    // Check if this is a custom topic (single row with questionsCount: 1)
-                                    const isCustomTopic = topic.questionRows.length === 1 && topic.questionRows[0].questionsCount === 1;
-                                    // Allow preview for custom topics even if allQuestionsGenerated is true
-                                    const canPreviewCustomTopic = isCustomTopic && row.status === "pending";
-                                    // Allow preview if: not generating, and (has questions OR is custom topic pending OR not all generated)
-                                    const canPreview = generatingRowId !== row.rowId && 
-                                                      (row.questions && row.questions.length > 0 || 
-                                                       canPreviewCustomTopic || 
-                                                       !allQuestionsGenerated) &&
-                                                      !(row.locked && (!row.questions || row.questions.length === 0));
-                                    
-                                    return (
-                                  <button
-                                    type="button"
-                                    onClick={() => handlePreviewRow(topic.id, row.rowId)}
-                                        disabled={!canPreview}
-                                    title={
-                                      generatingRowId === row.rowId 
-                                        ? "Generating..." 
-                                            : !canPreview && row.locked && (!row.questions || row.questions.length === 0)
-                                        ? "Row is locked but has no questions"
-                                        : row.questions && row.questions.length > 0
-                                        ? "View questions" 
-                                        : "Preview questions for this row"
-                                    }
-                                    style={{
-                                      position: "relative",
-                                      width: "110px",
-                                      padding: "0.5rem 1rem",
-                                          background: canPreview ? "#10b981" : "#94a3b8",
-                                      border: "none",
-                                      color: "#ffffff",
-                                          cursor: canPreview ? "pointer" : "not-allowed",
-                                      fontSize: "0.75rem",
-                                      fontWeight: 500,
-                                      borderRadius: "0.375rem",
-                                          opacity: canPreview ? 1 : 0.6,
-                                      textAlign: "center",
-                                      display: "flex",
-                                      alignItems: "center",
-                                      justifyContent: "center",
-                                    }}
-                                  >
-                                    <span style={{ 
-                                      visibility: generatingRowId === row.rowId ? "hidden" : "visible",
-                                      display: "inline-block",
-                                    }}>
-                                      {row.questions && row.questions.length > 0 ? "View" : "Preview"}
-                                    </span>
-                                    {generatingRowId === row.rowId && (
-                                      <span style={{
-                                        position: "absolute",
-                                        top: "50%",
-                                        left: "50%",
-                                        transform: "translate(-50%, -50%)",
-                                        display: "inline-block",
-                                        animation: "spin 1s linear infinite",
-                                      }}>
-                                        ⟳
-                                      </span>
-                                    )}
-                                  </button>
-                                    );
-                                  })()}
+                                  {/* Preview button removed */}
                                   {isFirstRow && (
                                     <button
                                       type="button"
@@ -6417,9 +7065,9 @@ export default function CreateNewAssessmentPage() {
                                 </div>
                               </td>
                             </tr>
-                          );
-                        });
-                      })
+                          ];
+                        })
+                      }).flat()
                     ) : (
                       <tr>
                         <td colSpan={6} style={{ padding: "2rem", textAlign: "center", color: "#64748b" }}>
@@ -6520,6 +7168,7 @@ export default function CreateNewAssessmentPage() {
                       setCustomTopicInputV2("");
                       setShowAiSuggestions(false);
                       setAiTopicSuggestions([]);
+                      setSuggestionsFetched(false); // Reset fetched flag
                     }}
                     style={{
                       padding: "0.5rem 1rem",
@@ -6541,7 +7190,7 @@ export default function CreateNewAssessmentPage() {
                 {/* Soft Skill Input Area (shown when a soft skill tab is selected) */}
                 {!showTechnicalInput && selectedCategoryForNewTopic && (
                   <div style={{ position: "relative", display: "flex", gap: "0.5rem" }}>
-                    <div style={{ flex: 1, position: "relative" }}>
+                    <div ref={suggestionsContainerRef} style={{ flex: 1, position: "relative" }}>
                       <input
                         ref={customTopicInputRef}
                         type="text"
@@ -6550,32 +7199,42 @@ export default function CreateNewAssessmentPage() {
                           const value = e.target.value;
                           setCustomTopicInputV2(value);
                           
-                          // Fetch AI-powered suggestions ONLY for soft skills
-                          if (selectedCategoryForNewTopic) {
-                            fetchAiTopicSuggestions(value, selectedCategoryForNewTopic);
+                          // Reset fetched flag when input is cleared or too short
+                          if (!value.trim() || value.trim().length < 2) {
+                            setSuggestionsFetched(false);
+                            setShowAiSuggestions(false);
+                            setAiTopicSuggestions([]);
+                          } else {
+                            // Reset fetched flag when input changes to allow refetching
+                            setSuggestionsFetched(false);
+                          }
+                          
+                          // Fetch AI-powered suggestions ONLY for soft skills (with debouncing)
+                          if (selectedCategoryForNewTopic && value.trim().length >= 2) {
+                            fetchAiTopicSuggestions(value, selectedCategoryForNewTopic, false);
                           }
                         }}
                         onFocus={() => {
-                          // Show suggestions if there's input or category is selected
-                          if (customTopicInputV2.trim() || selectedCategoryForNewTopic) {
-                            fetchAiTopicSuggestions(customTopicInputV2, selectedCategoryForNewTopic);
+                          // Show suggestions when field is focused - fetch even with empty input
+                          console.log("onFocus triggered", { 
+                            input: customTopicInputV2, 
+                            category: selectedCategoryForNewTopic,
+                            length: customTopicInputV2.trim().length 
+                          }); // Debug
+                          
+                          if (selectedCategoryForNewTopic) {
+                            console.log("onFocus: Calling fetchAiTopicSuggestions with forceFetch=true"); // Debug
+                            setSuggestionsFetched(false); // Reset to allow fetching
+                            // Use the input value, or empty string to get general suggestions for the category
+                            const queryToUse = customTopicInputV2.trim() || "";
+                            fetchAiTopicSuggestions(queryToUse, selectedCategoryForNewTopic, true);
+                          } else {
+                            console.log("onFocus: Not fetching - no category selected"); // Debug
                           }
                         }}
                         onBlur={(e) => {
-                          // Check if the blur is due to clicking a suggestion
-                          // If the relatedTarget is within the suggestions dropdown, don't close
-                          const relatedTarget = e.relatedTarget as HTMLElement;
-                          if (relatedTarget && relatedTarget.closest('[data-suggestions-dropdown]')) {
-                            return; // Don't close if clicking inside suggestions
-                          }
-                          // Delay hiding to allow clicking suggestions
-                          // Use a longer delay to ensure click events fire first
-                          setTimeout(() => {
-                            // Only close if input is not focused (user clicked outside)
-                            if (document.activeElement !== e.currentTarget) {
-                              setShowAiSuggestions(false);
-                            }
-                          }, 300);
+                          // Don't handle blur here - let the outside click handler manage closing
+                          // This prevents premature closing when clicking suggestions
                         }}
                         onKeyPress={(e) => {
                           if (e.key === "Enter") {
@@ -6685,20 +7344,24 @@ export default function CreateNewAssessmentPage() {
                     <button
                       type="button"
                       onClick={handleAddSoftSkillTopic}
-                      disabled={loading || !customTopicInputV2.trim()}
+                      disabled={loading || !customTopicInputV2.trim() || addingTopic || validatingTopic}
                       style={{
                         padding: "0.75rem 1.5rem",
-                        background: loading || !customTopicInputV2.trim() ? "#94a3b8" : "#10b981",
+                        background: loading || !customTopicInputV2.trim() || addingTopic || validatingTopic ? "#94a3b8" : "#10b981",
                         border: "none",
                         color: "#ffffff",
-                        cursor: loading || !customTopicInputV2.trim() ? "not-allowed" : "pointer",
+                        cursor: loading || !customTopicInputV2.trim() || addingTopic || validatingTopic ? "not-allowed" : "pointer",
                         fontSize: "0.875rem",
                         fontWeight: 500,
                         borderRadius: "0.5rem",
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {selectedCategoryForNewTopic === "aptitude" 
+                      {addingTopic 
+                        ? "Adding..."
+                        : validatingTopic
+                        ? "Validating..."
+                        : selectedCategoryForNewTopic === "aptitude" 
                         ? "Add Aptitude Topic"
                         : selectedCategoryForNewTopic === "communication"
                         ? "Add Communication Topic"
@@ -6745,20 +7408,20 @@ export default function CreateNewAssessmentPage() {
                           e.stopPropagation();
                           handleAddCustomTopicV2(true, undefined, e);
                         }}
-                        disabled={loading || !customTopicInputV2.trim()}
+                        disabled={loading || !customTopicInputV2.trim() || addingTopic}
                         style={{
                           padding: "0.75rem 1.5rem",
-                          background: loading || !customTopicInputV2.trim() ? "#94a3b8" : "#10b981",
+                          background: loading || !customTopicInputV2.trim() || addingTopic ? "#94a3b8" : "#10b981",
                           border: "none",
                           color: "#ffffff",
-                          cursor: loading || !customTopicInputV2.trim() ? "not-allowed" : "pointer",
+                          cursor: loading || !customTopicInputV2.trim() || addingTopic ? "not-allowed" : "pointer",
                           fontSize: "0.875rem",
                           fontWeight: 500,
                           borderRadius: "0.5rem",
                           whiteSpace: "nowrap",
                         }}
                       >
-                        Add Technical Topic
+                        {addingTopic ? "Adding..." : "Add Technical Topic"}
                       </button>
                     </div>
                     <div style={{ fontSize: "0.8125rem", color: "#64748b", marginTop: "0.25rem" }}>
@@ -6803,7 +7466,7 @@ export default function CreateNewAssessmentPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setCurrentStation(3)}
+                      onClick={handleNextToReviewQuestions}
                       className="btn-primary"
                       style={{ 
                         flex: 1,
@@ -6813,588 +7476,17 @@ export default function CreateNewAssessmentPage() {
                       disabled={generatingAllQuestions}
                       title={
                         generatingAllQuestions 
-                          ? "Please wait for all questions to be generated" 
-                          : undefined
+                          ? "Generating questions..." 
+                          : "Generate questions and proceed to Review Questions"
                       }
                     >
-                      Next
+                      {generatingAllQuestions ? "Generating Questions..." : "Next → Review Questions"}
                     </button>
               </div>
             </div>
           )}
 
-          {/* Single Preview Modal */}
-          {showSinglePreview && singlePreviewTopic && singlePreviewRow && (
-            <div style={{
-              position: "fixed",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              backgroundColor: "rgba(0, 0, 0, 0.5)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              zIndex: 1000,
-            }}>
-              <div style={{
-                backgroundColor: "#ffffff",
-                borderRadius: "0.75rem",
-                padding: "2rem",
-                maxWidth: "90vw",
-                maxHeight: "90vh",
-                overflow: "auto",
-                width: "800px",
-              }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
-                  <h2 style={{ fontSize: "1.5rem", fontWeight: 600, color: "#1e293b" }}>
-                    Preview: {singlePreviewTopic.label}
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowSinglePreview(false);
-                      setSinglePreviewTopic(null);
-                      setSinglePreviewRow(null);
-                      setEditingSingleQuestion(null);
-                    }}
-                    style={{
-                      background: "none",
-                      border: "none",
-                      fontSize: "1.5rem",
-                      cursor: "pointer",
-                      color: "#64748b",
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-                
-                {singlePreviewRow.questions && singlePreviewRow.questions.length > 0 && (() => {
-                  const currentQuestion = singlePreviewRow.questions[singlePreviewQuestionIndex];
-                  const isEditing = editingSingleQuestion !== null;
-                  
-                  return (
-                    <div>
-                      <div style={{ marginBottom: "1rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <span style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                          Question {singlePreviewQuestionIndex + 1} of {singlePreviewRow.questions.length}
-                        </span>
-                        <div style={{ display: "flex", gap: "0.5rem" }}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSinglePreviewQuestionIndex(prev => Math.max(0, prev - 1));
-                              setEditingSingleQuestion(null);
-                            }}
-                            disabled={singlePreviewQuestionIndex === 0}
-                            style={{
-                              padding: "0.5rem 1rem",
-                              background: singlePreviewQuestionIndex === 0 ? "#94a3b8" : "#3b82f6",
-                              border: "none",
-                              color: "#ffffff",
-                              cursor: singlePreviewQuestionIndex === 0 ? "not-allowed" : "pointer",
-                              borderRadius: "0.375rem",
-                            }}
-                          >
-                            Previous
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSinglePreviewQuestionIndex(prev => Math.min(singlePreviewRow.questions.length - 1, prev + 1));
-                              setEditingSingleQuestion(null);
-                            }}
-                            disabled={singlePreviewQuestionIndex >= singlePreviewRow.questions.length - 1}
-                            style={{
-                              padding: "0.5rem 1rem",
-                              background: singlePreviewQuestionIndex >= singlePreviewRow.questions.length - 1 ? "#94a3b8" : "#3b82f6",
-                              border: "none",
-                              color: "#ffffff",
-                              cursor: singlePreviewQuestionIndex >= singlePreviewRow.questions.length - 1 ? "not-allowed" : "pointer",
-                              borderRadius: "0.375rem",
-                            }}
-                          >
-                            Next
-                          </button>
-                        </div>
-                      </div>
-                      
-                      <div style={{
-                        padding: "1.5rem",
-                        backgroundColor: "#ffffff",
-                        borderRadius: "0.5rem",
-                        border: "1px solid #e2e8f0",
-                        marginBottom: "1rem",
-                      }}>
-                        {renderQuestionByType(
-                          isEditing ? editingSingleQuestion : currentQuestion,
-                          singlePreviewRow.questionType,
-                          isEditing,
-                          isEditing ? (value: string) => {
-                            try {
-                              setEditingSingleQuestion(JSON.parse(value));
-                            } catch {}
-                          } : undefined
-                        )}
-                      </div>
-                      
-                      <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const question = singlePreviewRow.questions[singlePreviewQuestionIndex];
-                          setEditingSingleQuestion({ ...question });
-                        }}
-                        disabled={editingSingleQuestion !== null}
-                        style={{
-                          padding: "0.5rem 1rem",
-                          background: editingSingleQuestion !== null ? "#94a3b8" : "#10b981",
-                          border: "none",
-                          color: "#ffffff",
-                          cursor: editingSingleQuestion !== null ? "not-allowed" : "pointer",
-                          borderRadius: "0.375rem",
-                        }}
-                      >
-                        {editingSingleQuestion !== null ? "Editing..." : "Edit Question"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          if (!editingSingleQuestion) return;
-                          // Save edited question
-                          const updatedTopics = topicsV2.map(t => {
-                            if (t.id === singlePreviewTopic.id) {
-                              const updatedRows = t.questionRows.map(r => {
-                                if (r.rowId === singlePreviewRow.rowId) {
-                                  const updatedQuestions = [...r.questions];
-                                  updatedQuestions[singlePreviewQuestionIndex] = editingSingleQuestion;
-                                  return { ...r, questions: updatedQuestions };
-                                }
-                                return r;
-                              });
-                              return { ...t, questionRows: updatedRows };
-                            }
-                            return t;
-                          });
-                          setTopicsV2(updatedTopics);
-                          const updatedTopic = updatedTopics.find(t => t.id === singlePreviewTopic.id);
-                          const updatedRow = updatedTopic?.questionRows.find(r => r.rowId === singlePreviewRow.rowId);
-                          if (updatedRow) {
-                            setSinglePreviewRow(updatedRow);
-                          }
-                          setEditingSingleQuestion(null);
-                        }}
-                        disabled={!editingSingleQuestion}
-                        style={{
-                          padding: "0.5rem 1rem",
-                          background: editingSingleQuestion ? "#3b82f6" : "#94a3b8",
-                          border: "none",
-                          color: "#ffffff",
-                          cursor: editingSingleQuestion ? "pointer" : "not-allowed",
-                          borderRadius: "0.375rem",
-                        }}
-                      >
-                        Save Question
-                      </button>
-                      {editingSingleQuestion && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingSingleQuestion(null);
-                          }}
-                          style={{
-                            padding: "0.5rem 1rem",
-                            background: "none",
-                            border: "1px solid #64748b",
-                            color: "#64748b",
-                            cursor: "pointer",
-                            borderRadius: "0.375rem",
-                          }}
-                        >
-                          Cancel Edit
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          if (!assessmentId) return;
-                          try {
-                            const response = await axios.post("/api/assessments/regenerate-single-question", {
-                              assessmentId: assessmentId,
-                              topicId: singlePreviewTopic.id,
-                              rowId: singlePreviewRow.rowId,
-                              questionIndex: singlePreviewQuestionIndex,
-                            });
-                            if (response.data?.success) {
-                              const updatedRow = response.data.data.row;
-                              const updatedTopics = topicsV2.map(t => {
-                                if (t.id === singlePreviewTopic.id) {
-                                  const updatedRows = t.questionRows.map(r => r.rowId === singlePreviewRow.rowId ? updatedRow : r);
-                                  return { ...t, questionRows: updatedRows };
-                                }
-                                return t;
-                              });
-                              setTopicsV2(updatedTopics);
-                              setSinglePreviewRow(updatedRow);
-                            }
-                          } catch (err: any) {
-                            console.error("Error regenerating question:", err);
-                            setError(err.response?.data?.message || err.message || "Failed to regenerate question");
-                          }
-                        }}
-                        style={{
-                          padding: "0.5rem 1rem",
-                          background: "#f59e0b",
-                          border: "none",
-                          color: "#ffffff",
-                          cursor: "pointer",
-                          borderRadius: "0.375rem",
-                        }}
-                      >
-                        Regenerate This Question
-                      </button>
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            </div>
-          )}
-
-          {/* Bulk Preview Modal */}
-          {showBulkPreview && bulkPreviewTopics.length > 0 && (() => {
-            // Calculate current question position
-            const currentTopic = bulkPreviewTopics[bulkPreviewCurrentTopicIndex];
-            const currentRow = currentTopic?.questionRows[bulkPreviewCurrentRowIndex];
-            const currentQuestion = currentRow?.questions?.[bulkPreviewCurrentQuestionIndex];
-            
-            // Calculate total questions for navigation
-            let totalQuestions = 0;
-            let currentQuestionNumber = 0;
-            bulkPreviewTopics.forEach((topic, tIdx) => {
-              topic.questionRows.forEach((row, rIdx) => {
-                const qCount = row.questions?.length || 0;
-                if (tIdx < bulkPreviewCurrentTopicIndex || 
-                    (tIdx === bulkPreviewCurrentTopicIndex && rIdx < bulkPreviewCurrentRowIndex) ||
-                    (tIdx === bulkPreviewCurrentTopicIndex && rIdx === bulkPreviewCurrentRowIndex && currentQuestion)) {
-                  currentQuestionNumber += qCount;
-                }
-                totalQuestions += qCount;
-              });
-            });
-            if (currentQuestion) {
-              currentQuestionNumber += bulkPreviewCurrentQuestionIndex + 1;
-            }
-            
-            // Helper to get next question position
-            const getNextPosition = () => {
-              let tIdx = bulkPreviewCurrentTopicIndex;
-              let rIdx = bulkPreviewCurrentRowIndex;
-              let qIdx = bulkPreviewCurrentQuestionIndex;
-              
-              // Try next question in current row
-              if (currentRow?.questions && qIdx < currentRow.questions.length - 1) {
-                return { topicIndex: tIdx, rowIndex: rIdx, questionIndex: qIdx + 1 };
-              }
-              
-              // Try next row in current topic
-              if (currentTopic?.questionRows && rIdx < currentTopic.questionRows.length - 1) {
-                const nextRow = currentTopic.questionRows[rIdx + 1];
-                if (nextRow.questions && nextRow.questions.length > 0) {
-                  return { topicIndex: tIdx, rowIndex: rIdx + 1, questionIndex: 0 };
-                }
-              }
-              
-              // Try next topic
-              for (let i = tIdx + 1; i < bulkPreviewTopics.length; i++) {
-                const topic = bulkPreviewTopics[i];
-                for (let j = 0; j < topic.questionRows.length; j++) {
-                  const row = topic.questionRows[j];
-                  if (row.questions && row.questions.length > 0) {
-                    return { topicIndex: i, rowIndex: j, questionIndex: 0 };
-                  }
-                }
-              }
-              
-              return null; // No next question
-            };
-            
-            // Helper to get previous question position
-            const getPreviousPosition = () => {
-              let tIdx = bulkPreviewCurrentTopicIndex;
-              let rIdx = bulkPreviewCurrentRowIndex;
-              let qIdx = bulkPreviewCurrentQuestionIndex;
-              
-              // Try previous question in current row
-              if (qIdx > 0) {
-                return { topicIndex: tIdx, rowIndex: rIdx, questionIndex: qIdx - 1 };
-              }
-              
-              // Try previous row in current topic
-              if (rIdx > 0) {
-                for (let j = rIdx - 1; j >= 0; j--) {
-                  const prevRow = currentTopic.questionRows[j];
-                  if (prevRow.questions && prevRow.questions.length > 0) {
-                    return { topicIndex: tIdx, rowIndex: j, questionIndex: prevRow.questions.length - 1 };
-                  }
-                }
-              }
-              
-              // Try previous topic
-              for (let i = tIdx - 1; i >= 0; i--) {
-                const topic = bulkPreviewTopics[i];
-                for (let j = topic.questionRows.length - 1; j >= 0; j--) {
-                  const row = topic.questionRows[j];
-                  if (row.questions && row.questions.length > 0) {
-                    return { topicIndex: i, rowIndex: j, questionIndex: row.questions.length - 1 };
-                  }
-                }
-              }
-              
-              return null; // No previous question
-            };
-            
-            const nextPos = getNextPosition();
-            const prevPos = getPreviousPosition();
-            
-            return (
-              <div style={{
-                position: "fixed",
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                backgroundColor: "rgba(0, 0, 0, 0.5)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                zIndex: 1000,
-              }}>
-                <div style={{
-                  backgroundColor: "#ffffff",
-                  borderRadius: "0.75rem",
-                  padding: "2rem",
-                  maxWidth: "95vw",
-                  maxHeight: "95vh",
-                  overflow: "auto",
-                  width: "1200px",
-                  display: "flex",
-                  flexDirection: "column",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
-                    <div>
-                      <h2 style={{ fontSize: "1.5rem", fontWeight: 600, color: "#1e293b", marginBottom: "0.5rem" }}>
-                        Bulk Preview: All Questions
-                      </h2>
-                      <div style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                        {currentTopic && (
-                          <>
-                            Topic: {currentTopic.label} | 
-                            Row: {currentRow?.questionType} ({currentRow?.difficulty}) | 
-                            Question {currentQuestionNumber} of {totalQuestions}
-                            {generatingAllQuestions && " (Generating...)"}
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowBulkPreview(false);
-                        setBulkPreviewTopics([]);
-                      }}
-                      style={{
-                        background: "none",
-                        border: "none",
-                        fontSize: "1.5rem",
-                        cursor: "pointer",
-                        color: "#64748b",
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  
-                  {currentQuestion ? (
-                    <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-                      <div style={{
-                        padding: "1.5rem",
-                        backgroundColor: "#ffffff",
-                        borderRadius: "0.5rem",
-                        border: "1px solid #e2e8f0",
-                        marginBottom: "1rem",
-                        flex: 1,
-                        overflow: "auto",
-                      }}>
-                        {renderQuestionByType(
-                          editingBulkQuestion || currentQuestion,
-                          currentRow.questionType,
-                          editingBulkQuestion !== null,
-                          editingBulkQuestion !== null ? (value: string) => {
-                            try {
-                              setEditingBulkQuestion(JSON.parse(value));
-                            } catch {}
-                          } : undefined
-                        )}
-                      </div>
-                      
-                      <div style={{ display: "flex", gap: "0.5rem", justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", gap: "0.5rem" }}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (prevPos) {
-                                setBulkPreviewCurrentTopicIndex(prevPos.topicIndex);
-                                setBulkPreviewCurrentRowIndex(prevPos.rowIndex);
-                                setBulkPreviewCurrentQuestionIndex(prevPos.questionIndex);
-                                setEditingBulkQuestion(null);
-                              }
-                            }}
-                            disabled={!prevPos}
-                            style={{
-                              padding: "0.5rem 1rem",
-                              background: prevPos ? "#3b82f6" : "#94a3b8",
-                              border: "none",
-                              color: "#ffffff",
-                              cursor: prevPos ? "pointer" : "not-allowed",
-                              borderRadius: "0.375rem",
-                            }}
-                          >
-                            Previous
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (nextPos) {
-                                setBulkPreviewCurrentTopicIndex(nextPos.topicIndex);
-                                setBulkPreviewCurrentRowIndex(nextPos.rowIndex);
-                                setBulkPreviewCurrentQuestionIndex(nextPos.questionIndex);
-                                setEditingBulkQuestion(null);
-                              }
-                            }}
-                            disabled={!nextPos}
-                            style={{
-                              padding: "0.5rem 1rem",
-                              background: nextPos ? "#3b82f6" : "#94a3b8",
-                              border: "none",
-                              color: "#ffffff",
-                              cursor: nextPos ? "pointer" : "not-allowed",
-                              borderRadius: "0.375rem",
-                            }}
-                          >
-                            Next
-                          </button>
-                        </div>
-                        
-                        <div style={{ display: "flex", gap: "0.5rem" }}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingBulkQuestion({ ...currentQuestion });
-                            }}
-                            disabled={!!editingBulkQuestion}
-                            style={{
-                              padding: "0.5rem 1rem",
-                              background: editingBulkQuestion ? "#94a3b8" : "#10b981",
-                              border: "none",
-                              color: "#ffffff",
-                              cursor: editingBulkQuestion ? "not-allowed" : "pointer",
-                              borderRadius: "0.375rem",
-                            }}
-                          >
-                            Edit Question
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!editingBulkQuestion) return;
-                              const updatedTopics = bulkPreviewTopics.map(t => {
-                                if (t.id === currentTopic.id) {
-                                  const updatedRows = t.questionRows.map(r => {
-                                    if (r.rowId === currentRow.rowId) {
-                                      const updatedQuestions = [...r.questions];
-                                      updatedQuestions[bulkPreviewCurrentQuestionIndex] = editingBulkQuestion;
-                                      return { ...r, questions: updatedQuestions };
-                                    }
-                                    return r;
-                                  });
-                                  return { ...t, questionRows: updatedRows };
-                                }
-                                return t;
-                              });
-                              setBulkPreviewTopics(updatedTopics);
-                              setTopicsV2(updatedTopics);
-                              setEditingBulkQuestion(null);
-                            }}
-                            disabled={!editingBulkQuestion}
-                            style={{
-                              padding: "0.5rem 1rem",
-                              background: editingBulkQuestion ? "#3b82f6" : "#94a3b8",
-                              border: "none",
-                              color: "#ffffff",
-                              cursor: editingBulkQuestion ? "pointer" : "not-allowed",
-                              borderRadius: "0.375rem",
-                            }}
-                          >
-                            Save Question
-                          </button>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              if (!assessmentId || !currentQuestion) return;
-                              try {
-                                const response = await axios.post("/api/assessments/regenerate-single-question", {
-                                  assessmentId: assessmentId,
-                                  topicId: currentTopic.id,
-                                  rowId: currentRow.rowId,
-                                  questionIndex: bulkPreviewCurrentQuestionIndex,
-                                });
-                                if (response.data?.success) {
-                                  const updatedRow = response.data.data.row;
-                                  const updatedTopics = bulkPreviewTopics.map(t => {
-                                    if (t.id === currentTopic.id) {
-                                      const updatedRows = t.questionRows.map(r => r.rowId === currentRow.rowId ? updatedRow : r);
-                                      return { ...t, questionRows: updatedRows };
-                                    }
-                                    return t;
-                                  });
-                                  setBulkPreviewTopics(updatedTopics);
-                                  setTopicsV2(updatedTopics);
-                                  setEditingBulkQuestion(null);
-                                }
-                              } catch (err: any) {
-                                console.error("Error regenerating question:", err);
-                                setError(err.response?.data?.message || err.message || "Failed to regenerate question");
-                              }
-                            }}
-                            style={{
-                              padding: "0.5rem 1rem",
-                              background: "#f59e0b",
-                              border: "none",
-                              color: "#ffffff",
-                              cursor: "pointer",
-                              borderRadius: "0.375rem",
-                            }}
-                          >
-                            Regenerate This Question
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ padding: "2rem", textAlign: "center", color: "#64748b" }}>
-                      {generatingAllQuestions ? (
-                        <p>Generating questions... Please wait.</p>
-                      ) : (
-                        <p>No questions available yet. Questions will appear as they are generated.</p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
+          {/* Preview modals removed */}
 
           {/* Station 3: Review Questions */}
           {currentStation === 3 && (
@@ -7557,7 +7649,14 @@ export default function CreateNewAssessmentPage() {
                 const totalAiEstimatedTime = allReviewQuestions.reduce((total, q) => {
                   const baseTime = getBaseTimePerQuestion(q.questionType);
                   const multiplier = getDifficultyMultiplier(q.difficulty);
-                  return total + (baseTime * multiplier);
+                  let questionTime = baseTime * multiplier;
+                  
+                  // Cap MCQ questions at 40 seconds maximum
+                  if (q.questionType === "MCQ" && questionTime > 40) {
+                    questionTime = 40;
+                  }
+                  
+                  return total + questionTime;
                 }, 0);
                 const totalAiEstimatedMinutes = Math.ceil(totalAiEstimatedTime / 60);
                 
@@ -7652,22 +7751,19 @@ export default function CreateNewAssessmentPage() {
                                   Time (minutes):
                                   <input
                                     type="number"
-                                    min="1"
+                                    min="0"
                                     value={sectionTimer}
-                                    onChange={(e) => {
-                                      const newTime = parseInt(e.target.value) || 1;
-                                      setSectionTimers((prev) => ({
-                                        ...prev,
-                                        [questionType]: newTime,
-                                      }));
-                                    }}
+                                    readOnly
                                     style={{
                                       width: "80px",
                                       padding: "0.5rem",
                                       border: "1px solid #e2e8f0",
                                       borderRadius: "0.5rem",
                                       fontSize: "0.875rem",
+                                      backgroundColor: "#f1f5f9",
+                                      cursor: "not-allowed",
                                     }}
+                                    title="Auto-calculated from sum of question timers"
                                   />
                                 </label>
                               </div>
@@ -7762,16 +7858,35 @@ export default function CreateNewAssessmentPage() {
                                           <input
                                             type="number"
                                             min="1"
-                                            value={Math.ceil((getBaseTimePerQuestion(questionType) * getDifficultyMultiplier(qData.difficulty)) / 60)}
-                                            readOnly
+                                            value={(() => {
+                                              // Get timer from question object, or calculate default
+                                              const topic = topicsV2.find(t => t.id === qData.topicId);
+                                              const row = topic?.questionRows.find(r => r.rowId === qData.rowId);
+                                              const question = row?.questions?.[qData.questionIndex];
+                                              
+                                              if (question?.timer) {
+                                                return question.timer;
+                                              }
+                                              
+                                              // Calculate default if not present
+                                              const baseTime = getBaseTimePerQuestion(questionType);
+                                              const multiplier = getDifficultyMultiplier(qData.difficulty);
+                                              let questionTime = baseTime * multiplier;
+                                              if (questionType === "MCQ" && questionTime > 40) {
+                                                questionTime = 40;
+                                              }
+                                              return Math.max(1, Math.ceil(questionTime / 60));
+                                            })()}
+                                            onChange={(e) => {
+                                              const newTimer = parseInt(e.target.value) || 1;
+                                              handleUpdateQuestionTimer(qData.topicId, qData.rowId, qData.questionIndex, newTimer);
+                                            }}
                                             style={{
                                               width: "100%",
                                               padding: "0.5rem",
                                               border: "1px solid #e2e8f0",
                                               borderRadius: "0.5rem",
                                               fontSize: "0.875rem",
-                                              backgroundColor: "#f1f5f9",
-                                              cursor: "not-allowed",
                                             }}
                                           />
                                         ) : (
@@ -7794,7 +7909,7 @@ export default function CreateNewAssessmentPage() {
                                         </span>
                                       </td>
                                       <td style={{ padding: "1rem", textAlign: "center" }}>
-                                        <div style={{ display: "flex", gap: "0.5rem", justifyContent: "center" }}>
+                                        <div style={{ display: "flex", gap: "0.5rem", justifyContent: "center", flexWrap: "wrap" }}>
                                           <button
                                             type="button"
                                             onClick={() => {
@@ -7813,6 +7928,25 @@ export default function CreateNewAssessmentPage() {
                                             title="Edit question"
                                           >
                                             Edit
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setRegeneratingQuestionId(questionId);
+                                              setRegenerateQuestionFeedback("");
+                                            }}
+                                            style={{
+                                              padding: "0.25rem 0.75rem",
+                                              background: "#10b981",
+                                              border: "none",
+                                              color: "#ffffff",
+                                              cursor: "pointer",
+                                              fontSize: "0.75rem",
+                                              borderRadius: "0.375rem",
+                                            }}
+                                            title="Regenerate question"
+                                          >
+                                            Regenerate
                                           </button>
                                           <button
                                             type="button"
@@ -8099,6 +8233,156 @@ export default function CreateNewAssessmentPage() {
                 );
               })()}
 
+              {/* Regenerate Question Modal */}
+              {regeneratingQuestionId && (() => {
+                const qData = (() => {
+                  for (const topic of topicsV2) {
+                    for (const row of topic.questionRows) {
+                      if (row.questions && row.questions.length > 0) {
+                        for (let i = 0; i < row.questions.length; i++) {
+                          const id = `${topic.id}_${row.rowId}_${i}`;
+                          if (id === regeneratingQuestionId) {
+                            return {
+                              question: row.questions[i],
+                              questionType: row.questionType,
+                              difficulty: row.difficulty,
+                              topicId: topic.id,
+                              rowId: row.rowId,
+                              questionIndex: i,
+                              topicLabel: topic.label,
+                              additionalRequirements: row.additionalRequirements,
+                            };
+                          }
+                        }
+                      }
+                    }
+                  }
+                  return null;
+                })();
+                
+                if (!qData) return null;
+                
+                const questionText = getQuestionText(qData.question, qData.questionType);
+                
+                return (
+                  <div style={{
+                    position: "fixed",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    backgroundColor: "rgba(0, 0, 0, 0.5)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    zIndex: 1000,
+                    padding: "2rem",
+                  }}
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget) {
+                      setRegeneratingQuestionId(null);
+                      setRegenerateQuestionFeedback("");
+                    }
+                  }}
+                  >
+                    <div style={{
+                      backgroundColor: "#ffffff",
+                      borderRadius: "0.75rem",
+                      padding: "2rem",
+                      maxWidth: "700px",
+                      maxHeight: "90vh",
+                      overflow: "auto",
+                      width: "100%",
+                      boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.1)",
+                    }}>
+                      <div style={{ marginBottom: "1.5rem" }}>
+                        <h2 style={{ margin: 0, fontSize: "1.5rem", color: "#1a1625", fontWeight: 700 }}>
+                          Regenerate Question
+                        </h2>
+                        <p style={{ margin: "0.5rem 0 0 0", fontSize: "0.875rem", color: "#64748b" }}>
+                          {qData.topicLabel} - {qData.questionType}
+                        </p>
+                      </div>
+                      
+                      <div style={{ marginBottom: "1.5rem" }}>
+                        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b", fontSize: "0.875rem" }}>
+                          Current Question (Read-only):
+                        </label>
+                        <div style={{
+                          padding: "1rem",
+                          backgroundColor: "#f8fafc",
+                          border: "1px solid #e2e8f0",
+                          borderRadius: "0.5rem",
+                          fontSize: "0.875rem",
+                          color: "#1e293b",
+                          maxHeight: "200px",
+                          overflow: "auto",
+                        }}>
+                          {renderQuestionByType(qData.question, qData.questionType, false)}
+                        </div>
+                      </div>
+                      
+                      <div style={{ marginBottom: "1.5rem" }}>
+                        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b", fontSize: "0.875rem" }}>
+                          Provide feedback to improve this question (optional):
+                        </label>
+                        <textarea
+                          value={regenerateQuestionFeedback}
+                          onChange={(e) => setRegenerateQuestionFeedback(e.target.value)}
+                          placeholder="E.g., Make it more scenario-based, add more context, increase difficulty..."
+                          style={{
+                            width: "100%",
+                            minHeight: "100px",
+                            padding: "0.75rem",
+                            border: "1px solid #e2e8f0",
+                            borderRadius: "0.5rem",
+                            fontSize: "0.875rem",
+                            fontFamily: "inherit",
+                            resize: "vertical",
+                          }}
+                        />
+                      </div>
+                      
+                      <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRegeneratingQuestionId(null);
+                            setRegenerateQuestionFeedback("");
+                          }}
+                          style={{
+                            padding: "0.5rem 1rem",
+                            background: "#94a3b8",
+                            border: "none",
+                            color: "#ffffff",
+                            cursor: "pointer",
+                            borderRadius: "0.375rem",
+                            fontSize: "0.875rem",
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleRegenerateQuestion}
+                          style={{
+                            padding: "0.5rem 1rem",
+                            background: "#10b981",
+                            border: "none",
+                            color: "#ffffff",
+                            cursor: "pointer",
+                            borderRadius: "0.375rem",
+                            fontSize: "0.875rem",
+                          }}
+                        >
+                          Regenerate
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Pass Percentage Setting */}
               <div style={{ 
                 marginTop: "2rem", 
@@ -8339,7 +8623,14 @@ export default function CreateNewAssessmentPage() {
                 const totalAiEstimatedTime = allReviewQuestions.reduce((total, q) => {
                   const baseTime = getBaseTimePerQuestion(q.questionType);
                   const multiplier = getDifficultyMultiplier(q.difficulty);
-                  return total + (baseTime * multiplier);
+                  let questionTime = baseTime * multiplier;
+                  
+                  // Cap MCQ questions at 40 seconds maximum
+                  if (q.questionType === "MCQ" && questionTime > 40) {
+                    questionTime = 40;
+                  }
+                  
+                  return total + questionTime;
                 }, 0);
                 const totalAiEstimatedMinutes = Math.ceil(totalAiEstimatedTime / 60);
                 
@@ -8941,6 +9232,10 @@ export default function CreateNewAssessmentPage() {
                     {(() => {
                       const currentAccessMode: "public" | "private" = accessMode;
                       const isPublicMode = currentAccessMode === "public";
+                    // Hide Add Candidate section after finalization
+                    if (isFinalized) {
+                      return null;
+                    }
                       return (
                         <>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "0.5rem", marginBottom: "1rem" }}>
@@ -9168,8 +9463,8 @@ export default function CreateNewAssessmentPage() {
                 </div>
               )}
 
-              {/* Generate URL Section */}
-              {!assessmentUrl && (
+              {/* Generate URL Section - Hide after finalization */}
+              {!isFinalized && !assessmentUrl && (
                 <div style={{ marginBottom: "2rem" }}>
                   <button
                     type="button"
@@ -9188,8 +9483,8 @@ export default function CreateNewAssessmentPage() {
                 </div>
               )}
 
-              {/* Assessment URL Display */}
-              {assessmentUrl && (() => {
+              {/* Assessment URL Display - Hide after finalization */}
+              {!isFinalized && assessmentUrl && (() => {
                 const currentAccessMode: "public" | "private" = accessMode;
                 const isPublic = currentAccessMode === "public";
                 return (
@@ -9345,14 +9640,8 @@ export default function CreateNewAssessmentPage() {
                       >
                         Save Template
                       </button>
-                    </div>
-                  )}
-                </div>
-              )}
 
-              {/* Send Invitations Button (Private Mode Only) */}
-              {accessMode === "private" && assessmentUrl && candidates.length > 0 && (
-                <div style={{ marginBottom: "2rem" }}>
+                      {/* Send Invitations Button - Moved inside Email Invitation Template card */}
                   <button
                     type="button"
                     onClick={async () => {
@@ -9412,10 +9701,18 @@ export default function CreateNewAssessmentPage() {
                       }
                     }}
                     className="btn-primary"
-                    style={{ width: "100%", padding: "1rem", fontSize: "1rem" }}
+                        disabled={candidates.length === 0}
+                        style={{ 
+                          width: "100%", 
+                          padding: "0.75rem 1.5rem", 
+                          fontSize: "1rem",
+                          marginTop: "0.5rem"
+                        }}
                   >
                     Send Invitations via Email
                   </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -9441,9 +9738,10 @@ export default function CreateNewAssessmentPage() {
                       return;
                     }
                     setError(null);
-                    // Save final state and redirect to dashboard
+                    setLoading(true);
                     try {
                       if (assessmentId) {
+                        // Save final state and mark as complete
                         await axios.post("/api/assessments/update-schedule-and-candidates", {
                           assessmentId,
                           startTime: startTime,
@@ -9453,21 +9751,68 @@ export default function CreateNewAssessmentPage() {
                           token: assessmentUrl.split("/").pop() || "",
                           accessMode: accessMode,
                           invitationTemplate: accessMode === "private" ? invitationTemplate : undefined,
+                          complete: true, // Mark as complete to set status = "active"
                         });
+                        
+                        // Auto-send invitations if not sent manually (private mode only)
+                        if (accessMode === "private" && candidates.length > 0) {
+                          const candidatesNotInvited = candidates.filter(c => !c.invited);
+                          if (candidatesNotInvited.length > 0) {
+                            try {
+                              // Use default template if no custom template configured
+                              const templateToUse = invitationTemplate.logoUrl || invitationTemplate.companyName || invitationTemplate.message || invitationTemplate.footer
+                                ? invitationTemplate
+                                : {
+                                    logoUrl: "",
+                                    companyName: "",
+                                    message: "You have been invited to take an assessment. Please click the link below to start.",
+                                    footer: "",
+                                    sentBy: "AI Assessment Platform"
+                                  };
+                              
+                              await axios.post("/api/assessments/send-invitations", {
+                                assessmentId,
+                                candidates: candidatesNotInvited.map(c => ({ email: c.email, name: c.name })),
+                                examUrl: assessmentUrl,
+                                template: templateToUse,
+                              });
+                              
+                              // Update local state
+                              const updatedCandidates = candidates.map(c => {
+                                if (candidatesNotInvited.some(ni => ni.email.toLowerCase() === c.email.toLowerCase())) {
+                                  return {
+                                    ...c,
+                                    invited: true,
+                                    inviteSentAt: new Date().toISOString(),
+                                  };
+                                }
+                                return c;
+                              });
+                              setCandidates(updatedCandidates);
+                            } catch (inviteErr: any) {
+                              // Log error but don't block finalization
+                              console.error("Error auto-sending invitations:", inviteErr);
+                              // Continue with finalization even if invitations fail
+                            }
+                          }
+                        }
                       }
-                      router.push("/dashboard");
+                      // Force refresh dashboard by navigating with a timestamp query to bypass cache
+                      router.push("/dashboard?refresh=" + Date.now());
                     } catch (err: any) {
                       setError("Failed to save. Please try again.");
+                    } finally {
+                      setLoading(false);
                     }
                   }}
                   className="btn-primary"
                   disabled={(() => {
                     const currentAccessMode: "public" | "private" = accessMode;
-                    return !assessmentUrl || (currentAccessMode === "private" && candidates.length === 0);
+                    return !assessmentUrl || (currentAccessMode === "private" && candidates.length === 0) || loading;
                   })()}
                   style={{ flex: 1 }}
                 >
-                  Complete
+                  {loading ? "Completing..." : "Complete Assessment"}
                 </button>
               </div>
             </div>
@@ -9475,586 +9820,7 @@ export default function CreateNewAssessmentPage() {
         </div>
       </div>
 
-      {/* Full-screen Preview Questions Modal */}
-      {showPreviewModal && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: "rgba(0, 0, 0, 0.8)",
-            zIndex: 9999,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "2rem",
-          }}
-          onClick={(e) => {
-            // Close modal if clicking outside (generation continues in background)
-            if (e.target === e.currentTarget) {
-              setShowPreviewModal(false);
-            }
-          }}
-        >
-          <div
-            style={{
-              backgroundColor: "#ffffff",
-              borderRadius: "1rem",
-              width: "100%",
-              maxWidth: "900px",
-              maxHeight: "90vh",
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header */}
-            <div
-              style={{
-                padding: "1.5rem",
-                borderBottom: "1px solid #e2e8f0",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              <h2 style={{ margin: 0, fontSize: "1.5rem", color: "#1a1625", fontWeight: 700 }}>
-                Preview Questions
-              </h2>
-              <button
-                type="button"
-                onClick={() => {
-                  // Close modal but keep generation running in background
-                  setShowPreviewModal(false);
-                  // Don't clear preview questions - they're still being generated
-                }}
-                style={{
-                  background: "none",
-                  border: "none",
-                  fontSize: "1.5rem",
-                  color: "#64748b",
-                  cursor: "pointer",
-                  padding: "0.25rem 0.5rem",
-                  lineHeight: 1,
-                }}
-                title={previewGenerating ? "Close (generation continues in background)" : "Close"}
-              >
-                ×
-              </button>
-            </div>
-
-            {/* Content */}
-            <div style={{ flex: 1, overflow: "auto", padding: "1.5rem" }}>
-              {previewGenerating && previewQuestions.length === 0 ? (
-                // Loading state
-                <div style={{ textAlign: "center", padding: "3rem" }}>
-                  <div
-                    style={{
-                      width: "60px",
-                      height: "60px",
-                      border: "4px solid #e2e8f0",
-                      borderTop: "4px solid #3b82f6",
-                      borderRadius: "50%",
-                      animation: "spin 1s linear infinite",
-                      margin: "0 auto 1.5rem",
-                    }}
-                  />
-                  <h3 style={{ margin: 0, marginBottom: "0.5rem", color: "#1a1625", fontSize: "1.25rem" }}>
-                    Generating Questions...
-                  </h3>
-                  <p style={{ margin: 0, color: "#64748b" }}>
-                    {previewProgress.current > 0
-                      ? `Generated ${previewProgress.current} of ${previewProgress.total} questions`
-                      : "Starting generation..."}
-                  </p>
-                </div>
-              ) : previewQuestions.length > 0 || questions.length > 0 ? (
-                // Show current question (use previewQuestions if available, otherwise questions)
-                <div>
-                  {(() => {
-                    const questionsToShow = previewQuestions.length > 0 ? previewQuestions : questions;
-                    const totalQuestions = questionsToShow.length;
-                    // Ensure index is within bounds (clamp to valid range)
-                    const safeIndex = totalQuestions > 0 ? Math.min(Math.max(0, currentPreviewIndex), totalQuestions - 1) : 0;
-                    // Force re-retrieval of question using the safe index
-                    const currentQuestion = questionsToShow[safeIndex];
-                    
-                    // Debug logging with question details
-                    console.log(`[Preview] Rendering question: currentPreviewIndex=${currentPreviewIndex}, safeIndex=${safeIndex}, total=${totalQuestions}, hasQuestion=${!!currentQuestion}`);
-                    if (currentQuestion) {
-                      console.log(`[Preview] Question details: topic=${currentQuestion.topic}, type=${currentQuestion.type}, questionText=${currentQuestion.questionText?.substring(0, 50) || currentQuestion.question?.substring(0, 50) || 'N/A'}...`);
-                    } else {
-                      console.warn(`[Preview] No question found at index ${safeIndex} (currentPreviewIndex: ${currentPreviewIndex})`);
-                    }
-                    
-                    return (
-                      <>
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            marginBottom: "1rem",
-                            paddingBottom: "1rem",
-                            borderBottom: "1px solid #e2e8f0",
-                          }}
-                        >
-                          <div>
-                            <span style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                              Question {safeIndex + 1} of {totalQuestions}
-                            </span>
-                            {previewGenerating && (
-                              <span style={{ fontSize: "0.875rem", color: "#3b82f6", marginLeft: "1rem" }}>
-                                Generating more...
-                              </span>
-                            )}
-                          </div>
-                          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                            <span style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                              {currentQuestion?.topic || "Unknown Topic"} -{" "}
-                              {currentQuestion?.type || "Unknown Type"}
-                            </span>
-                            {currentQuestion?.difficulty && (
-                        <span
-                          style={{
-                            fontSize: "0.75rem",
-                            padding: "0.25rem 0.5rem",
-                            backgroundColor: "#f1f5f9",
-                            borderRadius: "0.25rem",
-                            color: "#64748b",
-                          }}
-                        >
-                          {currentQuestion.difficulty}
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleEditQuestion(safeIndex)}
-                        disabled={editingQuestionIndex !== null}
-                        style={{
-                          padding: "0.375rem 0.75rem",
-                          background: "#3b82f6",
-                          border: "none",
-                          color: "#ffffff",
-                          cursor: editingQuestionIndex !== null ? "not-allowed" : "pointer",
-                          fontSize: "0.75rem",
-                          fontWeight: 500,
-                          borderRadius: "0.375rem",
-                          opacity: editingQuestionIndex !== null ? 0.6 : 1,
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRegenerateQuestion(safeIndex)}
-                        disabled={regeneratingQuestionIndex === safeIndex || previewGenerating}
-                        style={{
-                          padding: "0.375rem 0.75rem",
-                          background: "#10b981",
-                          border: "none",
-                          color: "#ffffff",
-                          cursor: (regeneratingQuestionIndex === safeIndex || previewGenerating) ? "not-allowed" : "pointer",
-                          fontSize: "0.75rem",
-                          fontWeight: 500,
-                          borderRadius: "0.375rem",
-                          opacity: (regeneratingQuestionIndex === safeIndex || previewGenerating) ? 0.6 : 1,
-                        }}
-                      >
-                        {regeneratingQuestionIndex === safeIndex ? "Regenerating..." : "Regenerate"}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div
-                    key={`question-${safeIndex}-${currentQuestion?.questionText?.substring(0, 50) || currentQuestion?.question?.substring(0, 50) || safeIndex}-${currentQuestion?.topic || 'unknown'}`}
-                    style={{
-                      backgroundColor: "#ffffff",
-                      padding: "1.5rem",
-                      borderRadius: "0.5rem",
-                      border: "1px solid #e2e8f0",
-                      minHeight: "300px",
-                    }}
-                  >
-                    {/* Render question based on type using formatted components */}
-                    {(() => {
-                      const questionType = currentQuestion?.type || "Subjective";
-                      const questionForRender = {
-                        question: currentQuestion?.questionText || currentQuestion?.question || "",
-                        options: currentQuestion?.options || [],
-                        correctAnswer: currentQuestion?.correctAnswer || "",
-                        idealAnswer: currentQuestion?.idealAnswer || "",
-                        expectedLogic: currentQuestion?.expectedLogic || "",
-                        title: currentQuestion?.title || "",
-                        problemStatement: currentQuestion?.problemStatement || currentQuestion?.questionText || currentQuestion?.question || "",
-                        functionSignature: currentQuestion?.functionSignature || "",
-                        inputFormat: currentQuestion?.inputFormat || "",
-                        outputFormat: currentQuestion?.outputFormat || "",
-                        constraints: currentQuestion?.constraints || "",
-                        sampleInput: currentQuestion?.sampleInput || "",
-                        sampleOutput: currentQuestion?.sampleOutput || "",
-                        visibleTestCases: currentQuestion?.public_testcases || currentQuestion?.visibleTestCases || [],
-                      };
-                      
-                      // Map old type names to new ones
-                      const mappedType = questionType === "coding" ? "Coding" : 
-                                        questionType === "MCQ" ? "MCQ" :
-                                        questionType === "Pseudo Code" || questionType === "PseudoCode" ? "PseudoCode" :
-                                        "Subjective";
-                      
-                      return renderQuestionByType(questionForRender, mappedType, false);
-                    })()}
-                  </div>
-                      </>
-                    );
-                  })()}
-                </div>
-              ) : (
-                // No questions yet
-                <div style={{ textAlign: "center", padding: "3rem", color: "#64748b" }}>
-                  <p>No questions generated yet.</p>
-                </div>
-              )}
-
-            </div>
-
-            {/* Footer with Navigation */}
-            {(previewQuestions.length > 0 || questions.length > 0) && (
-              <div
-                style={{
-                  padding: "1.5rem",
-                  borderTop: "1px solid #e2e8f0",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                {(() => {
-                  const questionsToShow = previewQuestions.length > 0 ? previewQuestions : questions;
-                  const totalQuestions = questionsToShow.length;
-                  // Calculate safe index for navigation buttons
-                  const navSafeIndex = totalQuestions > 0 ? Math.min(Math.max(0, currentPreviewIndex), totalQuestions - 1) : 0;
-                  
-                  return (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCurrentPreviewIndex((prevIndex) => {
-                            const newIndex = Math.max(0, prevIndex - 1);
-                            console.log(`[Preview] Previous clicked: ${prevIndex} -> ${newIndex} (total: ${totalQuestions})`);
-                            return newIndex;
-                          });
-                        }}
-                        disabled={navSafeIndex === 0}
-                        className="btn-secondary"
-                        style={{
-                          marginTop: 0,
-                          opacity: navSafeIndex === 0 ? 0.5 : 1,
-                          cursor: navSafeIndex === 0 ? "not-allowed" : "pointer",
-                        }}
-                      >
-                        Previous
-                      </button>
-
-                      <div style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                        {navSafeIndex + 1} / {totalQuestions}
-                        {previewGenerating && " (generating...)"}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCurrentPreviewIndex((prevIndex) => {
-                            const newIndex = Math.min(totalQuestions - 1, prevIndex + 1);
-                            console.log(`[Preview] Next clicked: ${prevIndex} -> ${newIndex} (total: ${totalQuestions})`);
-                            return newIndex;
-                          });
-                        }}
-                        disabled={
-                          navSafeIndex >= totalQuestions - 1 && 
-                          (previewGenerating || (previewProgress.total > 0 && previewProgress.current < previewProgress.total))
-                        }
-                        className="btn-primary"
-                        style={{
-                          marginTop: 0,
-                          opacity:
-                            navSafeIndex >= totalQuestions - 1 && 
-                            (previewGenerating || (previewProgress.total > 0 && previewProgress.current < previewProgress.total))
-                              ? 0.5 : 1,
-                          cursor:
-                            navSafeIndex >= totalQuestions - 1 && 
-                            (previewGenerating || (previewProgress.total > 0 && previewProgress.current < previewProgress.total))
-                              ? "not-allowed"
-                              : "pointer",
-                        }}
-                      >
-                        {navSafeIndex >= totalQuestions - 1 && (previewGenerating || (previewProgress.total > 0 && previewProgress.current < previewProgress.total))
-                          ? "Generating..."
-                          : "Next"}
-                      </button>
-                    </>
-                  );
-                })()}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Edit Question Modal */}
-      {editingQuestionIndex !== null && editingQuestion && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: "rgba(0, 0, 0, 0.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 10000,
-          }}
-          onClick={(e) => {
-            if (e.target === e.currentTarget) {
-              setEditingQuestionIndex(null);
-              setEditingQuestion(null);
-            }
-          }}
-        >
-          <div
-            style={{
-              backgroundColor: "#ffffff",
-              borderRadius: "0.75rem",
-              padding: "2rem",
-              maxWidth: "800px",
-              width: "90%",
-              maxHeight: "90vh",
-              overflowY: "auto",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 style={{ marginBottom: "1.5rem", fontSize: "1.5rem", color: "#1a1625", fontWeight: 700 }}>
-              Edit Question
-            </h2>
-
-            <div style={{ marginBottom: "1rem" }}>
-              <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                Question Text
-              </label>
-              <textarea
-                value={editingQuestion.questionText || editingQuestion.question || ""}
-                onChange={(e) =>
-                  setEditingQuestion({ ...editingQuestion, questionText: e.target.value, question: e.target.value })
-                }
-                style={{
-                  width: "100%",
-                  minHeight: "150px",
-                  padding: "0.75rem",
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.5rem",
-                  fontSize: "0.875rem",
-                  fontFamily: "inherit",
-                }}
-              />
-            </div>
-
-            {editingQuestion.type === "MCQ" && (
-              <>
-                <div style={{ marginBottom: "1rem" }}>
-                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                    Options (one per line)
-                  </label>
-                  <textarea
-                    value={(editingQuestion.options || []).join("\n")}
-                    onChange={(e) =>
-                      setEditingQuestion({
-                        ...editingQuestion,
-                        options: e.target.value.split("\n").filter((opt: string) => opt.trim()),
-                      })
-                    }
-                    style={{
-                      width: "100%",
-                      minHeight: "100px",
-                      padding: "0.75rem",
-                      border: "1px solid #e2e8f0",
-                      borderRadius: "0.5rem",
-                      fontSize: "0.875rem",
-                      fontFamily: "inherit",
-                    }}
-                  />
-                </div>
-                <div style={{ marginBottom: "1rem" }}>
-                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                    Correct Answer
-                  </label>
-                  <input
-                    type="text"
-                    value={editingQuestion.correctAnswer || ""}
-                    onChange={(e) => setEditingQuestion({ ...editingQuestion, correctAnswer: e.target.value })}
-                    style={{
-                      width: "100%",
-                      padding: "0.75rem",
-                      border: "1px solid #e2e8f0",
-                      borderRadius: "0.5rem",
-                      fontSize: "0.875rem",
-                    }}
-                  />
-                </div>
-              </>
-            )}
-
-            {editingQuestion.type === "coding" && (
-              <>
-                {editingQuestion.title && (
-                  <div style={{ marginBottom: "1rem" }}>
-                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                      Title
-                    </label>
-                    <input
-                      type="text"
-                      value={editingQuestion.title || ""}
-                      onChange={(e) => setEditingQuestion({ ...editingQuestion, title: e.target.value })}
-                      style={{
-                        width: "100%",
-                        padding: "0.75rem",
-                        border: "1px solid #e2e8f0",
-                        borderRadius: "0.5rem",
-                        fontSize: "0.875rem",
-                      }}
-                    />
-                  </div>
-                )}
-                {editingQuestion.functionSignature && (
-                  <div style={{ marginBottom: "1rem" }}>
-                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                      Function Signature
-                    </label>
-                    <textarea
-                      value={editingQuestion.functionSignature || ""}
-                      onChange={(e) => setEditingQuestion({ ...editingQuestion, functionSignature: e.target.value })}
-                      style={{
-                        width: "100%",
-                        minHeight: "60px",
-                        padding: "0.75rem",
-                        border: "1px solid #e2e8f0",
-                        borderRadius: "0.5rem",
-                        fontSize: "0.875rem",
-                        fontFamily: "monospace",
-                      }}
-                    />
-                  </div>
-                )}
-                {editingQuestion.public_testcases && Array.isArray(editingQuestion.public_testcases) && editingQuestion.public_testcases.length > 0 && (
-                  <div style={{ marginBottom: "1rem" }}>
-                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                      Test Cases ({editingQuestion.public_testcases.length} case(s))
-                    </label>
-                    <div style={{
-                      padding: "1rem",
-                      backgroundColor: "#f8fafc",
-                      borderRadius: "0.5rem",
-                      border: "1px solid #e2e8f0",
-                      maxHeight: "300px",
-                      overflowY: "auto",
-                    }}>
-                      {editingQuestion.public_testcases.map((testCase: any, idx: number) => (
-                        <div key={idx} style={{
-                          marginBottom: idx < editingQuestion.public_testcases.length - 1 ? "1rem" : 0,
-                          padding: "0.75rem",
-                          backgroundColor: "#ffffff",
-                          borderRadius: "0.375rem",
-                          border: "1px solid #e2e8f0",
-                        }}>
-                          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
-                            Test Case {idx + 1}
-                          </div>
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
-                            <div>
-                              <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#64748b", marginBottom: "0.25rem" }}>
-                                Input:
-                              </div>
-                              <textarea
-                                value={typeof testCase.input === 'string' ? testCase.input : JSON.stringify(testCase.input)}
-                                onChange={(e) => {
-                                  const newTestCases = [...editingQuestion.public_testcases];
-                                  try {
-                                    newTestCases[idx] = { ...testCase, input: JSON.parse(e.target.value) };
-                                  } catch {
-                                    newTestCases[idx] = { ...testCase, input: e.target.value };
-                                  }
-                                  setEditingQuestion({ ...editingQuestion, public_testcases: newTestCases });
-                                }}
-                                style={{
-                                  width: "100%",
-                                  minHeight: "60px",
-                                  padding: "0.5rem",
-                                  border: "1px solid #e2e8f0",
-                                  borderRadius: "0.25rem",
-                                  fontSize: "0.75rem",
-                                  fontFamily: "monospace",
-                                }}
-                              />
-                            </div>
-                            <div>
-                              <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#64748b", marginBottom: "0.25rem" }}>
-                                Output:
-                              </div>
-                              <textarea
-                                value={typeof testCase.output === 'string' ? testCase.output : JSON.stringify(testCase.output)}
-                                onChange={(e) => {
-                                  const newTestCases = [...editingQuestion.public_testcases];
-                                  try {
-                                    newTestCases[idx] = { ...testCase, output: JSON.parse(e.target.value) };
-                                  } catch {
-                                    newTestCases[idx] = { ...testCase, output: e.target.value };
-                                  }
-                                  setEditingQuestion({ ...editingQuestion, public_testcases: newTestCases });
-                                }}
-                                style={{
-                                  width: "100%",
-                                  minHeight: "60px",
-                                  padding: "0.5rem",
-                                  border: "1px solid #e2e8f0",
-                                  borderRadius: "0.25rem",
-                                  fontSize: "0.75rem",
-                                  fontFamily: "monospace",
-                                }}
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-
-            <div style={{ display: "flex", gap: "1rem", justifyContent: "flex-end", marginTop: "1.5rem" }}>
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingQuestionIndex(null);
-                  setEditingQuestion(null);
-                }}
-                className="btn-secondary"
-              >
-                Cancel
-              </button>
-              <button type="button" onClick={handleSaveEditedQuestion} className="btn-primary">
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Preview modals removed - preview functionality removed */}
 
       {/* Add CSS for spinner animation */}
       <style jsx>{`

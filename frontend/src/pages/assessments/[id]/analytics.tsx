@@ -34,16 +34,21 @@ interface QuestionLog {
 interface Candidate {
   email: string
   name: string
-  score: number
-  maxScore: number
-  attempted: number
-  notAttempted: number
-  correctAnswers: number
-  submittedAt: string | null
+  score?: number
+  maxScore?: number
+  attempted?: number
+  notAttempted?: number
+  correctAnswers?: number
+  submittedAt?: string | null
   aiScore?: number
   percentageScored?: number
   passPercentage?: number
   passed?: boolean
+  status?: "invited" | "pending" | "started" | "completed"
+  invited?: boolean
+  invitedAt?: string
+  startedAt?: string
+  completedAt?: string
 }
 
 export default function AnalyticsPage() {
@@ -63,6 +68,12 @@ export default function AnalyticsPage() {
   const [showLiveProctor, setShowLiveProctor] = useState(false)
   const [hasActiveSessions, setHasActiveSessions] = useState(false)
   const isMonitoringRef = useRef(false)
+  const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
+  const [newCandidateName, setNewCandidateName] = useState("")
+  const [newCandidateEmail, setNewCandidateEmail] = useState("")
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [addingCandidate, setAddingCandidate] = useState(false)
+  const [assessmentCandidates, setAssessmentCandidates] = useState<Candidate[]>([])
   
   // Multi-proctor hook for viewing all candidates
   const {
@@ -211,6 +222,21 @@ export default function AnalyticsPage() {
         const assessmentResponse = await axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`)
         if (assessmentResponse.data?.success && assessmentResponse.data?.data) {
           setAssessment(assessmentResponse.data.data)
+          // Get candidates from assessment object - includes both candidates added during creation and later
+          if (assessmentResponse.data.data.assessment?.candidates) {
+            const allCandidates = assessmentResponse.data.data.assessment.candidates
+            // Ensure all candidates have required fields
+            const normalizedCandidates = allCandidates.map((c: any) => ({
+              email: c.email || '',
+              name: c.name || '',
+              status: c.status || (c.invited ? 'invited' : 'pending'),
+              invited: c.invited || false,
+              invitedAt: c.invitedAt || c.inviteSentAt || null,
+              startedAt: c.startedAt || null,
+              completedAt: c.completedAt || null,
+            }))
+            setAssessmentCandidates(normalizedCandidates)
+          }
         }
         
         // Fetch candidate results
@@ -246,6 +272,13 @@ export default function AnalyticsPage() {
     fetchAnalytics(email, name)
     fetchProctorLogs(email)
     setShowProctorLogs(false)
+    // Scroll to top of analytics content when candidate is selected
+    setTimeout(() => {
+      const analyticsContent = document.querySelector('[data-analytics-content]')
+      if (analyticsContent) {
+        analyticsContent.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }
+    }, 100)
   }
 
   const formatDate = (dateString: string | null) => {
@@ -263,6 +296,116 @@ export default function AnalyticsPage() {
     return date.toLocaleString('en-US', options)
   }
 
+  const validateEmail = (email: string): boolean => {
+    const emailPattern = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/
+    return emailPattern.test(email)
+  }
+
+  const handleAddCandidate = async () => {
+    if (!assessmentId || typeof assessmentId !== 'string') return
+    
+    // Validate email
+    if (!validateEmail(newCandidateEmail.trim())) {
+      setEmailError("Please enter a valid email address.")
+      return
+    }
+    
+    if (!newCandidateName.trim()) {
+      setEmailError("Please enter a candidate name.")
+      return
+    }
+    
+    setEmailError(null)
+    setAddingCandidate(true)
+    
+    try {
+      const response = await axios.post(`/api/assessments/${assessmentId}/add-candidate`, {
+        email: newCandidateEmail.trim(),
+        name: newCandidateName.trim(),
+      })
+      
+      if (response.data?.success) {
+        // Refresh assessment data to get updated candidates list
+        const assessmentResponse = await axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`)
+        if (assessmentResponse.data?.success && assessmentResponse.data?.data) {
+          if (assessmentResponse.data.data.assessment?.candidates) {
+            const allCandidates = assessmentResponse.data.data.assessment.candidates
+            // Normalize candidates to ensure consistent structure
+            const normalizedCandidates = allCandidates.map((c: any) => ({
+              email: c.email || '',
+              name: c.name || '',
+              status: c.status || (c.invited ? 'invited' : 'pending'),
+              invited: c.invited || false,
+              invitedAt: c.invitedAt || c.inviteSentAt || null,
+              startedAt: c.startedAt || null,
+              completedAt: c.completedAt || null,
+            }))
+            setAssessmentCandidates(normalizedCandidates)
+          }
+        }
+        
+        // Close modal and reset form
+        setShowAddCandidateModal(false)
+        setNewCandidateName("")
+        setNewCandidateEmail("")
+        setEmailError(null)
+        alert("Candidate added and invitation sent successfully!")
+      }
+    } catch (err: any) {
+      setEmailError(err.response?.data?.detail || err.response?.data?.message || "Failed to add candidate")
+    } finally {
+      setAddingCandidate(false)
+    }
+  }
+
+  const handleResendInvitation = async (email: string) => {
+    if (!assessmentId || typeof assessmentId !== 'string') return
+    
+    try {
+      const response = await axios.post(`/api/assessments/${assessmentId}/resend-invite`, {
+        email: email,
+      })
+      
+      if (response.data?.success) {
+        alert("Invitation resent successfully!")
+        // Refresh assessment data
+        const assessmentResponse = await axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`)
+        if (assessmentResponse.data?.success && assessmentResponse.data?.data) {
+          if (assessmentResponse.data.data.assessment?.candidates) {
+            setAssessmentCandidates(assessmentResponse.data.data.assessment.candidates)
+          }
+        }
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.message || "Failed to resend invitation")
+    }
+  }
+
+  const handleRemoveCandidate = async (email: string) => {
+    if (!assessmentId || typeof assessmentId !== 'string') return
+    if (!confirm(`Are you sure you want to remove ${email} from this assessment?`)) return
+    
+    try {
+      // Note: We need to create a remove-candidate endpoint or use update-schedule-and-candidates
+      // For now, we'll use update-schedule-and-candidates to remove the candidate
+      const updatedCandidates = assessmentCandidates.filter(c => c.email.toLowerCase() !== email.toLowerCase())
+      await axios.post("/api/assessments/update-schedule-and-candidates", {
+        assessmentId,
+        candidates: updatedCandidates,
+        startTime: assessment?.assessment?.schedule?.startTime,
+        endTime: assessment?.assessment?.schedule?.endTime,
+        assessmentUrl: assessment?.assessment?.assessmentUrl,
+        token: assessment?.assessment?.assessmentToken,
+        accessMode: assessment?.assessment?.accessMode,
+      })
+      
+      setAssessmentCandidates(updatedCandidates)
+      alert("Candidate removed successfully")
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.message || "Failed to remove candidate")
+    }
+  }
+
   if (loading) {
     return (
       <div className="container">
@@ -273,7 +416,24 @@ export default function AnalyticsPage() {
     )
   }
 
-  const selectedCandidateData = candidates.find(c => c.email === selectedCandidate)
+  // Find candidate from both sources (results and assessment candidates)
+  const selectedCandidateFromResults = candidates.find(c => c.email === selectedCandidate)
+  const selectedCandidateFromAssessment = assessmentCandidates.find(c => c.email === selectedCandidate)
+  
+  // Merge data from both sources, prioritizing results data but including assessment data
+  const selectedCandidateData = selectedCandidateFromResults || selectedCandidateFromAssessment ? {
+    ...selectedCandidateFromAssessment,
+    ...selectedCandidateFromResults,
+    // Ensure we have email and name
+    email: selectedCandidateFromResults?.email || selectedCandidateFromAssessment?.email || selectedCandidate || '',
+    name: selectedCandidateFromResults?.name || selectedCandidateFromAssessment?.name || '',
+    // Merge status
+    status: selectedCandidateFromAssessment?.status || (selectedCandidateFromResults?.submittedAt ? 'completed' : 'pending'),
+    // Merge timestamps
+    invitedAt: selectedCandidateFromAssessment?.invitedAt || null,
+    startedAt: selectedCandidateFromAssessment?.startedAt || null,
+    completedAt: selectedCandidateFromAssessment?.completedAt || selectedCandidateFromResults?.submittedAt || null,
+  } : null
 
   // Calculate overall statistics
   const submittedCandidates = candidates.filter(c => c.submittedAt)
@@ -281,17 +441,17 @@ export default function AnalyticsPage() {
   const submittedCount = submittedCandidates.length
   
   const avgScore = submittedCount > 0 
-    ? submittedCandidates.reduce((sum, c) => sum + (c.aiScore !== undefined ? c.aiScore : c.score), 0) / submittedCount 
+    ? submittedCandidates.reduce((sum, c) => sum + (c?.aiScore !== undefined ? c.aiScore : (c?.score || 0)), 0) / submittedCount 
     : 0
   const avgPercentage = submittedCount > 0
-    ? submittedCandidates.reduce((sum, c) => sum + (c.percentageScored !== undefined ? c.percentageScored : (c.maxScore > 0 ? (c.score / c.maxScore) * 100 : 0)), 0) / submittedCount
+    ? submittedCandidates.reduce((sum, c) => sum + (c?.percentageScored !== undefined ? c.percentageScored : ((c?.maxScore && c?.maxScore > 0) ? ((c?.score || 0) / (c?.maxScore || 1)) * 100 : 0)), 0) / submittedCount
     : 0
-  const passedCount = submittedCandidates.filter(c => c.passed === true).length
-  const failedCount = submittedCandidates.filter(c => c.passed === false).length
-  const totalMaxScore = submittedCandidates.length > 0 ? submittedCandidates[0].maxScore : 0
-  const totalScore = submittedCandidates.reduce((sum, c) => sum + (c.aiScore !== undefined ? c.aiScore : c.score), 0)
+  const passedCount = submittedCandidates.filter(c => c?.passed === true).length
+  const failedCount = submittedCandidates.filter(c => c?.passed === false).length
+  const totalMaxScore = submittedCandidates.length > 0 ? (submittedCandidates[0]?.maxScore || 0) : 0
+  const totalScore = submittedCandidates.reduce((sum, c) => sum + (c?.aiScore !== undefined ? c.aiScore : (c?.score || 0)), 0)
   const avgAttempted = submittedCount > 0
-    ? submittedCandidates.reduce((sum, c) => sum + c.attempted, 0) / submittedCount
+    ? submittedCandidates.reduce((sum, c) => sum + (c?.attempted || 0), 0) / submittedCount
     : 0
   const totalQuestions = assessment?.questions?.length || 0
 
@@ -325,6 +485,169 @@ export default function AnalyticsPage() {
             {assessment?.assessment?.title || 'Assessment'} - View detailed analytics and AI feedback
           </p>
         </div>
+
+        {/* Assessment Access Section - Show URL, Add Candidate, Invite Again */}
+        {assessment?.assessment && (
+          <div style={{ 
+            marginBottom: "2rem", 
+            padding: "1.5rem", 
+            backgroundColor: "#f8fafc", 
+            borderRadius: "0.75rem", 
+            border: "1px solid #e2e8f0" 
+          }}>
+            <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
+              Assessment Access
+            </h2>
+            
+            {/* Assessment URL */}
+            {assessment.assessment.assessmentUrl && (
+              <div style={{ marginBottom: "1.5rem" }}>
+                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                  Assessment URL
+                </label>
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  <input
+                    type="text"
+                    value={assessment.assessment.assessmentUrl}
+                    readOnly
+                    style={{
+                      flex: 1,
+                      padding: "0.75rem",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "0.5rem",
+                      fontSize: "1rem",
+                      backgroundColor: "#ffffff",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      navigator.clipboard.writeText(assessment.assessment.assessmentUrl);
+                      alert("URL copied to clipboard!");
+                    }}
+                    style={{ marginTop: 0, whiteSpace: "nowrap", padding: "0.75rem 1.5rem" }}
+                  >
+                    Copy URL
+                  </button>
+                </div>
+              </div>
+            )}
+            
+          </div>
+        )}
+
+        {/* Candidates Management Section */}
+        {assessment?.assessment && (
+          <div style={{ 
+            marginBottom: "2rem", 
+            padding: "1.5rem", 
+            backgroundColor: "#ffffff", 
+            borderRadius: "0.75rem", 
+            border: "1px solid #e2e8f0" 
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+              <h2 style={{ fontSize: "1.25rem", fontWeight: 600 }}>Candidates</h2>
+              {assessment.assessment.accessMode === "private" && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => setShowAddCandidateModal(true)}
+                  style={{ 
+                    padding: "0.5rem 1rem", 
+                    fontSize: "0.875rem",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem"
+                  }}
+                >
+                  ➕ Add Candidate
+                </button>
+              )}
+            </div>
+            
+            {assessmentCandidates.length === 0 ? (
+              <p style={{ color: "#64748b", fontSize: "0.875rem" }}>No candidates added yet.</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ backgroundColor: "#f8fafc", borderBottom: "2px solid #e2e8f0" }}>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.875rem", fontWeight: 600, color: "#1e293b" }}>Email</th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.875rem", fontWeight: 600, color: "#1e293b" }}>Name</th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.875rem", fontWeight: 600, color: "#1e293b" }}>Status</th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.875rem", fontWeight: 600, color: "#1e293b" }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assessmentCandidates.map((candidate, index) => (
+                      <tr key={index} style={{ borderBottom: "1px solid #e2e8f0" }}>
+                        <td style={{ padding: "0.75rem", fontSize: "0.875rem" }}>{candidate.email}</td>
+                        <td style={{ padding: "0.75rem", fontSize: "0.875rem" }}>{candidate.name}</td>
+                        <td style={{ padding: "0.75rem" }}>
+                          <span style={{
+                            padding: "0.25rem 0.75rem",
+                            borderRadius: "9999px",
+                            fontSize: "0.75rem",
+                            fontWeight: 600,
+                            backgroundColor: 
+                              candidate.status === "completed" ? "#d1fae5" :
+                              candidate.status === "started" ? "#dbeafe" :
+                              candidate.status === "invited" ? "#fef3c7" :
+                              "#f3f4f6",
+                            color:
+                              candidate.status === "completed" ? "#065f46" :
+                              candidate.status === "started" ? "#1e40af" :
+                              candidate.status === "invited" ? "#92400e" :
+                              "#374151",
+                          }}>
+                            {candidate.status || "pending"}
+                          </span>
+                        </td>
+                        <td style={{ padding: "0.75rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                          {assessment.assessment.accessMode === "private" && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleResendInvitation(candidate.email)}
+                                style={{
+                                  padding: "0.25rem 0.75rem",
+                                  fontSize: "0.75rem",
+                                  backgroundColor: "#10b981",
+                                  color: "#ffffff",
+                                  border: "none",
+                                  borderRadius: "0.375rem",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Resend Invitation
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveCandidate(candidate.email)}
+                                style={{
+                                  padding: "0.25rem 0.75rem",
+                                  fontSize: "0.75rem",
+                                  backgroundColor: "#ef4444",
+                                  color: "#ffffff",
+                                  border: "none",
+                                  borderRadius: "0.375rem",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Remove
+                              </button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: "1.5rem" }}>
           {/* Candidate List */}
@@ -372,52 +695,59 @@ export default function AnalyticsPage() {
               >
                 📊 Overall Analytics
               </button>
-              {candidates.length === 0 ? (
+              {(assessmentCandidates.length === 0 && candidates.length === 0) ? (
                 <p style={{ fontSize: "0.875rem", color: "#64748b" }}>
                   No candidates found
                 </p>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                  {candidates.map((candidate) => (
+                  {(assessmentCandidates.length > 0 ? assessmentCandidates : candidates).map((candidate) => {
+                    const candidateEmail = candidate.email || ''
+                    const candidateName = candidate.name || candidateEmail.split('@')[0]
+                    return (
                     <button
-                      key={candidate.email}
-                      onClick={() => handleCandidateSelect(candidate.email, candidate.name)}
+                      key={candidateEmail}
+                      onClick={() => {
+                        // Select candidate to show inline analytics (no navigation)
+                        handleCandidateSelect(candidateEmail, candidateName)
+                      }}
                       style={{
                         width: "100%",
                         textAlign: "left",
                         padding: "0.75rem",
                         borderRadius: "0.5rem",
-                        border: selectedCandidate === candidate.email
+                        border: selectedCandidate === candidateEmail
                           ? "2px solid #3b82f6"
                           : "1px solid #e2e8f0",
-                        backgroundColor: selectedCandidate === candidate.email
+                        backgroundColor: selectedCandidate === candidateEmail
                           ? "#eff6ff"
                           : "#ffffff",
                         cursor: "pointer",
                         transition: "all 0.2s",
                       }}
                       onMouseEnter={(e) => {
-                        if (selectedCandidate !== candidate.email) {
+                        if (selectedCandidate !== candidateEmail) {
                           e.currentTarget.style.backgroundColor = "#f8fafc"
                         }
                       }}
                       onMouseLeave={(e) => {
-                        if (selectedCandidate !== candidate.email) {
+                        if (selectedCandidate !== candidateEmail) {
                           e.currentTarget.style.backgroundColor = "#ffffff"
                         }
                       }}
                     >
-                      <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>{candidate.name}</div>
+                      <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>{candidateName}</div>
                       <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>
-                        {candidate.email}
+                        {candidateEmail}
                       </div>
-                      {candidate.submittedAt && (
+                      {(candidate.submittedAt || candidate.completedAt) && (
                         <div style={{ fontSize: "0.75rem", color: "#10b981", marginTop: "0.25rem", fontWeight: 600 }}>
-                          Score: {candidate.aiScore !== undefined ? candidate.aiScore : candidate.score} / {candidate.maxScore}
+                          Score: {candidate.aiScore !== undefined ? candidate.aiScore : (candidate.score || 0)} / {candidate.maxScore || 0}
                         </div>
                       )}
                     </button>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -578,12 +908,12 @@ export default function AnalyticsPage() {
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem" }}>{candidate.name}</td>
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem", color: "#64748b" }}>{candidate.email}</td>
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem", fontWeight: 600 }}>
-                                {candidate.aiScore !== undefined ? candidate.aiScore : candidate.score} / {candidate.maxScore}
+                                {candidate.aiScore !== undefined ? candidate.aiScore : (candidate.score || 0)} / {candidate.maxScore || 0}
                               </td>
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem", fontWeight: 600 }}>
                                 {candidate.percentageScored !== undefined 
                                   ? candidate.percentageScored.toFixed(1) 
-                                  : (candidate.maxScore > 0 ? Math.round((candidate.score / candidate.maxScore) * 100) : 0)}%
+                                  : ((candidate.maxScore && candidate.maxScore > 0) ? Math.round(((candidate.score || 0) / candidate.maxScore) * 100) : 0)}%
                               </td>
                               <td style={{ padding: "0.75rem" }}>
                                 {candidate.passed !== undefined ? (
@@ -624,20 +954,69 @@ export default function AnalyticsPage() {
                   Candidate not found
                 </p>
               </div>
-            ) : !selectedCandidateData.submittedAt ? (
-              <div style={{
-                border: "1px solid #e2e8f0",
-                borderRadius: "0.75rem",
-                padding: "3rem",
-                textAlign: "center",
-                backgroundColor: "#ffffff",
-              }}>
-                <p style={{ color: "#64748b" }}>
-                  {selectedCandidateData.name} has not submitted the assessment yet.
-                </p>
-              </div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }} data-analytics-content>
+                {/* Candidate Basic Info */}
+                <div style={{
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "0.75rem",
+                  padding: "1.5rem",
+                  backgroundColor: "#f8fafc",
+                }}>
+                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
+                    Candidate Information
+                  </h2>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+                    <div>
+                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Name</div>
+                      <div style={{ fontSize: "1rem", fontWeight: 600 }}>{selectedCandidateData.name}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Email</div>
+                      <div style={{ fontSize: "1rem", fontWeight: 600 }}>{selectedCandidateData.email}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Status</div>
+                      <span style={{
+                        padding: "0.25rem 0.75rem",
+                        borderRadius: "9999px",
+                        fontSize: "0.875rem",
+                        fontWeight: 600,
+                        backgroundColor: 
+                          selectedCandidateData.status === "completed" ? "#d1fae5" :
+                          selectedCandidateData.status === "started" ? "#dbeafe" :
+                          selectedCandidateData.status === "invited" ? "#fef3c7" :
+                          "#f3f4f6",
+                        color:
+                          selectedCandidateData.status === "completed" ? "#065f46" :
+                          selectedCandidateData.status === "started" ? "#1e40af" :
+                          selectedCandidateData.status === "invited" ? "#92400e" :
+                          "#374151",
+                      }}>
+                        {selectedCandidateData.status || (selectedCandidateData.submittedAt ? "completed" : "pending")}
+                      </span>
+                    </div>
+                    {selectedCandidateData.invitedAt && (
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Invited At</div>
+                        <div style={{ fontSize: "1rem" }}>{formatDate(selectedCandidateData.invitedAt || null)}</div>
+                      </div>
+                    )}
+                    {selectedCandidateData.startedAt && (
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Started At</div>
+                        <div style={{ fontSize: "1rem" }}>{formatDate(selectedCandidateData.startedAt || null)}</div>
+                      </div>
+                    )}
+                    {selectedCandidateData.completedAt && (
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Completed At</div>
+                        <div style={{ fontSize: "1rem" }}>{formatDate(selectedCandidateData.completedAt || null)}</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
                 {/* Overall Summary */}
                 <div style={{
                   border: "1px solid #e2e8f0",
@@ -652,7 +1031,7 @@ export default function AnalyticsPage() {
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Total Score</div>
                       <div style={{ fontSize: "1.5rem", fontWeight: 700 }}>
-                        {selectedCandidateData.aiScore !== undefined ? selectedCandidateData.aiScore : selectedCandidateData.score} / {selectedCandidateData.maxScore}
+                        {selectedCandidateData.aiScore !== undefined ? selectedCandidateData.aiScore : (selectedCandidateData.score || 0)} / {selectedCandidateData.maxScore || 0}
                       </div>
                     </div>
                     <div>
@@ -660,8 +1039,8 @@ export default function AnalyticsPage() {
                       <div style={{ fontSize: "1.5rem", fontWeight: 700 }}>
                         {selectedCandidateData.percentageScored !== undefined 
                           ? selectedCandidateData.percentageScored.toFixed(1) 
-                          : (selectedCandidateData.maxScore > 0 
-                            ? Math.round((selectedCandidateData.score / selectedCandidateData.maxScore) * 100) 
+                          : ((selectedCandidateData.maxScore && selectedCandidateData.maxScore > 0)
+                            ? Math.round(((selectedCandidateData.score || 0) / selectedCandidateData.maxScore) * 100) 
                             : 0)}%
                       </div>
                     </div>
@@ -696,7 +1075,7 @@ export default function AnalyticsPage() {
                     </div>
                     <div>
                       <span style={{ fontWeight: 600, color: "#1e293b" }}>Submitted: </span>
-                      {formatDate(selectedCandidateData.submittedAt)}
+                      {formatDate(selectedCandidateData.submittedAt || null)}
                     </div>
                   </div>
                 </div>
@@ -1063,6 +1442,122 @@ export default function AnalyticsPage() {
               onRefreshCandidate={refreshCandidate}
               isLoading={isProctorLoading}
             />
+          </div>
+        </div>
+      )}
+
+      {/* Add Candidate Modal */}
+      {showAddCandidateModal && (
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.5)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 1000,
+        }}
+        onClick={() => {
+          if (!addingCandidate) {
+            setShowAddCandidateModal(false)
+            setEmailError(null)
+          }
+        }}
+        >
+          <div style={{
+            backgroundColor: "#ffffff",
+            borderRadius: "0.75rem",
+            padding: "2rem",
+            maxWidth: "500px",
+            width: "90%",
+            maxHeight: "90vh",
+            overflow: "auto",
+          }}
+          onClick={(e) => e.stopPropagation()}
+          >
+            <h2 style={{ fontSize: "1.5rem", fontWeight: 600, marginBottom: "1.5rem" }}>
+              Add Candidate
+            </h2>
+            
+            <div style={{ marginBottom: "1rem" }}>
+              <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                Full Name <span style={{ color: "#ef4444" }}>*</span>
+              </label>
+              <input
+                type="text"
+                value={newCandidateName}
+                onChange={(e) => {
+                  setNewCandidateName(e.target.value)
+                  setEmailError(null)
+                }}
+                placeholder="Enter candidate's full name"
+                style={{
+                  width: "100%",
+                  padding: "0.75rem",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "0.5rem",
+                  fontSize: "1rem",
+                }}
+                disabled={addingCandidate}
+              />
+            </div>
+            
+            <div style={{ marginBottom: "1.5rem" }}>
+              <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                Email Address <span style={{ color: "#ef4444" }}>*</span>
+              </label>
+              <input
+                type="email"
+                value={newCandidateEmail}
+                onChange={(e) => {
+                  setNewCandidateEmail(e.target.value)
+                  setEmailError(null)
+                }}
+                placeholder="candidate@example.com"
+                style={{
+                  width: "100%",
+                  padding: "0.75rem",
+                  border: `1px solid ${emailError ? "#ef4444" : "#e2e8f0"}`,
+                  borderRadius: "0.5rem",
+                  fontSize: "1rem",
+                }}
+                disabled={addingCandidate}
+              />
+              {emailError && (
+                <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#ef4444" }}>
+                  {emailError}
+                </p>
+              )}
+            </div>
+            
+            <div style={{ display: "flex", gap: "1rem", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setShowAddCandidateModal(false)
+                  setEmailError(null)
+                  setNewCandidateName("")
+                  setNewCandidateEmail("")
+                }}
+                disabled={addingCandidate}
+                style={{ padding: "0.75rem 1.5rem" }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={handleAddCandidate}
+                disabled={addingCandidate || !newCandidateName.trim() || !newCandidateEmail.trim()}
+                style={{ padding: "0.75rem 1.5rem" }}
+              >
+                {addingCandidate ? "Adding..." : "Add Candidate"}
+              </button>
+            </div>
           </div>
         </div>
       )}

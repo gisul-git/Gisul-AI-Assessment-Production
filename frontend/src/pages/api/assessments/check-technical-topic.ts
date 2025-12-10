@@ -14,20 +14,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const { topicName, category } = req.body;
+  const { topic } = req.body;
 
-  if (!topicName || topicName.trim().length === 0) {
-    return res.status(400).json({ message: "Topic name is required" });
-  }
-
-  if (!category || !["aptitude", "communication", "logical_reasoning"].includes(category)) {
-    return res.status(400).json({ message: "Invalid category. Must be aptitude, communication, or logical_reasoning" });
+  if (!topic || typeof topic !== "string" || topic.trim().length === 0) {
+    return res.status(400).json({ message: "Topic is required" });
   }
 
   try {
     const token = (session as any)?.backendToken;
     const response = await fastApiClient.post(
-      `/api/v1/assessments/generate-topic-context?topic_name=${encodeURIComponent(topicName)}&category=${category}`,
+      `/api/v1/assessments/topics/check-technical?topic=${encodeURIComponent(topic.trim())}`,
       {},
       {
         headers: {
@@ -37,19 +33,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     );
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
-    console.error("Error in generate-topic-context API route:", error);
-    const statusCode = error?.response?.status || 500;
-    const errorMessage =
-      error?.response?.data?.detail ||
-      error?.response?.data?.message ||
-      error?.message ||
-      "Failed to generate topic context";
-    return res.status(statusCode).json({
-      message: errorMessage,
+    console.error("Error checking if topic is technical:", error);
+    if (error.response) {
+      return res.status(error.response.status || 500).json({
+        success: false,
+        message: error.response.data?.detail || "Failed to check if topic is technical",
+        data: {
+          isTechnical: false, // Default to false on error
+        },
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: "Failed to check if topic is technical",
+      data: {
+        isTechnical: false, // Default to false on error
+      },
     });
   }
 }
-
-
-
 
