@@ -347,8 +347,8 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
           Function Signature:
         </label>
         <textarea
-          value={question.functionSignature || ""}
-          onChange={(e) => onEditChange(JSON.stringify({ ...question, functionSignature: e.target.value }, null, 2))}
+          value={question.functionSignatureString || (typeof question.functionSignature === 'string' ? question.functionSignature : (typeof question.functionSignature === 'object' && question.functionSignature ? `${question.functionSignature.name || 'function'}(${question.functionSignature.parameters?.map((p: any) => `${p.name}: ${p.type}`).join(', ') || ''}): ${question.functionSignature.return_type || ''}` : ""))}
+          onChange={(e) => onEditChange(JSON.stringify({ ...question, functionSignature: e.target.value, functionSignatureString: e.target.value }, null, 2))}
           style={{
             width: "100%",
             minHeight: "60px",
@@ -2696,8 +2696,11 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         return;
       }
       
-      // Get topic source (default to "manual" if not set)
-      const topicSource = (topic.source || "manual") as "role" | "manual" | "csv";
+      // Get topic source (default to "manual" if not set, map "ai" to "manual")
+      const rawSource = topic.source || "manual";
+      const topicSource = (rawSource === "ai" || !["role", "manual", "csv"].includes(rawSource)) 
+        ? "manual" 
+        : (rawSource as "role" | "manual" | "csv");
       
       // Reconstruct skill metadata based on source
       let skillMetadataProvided: any = undefined;
@@ -3194,7 +3197,10 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         .map(topic => {
           // Try to find related skill
           let relatedSkill: string | undefined = undefined;
-          const topicSource = (topic.source || "manual") as "role" | "manual" | "csv";
+          const rawSource = topic.source || "manual";
+          const topicSource = (rawSource === "ai" || !["role", "manual", "csv"].includes(rawSource)) 
+            ? "manual" 
+            : (rawSource as "role" | "manual" | "csv");
           
           if (topicSource === "csv") {
             const csvSkill = csvData.find(row => 
