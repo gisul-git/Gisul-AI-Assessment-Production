@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Depends, status, BackgroundTasks
 from typing import List, Dict, Any, Optional
 from bson import ObjectId
 from datetime import datetime
@@ -6,10 +6,13 @@ import secrets
 import csv
 import io
 import logging
+import urllib.parse
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 from ..database import get_dsa_database as get_database
 from ..models.test import TestCreate, Test, TestSubmission, TestInviteRequest, AddCandidateRequest, CandidateLinkResponse
-from ..services.ai_feedback import generate_code_feedback
+from ..services.ai_feedback import generate_code_feedback, is_starter_code_only
 from ..utils.judge0 import run_all_test_cases, LANGUAGE_IDS
 from ..routers.assessment import (
     prepare_code_for_execution,
@@ -17,6 +20,8 @@ from ..routers.assessment import (
     format_hidden_result_for_admin,
 )
 from .....core.dependencies import get_current_user, require_editor
+from .....utils.email import get_email_service
+from .....config.settings import get_settings
 
 logger = logging.getLogger("backend")
 
@@ -446,7 +451,80 @@ async def get_test(
         "question_time_limits": test.get("question_time_limits"),
         "test_token": test.get("test_token"),
     }
+    # Include invitationTemplate if it exists
+    if "invitationTemplate" in test:
+        test_dict["invitationTemplate"] = test.get("invitationTemplate")
     return test_dict
+
+@router.patch("/{test_id}", response_model=dict)
+async def patch_test(
+    test_id: str,
+    payload: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Partially update a test (PATCH) - allows updating specific fields like invitationTemplate
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    # Check if test exists and belongs to the current user
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id)
+    existing_test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not existing_test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # Verify ownership
+    existing_created_by = existing_test.get("created_by")
+    if not existing_created_by:
+        logger.error(f"[patch_test] SECURITY: Test {test_id} has no created_by field")
+        raise HTTPException(status_code=403, detail="You don't have permission to update this test")
+    if str(existing_created_by).strip() != user_id.strip():
+        logger.error(f"[patch_test] SECURITY ISSUE: User {user_id} attempted to update test {test_id} created by {existing_created_by}")
+        raise HTTPException(status_code=403, detail="You don't have permission to update this test")
+    
+    # Build update data - only include fields that are provided
+    update_data: Dict[str, Any] = {"updated_at": datetime.utcnow()}
+    
+    # Allow updating invitationTemplate
+    if "invitationTemplate" in payload:
+        update_data["invitationTemplate"] = payload["invitationTemplate"]
+    
+    # Update the test
+    result = await db.tests.update_one(
+        {"_id": ObjectId(test_id)},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # Fetch the updated test
+    updated_test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if updated_test:
+        test_dict = {
+            "id": str(updated_test["_id"]),
+            "title": updated_test.get("title", ""),
+            "description": updated_test.get("description", ""),
+            "duration_minutes": updated_test.get("duration_minutes", 0),
+            "start_time": updated_test.get("start_time").isoformat() if updated_test.get("start_time") else None,
+            "end_time": updated_test.get("end_time").isoformat() if updated_test.get("end_time") else None,
+            "is_active": updated_test.get("is_active", False),
+            "is_published": updated_test.get("is_published", False),
+            "invited_users": updated_test.get("invited_users", []),
+            "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in updated_test.get("question_ids", [])],
+            "test_token": updated_test.get("test_token"),
+        }
+        # Include invitationTemplate if it exists
+        if "invitationTemplate" in updated_test:
+            test_dict["invitationTemplate"] = updated_test.get("invitationTemplate")
+        return test_dict
+    
+    raise HTTPException(status_code=500, detail="Failed to update test")
 
 @router.put("/{test_id}", response_model=dict)
 async def update_test(
@@ -533,6 +611,9 @@ async def update_test(
             "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in updated_test.get("question_ids", [])],
             "test_token": updated_test.get("test_token"),
         }
+        # Include invitationTemplate if it exists
+        if "invitationTemplate" in updated_test:
+            test_dict["invitationTemplate"] = updated_test.get("invitationTemplate")
         return test_dict
     
     raise HTTPException(status_code=500, detail="Failed to update test")
@@ -692,15 +773,131 @@ class FinalTestSubmissionRequest(BaseModel):
     activity_logs: Optional[List[Dict[str, Any]]] = []
 
 
+async def process_ai_feedback_background(
+    submission_id: str,
+    test_id: str,
+    user_id: str,
+    question_id: str,
+    source_code: str,
+    language: str,
+    question_title: str,
+    question_description: str,
+    all_test_results: List[Dict],
+    total_passed: int,
+    total_tests: int,
+    public_passed: int,
+    public_total: int,
+    hidden_passed: int,
+    hidden_total: int,
+    starter_code: Optional[str]
+):
+    """Background task to generate AI feedback and update submission"""
+    db = get_database()
+    try:
+        logger.info(f"Starting background AI feedback generation for submission {submission_id}")
+        
+        # Run AI feedback generation in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        ai_feedback = await loop.run_in_executor(
+            None,  # Use default ThreadPoolExecutor
+            lambda: generate_code_feedback(
+                source_code=source_code,
+                language=language,
+                question_title=question_title,
+                question_description=question_description,
+                test_results=all_test_results,
+                total_passed=total_passed,
+                total_tests=total_tests,
+                time_spent_seconds=None,
+                public_passed=public_passed,
+                public_total=public_total,
+                hidden_passed=hidden_passed,
+                hidden_total=hidden_total,
+                starter_code=starter_code,
+            )
+        )
+        
+        # Update submission with AI feedback
+        await db.submissions.update_one(
+            {"_id": ObjectId(submission_id)},
+            {"$set": {"ai_feedback": ai_feedback}}
+        )
+        
+        # Update score if AI feedback has overall_score
+        score = 0
+        if ai_feedback and isinstance(ai_feedback, dict):
+            score = ai_feedback.get("overall_score", 0)
+            await db.submissions.update_one(
+                {"_id": ObjectId(submission_id)},
+                {"$set": {"score": score}}
+            )
+        
+        # Recalculate total score for test submission
+        test_submission = await db.test_submissions.find_one({
+            "test_id": test_id,
+            "user_id": user_id
+        })
+        if test_submission:
+            # Get all submissions for this test
+            all_submissions = await db.submissions.find({
+                "user_id": user_id,
+                "test_id": test_id,
+                "is_final_submission": True
+            }).to_list(length=100)
+            
+            # Calculate total score from submissions that have AI feedback or are marked as starter code only
+            new_total_score = sum(
+                s.get("score", 0) for s in all_submissions 
+                if s.get("ai_feedback") is not None or s.get("status") == "no_code_written"
+            )
+            
+            await db.test_submissions.update_one(
+                {"test_id": test_id, "user_id": user_id},
+                {"$set": {"score": new_total_score}}
+            )
+            logger.info(f"Updated test submission total score to {new_total_score}")
+        
+        logger.info(f"Completed AI feedback generation for submission {submission_id}")
+    except Exception as e:
+        logger.error(f"Error in background AI feedback generation for submission {submission_id}: {e}")
+        # Update submission with error
+        await db.submissions.update_one(
+            {"_id": ObjectId(submission_id)},
+            {"$set": {"ai_feedback": {"error": str(e)}}}
+        )
+
+
+async def process_activity_logs_background(
+    test_id: str,
+    user_id: str,
+    activity_logs: List[Dict[str, Any]]
+):
+    """Background task to process and save activity logs"""
+    db = get_database()
+    try:
+        logger.info(f"Processing activity logs in background for test {test_id}, user {user_id}")
+        
+        # Update test submission with activity logs
+        await db.test_submissions.update_one(
+            {"test_id": test_id, "user_id": user_id},
+            {"$set": {"activity_logs": activity_logs}}
+        )
+        
+        logger.info(f"Activity logs saved for test {test_id}, user {user_id}")
+    except Exception as e:
+        logger.error(f"Error processing activity logs: {e}")
+
+
 @router.post("/{test_id}/final-submit")
 async def final_submit_test(
     test_id: str,
     user_id: str = Query(..., description="User ID from link token"),
-    request: FinalTestSubmissionRequest = Body(...)
+    request: FinalTestSubmissionRequest = Body(...),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
     Final test submission - collects all code, generates AI feedback, and saves logs.
-    Does NOT use Judge0 for evaluation.
+    Returns quickly (within 5 seconds) while processing AI feedback and logs in background.
     """
     db = get_database()
     if not ObjectId.is_valid(test_id):
@@ -721,24 +918,27 @@ async def final_submit_test(
         raise HTTPException(status_code=404, detail="Test submission not found. Please start the test first.")
     
     # Process each question submission
+    # Use asyncio.gather to run test cases in parallel for faster execution
     final_submissions = []
     total_score = 0
     
-    for q_sub in request.question_submissions:
+    # Process questions in parallel to speed up submission
+    async def process_question_submission(q_sub):
+        """Process a single question submission"""
         question_id = q_sub.question_id
         if not ObjectId.is_valid(question_id):
-            continue
+            return None
         
         # Get question details
         question = await db.questions.find_one({"_id": ObjectId(question_id)})
         if not question:
-            continue
+            return None
         
         # Get language ID from language name
         language_id = LANGUAGE_IDS.get(q_sub.language.lower(), None)
         if not language_id:
             logger.warning(f"Unknown language: {q_sub.language}, skipping question {question_id}")
-            continue
+            return None
         
         # Prepare code for execution (validate + wrap if needed)
         prepared_code, prep_error, code_warnings = await prepare_code_for_execution(
@@ -753,6 +953,7 @@ async def final_submit_test(
             submission_data = {
                 "user_id": user_id,
                 "question_id": question_id,
+                "test_id": test_id,
                 "language": q_sub.language,
                 "code": q_sub.code,
                 "status": "compilation_error",
@@ -760,12 +961,12 @@ async def final_submit_test(
                 "passed_testcases": 0,
                 "total_testcases": 0,
                 "ai_feedback": {"error": prep_error},
+                "score": 0,
                 "created_at": datetime.utcnow(),
                 "is_final_submission": True,
             }
             submission_result = await db.submissions.insert_one(submission_data)
-            final_submissions.append(str(submission_result.inserted_id))
-            continue
+            return str(submission_result.inserted_id)
         
         # Build test cases array - PUBLIC + HIDDEN
         public_test_cases = []
@@ -798,7 +999,7 @@ async def final_submit_test(
         
         if not all_test_cases:
             logger.warning(f"No test cases for question {question_id}")
-            continue
+            return None
         
         # Get execution constraints
         cpu_time_limit = 2.0
@@ -844,37 +1045,6 @@ async def final_submit_test(
         total_passed = public_passed + hidden_passed
         total_tests = public_total + hidden_total
         
-        # Generate AI feedback based on actual test results
-        ai_feedback = None
-        try:
-            all_test_results = public_results + full_hidden_results
-            
-            # Get starter code for the language
-            starter_code = None
-            starter_code_dict = question.get("starter_code", {})
-            if isinstance(starter_code_dict, dict):
-                starter_code = starter_code_dict.get(q_sub.language) or starter_code_dict.get(q_sub.language.lower())
-            
-            ai_feedback = generate_code_feedback(
-                source_code=q_sub.code,
-                language=q_sub.language,
-                question_title=question.get("title", ""),
-                question_description=question.get("description", ""),
-                test_results=all_test_results,
-                total_passed=total_passed,
-                total_tests=total_tests,
-                time_spent_seconds=None,
-                public_passed=public_passed,
-                public_total=public_total,
-                hidden_passed=hidden_passed,
-                hidden_total=hidden_total,
-                starter_code=starter_code,
-            )
-            logger.info(f"Generated AI feedback for question {question_id} with {total_passed}/{total_tests} tests passed")
-        except Exception as e:
-            logger.error(f"Failed to generate AI feedback for question {question_id}: {e}")
-            ai_feedback = {"error": str(e)}
-        
         # Determine status
         if results.get("compilation_error"):
             status = "compilation_error"
@@ -885,10 +1055,30 @@ async def final_submit_test(
         else:
             status = "wrong_answer"
         
-        # Create submission record with actual test results
+        all_test_results = public_results + full_hidden_results
+        
+        # Get starter code for the language
+        starter_code = None
+        starter_code_dict = question.get("starter_code", {})
+        if isinstance(starter_code_dict, dict):
+            starter_code = starter_code_dict.get(q_sub.language) or starter_code_dict.get(q_sub.language.lower())
+        
+        # Check if user submitted only starter code (no actual implementation)
+        # If so, set score to 0 immediately without waiting for AI feedback
+        initial_score = 0
+        is_starter_only = False
+        if starter_code:
+            is_starter_only = is_starter_code_only(q_sub.code, starter_code)
+            if is_starter_only:
+                logger.info(f"User submitted only starter code for question {question_id} - setting score to 0")
+                initial_score = 0
+                status = "no_code_written"
+        
+        # Create submission record WITHOUT AI feedback (will be added in background)
         submission_data = {
             "user_id": user_id,
             "question_id": question_id,
+            "test_id": test_id,
             "language": q_sub.language,
             "code": q_sub.code,
             "status": status,
@@ -901,27 +1091,80 @@ async def final_submit_test(
             "public_total": public_total,
             "hidden_passed": hidden_passed,
             "hidden_total": hidden_total,
-            "ai_feedback": ai_feedback,
+            "ai_feedback": None,  # Will be generated in background
+            "score": initial_score,  # Set to 0 if starter code only, otherwise will be updated in background
             "created_at": datetime.utcnow(),
             "is_final_submission": True,
         }
         
-        # Save submission
+        # Save submission immediately
         submission_result = await db.submissions.insert_one(submission_data)
-        final_submissions.append(str(submission_result.inserted_id))
+        submission_id = str(submission_result.inserted_id)
         
-        # Calculate score from AI feedback if available
-        if ai_feedback and isinstance(ai_feedback, dict):
-            score = ai_feedback.get("overall_score", 0)
-            total_score += score
+        # If starter code only, skip AI feedback generation (score is already 0)
+        # Otherwise, schedule AI feedback generation in background
+        if not is_starter_only:
+            background_tasks.add_task(
+                process_ai_feedback_background,
+                submission_id=submission_id,
+                test_id=test_id,
+                user_id=user_id,
+                question_id=question_id,
+                source_code=q_sub.code,
+                language=q_sub.language,
+                question_title=question.get("title", ""),
+                question_description=question.get("description", ""),
+                all_test_results=all_test_results,
+                total_passed=total_passed,
+                total_tests=total_tests,
+                public_passed=public_passed,
+                public_total=public_total,
+                hidden_passed=hidden_passed,
+                hidden_total=hidden_total,
+                starter_code=starter_code
+            )
+            logger.info(f"Saved submission {submission_id} and scheduled AI feedback generation in background")
+        else:
+            # For starter code only, create a simple feedback record immediately
+            ai_feedback_starter = {
+                "overall_score": 0,
+                "feedback_summary": "No code was written. You submitted only the starter code template. Please implement the solution to receive a score.",
+                "one_liner": "No code written | Starter code only",
+                "evaluation_note": "Starter code only - no implementation provided"
+            }
+            await db.submissions.update_one(
+                {"_id": ObjectId(submission_id)},
+                {"$set": {"ai_feedback": ai_feedback_starter}}
+            )
+            logger.info(f"Saved submission {submission_id} with starter code only - score set to 0, no AI feedback needed")
+        
+        return submission_id
     
-    # Update test submission with final data
+    # Process all questions in parallel for faster execution
+    submission_tasks = [process_question_submission(q_sub) for q_sub in request.question_submissions]
+    submission_ids = await asyncio.gather(*submission_tasks)
+    final_submissions = [sid for sid in submission_ids if sid is not None]
+    
+    # Calculate initial total score (including starter code only submissions which have score 0)
+    # This ensures the score is accurate even before AI feedback completes
+    initial_total_score = 0
+    if final_submissions:
+        all_submissions = await db.submissions.find({
+            "_id": {"$in": [ObjectId(sid) for sid in final_submissions]}
+        }).to_list(length=100)
+        
+        # Sum scores from all submissions (starter code only already have score 0 and ai_feedback)
+        initial_total_score = sum(
+            s.get("score", 0) for s in all_submissions 
+            if s.get("ai_feedback") is not None or s.get("status") == "no_code_written"
+        )
+    
+    # Update test submission with final data (without activity logs - will be added in background)
     update_data = {
         "is_completed": True,
         "submitted_at": datetime.utcnow(),
         "submissions": final_submissions,
-        "score": total_score,
-        "activity_logs": request.activity_logs,
+        "score": initial_total_score,  # Include starter code only submissions (score 0) immediately
         "final_submission_data": {
             "question_submissions": [
                 {
@@ -940,14 +1183,24 @@ async def final_submit_test(
         {"$set": update_data}
     )
     
-    # Return submission summary
+    # Schedule activity logs processing in background
+    if request.activity_logs:
+        background_tasks.add_task(
+            process_activity_logs_background,
+            test_id=test_id,
+            user_id=user_id,
+            activity_logs=request.activity_logs
+        )
+    
+    # Return submission summary immediately (AI feedback and logs processing in background)
     return {
-        "message": "Test submitted successfully",
+        "message": "Test submitted successfully. AI feedback and logs are being processed in the background.",
         "test_id": test_id,
         "user_id": user_id,
         "submissions_count": len(final_submissions),
-        "total_score": total_score,
+        "total_score": initial_total_score,  # Includes starter code only submissions (score 0) immediately
         "submitted_at": update_data["submitted_at"].isoformat(),
+        "ai_feedback_status": "processing",  # Indicates AI feedback is being generated
     }
 
 
@@ -1002,6 +1255,9 @@ async def add_candidate(
         "user_id": user_id,
         "name": candidate.name,
         "email": candidate.email,
+        "status": "pending",  # pending -> invited -> started -> completed
+        "invited": False,
+        "invited_at": None,
         "created_at": datetime.utcnow(),
     }
     await db.test_candidates.insert_one(candidate_record)
@@ -1024,7 +1280,127 @@ async def add_candidate(
             {"$set": {"test_token": test_token}}
         )
     
-    test_link = f"/test/{test_id}?token={test_token}"
+    # Build full test URL
+    # Use cors_origins to get frontend URL, or default to localhost:3000
+    settings = get_settings()
+    cors_origins = settings.cors_origins.split(",")[0].strip() if settings.cors_origins else "http://localhost:3000"
+    test_link = f"{cors_origins}/test/{test_id}?token={test_token}"
+    
+    # Get email template
+    stored_template = test.get("invitationTemplate", {})
+    default_template = {
+        "logoUrl": "",
+        "companyName": "",
+        "message": "You have been invited to take a DSA test. Please click the link below to start.",
+        "footer": "",
+        "sentBy": "AI Assessment Platform"
+    }
+    template_to_use = stored_template if stored_template else default_template
+    
+    # Send invitation email
+    try:
+        settings = get_settings()
+        if settings.sendgrid_api_key and settings.sendgrid_from_email:
+            email_service = get_email_service()
+            
+            # Build exam URL with candidate params
+            encoded_email = urllib.parse.quote(candidate.email)
+            encoded_name = urllib.parse.quote(candidate.name)
+            exam_url_with_params = f"{test_link}&email={encoded_email}&name={encoded_name}"
+            
+            # Replace placeholders
+            message = template_to_use.get("message", default_template["message"])
+            email_body = message
+            email_body = email_body.replace("{{candidate_name}}", candidate.name)
+            email_body = email_body.replace("{{candidate_email}}", candidate.email)
+            email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+            email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
+            
+            # Build HTML email
+            logo_url = template_to_use.get("logoUrl", "")
+            company_name = template_to_use.get("companyName", "")
+            footer = template_to_use.get("footer", "")
+            sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
+            
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ text-align: center; margin-bottom: 30px; }}
+                    .logo {{ max-width: 200px; margin-bottom: 20px; }}
+                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                        {f'<h1>{company_name}</h1>' if company_name else ''}
+                    </div>
+                    <div class="content">
+                        <p>Dear {candidate.name},</p>
+                        <p>{email_body}</p>
+                        <div class="candidate-info">
+                            <p><strong>Your Details:</strong></p>
+                            <p><strong>Name:</strong> {candidate.name}</p>
+                            <p><strong>Email:</strong> {candidate.email}</p>
+                        </div>
+                        <div style="text-align: center;">
+                            <a href="{exam_url_with_params}" class="button">Start Test</a>
+                        </div>
+                    </div>
+                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                    <div class="footer">
+                        <p>Sent by {sent_by}</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            subject = f"DSA Test Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+            
+            await email_service.send_email(candidate.email, subject, html_content)
+            logger.info(f"Invitation email sent successfully to {candidate.email}")
+        else:
+            logger.warning("SendGrid is not configured. Email not sent.")
+        
+        # Update candidate status to "invited" regardless of email success
+        # (Email might fail but we still want to mark as invited if we attempted to send)
+        try:
+            await db.test_candidates.update_one(
+                {"test_id": test_id, "email": candidate.email},
+                {"$set": {
+                    "status": "invited",
+                    "invited": True,
+                    "invited_at": datetime.utcnow()
+                }}
+            )
+            logger.info(f"Updated candidate status to 'invited' for {candidate.email}")
+        except Exception as update_error:
+            logger.error(f"Failed to update candidate status for {candidate.email}: {str(update_error)}")
+    except Exception as e:
+        logger.error(f"Failed to send invitation email to {candidate.email}: {str(e)}")
+        # Still try to update status even if email failed
+        try:
+            await db.test_candidates.update_one(
+                {"test_id": test_id, "email": candidate.email},
+                {"$set": {
+                    "status": "invited",
+                    "invited": True,
+                    "invited_at": datetime.utcnow()
+                }}
+            )
+        except Exception as update_error:
+            logger.error(f"Failed to update candidate status after email error: {str(update_error)}")
+        # Don't fail the request if email fails - candidate is still added
     
     return {
         "candidate_id": user_id,
@@ -1032,6 +1408,189 @@ async def add_candidate(
         "name": candidate.name,
         "email": candidate.email,
     }
+
+
+@router.post("/{test_id}/send-invitations-to-all")
+async def send_invitations_to_all(
+    test_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Send invitation emails to all candidates for a test
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    # Check if test exists and belongs to the current user
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id)
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # Verify ownership
+    test_created_by = test.get("created_by")
+    if not test_created_by or str(test_created_by).strip() != user_id.strip():
+        raise HTTPException(status_code=403, detail="You don't have permission to access this test")
+    
+    if not test.get("is_published", False):
+        raise HTTPException(status_code=400, detail="Test must be published before sending invitations")
+    
+    # Get all candidates for this test
+    candidates = await db.test_candidates.find({"test_id": test_id}).to_list(length=1000)
+    if not candidates:
+        raise HTTPException(status_code=400, detail="No candidates found for this test")
+    
+    # Get test token
+    test_token = test.get("test_token")
+    if not test_token:
+        test_token = secrets.token_urlsafe(32)
+        await db.tests.update_one(
+            {"_id": ObjectId(test_id)},
+            {"$set": {"test_token": test_token}}
+        )
+    
+    # Build test URL
+    settings = get_settings()
+    cors_origins = settings.cors_origins.split(",")[0].strip() if settings.cors_origins else "http://localhost:3000"
+    base_test_link = f"{cors_origins}/test/{test_id}?token={test_token}"
+    
+    # Get email template
+    stored_template = test.get("invitationTemplate", {})
+    default_template = {
+        "logoUrl": "",
+        "companyName": "",
+        "message": "You have been invited to take a DSA test. Please click the link below to start.",
+        "footer": "",
+        "sentBy": "AI Assessment Platform"
+    }
+    template_to_use = stored_template if stored_template else default_template
+    
+    # Send emails to all candidates
+    results = {
+        "success": [],
+        "failed": []
+    }
+    
+    if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="SendGrid is not configured"
+        )
+    
+    try:
+        email_service = get_email_service()
+        
+        for candidate in candidates:
+            try:
+                candidate_email = candidate.get("email")
+                candidate_name = candidate.get("name", "Candidate")
+                
+                if not candidate_email:
+                    results["failed"].append({"email": "unknown", "reason": "Email not found"})
+                    continue
+                
+                # Build exam URL with candidate params
+                encoded_email = urllib.parse.quote(candidate_email)
+                encoded_name = urllib.parse.quote(candidate_name)
+                exam_url_with_params = f"{base_test_link}&email={encoded_email}&name={encoded_name}"
+                
+                # Replace placeholders
+                message = template_to_use.get("message", default_template["message"])
+                email_body = message
+                email_body = email_body.replace("{{candidate_name}}", candidate_name)
+                email_body = email_body.replace("{{candidate_email}}", candidate_email)
+                email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+                email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
+                
+                # Build HTML email
+                logo_url = template_to_use.get("logoUrl", "")
+                company_name = template_to_use.get("companyName", "")
+                footer = template_to_use.get("footer", "")
+                sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
+                
+                html_content = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <style>
+                        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                        .header {{ text-align: center; margin-bottom: 30px; }}
+                        .logo {{ max-width: 200px; margin-bottom: 20px; }}
+                        .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                        .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+                        .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                        .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <div class="header">
+                            {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                            {f'<h1>{company_name}</h1>' if company_name else ''}
+                        </div>
+                        <div class="content">
+                            <p>Dear {candidate_name},</p>
+                            <p>{email_body}</p>
+                            <div class="candidate-info">
+                                <p><strong>Your Details:</strong></p>
+                                <p><strong>Name:</strong> {candidate_name}</p>
+                                <p><strong>Email:</strong> {candidate_email}</p>
+                            </div>
+                            <div style="text-align: center;">
+                                <a href="{exam_url_with_params}" class="button">Start Test</a>
+                            </div>
+                        </div>
+                        {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                        <div class="footer">
+                            <p>Sent by {sent_by}</p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                subject = f"DSA Test Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+                
+                await email_service.send_email(candidate_email, subject, html_content)
+                results["success"].append({"email": candidate_email, "name": candidate_name})
+                logger.info(f"Invitation email sent successfully to {candidate_email}")
+            except Exception as e:
+                logger.error(f"Failed to send invitation email to {candidate.get('email', 'unknown')}: {str(e)}")
+                results["failed"].append({"email": candidate.get("email", "unknown"), "reason": str(e)})
+            
+            # Update candidate status to "invited" regardless of email success
+            try:
+                update_result = await db.test_candidates.update_one(
+                    {"test_id": test_id, "email": candidate_email},
+                    {"$set": {
+                        "status": "invited",
+                        "invited": True,
+                        "invited_at": datetime.utcnow()
+                    }}
+                )
+                if update_result.matched_count > 0:
+                    logger.info(f"Updated candidate status to 'invited' for {candidate_email}")
+                else:
+                    logger.warning(f"Could not find candidate to update status for {candidate_email}")
+            except Exception as update_error:
+                logger.error(f"Failed to update candidate status for {candidate_email}: {str(update_error)}")
+        
+        return {
+            "message": f"Invitation emails sent to {len(results['success'])} candidates",
+            "success_count": len(results["success"]),
+            "failed_count": len(results["failed"]),
+            "success": results["success"],
+            "failed": results["failed"]
+        }
+    except Exception as e:
+        logger.error(f"Error sending invitations to all candidates: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to send invitations: {str(e)}")
 
 
 @router.post("/{test_id}/bulk-add-candidates")
@@ -1132,6 +1691,9 @@ async def bulk_add_candidates(
                 "name": name,
                 "email": email,
                 "link_token": link_token,
+                "status": "pending",  # pending -> invited -> started -> completed
+                "invited": False,
+                "invited_at": None,
                 "created_at": datetime.utcnow(),
             }
             await db.test_candidates.insert_one(candidate_record)
@@ -1210,11 +1772,26 @@ async def get_test_candidates(
             "user_id": candidate["user_id"]
         })
         
+        # Determine status based on candidate record and submission
+        # Priority: completed > started > invited (from DB) > pending
+        candidate_status = candidate.get("status", "pending")
+        if submission and submission.get("is_completed", False):
+            candidate_status = "completed"
+        elif submission:
+            candidate_status = "started"
+        elif candidate.get("status") == "invited" or candidate.get("invited", False) or candidate.get("invited_at"):
+            candidate_status = "invited"
+        else:
+            candidate_status = "pending"
+        
         result.append({
             "candidate_id": str(candidate["_id"]),
             "user_id": candidate["user_id"],
             "name": candidate.get("name", ""),
             "email": candidate.get("email", ""),
+            "status": candidate_status,
+            "invited": candidate.get("invited", False),
+            "invited_at": candidate.get("invited_at").isoformat() if candidate.get("invited_at") else None,
             "created_at": candidate.get("created_at").isoformat() if candidate.get("created_at") else None,
             "has_submitted": submission is not None and submission.get("is_completed", False),
             "submission_score": submission.get("score", 0) if submission else 0,
@@ -1432,6 +2009,9 @@ async def bulk_add_candidates(
                 "name": name,
                 "email": email,
                 "link_token": link_token,
+                "status": "pending",  # pending -> invited -> started -> completed
+                "invited": False,
+                "invited_at": None,
                 "created_at": datetime.utcnow(),
             }
             await db.test_candidates.insert_one(candidate_record)
@@ -1510,11 +2090,26 @@ async def get_test_candidates(
             "user_id": candidate["user_id"]
         })
         
+        # Determine status based on candidate record and submission
+        # Priority: completed > started > invited (from DB) > pending
+        candidate_status = candidate.get("status", "pending")
+        if submission and submission.get("is_completed", False):
+            candidate_status = "completed"
+        elif submission:
+            candidate_status = "started"
+        elif candidate.get("status") == "invited" or candidate.get("invited", False) or candidate.get("invited_at"):
+            candidate_status = "invited"
+        else:
+            candidate_status = "pending"
+        
         result.append({
             "candidate_id": str(candidate["_id"]),
             "user_id": candidate["user_id"],
             "name": candidate.get("name", ""),
             "email": candidate.get("email", ""),
+            "status": candidate_status,
+            "invited": candidate.get("invited", False),
+            "invited_at": candidate.get("invited_at").isoformat() if candidate.get("invited_at") else None,
             "created_at": candidate.get("created_at").isoformat() if candidate.get("created_at") else None,
             "has_submitted": submission is not None and submission.get("is_completed", False),
             "submission_score": submission.get("score", 0) if submission else 0,

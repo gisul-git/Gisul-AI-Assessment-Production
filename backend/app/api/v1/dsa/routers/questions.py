@@ -8,7 +8,7 @@ from ..models.question import Question, QuestionCreate, QuestionUpdate
 from .....core.dependencies import get_current_user, require_editor
 
 logger = logging.getLogger("backend")
-router = APIRouter(prefix="/api/v1/dsa", tags=["dsa"])
+router = APIRouter(prefix="/api/v1/dsa/questions", tags=["dsa"])
 
 @router.get("/", response_model=List[dict])
 async def get_questions(

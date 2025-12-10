@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from ..services.ai_generator import generate_question
 from typing import Optional
 
-router = APIRouter(prefix="/api/v1/dsa", tags=["dsa"])
+router = APIRouter(prefix="/api/v1/dsa/admin", tags=["dsa"])
 
 
 class GenerateQuestionRequest(BaseModel):

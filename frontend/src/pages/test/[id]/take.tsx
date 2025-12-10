@@ -1291,12 +1291,54 @@ export default function TestTakePage() {
 
   // Timer countdown - only runs after editor is visible and timer is started
   useEffect(() => {
-    if (!timerStarted || submitted) return
+    if (!timerStarted || submitted || !testSubmission || !test) {
+      console.log('[Timer] Not starting countdown:', { timerStarted, submitted, hasSubmission: !!testSubmission, hasTest: !!test })
+      return
+    }
+    
+    console.log('[Timer] Starting countdown effect', { timeRemaining, testDuration: test.duration_minutes })
+    
+    // Recalculate remaining time when timer starts to ensure accuracy
+    const startedAtStr = testSubmission.started_at
+    let calculatedRemaining = timeRemaining
+    
+    if (startedAtStr) {
+      const startedAt = new Date(startedAtStr)
+      if (!isNaN(startedAt.getTime())) {
+        const durationMs = test.duration_minutes * 60 * 1000
+        const endTime = new Date(startedAt.getTime() + durationMs)
+        const now = new Date()
+        calculatedRemaining = Math.floor((endTime.getTime() - now.getTime()) / 1000)
+        
+        console.log('[Timer] Calculated remaining time:', {
+          startedAt: startedAt.toISOString(),
+          endTime: endTime.toISOString(),
+          now: now.toISOString(),
+          calculatedRemaining,
+          currentTimeRemaining: timeRemaining
+        })
+        
+        // ALWAYS update timeRemaining when timer starts to ensure it's set correctly
+        // This is critical because the timer might start with timeRemaining = 0
+        console.log(`[Timer] Setting remaining time: ${calculatedRemaining}s (was ${timeRemaining}s)`)
+        setTimeRemaining(Math.max(0, calculatedRemaining))
+        setTotalTime(test.duration_minutes * 60)
+        // Update the local variable for immediate use
+        calculatedRemaining = Math.max(0, calculatedRemaining)
+      } else {
+        console.warn('[Timer] Invalid started_at date:', startedAtStr)
+      }
+    } else {
+      console.warn('[Timer] No started_at in testSubmission:', testSubmission)
+    }
+    
+    // Use calculated value for checks (state update is async)
+    const remainingToCheck = calculatedRemaining > 0 ? calculatedRemaining : timeRemaining
     
     // When timer starts (editor becomes visible), check if time has already expired
     // IMPORTANT: Don't auto-submit immediately - the test might have just started
     // Only auto-submit if time truly expired AND it's been a reasonable time since test start
-    if (timeRemaining <= 0) {
+    if (remainingToCheck <= 0) {
       const timeSincePageLoad = pageLoadTimeRef.current ? Date.now() - pageLoadTimeRef.current : Infinity
       const gracePeriod = 10000 // 10 seconds grace period for page loading
       
@@ -1353,19 +1395,32 @@ export default function TestTakePage() {
       }
     }
 
+    // Only start countdown if we have valid remaining time
+    if (remainingToCheck <= 0) {
+      console.log('[Timer] No time remaining, skipping countdown interval')
+      return
+    }
+    
+    console.log('[Timer] Starting countdown interval with', remainingToCheck, 'seconds remaining')
+    
     const timer = setInterval(() => {
       setTimeRemaining((prev) => {
-        if (prev <= 1) {
+        const newValue = prev - 1
+        if (newValue <= 0) {
+          console.log('[Timer] Time expired, triggering auto-submit')
           // Trigger auto-submit
           handleAutoSubmit()
           return 0
         }
-        return prev - 1
+        return newValue
       })
     }, 1000)
 
-    return () => clearInterval(timer)
-  }, [timerStarted, submitted]) // Removed timeRemaining from dependencies to prevent timer reset
+    return () => {
+      console.log('[Timer] Cleaning up countdown interval')
+      clearInterval(timer)
+    }
+  }, [timerStarted, submitted, testSubmission, test]) // Don't include timeRemaining to avoid recreating interval
 
   const handleAutoSubmit = async () => {
     if (submitted || submitting) return
@@ -1897,7 +1952,6 @@ export default function TestTakePage() {
             onSubmit={() => handleSubmit(false)}
             submitting={submitting}
             questionStatus={questionStatus}
-            timeRemaining={timeRemaining}
           />
           <div className="border-t border-slate-700">
             <QuestionTabs question={currentQuestion} />
@@ -1997,7 +2051,6 @@ export default function TestTakePage() {
               onSubmit={() => handleSubmit(false)}
               submitting={submitting}
               questionStatus={questionStatus}
-              timeRemaining={timeRemaining}
             />
           </div>
 

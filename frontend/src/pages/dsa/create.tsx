@@ -66,12 +66,30 @@ export default function CreateDSACompetencyPage() {
     setLoading(true);
 
     try {
+      // Create the test
       const response = await dsaApi.post("/tests/", {
         ...formData,
         start_time: new Date(formData.start_time).toISOString(),
         end_time: new Date(formData.end_time).toISOString(),
       });
-      router.push("/dsa/tests");
+      
+      const testId = response.data?.id || response.data?._id;
+      
+      // Automatically publish the test
+      if (testId) {
+        try {
+          await dsaApi.patch(`/tests/${testId}/publish`, {
+            is_published: true
+          });
+        } catch (publishError: any) {
+          console.error("Error publishing test:", publishError);
+          // Continue even if publish fails - test is still created
+        }
+      }
+      
+      // Redirect to dashboard
+      alert("Test created and published successfully!");
+      router.push("/dashboard");
     } catch (error: any) {
       alert(error.response?.data?.detail || error.response?.data?.message || "Failed to create DSA competency test");
       setLoading(false);
@@ -191,7 +209,25 @@ export default function CreateDSACompetencyPage() {
                   required
                   min="1"
                   value={formData.duration_minutes}
-                  onChange={(e) => setFormData({ ...formData, duration_minutes: parseInt(e.target.value) })}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    // Allow empty string while typing
+                    if (value === '') {
+                      setFormData({ ...formData, duration_minutes: 0 });
+                      return;
+                    }
+                    const numValue = parseInt(value, 10);
+                    // Only update if it's a valid number
+                    if (!isNaN(numValue) && numValue >= 0) {
+                      setFormData({ ...formData, duration_minutes: numValue });
+                    }
+                  }}
+                  onBlur={(e) => {
+                    // Ensure minimum value of 1 when field loses focus
+                    if (formData.duration_minutes < 1) {
+                      setFormData({ ...formData, duration_minutes: 1 });
+                    }
+                  }}
                   style={{
                     width: "100%",
                     padding: "0.75rem",
