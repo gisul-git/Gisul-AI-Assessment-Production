@@ -4,7 +4,7 @@ export default function Document() {
   return (
     <Html lang="en">
       <Head>
-        {/* Viewport meta tag should be in _app.tsx, not here */}
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
       <body>
         <Main />

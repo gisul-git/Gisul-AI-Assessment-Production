@@ -118,3 +118,5 @@ The following backend endpoints don't have direct frontend API routes (they may 
 3. **Token Refresh**: Handled in NextAuth JWT callback, not as a separate API route
 4. **Rate Limiting**: Applied to login and verify-email-code endpoints
 
+
+

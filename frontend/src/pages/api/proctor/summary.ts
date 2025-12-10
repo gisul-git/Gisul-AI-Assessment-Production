@@ -37,7 +37,7 @@ export default async function handler(
       `${BACKEND_URL}/api/v1/proctor/summary/${encodeURIComponent(assessmentIdStr)}/${encodeURIComponent(userIdStr)}`,
       {
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/json; charset=utf-8",
         },
         timeout: 30000, // 30 second timeout
       }

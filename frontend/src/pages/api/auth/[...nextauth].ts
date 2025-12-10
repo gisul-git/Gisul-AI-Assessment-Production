@@ -24,7 +24,7 @@ export const authOptions: NextAuthOptions = {
         httpOnly: true,
         sameSite: "lax", // Changed from strict to allow OAuth redirects
         path: "/",
-        secure: process.env.NODE_ENV === "production", // Only secure in production
+        secure: process.env.NODE_ENV === "production" || process.env.NEXT_PUBLIC_FORCE_SECURE_COOKIES === "true", // Secure in production or when forced
       },
     },
   },

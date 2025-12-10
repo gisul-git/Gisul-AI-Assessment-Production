@@ -109,7 +109,7 @@ export default async function handler(
         },
         {
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
           },
           timeout: 10000, // 10 second timeout
         }

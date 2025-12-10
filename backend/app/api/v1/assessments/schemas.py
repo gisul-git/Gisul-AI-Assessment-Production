@@ -99,132 +99,48 @@ class GenerateQuestionsRequest(BaseModel):
 class UpdateQuestionsRequest(BaseModel):
     assessmentId: str
     topic: str
-    updatedQuestions: List[Question]
+    questions: List[Question]
 
 
-class UpdateSingleQuestionRequest(BaseModel):
-    assessmentId: str
-    topic: str
-    questionIndex: int = Field(..., ge=0)
-    updatedQuestion: Question
+class CreateAssessmentRequest(BaseModel):
+    title: str
+    description: Optional[str] = None
+    assessmentType: List[str] = Field(..., min_length=1)
+    jobRole: Optional[str] = None
+    experience: Optional[str] = None
+    skills: Optional[List[str]] = None
+    numTopics: Optional[int] = None
+    aptitudeConfig: Optional[AptitudeConfig] = None
+    duration: Optional[int] = None  # Duration in minutes
+    passingScore: Optional[int] = None  # Passing score percentage
+    instructions: Optional[str] = None
 
 
-class AddNewQuestionRequest(BaseModel):
-    assessmentId: str
-    topic: str
-    newQuestion: Question
-
-
-class DeleteQuestionRequest(BaseModel):
-    assessmentId: str
-    topic: str
-    questionIndex: int = Field(..., ge=0)
-
-
-class DeleteTopicQuestionsRequest(BaseModel):
-    assessmentId: str
-    topic: Optional[str] = None  # If None, deletes questions for all topics
-
-
-class UpdateAssessmentDraftRequest(BaseModel):
-    assessmentId: Optional[str] = None  # Optional: if not provided, backend will find existing draft
+class UpdateAssessmentRequest(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
-    jobDesignation: Optional[str] = None
-    selectedSkills: Optional[List[str]] = None
-    experienceMin: Optional[int] = None
-    experienceMax: Optional[int] = None
-    experienceMode: Optional[str] = Field(default=None, pattern=r"^(corporate|student)$")
-    topics: Optional[List[Dict[str, Any]]] = None  # Old topics structure
-    topics_v2: Optional[List[Dict[str, Any]]] = None  # New topics_v2 structure
-    previewQuestions: Optional[List[Dict[str, Any]]] = None
-    questions: Optional[List[Dict[str, Any]]] = None
-    questionTypeTimes: Optional[Dict[str, int]] = None
-    enablePerSectionTimers: Optional[bool] = None
-    sectionTimers: Optional[Dict[str, int]] = None
-    scoringRules: Optional[Dict[str, int]] = None
-    passPercentage: Optional[float] = None
-    schedule: Optional[Dict[str, Any]] = None
-    candidates: Optional[List[Dict[str, Any]]] = None
-    assessmentUrl: Optional[str] = None
-    proctoringSettings: Optional[Dict[str, bool]] = None
+    assessmentType: Optional[List[str]] = None
+    jobRole: Optional[str] = None
+    experience: Optional[str] = None
+    skills: Optional[List[str]] = None
+    numTopics: Optional[int] = None
+    aptitudeConfig: Optional[AptitudeConfig] = None
+    duration: Optional[int] = None
+    passingScore: Optional[int] = None
+    instructions: Optional[str] = None
 
 
-class FinalizeAssessmentRequest(BaseModel):
-    assessmentId: str
-    title: Optional[str] = None
-    description: Optional[str] = None
-    questionTypeTimes: Optional[Dict[str, int]] = None  # Time in minutes per question type
-    enablePerSectionTimers: Optional[bool] = True  # Whether to enable per-section timers
-    passPercentage: Optional[float] = Field(default=None, ge=0, le=100)  # Pass percentage (0-100)
-
-
-class LogAnswerRequest(BaseModel):
-    assessmentId: str = Field(..., min_length=1, max_length=100)
-    token: str = Field(..., min_length=1, max_length=200)
-    email: str = Field(..., min_length=1, max_length=255)
-    name: str = Field(..., min_length=1, max_length=200)
-    questionIndex: int = Field(..., ge=0)
-    answer: str = Field(..., max_length=50000)  # Max 50KB answer text
-    questionType: str = Field(..., max_length=50)
-
-
-# New flow schemas
-class GenerateTopicsFromSkillRequest(BaseModel):
-    skill: str = Field(..., min_length=1)
-    experienceMin: str = Field(default="0")
-    experienceMax: str = Field(default="10")
-    experienceMode: Optional[str] = Field(default="corporate", pattern=r"^(corporate|student)$")
-
-
-class RegenerateSingleTopicRequest(BaseModel):
-    topic: str = Field(..., min_length=1)
-    assessmentId: Optional[str] = None  # If provided, regenerates topic based on assessment skills
-
-
-class GenerateTopicCardsRequest(BaseModel):
-    jobDesignation: str = Field(..., min_length=1)
-    experienceMin: Optional[int] = Field(default=0, ge=0, le=20)
-    experienceMax: Optional[int] = Field(default=10, ge=0, le=20)
-    experienceMode: Optional[str] = Field(default="corporate", pattern=r"^(corporate|student)$")
-    assessmentTitle: Optional[str] = Field(default=None, max_length=255)
-
-
-class CreateAssessmentFromJobDesignationRequest(BaseModel):
-    assessmentId: Optional[str] = Field(default=None, description="Optional: If provided, updates existing assessment instead of creating new one")
-    jobDesignation: str = Field(..., min_length=1)
-    selectedSkills: List[str] = Field(..., min_length=1)
-    experienceMin: str = Field(default="0")
-    experienceMax: str = Field(default="10")
-    experienceMode: Optional[str] = Field(default="corporate", pattern=r"^(corporate|student)$")
-
-
-class TopicConfigRow(BaseModel):
-    topic: str
-    questionType: str
-    difficulty: str = Field(default="Medium")
-    numQuestions: int = Field(default=1, ge=1)
-    # Aptitude topic fields
-    isAptitude: Optional[bool] = False
-    subTopic: Optional[str] = None
-    # Coding question fields
-    judge0_enabled: Optional[bool] = None  # For coding questions: whether Judge0 is enabled
-    language: Optional[str] = None  # For coding questions: selected language ID
-
-
-# ============================================
-# NEW MULTI-ROW TOPIC DATA MODEL (STRICT STRUCTURE)
-# ============================================
 class QuestionRowModel(BaseModel):
-    """Question row within a topic - supports multiple question types per topic."""
+    """Model for a single question type row within a topic."""
     rowId: str = Field(..., description="Unique row identifier")
     questionType: str = Field(..., pattern=r"^(MCQ|Subjective|PseudoCode|Coding)$")
     difficulty: str = Field(..., pattern=r"^(Easy|Medium|Hard)$")
-    questionsCount: int = Field(..., ge=1, le=20, description="Number of questions to generate")
-    canUseJudge0: bool = Field(default=False, description="ONLY relevant for Coding type")
-    status: str = Field(default="pending", pattern=r"^(pending|generated)$")
-    locked: bool = Field(default=False, description="Whether this row is locked")
-    questions: List[Dict] = Field(default_factory=list, description="Generated questions (filled after generation)")
+    questionsCount: int = Field(..., ge=1, le=20)
+    questions: List[Dict[str, Any]] = Field(default_factory=list, description="Generated questions for this row")
+    status: str = Field(default="pending", pattern=r"^(pending|generated)$", description="Question generation status")
+    locked: bool = Field(default=False, description="Whether this row is locked from regeneration")
+    canUseJudge0: bool = Field(default=False, description="Whether Judge0 can be used for coding questions")
+    additionalRequirements: Optional[str] = Field(default=None, description="Additional requirements for question generation")
 
 
 class TopicModel(BaseModel):
@@ -233,21 +149,33 @@ class TopicModel(BaseModel):
     label: str = Field(..., description="Topic name/label")
     locked: bool = Field(default=False, description="Whether topic is locked from regeneration")
     questionRows: List[QuestionRowModel] = Field(..., min_length=1, description="Array of question type rows")
+    status: str = Field(default="pending", pattern=r"^(pending|generated|completed|regenerated)$", description="Topic generation status: pending=needs generation, generated=has questions, completed=same as generated, regenerated=needs regeneration")
+    source: Optional[str] = Field(default=None, pattern=r"^(ai|manual|csv|role)$", description="Source of the topic")
+    regenerated: bool = Field(default=False, description="Whether topic has been improved/regenerated")
+    previousVersion: List[str] = Field(default_factory=list, description="History of previous topic labels")
+
+
+class CombinedSkill(BaseModel):
+    """Unified skill representation from any source."""
+    skill_name: str = Field(..., min_length=1)
+    source: str = Field(..., pattern=r"^(role|manual|csv)$")
+    description: Optional[str] = None
+    importance_level: Optional[str] = Field(default=None, pattern=r"^(Low|Medium|High)$")
 
 
 class GenerateTopicsRequest(BaseModel):
-    """Request to generate topics based on assessment context."""
+    """Request to generate topics based on assessment context - unified for all skill sources."""
     assessmentId: Optional[str] = None
     assessmentTitle: Optional[str] = None
-    jobDesignation: str = Field(..., min_length=1)
-    selectedSkills: List[str] = Field(..., min_length=1)
+    jobDesignation: Optional[str] = None  # Optional for manual/CSV methods
+    combinedSkills: List[CombinedSkill] = Field(..., min_length=1)
     experienceMin: int = Field(default=0, ge=0, le=20)
     experienceMax: int = Field(default=10, ge=0, le=20)
     experienceMode: str = Field(default="corporate", pattern=r"^(corporate|student)$")
 
 
 class RegenerateTopicRequest(BaseModel):
-    """Request to regenerate a single topic."""
+    """Request to regenerate a single topic - OLD, DEPRECATED. Use ImproveTopicRequest instead."""
     assessmentId: str
     topicId: str
     assessmentTitle: Optional[str] = None
@@ -256,6 +184,38 @@ class RegenerateTopicRequest(BaseModel):
     experienceMin: int
     experienceMax: int
     experienceMode: str
+
+
+class ImproveTopicRequest(BaseModel):
+    """Request to improve a single topic (not regenerate from scratch)."""
+    assessmentId: str
+    topicId: str
+    previousTopicLabel: str = Field(..., min_length=1, description="The current topic label to improve")
+    experienceMode: str = Field(..., pattern=r"^(corporate|student)$")
+    experienceMin: int = Field(..., ge=0, le=20)
+    experienceMax: int = Field(..., ge=0, le=20)
+    source: str = Field(..., pattern=r"^(role|manual|csv)$", description="Source of the original topic")
+    skillMetadataProvided: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional skill metadata (description, importance_level) if available from source"
+    )
+
+
+class ImproveAllTopicsRequest(BaseModel):
+    """Request to improve all topics (not regenerate from scratch)."""
+    assessmentId: str
+    experienceMode: str = Field(..., pattern=r"^(corporate|student)$")
+    experienceMin: int = Field(..., ge=0, le=20)
+    experienceMax: int = Field(..., ge=0, le=20)
+    previousTopics: List[Dict[str, Any]] = Field(
+        ...,
+        min_length=1,
+        description="List of previous topics with topicId, previousTopicLabel, source, relatedSkill"
+    )
+    combinedSkills: Optional[List[CombinedSkill]] = Field(
+        default=None,
+        description="Combined skills from all sources (for context)"
+    )
 
 
 class GenerateQuestionRequest(BaseModel):
@@ -268,17 +228,189 @@ class GenerateQuestionRequest(BaseModel):
     difficulty: str = Field(..., pattern=r"^(Easy|Medium|Hard)$")
     questionsCount: int = Field(..., ge=1, le=20)
     canUseJudge0: bool = Field(default=False)
-    # Optional context fields for better question generation
-    category: Optional[str] = None
+    codingLanguage: Optional[str] = Field(default="python")
+    additionalRequirements: Optional[str] = Field(default=None, description="Additional requirements for question generation")
+    experienceMode: Optional[str] = Field(default="corporate", pattern=r"^(corporate|student|college)$")
+    experienceMin: Optional[int] = Field(default=0, ge=0, le=20)
+    experienceMax: Optional[int] = Field(default=10, ge=0, le=20)
+
+
+class TopicToGenerate(BaseModel):
+    """Model for a topic that needs question generation."""
+    topicId: str
+    topicLabel: str
+    questionRows: List[Dict[str, Any]] = Field(..., description="Question rows that need generation")
+    experienceMode: str = Field(..., pattern=r"^(corporate|student|college)$")
+    experienceMin: int = Field(..., ge=0, le=20)
+    experienceMax: int = Field(..., ge=0, le=20)
+
+
+class GenerateQuestionsForTopicsRequest(BaseModel):
+    """Request to generate questions for multiple topics (only pending/regenerated topics)."""
+    assessmentId: str
+    topicsToGenerate: List[TopicToGenerate] = Field(..., min_length=1, description="Only topics with status 'pending' or 'regenerated'")
+
+
+class UpdateAssessmentDraftRequest(BaseModel):
+    """Request to update assessment draft data."""
+    assessmentId: str
+    # Optional fields that can be updated directly
+    title: Optional[str] = None
+    description: Optional[str] = None
+    jobDesignation: Optional[str] = None
+    selectedSkills: Optional[List[str]] = None
     experienceMin: Optional[int] = None
     experienceMax: Optional[int] = None
     experienceMode: Optional[str] = None
+    topics: Optional[List[Dict[str, Any]]] = None
+    topics_v2: Optional[List[Dict[str, Any]]] = None
+    questions: Optional[List[Dict[str, Any]]] = None
+    questionTypeTimes: Optional[Dict[str, int]] = None
+    enablePerSectionTimers: Optional[bool] = None
+    sectionTimers: Optional[Dict[str, int]] = None
+    scoringRules: Optional[Dict[str, int]] = None
+    passPercentage: Optional[int] = None
+    schedule: Optional[Dict[str, Any]] = None
+    candidates: Optional[List[Dict[str, Any]]] = None
+    assessmentUrl: Optional[str] = None
+    accessMode: Optional[str] = None
+    invitationTemplate: Optional[str] = None
+    proctoringSettings: Optional[Dict[str, Any]] = None
+    # Also support a draft wrapper for backward compatibility
+    draft: Optional[Dict[str, Any]] = Field(default=None, description="Optional draft data wrapper (for backward compatibility)")
+
+
+class AssessmentResponse(BaseModel):
+    """Response model for assessment data."""
+    id: str
+    title: str
+    description: Optional[str] = None
+    assessmentType: List[str]
+    jobRole: Optional[str] = None
+    experience: Optional[str] = None
+    skills: Optional[List[str]] = None
+    numTopics: Optional[int] = None
+    aptitudeConfig: Optional[AptitudeConfig] = None
+    duration: Optional[int] = None
+    passingScore: Optional[int] = None
+    instructions: Optional[str] = None
+    status: str
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
+    topics: List[TopicModel]
+    draft: Optional[Dict[str, Any]] = None
+
+
+class GenerateTopicsResponse(BaseModel):
+    """Response for topic generation."""
+    topics: List[TopicModel]
+    message: str = "Topics generated successfully"
+
+
+class ImproveTopicResponse(BaseModel):
+    """Response for topic improvement."""
+    updatedTopicLabel: str
+    updatedContextSummary: Optional[str] = None
+
+
+class ImproveAllTopicsResponse(BaseModel):
+    """Response for improving all topics."""
+    updatedTopics: List[TopicModel]
+    message: str = "All topics improved successfully"
+
+
+class AITopicSuggestionRequest(BaseModel):
+    """Request for AI topic validation and suggestions."""
+    category: str = Field(..., pattern=r"^(aptitude|communication|logical)$")
+    input: str = Field(..., min_length=1)
+
+
+class AddCustomTopicRequest(BaseModel):
+    """Request to add a single custom topic."""
+    category: str = Field(..., pattern=r"^(aptitude|communication|logical|technical)$")
+    topicName: str = Field(..., min_length=1)
+
+
+class GenerateQuestionResponse(BaseModel):
+    """Response for question generation."""
+    questions: List[Dict[str, Any]]
+    message: str = "Questions generated successfully"
+
+
+class GenerateQuestionsForTopicsResponse(BaseModel):
+    """Response for generating questions for multiple topics."""
+    generatedTopics: List[str] = Field(..., description="List of topic IDs that had questions generated")
+    skippedTopics: List[str] = Field(default_factory=list, description="List of topic IDs that were skipped (already generated)")
+    message: str = "Question generation completed"
+
+
+# Additional request schemas for various endpoints
+class SuggestTopicsRequest(BaseModel):
+    """Request for AI-powered topic suggestions."""
+    category: str = Field(..., description="Topic category")
+    query: str = Field(..., description="Partial query string for suggestions")
+
+
+class ClassifyTechnicalTopicRequest(BaseModel):
+    """Request to classify a technical topic."""
+    topic: str = Field(..., min_length=1, description="Topic name to classify")
+
+
+class AddNewQuestionRequest(BaseModel):
+    """Request to add a new question."""
+    assessmentId: str
+    topic: str
+    question: Question
+
+
+class CreateAssessmentFromJobDesignationRequest(BaseModel):
+    """Request to create assessment from job designation."""
+    jobDesignation: str
+    experience: Optional[str] = None
+    skills: Optional[List[str]] = None
+
+
+class DeleteQuestionRequest(BaseModel):
+    """Request to delete a question."""
+    assessmentId: str
+    topic: str
+    questionIndex: int
+
+
+class DeleteTopicQuestionsRequest(BaseModel):
+    """Request to delete all questions for a topic."""
+    assessmentId: str
+    topicId: str
+
+
+class FinalizeAssessmentRequest(BaseModel):
+    """Request to finalize an assessment."""
+    assessmentId: str
 
 
 class AddQuestionRowRequest(BaseModel):
     """Request to add a new question row to a topic."""
     assessmentId: str
     topicId: str
+
+
+class GenerateAllQuestionsRequest(BaseModel):
+    """Request to generate questions for all topics."""
+    assessmentId: str
+    topics: List[TopicModel] = Field(..., description="List of topics to generate questions for")
+
+
+class GenerateQuestionsFromConfigRequest(BaseModel):
+    """Request to generate questions from configuration."""
+    assessmentId: str
+    topicConfigs: List[Dict[str, Any]]
+
+
+class RegenerateSingleQuestionRequest(BaseModel):
+    """Request to regenerate a single question."""
+    assessmentId: str
+    topic: str
+    questionIndex: int
 
 
 class RemoveQuestionRowRequest(BaseModel):
@@ -288,82 +420,92 @@ class RemoveQuestionRowRequest(BaseModel):
     rowId: str
 
 
-class RegenerateSingleQuestionRequest(BaseModel):
-    """Request to regenerate a single question within a row."""
-    assessmentId: str
-    topicId: str
-    rowId: str
-    questionIndex: int = Field(..., ge=0)
+class GenerateTopicCardsRequest(BaseModel):
+    """Request to generate topic cards from job designation."""
+    jobDesignation: str = Field(..., description="Job designation/role")
+    assessmentTitle: Optional[str] = Field(default=None, description="Optional assessment title")
+    experienceMin: Optional[int] = Field(default=0, ge=0, le=20, description="Minimum experience in years")
+    experienceMax: Optional[int] = Field(default=10, ge=0, le=20, description="Maximum experience in years")
+    experienceMode: Optional[str] = Field(default="corporate", pattern=r"^(corporate|student)$", description="Experience mode")
 
 
-class UpdateSingleQuestionRequestV2(BaseModel):
-    """Request to update a single question within a row (topicsV2 structure)."""
-    assessmentId: str
-    topicId: str
-    rowId: str
-    questionIndex: int = Field(..., ge=0)
-    question: Dict[str, Any]  # The updated question object
-
-
-class GenerateAllQuestionsRequest(BaseModel):
-    """Request to generate questions for all pending topics."""
-    assessmentId: str
-    topics: List[TopicModel]
-
-
-class SuggestTopicsRequest(BaseModel):
-    """Request for AI-powered topic suggestions."""
-    category: str = Field(..., pattern=r"^(aptitude|communication|logical_reasoning|technical|auto)$")
-    query: str = Field(..., min_length=0)
-
-
-class ClassifyTechnicalTopicRequest(BaseModel):
-    """Request to classify a technical topic."""
-    topic: str = Field(..., min_length=1)
-
-
-class GenerateQuestionsFromConfigRequest(BaseModel):
-    assessmentId: str
+class GenerateTopicsFromSkillRequest(BaseModel):
+    """Request to generate topics from a skill."""
     skill: str
-    topics: List[TopicConfigRow]
+    experienceMode: str = Field(default="corporate", pattern=r"^(corporate|student)$")
+    experienceMin: int = Field(default=0, ge=0, le=20)
+    experienceMax: int = Field(default=10, ge=0, le=20)
 
 
-class ScheduleCandidateQuestions(BaseModel):
-    allowed: bool = True
-    maxQuestions: int = 3
-    timeLimit: int = 5
-    questions: List[dict] = Field(default_factory=list)
+class GenerateTopicsFromRequirementsRequest(BaseModel):
+    """Request to generate topics from CSV requirements."""
+    experienceMode: str = Field(..., pattern=r"^(corporate|student)$")
+    experienceMin: int = Field(..., ge=0, le=20)
+    experienceMax: int = Field(..., ge=0, le=20)
+    requirements: List[Dict[str, Any]] = Field(..., description="List of skill requirements with skill_name, skill_description, importance_level")
 
 
-class ProctoringOptions(BaseModel):
-    enabled: bool = False
-    webcamRequired: bool = False
-    screenRecording: bool = False
-    browserLock: bool = False
-    fullScreenMode: bool = False
+class RegenerateSingleTopicRequest(BaseModel):
+    """Request to regenerate a single topic."""
+    assessmentId: str
+    topicId: str
+    assessmentTitle: Optional[str] = None
+    jobDesignation: str
+    selectedSkills: List[str]
+    experienceMin: int
+    experienceMax: int
+    experienceMode: str
 
 
 class ScheduleUpdateRequest(BaseModel):
-    startTime: datetime
-    endTime: datetime
-    duration: int = Field(..., gt=0)
-    durationUnit: Optional[str] = Field(default="hours")
-    attemptCount: Optional[int] = Field(default=1, ge=1)
-    proctoringOptions: Optional[ProctoringOptions] = None
-    vpnRequired: Optional[bool] = False
-    linkSharingEnabled: Optional[bool] = False
-    mailFeedbackReport: Optional[bool] = False
-    candidateQuestions: Optional[ScheduleCandidateQuestions] = None
-    instructions: Optional[str] = None
-    timezone: Optional[str] = Field(default="UTC")
-    isActive: Optional[bool] = False
-
-
-class AssessmentScheduleUpdateRequest(BaseModel):
+    """Request to update assessment schedule."""
     assessmentId: str
-    schedule: ScheduleUpdateRequest
+    schedule: Dict[str, Any]
+
+
+class TopicConfigRow(BaseModel):
+    """Configuration for a topic row."""
+    questionType: str
+    difficulty: str
+    numQuestions: int
+    language: Optional[str] = None
+    judge0_enabled: Optional[bool] = None
+
+
+class UpdateSingleQuestionRequest(BaseModel):
+    """Request to update a single question."""
+    assessmentId: str
+    topic: str
+    questionIndex: int
+    question: Question
+
+
+class UpdateSingleQuestionRequestV2(BaseModel):
+    """Request to update a single question (v2 format)."""
+    assessmentId: str
+    topicId: str
+    rowId: str
+    questionIndex: int
+    question: Dict[str, Any]
 
 
 class ValidateQuestionTypeRequest(BaseModel):
-    topic: str = Field(..., min_length=1)
-    questionType: str = Field(..., min_length=1)
+    """Request to validate a question type."""
+    questionType: str
+    topic: Optional[str] = None
+
+
+class RegenerateQuestionRequest(BaseModel):
+    """Request to regenerate a single question."""
+    assessmentId: str
+    topicId: str
+    rowId: str
+    questionIndex: int
+    oldQuestion: str = Field(..., description="The current question text")
+    questionType: str = Field(..., description="Type of question (MCQ, Subjective, PseudoCode, Coding)")
+    difficulty: str = Field(..., description="Difficulty level (Easy, Medium, Hard)")
+    experienceMode: Optional[str] = Field(default="corporate", pattern=r"^(corporate|student|college)$")
+    experienceMin: Optional[int] = Field(default=0, ge=0, le=20)
+    experienceMax: Optional[int] = Field(default=10, ge=0, le=20)
+    additionalRequirements: Optional[str] = Field(default=None, description="Additional requirements from topic configuration")
+    feedback: Optional[str] = Field(default=None, description="Optional user feedback for improvement")

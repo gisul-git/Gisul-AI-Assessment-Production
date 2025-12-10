@@ -16,6 +16,8 @@ from .schemas import (
     SuggestTopicsRequest,
     ClassifyTechnicalTopicRequest,
     AddCustomTopicsRequest,
+    AITopicSuggestionRequest,
+    AddCustomTopicRequest,
     AddNewQuestionRequest,
     CreateAssessmentFromJobDesignationRequest,
     DeleteQuestionRequest,
@@ -30,10 +32,14 @@ from .schemas import (
     GenerateQuestionsRequest,
     GenerateTopicCardsRequest,
     GenerateTopicsFromSkillRequest,
+    GenerateTopicsFromRequirementsRequest,
     GenerateTopicsRequest,
     GenerateTopicsRequestOld,
     RegenerateSingleTopicRequest,
     RegenerateTopicRequest,
+    ImproveTopicRequest,
+    ImproveAllTopicsRequest,
+    RegenerateQuestionRequest,
     RemoveCustomTopicsRequest,
     ScheduleUpdateRequest,
     TopicConfigRow,
@@ -44,6 +50,8 @@ from .schemas import (
     UpdateSingleQuestionRequestV2,
     UpdateTopicSettingsRequest,
     ValidateQuestionTypeRequest,
+    AITopicSuggestionRequest,
+    AddCustomTopicRequest,
 )
 from .topic_suggestions import suggest_topic_contexts, generate_topic_context_summary, _detect_category_semantically, suggest_topics, classify_technical_topic
 from .services import (
@@ -63,6 +71,13 @@ from .topic_service_v2 import (
     generate_questions_for_row_v2,
     generate_questions_for_topic_v2,
     generate_topics_v2,
+    generate_topics_from_requirements_v2,
+    generate_topics_unified,
+    improve_topic,
+    regenerate_question,
+    validate_topic_category,
+    _is_technical_topic_ai,
+    ai_topic_suggestion,
 )
 from ....utils.mongo import convert_object_ids, serialize_document, to_object_id
 from ....utils.responses import success_response
@@ -873,24 +888,11 @@ async def delete_topic_questions(
             if topic_obj:
                 topic_obj["questions"] = []
                 topic_obj["numQuestions"] = 0
-            
-            # Clear preview questions for this specific topic only (not all preview questions)
-            preview_questions = assessment.get("previewQuestions", [])
-            if preview_questions and isinstance(preview_questions, list):
-                filtered_preview_questions = [
-                    q for q in preview_questions 
-                    if q.get("topic") != payload.topic
-                ]
-                assessment["previewQuestions"] = filtered_preview_questions
-                logger.info(f"Deleted preview questions for topic '{payload.topic}'. Remaining preview questions: {len(filtered_preview_questions)}")
         else:
             # Delete questions for all topics
             for topic_obj in topics:
                 topic_obj["questions"] = []
                 topic_obj["numQuestions"] = 0
-            
-            # Clear all preview questions only when deleting all topics
-            assessment["previewQuestions"] = []
         
         await _save_assessment(db, assessment)
         
@@ -1104,9 +1106,6 @@ async def create_assessment_from_job_designation(
                 topic_doc["questions"] = []
                 topic_doc["numQuestions"] = 0
                 topic_doc["questionConfigs"] = []
-            
-            # Clear preview questions as well
-            existing_assessment["previewQuestions"] = []
             
             # Update the assessment in database
             await _save_assessment(db, existing_assessment)
@@ -1556,6 +1555,7 @@ async def finalize_assessment(
             assessment["enablePerSectionTimers"] = payload.enablePerSectionTimers
         if payload.passPercentage is not None:
             assessment["passPercentage"] = payload.passPercentage
+        
         assessment["finalizedAt"] = _now_utc()
         assessment["updatedAt"] = _now_utc()
         
@@ -1565,6 +1565,132 @@ async def finalize_assessment(
         
         # Save the converted draft (same document, status changed to "ready")
         await _save_assessment(db, assessment)
+        
+        # Auto-send invitations if not sent manually (private mode only)
+        candidates = assessment.get("candidates", [])
+        access_mode = assessment.get("accessMode", "public")
+        assessment_url = assessment.get("assessmentUrl")
+        
+        if access_mode == "private" and candidates and assessment_url:
+            # Check if any candidates haven't been invited
+            candidates_not_invited = [c for c in candidates if not c.get("invited", False)]
+            
+            if candidates_not_invited:
+                try:
+                    # Use stored template or default template
+                    stored_template = assessment.get("invitationTemplate", {})
+                    default_template = {
+                        "logoUrl": "",
+                        "companyName": "",
+                        "message": "You have been invited to take an assessment. Please click the link below to start.",
+                        "footer": "",
+                        "sentBy": "AI Assessment Platform"
+                    }
+                    template_to_use = stored_template if stored_template else default_template
+                    
+                    # Send invitations
+                    from ....utils.email import get_email_service
+                    from ....config.settings import get_settings
+                    settings = get_settings()
+                    
+                    if settings.sendgrid_api_key and settings.sendgrid_from_email:
+                        email_service = get_email_service()
+                        sent_count = 0
+                        
+                        for candidate in candidates_not_invited:
+                            email = candidate.get("email", "").strip().lower()
+                            name = candidate.get("name", "").strip()
+                            
+                            if not email or not name:
+                                continue
+                            
+                            # Build email content
+                            import urllib.parse
+                            encoded_email = urllib.parse.quote(email)
+                            encoded_name = urllib.parse.quote(name)
+                            exam_url_with_params = f"{assessment_url}?email={encoded_email}&name={encoded_name}"
+                            
+                            # Replace placeholders
+                            message = template_to_use.get("message", default_template["message"])
+                            email_body = message
+                            email_body = email_body.replace("{{candidate_name}}", name)
+                            email_body = email_body.replace("{{candidate_email}}", email)
+                            email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+                            email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
+                            
+                            # Build HTML email
+                            logo_url = template_to_use.get("logoUrl", "")
+                            company_name = template_to_use.get("companyName", "")
+                            footer = template_to_use.get("footer", "")
+                            sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
+                            
+                            html_content = f"""
+                            <!DOCTYPE html>
+                            <html>
+                            <head>
+                                <meta charset="UTF-8">
+                                <style>
+                                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                                    .header {{ text-align: center; margin-bottom: 30px; }}
+                                    .logo {{ max-width: 200px; margin-bottom: 20px; }}
+                                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                                    .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+                                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
+                                </style>
+                            </head>
+                            <body>
+                                <div class="container">
+                                    <div class="header">
+                                        {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                                        {f'<h1>{company_name}</h1>' if company_name else ''}
+                                    </div>
+                                    <div class="content">
+                                        <p>Dear {name},</p>
+                                        <p>{email_body}</p>
+                                        <div class="candidate-info">
+                                            <p><strong>Your Details:</strong></p>
+                                            <p><strong>Name:</strong> {name}</p>
+                                            <p><strong>Email:</strong> {email}</p>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <a href="{exam_url_with_params}" class="button">Start Assessment</a>
+                                        </div>
+                                    </div>
+                                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                                    <div class="footer">
+                                        <p>Sent by {sent_by}</p>
+                                    </div>
+                                </div>
+                            </body>
+                            </html>
+                            """
+                            
+                            subject = f"Assessment Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+                            
+                            try:
+                                await email_service.send_email(email, subject, html_content)
+                                sent_count += 1
+                                
+                                # Update candidate invite status
+                                for idx, c in enumerate(candidates):
+                                    if c.get("email", "").lower() == email:
+                                        candidates[idx]["invited"] = True
+                                        candidates[idx]["inviteSentAt"] = _now_utc().isoformat()
+                                        break
+                                
+                                assessment["candidates"] = candidates
+                                await _save_assessment(db, assessment)
+                            except Exception as email_err:
+                                logger.warning(f"Failed to auto-send invitation to {email}: {email_err}")
+                                # Continue with other candidates even if one fails
+                        
+                        if sent_count > 0:
+                            logger.info(f"Auto-sent {sent_count} invitation(s) during finalization")
+                except Exception as auto_invite_err:
+                    # Don't block finalization if auto-send fails
+                    logger.warning(f"Error during auto-send invitations: {auto_invite_err}")
         
         # Serialize the assessment document before returning
         serialized_assessment = serialize_document(assessment)
@@ -1775,13 +1901,15 @@ async def update_assessment_draft(
         # Update assessment topics
         assessment["topics"] = updated_topics
     
-    # Update topics_v2 if provided (new structure)
+    # Update topics_v2 if provided (new structure) - check both direct field and draft wrapper
     if payload.topics_v2 is not None:
         assessment["topics_v2"] = payload.topics_v2
+    elif payload.draft and "topics_v2" in payload.draft:
+        assessment["topics_v2"] = payload.draft["topics_v2"]
     
-    # Update preview questions if provided
-    if payload.previewQuestions is not None:
-        assessment["previewQuestions"] = payload.previewQuestions
+    # Update combinedSkills if provided in draft
+    if payload.draft and "combinedSkills" in payload.draft:
+        assessment["combinedSkills"] = payload.draft["combinedSkills"]
     
     # Update questions if provided
     if payload.questions is not None:
@@ -1896,6 +2024,17 @@ async def update_schedule_and_candidates(
     # Store invitation template if provided
     if payload.get("invitationTemplate"):
         assessment["invitationTemplate"] = payload.get("invitationTemplate")
+    
+    # If this is a completion request (Complete Assessment clicked), mark as active
+    if payload.get("complete", False):
+        assessment["status"] = "active"
+        assessment["completed"] = True
+        assessment["isDraft"] = False
+        assessment["finalizedAt"] = _now_utc()
+        # Ensure candidates keep their invited status
+        for candidate in assessment.get("candidates", []):
+            if candidate.get("invited"):
+                candidate["invited"] = True
 
     await _save_assessment(db, assessment)
     return success_response("Schedule and candidates updated successfully", serialize_document(assessment))
@@ -2088,6 +2227,334 @@ async def send_invitations(
             "errorMessages": error_messages,
         }
     )
+
+
+@router.post("/{assessment_id}/add-candidate")
+async def add_candidate_to_assessment(
+    assessment_id: str,
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Add a single candidate to an active assessment and auto-send invitation."""
+    from ....utils.email import get_email_service
+    from ....config.settings import get_settings
+    
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+    
+    # Only allow adding candidates to active assessments
+    if assessment.get("status") not in {"active", "completed"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Candidates can only be added to active or completed assessments"
+        )
+    
+    email = payload.get("email", "").strip().lower()
+    name = payload.get("name", "").strip()
+    
+    if not email or not name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email and name are required"
+        )
+    
+    # Validate email format
+    import re
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_pattern, email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please enter a valid email address"
+        )
+    
+    # Check if candidate already exists
+    existing_candidates = assessment.get("candidates", [])
+    for existing in existing_candidates:
+        if existing.get("email", "").lower() == email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This candidate already exists in the list"
+            )
+    
+    # Create new candidate object
+    new_candidate = {
+        "email": email,
+        "name": name,
+        "status": "invited",
+        "invited": True,
+        "invitedAt": _now_utc().isoformat(),
+    }
+    
+    # Add candidate to assessment
+    existing_candidates.append(new_candidate)
+    assessment["candidates"] = existing_candidates
+    
+    # Auto-send invitation email
+    assessment_url = assessment.get("assessmentUrl")
+    if not assessment_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Assessment URL not found. Please generate the assessment URL first."
+        )
+    
+    # Get template (stored or default)
+    stored_template = assessment.get("invitationTemplate", {})
+    default_template = {
+        "logoUrl": "",
+        "companyName": "",
+        "message": "You have been invited to take an assessment. Please click the link below to start.",
+        "footer": "",
+        "sentBy": "AI Assessment Platform"
+    }
+    template_to_use = stored_template if stored_template else default_template
+    
+    # Send invitation email
+    settings = get_settings()
+    if settings.sendgrid_api_key and settings.sendgrid_from_email:
+        try:
+            email_service = get_email_service()
+            
+            # Build exam URL with candidate params
+            import urllib.parse
+            encoded_email = urllib.parse.quote(email)
+            encoded_name = urllib.parse.quote(name)
+            exam_url_with_params = f"{assessment_url}?email={encoded_email}&name={encoded_name}"
+            
+            # Replace placeholders
+            message = template_to_use.get("message", default_template["message"])
+            email_body = message
+            email_body = email_body.replace("{{candidate_name}}", name)
+            email_body = email_body.replace("{{candidate_email}}", email)
+            email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+            email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
+            
+            # Build HTML email
+            logo_url = template_to_use.get("logoUrl", "")
+            company_name = template_to_use.get("companyName", "")
+            footer = template_to_use.get("footer", "")
+            sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
+            
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ text-align: center; margin-bottom: 30px; }}
+                    .logo {{ max-width: 200px; margin-bottom: 20px; }}
+                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                        {f'<h1>{company_name}</h1>' if company_name else ''}
+                    </div>
+                    <div class="content">
+                        <p>Dear {name},</p>
+                        <p>{email_body}</p>
+                        <div class="candidate-info">
+                            <p><strong>Your Details:</strong></p>
+                            <p><strong>Name:</strong> {name}</p>
+                            <p><strong>Email:</strong> {email}</p>
+                        </div>
+                        <div style="text-align: center;">
+                            <a href="{exam_url_with_params}" class="button">Start Assessment</a>
+                        </div>
+                    </div>
+                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                    <div class="footer">
+                        <p>Sent by {sent_by}</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            subject = f"Assessment Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+            
+            await email_service.send_email(email, subject, html_content)
+            logger.info(f"Invitation email sent successfully to {email}")
+        except Exception as email_err:
+            logger.error(f"Failed to send invitation email to {email}: {email_err}", exc_info=True)
+            # Don't fail the entire operation if email fails, but log it
+            # The candidate is still added to the assessment
+    
+    # Save assessment with new candidate
+    await _save_assessment(db, assessment)
+    
+    return success_response(
+        "Candidate added and invitation sent successfully",
+        serialize_document(new_candidate)
+    )
+
+
+@router.post("/{assessment_id}/resend-invite")
+async def resend_invitation(
+    assessment_id: str,
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Resend invitation email to a specific candidate."""
+    from ....utils.email import get_email_service
+    from ....config.settings import get_settings
+    
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+    
+    candidate_email = payload.get("email", "").strip().lower()
+    if not candidate_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Candidate email is required"
+        )
+    
+    # Find candidate in assessment
+    candidates = assessment.get("candidates", [])
+    candidate = None
+    for c in candidates:
+        if c.get("email", "").lower() == candidate_email:
+            candidate = c
+            break
+    
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Candidate not found in this assessment"
+        )
+    
+    email = candidate.get("email", "").strip().lower()
+    name = candidate.get("name", "").strip()
+    
+    if not email or not name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid candidate data"
+        )
+    
+    # Get assessment URL
+    assessment_url = assessment.get("assessmentUrl")
+    if not assessment_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Assessment URL not found"
+        )
+    
+    # Get template
+    stored_template = assessment.get("invitationTemplate", {})
+    default_template = {
+        "logoUrl": "",
+        "companyName": "",
+        "message": "You have been invited to take an assessment. Please click the link below to start.",
+        "footer": "",
+        "sentBy": "AI Assessment Platform"
+    }
+    template_to_use = stored_template if stored_template else default_template
+    
+    # Send invitation email
+    settings = get_settings()
+    if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="SendGrid is not configured"
+        )
+    
+    try:
+        email_service = get_email_service()
+        
+        # Build exam URL with candidate params
+        import urllib.parse
+        encoded_email = urllib.parse.quote(email)
+        encoded_name = urllib.parse.quote(name)
+        exam_url_with_params = f"{assessment_url}?email={encoded_email}&name={encoded_name}"
+        
+        # Replace placeholders
+        message = template_to_use.get("message", default_template["message"])
+        email_body = message
+        email_body = email_body.replace("{{candidate_name}}", name)
+        email_body = email_body.replace("{{candidate_email}}", email)
+        email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+        email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
+        
+        # Build HTML email
+        logo_url = template_to_use.get("logoUrl", "")
+        company_name = template_to_use.get("companyName", "")
+        footer = template_to_use.get("footer", "")
+        sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ text-align: center; margin-bottom: 30px; }}
+                .logo {{ max-width: 200px; margin-bottom: 20px; }}
+                .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+                .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                    {f'<h1>{company_name}</h1>' if company_name else ''}
+                </div>
+                <div class="content">
+                    <p>Dear {name},</p>
+                    <p>{email_body}</p>
+                    <div class="candidate-info">
+                        <p><strong>Your Details:</strong></p>
+                        <p><strong>Name:</strong> {name}</p>
+                        <p><strong>Email:</strong> {email}</p>
+                    </div>
+                    <div style="text-align: center;">
+                        <a href="{exam_url_with_params}" class="button">Start Assessment</a>
+                    </div>
+                </div>
+                {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                <div class="footer">
+                    <p>Sent by {sent_by}</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        subject = f"Assessment Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+        
+        await email_service.send_email(email, subject, html_content)
+        logger.info(f"Invitation email resent successfully to {email}")
+        
+        # Update candidate invitedAt timestamp
+        for idx, c in enumerate(candidates):
+            if c.get("email", "").lower() == candidate_email:
+                candidates[idx]["invitedAt"] = _now_utc().isoformat()
+                candidates[idx]["invited"] = True
+                break
+        
+        assessment["candidates"] = candidates
+        await _save_assessment(db, assessment)
+        
+        return success_response("Invitation resent successfully", serialize_document(candidate))
+    except Exception as email_err:
+        logger.error(f"Failed to resend invitation email to {email}: {email_err}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resend invitation: {str(email_err)}"
+        )
 
 
 @router.put("/{assessment_id}/update-schedule")
@@ -2475,7 +2942,6 @@ async def get_all_questions(
             "topics_v2": serialized_topics_v2,  # Include topics_v2 (new format) for draft loading
             "fullTopicRegenLocked": assessment.get("fullTopicRegenLocked", False),
             "allQuestionsGenerated": assessment.get("allQuestionsGenerated", False),
-            "previewQuestions": assessment.get("previewQuestions"),
             "passPercentage": assessment.get("passPercentage"),
             "questionTypeTimes": assessment.get("questionTypeTimes"),
             "enablePerSectionTimers": assessment.get("enablePerSectionTimers"),
@@ -2670,25 +3136,36 @@ async def generate_topics_endpoint_v2(
         # Do NOT look for existing drafts - user explicitly wants a new assessment
         
         # Sanitize inputs
-        sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
-        sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
+        sanitized_job_designation = sanitize_text_field(payload.jobDesignation) if payload.jobDesignation else None
         sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
         
         # Validate experience mode
         if payload.experienceMode not in ["corporate", "student"]:
             raise HTTPException(status_code=400, detail="experienceMode must be 'corporate' or 'student'")
         
-        # Infer coding language from job designation and skills
+        # Sanitize combined skills
+        sanitized_combined_skills = []
+        for skill in payload.combinedSkills:
+            sanitized_skill = {
+                "skill_name": sanitize_text_field(skill.skill_name),
+                "source": skill.source,
+                "description": sanitize_text_field(skill.description) if skill.description else None,
+                "importance_level": skill.importance_level
+            }
+            sanitized_combined_skills.append(sanitized_skill)
+        
+        # Infer coding language from job designation and skills (if available)
+        skill_names = [s["skill_name"] for s in sanitized_combined_skills]
         coding_language = infer_language_from_skill(
-            job_designation=sanitized_job_designation,
-            selected_skills=sanitized_skills
+            job_designation=sanitized_job_designation or "General",
+            selected_skills=skill_names
         )
         
-        # Generate topics
-        topics = await generate_topics_v2(
+        # Generate topics using unified function
+        topics = await generate_topics_unified(
             assessment_title=sanitized_title,
             job_designation=sanitized_job_designation,
-            selected_skills=sanitized_skills,
+            combined_skills=sanitized_combined_skills,
             experience_min=payload.experienceMin,
             experience_max=payload.experienceMax,
             experience_mode=payload.experienceMode
@@ -2699,8 +3176,9 @@ async def generate_topics_endpoint_v2(
             # UPDATE EXISTING DRAFT
             # topics is already List[Dict[str, Any]], no need to call .dict()
             existing_assessment["topics_v2"] = topics
-            existing_assessment["jobDesignation"] = sanitized_job_designation
-            existing_assessment["selectedSkills"] = sanitized_skills
+            existing_assessment["combinedSkills"] = sanitized_combined_skills  # Save combined skills
+            if sanitized_job_designation:
+                existing_assessment["jobDesignation"] = sanitized_job_designation
             existing_assessment["experienceMin"] = payload.experienceMin
             existing_assessment["experienceMax"] = payload.experienceMax
             existing_assessment["experienceMode"] = payload.experienceMode
@@ -2715,12 +3193,13 @@ async def generate_topics_endpoint_v2(
         else:
             # CREATE NEW DRAFT
             # topics is already List[Dict[str, Any]], no need to call .dict()
+            skill_names_str = ", ".join(skill_names)
             assessment_doc: Dict[str, Any] = {
-                "title": sanitized_title or f"Assessment for {sanitized_job_designation}",
-                "description": f"Assessment for {sanitized_job_designation} - Skills: {', '.join(sanitized_skills)}",
+                "title": sanitized_title or f"Assessment for {sanitized_job_designation or 'Multiple Skills'}",
+                "description": f"Assessment - Skills: {skill_names_str}",
                 "topics_v2": topics,
+                "combinedSkills": sanitized_combined_skills,  # Save combined skills
                 "jobDesignation": sanitized_job_designation,
-                "selectedSkills": sanitized_skills,
                 "experienceMin": payload.experienceMin,
                 "experienceMax": payload.experienceMax,
                 "experienceMode": payload.experienceMode,
@@ -2747,6 +3226,53 @@ async def generate_topics_endpoint_v2(
     except Exception as exc:
         logger.error(f"Error generating topics: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate topics: {str(exc)}") from exc
+
+
+@router.post("/generate-topics-from-requirements")
+async def generate_topics_from_requirements_endpoint(
+    payload: GenerateTopicsFromRequirementsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Generate topics from CSV requirements.
+    Returns topics with source="csv" in the same format as generate_topics_v2.
+    """
+    try:
+        # Validate experience mode
+        if payload.experienceMode not in ["corporate", "student"]:
+            raise HTTPException(status_code=400, detail="experienceMode must be 'corporate' or 'student'")
+        
+        # Convert requirements to dict format
+        requirements_list = [
+            {
+                "skill_name": req.skill_name,
+                "skill_description": req.skill_description,
+                "importance_level": req.importance_level
+            }
+            for req in payload.requirements
+        ]
+        
+        # Generate topics from requirements
+        topics = await generate_topics_from_requirements_v2(
+            requirements=requirements_list,
+            experience_min=payload.experienceMin or 0,
+            experience_max=payload.experienceMax or 10,
+            experience_mode=payload.experienceMode
+        )
+        
+        return success_response(
+            "Topics generated successfully from requirements",
+            {
+                "topics": topics,
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating topics from requirements: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate topics from requirements: {str(exc)}") from exc
 
 
 @router.post("/regenerate-topic")
@@ -2906,13 +3432,18 @@ async def generate_question_endpoint_v2(
         coding_language = assessment.get("codingLanguage", "python")
         
         # Generate questions
+        # Get experience mode from payload or assessment
+        experience_mode = payload.experienceMode or assessment.get("experienceMode", "corporate")
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
             question_type=payload.questionType,
             difficulty=payload.difficulty,
             questions_count=payload.questionsCount,
             can_use_judge0=payload.canUseJudge0,
-            coding_language=coding_language
+            coding_language=coding_language,
+            additional_requirements=payload.additionalRequirements,
+            experience_mode=experience_mode
         )
         
         if not questions or len(questions) == 0:
@@ -3603,7 +4134,6 @@ async def get_all_questions(
             "topics_v2": serialized_topics_v2,  # Include topics_v2 (new format) for draft loading
             "fullTopicRegenLocked": assessment.get("fullTopicRegenLocked", False),
             "allQuestionsGenerated": assessment.get("allQuestionsGenerated", False),
-            "previewQuestions": assessment.get("previewQuestions"),
             "passPercentage": assessment.get("passPercentage"),
             "questionTypeTimes": assessment.get("questionTypeTimes"),
             "enablePerSectionTimers": assessment.get("enablePerSectionTimers"),
@@ -3798,25 +4328,36 @@ async def generate_topics_endpoint_v2(
         # Do NOT look for existing drafts - user explicitly wants a new assessment
         
         # Sanitize inputs
-        sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
-        sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
+        sanitized_job_designation = sanitize_text_field(payload.jobDesignation) if payload.jobDesignation else None
         sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
         
         # Validate experience mode
         if payload.experienceMode not in ["corporate", "student"]:
             raise HTTPException(status_code=400, detail="experienceMode must be 'corporate' or 'student'")
         
-        # Infer coding language from job designation and skills
+        # Sanitize combined skills
+        sanitized_combined_skills = []
+        for skill in payload.combinedSkills:
+            sanitized_skill = {
+                "skill_name": sanitize_text_field(skill.skill_name),
+                "source": skill.source,
+                "description": sanitize_text_field(skill.description) if skill.description else None,
+                "importance_level": skill.importance_level
+            }
+            sanitized_combined_skills.append(sanitized_skill)
+        
+        # Infer coding language from job designation and skills (if available)
+        skill_names = [s["skill_name"] for s in sanitized_combined_skills]
         coding_language = infer_language_from_skill(
-            job_designation=sanitized_job_designation,
-            selected_skills=sanitized_skills
+            job_designation=sanitized_job_designation or "General",
+            selected_skills=skill_names
         )
         
-        # Generate topics
-        topics = await generate_topics_v2(
+        # Generate topics using unified function
+        topics = await generate_topics_unified(
             assessment_title=sanitized_title,
             job_designation=sanitized_job_designation,
-            selected_skills=sanitized_skills,
+            combined_skills=sanitized_combined_skills,
             experience_min=payload.experienceMin,
             experience_max=payload.experienceMax,
             experience_mode=payload.experienceMode
@@ -3827,8 +4368,9 @@ async def generate_topics_endpoint_v2(
             # UPDATE EXISTING DRAFT
             # topics is already List[Dict[str, Any]], no need to call .dict()
             existing_assessment["topics_v2"] = topics
-            existing_assessment["jobDesignation"] = sanitized_job_designation
-            existing_assessment["selectedSkills"] = sanitized_skills
+            existing_assessment["combinedSkills"] = sanitized_combined_skills  # Save combined skills
+            if sanitized_job_designation:
+                existing_assessment["jobDesignation"] = sanitized_job_designation
             existing_assessment["experienceMin"] = payload.experienceMin
             existing_assessment["experienceMax"] = payload.experienceMax
             existing_assessment["experienceMode"] = payload.experienceMode
@@ -3843,12 +4385,13 @@ async def generate_topics_endpoint_v2(
         else:
             # CREATE NEW DRAFT
             # topics is already List[Dict[str, Any]], no need to call .dict()
+            skill_names_str = ", ".join(skill_names)
             assessment_doc: Dict[str, Any] = {
-                "title": sanitized_title or f"Assessment for {sanitized_job_designation}",
-                "description": f"Assessment for {sanitized_job_designation} - Skills: {', '.join(sanitized_skills)}",
+                "title": sanitized_title or f"Assessment for {sanitized_job_designation or 'Multiple Skills'}",
+                "description": f"Assessment - Skills: {skill_names_str}",
                 "topics_v2": topics,
+                "combinedSkills": sanitized_combined_skills,  # Save combined skills
                 "jobDesignation": sanitized_job_designation,
-                "selectedSkills": sanitized_skills,
                 "experienceMin": payload.experienceMin,
                 "experienceMax": payload.experienceMax,
                 "experienceMode": payload.experienceMode,
@@ -3875,6 +4418,53 @@ async def generate_topics_endpoint_v2(
     except Exception as exc:
         logger.error(f"Error generating topics: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate topics: {str(exc)}") from exc
+
+
+@router.post("/generate-topics-from-requirements")
+async def generate_topics_from_requirements_endpoint(
+    payload: GenerateTopicsFromRequirementsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Generate topics from CSV requirements.
+    Returns topics with source="csv" in the same format as generate_topics_v2.
+    """
+    try:
+        # Validate experience mode
+        if payload.experienceMode not in ["corporate", "student"]:
+            raise HTTPException(status_code=400, detail="experienceMode must be 'corporate' or 'student'")
+        
+        # Convert requirements to dict format
+        requirements_list = [
+            {
+                "skill_name": req.skill_name,
+                "skill_description": req.skill_description,
+                "importance_level": req.importance_level
+            }
+            for req in payload.requirements
+        ]
+        
+        # Generate topics from requirements
+        topics = await generate_topics_from_requirements_v2(
+            requirements=requirements_list,
+            experience_min=payload.experienceMin or 0,
+            experience_max=payload.experienceMax or 10,
+            experience_mode=payload.experienceMode
+        )
+        
+        return success_response(
+            "Topics generated successfully from requirements",
+            {
+                "topics": topics,
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error generating topics from requirements: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate topics from requirements: {str(exc)}") from exc
 
 
 @router.post("/regenerate-topic")
@@ -4034,13 +4624,18 @@ async def generate_question_endpoint_v2(
         coding_language = assessment.get("codingLanguage", "python")
         
         # Generate questions
+        # Get experience mode from payload or assessment
+        experience_mode = payload.experienceMode or assessment.get("experienceMode", "corporate")
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
             question_type=payload.questionType,
             difficulty=payload.difficulty,
             questions_count=payload.questionsCount,
             can_use_judge0=payload.canUseJudge0,
-            coding_language=coding_language
+            coding_language=coding_language,
+            additional_requirements=payload.additionalRequirements,
+            experience_mode=experience_mode
         )
         
         if not questions or len(questions) == 0:
@@ -4455,5 +5050,432 @@ async def classify_technical_topic_endpoint(
     except Exception as exc:
         logger.error(f"Error classifying technical topic: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to classify topic: {str(exc)}") from exc
+
+
+@router.post("/topics/validate-category")
+async def validate_topic_category_endpoint(
+    topic: str = Query(..., min_length=1),
+    category: str = Query(..., pattern=r"^(aptitude|communication|logical_reasoning)$"),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """
+    Validate if a custom topic belongs to the selected non-technical category.
+    Uses gpt-4o-mini (same as other functionality) for consistency.
+    """
+    try:
+        result = await validate_topic_category(topic, category)
+        return success_response("Topic validated", result)
+    except Exception as exc:
+        logger.error(f"Error validating topic category: {exc}", exc_info=True)
+        return success_response("Topic validated", {
+            "valid": False,
+            "error": "Unable to validate topic. Please try again."
+        })
+
+
+@router.post("/topics/check-technical")
+async def check_technical_topic_endpoint(
+    topic: str = Query(..., min_length=1),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """
+    Check if a topic is technical/programming-related using OpenAI's models.
+    Uses gpt-4o-mini (same as other functionality) for consistency.
+    """
+    try:
+        is_technical = await _is_technical_topic_ai(topic)
+        return success_response("Topic checked", {
+            "isTechnical": is_technical
+        })
+    except Exception as exc:
+        logger.error(f"Error checking if topic is technical: {exc}", exc_info=True)
+        return success_response("Topic checked", {
+            "isTechnical": False  # Default to False on error to allow topic
+        })
+
+
+@router.post("/ai/topic-suggestion")
+async def ai_topic_suggestion_endpoint(
+    payload: AITopicSuggestionRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """
+    AI-powered topic validation and suggestions.
+    Validates if the input is relevant to the selected category and provides suggestions.
+    """
+    try:
+        result = await ai_topic_suggestion(payload.category, payload.input)
+        return success_response("Topic suggestion generated", result)
+    except Exception as exc:
+        logger.error(f"Error generating AI topic suggestion: {exc}", exc_info=True)
+        return success_response("Topic suggestion generated", {
+            "isValid": True,  # Default to valid on error
+            "reason": "",
+            "suggestions": []
+        })
+
+
+@router.post("/topics/add-custom")
+async def add_custom_topic_endpoint(
+    payload: AddCustomTopicRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Add a single custom topic to the assessment draft.
+    """
+    try:
+        # Get assessment ID from query or find draft
+        # For now, find the most recent draft for the user
+        assessment = await db.assessments.find_one(
+            {"status": "draft", "createdBy": current_user.get("id")},
+            sort=[("createdAt", -1)]
+        )
+        if not assessment:
+            raise HTTPException(status_code=404, detail="No draft assessment found")
+        
+        # Validate topic name
+        topic_name = payload.topicName.strip()
+        if not topic_name or len(topic_name) < 2:
+            raise HTTPException(status_code=400, detail="Topic name must be at least 2 characters")
+        
+        # Check for duplicates
+        topics_v2 = assessment.get("topics_v2", [])
+        if any(t.get("label", "").lower() == topic_name.lower() for t in topics_v2):
+            raise HTTPException(status_code=400, detail="Topic already exists")
+        
+        # Generate topic context for technical topics
+        if payload.category == "technical":
+            try:
+                context_data = await generate_topic_context_summary(topic_name, "technical")
+                suggested_question_type = context_data.get("suggestedQuestionType", "MCQ")
+            except Exception as ctx_err:
+                logger.warning(f"Failed to generate context for technical topic: {ctx_err}")
+                suggested_question_type = "MCQ"
+        else:
+            suggested_question_type = "MCQ"
+        
+        # Create new topic
+        import uuid
+        new_topic = {
+            "id": f"custom-{uuid.uuid4().hex[:12]}",
+            "label": topic_name,
+            "category": payload.category,
+            "locked": False,
+            "source": "custom",
+            "status": "pending",
+            "contextSummary": context_data.get("contextSummary", "") if payload.category == "technical" else "",
+            "suggestedQuestionType": suggested_question_type,
+            "questionRows": []
+        }
+        
+        # Add topic to assessment
+        topics_v2.append(new_topic)
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = _now_utc()
+        
+        await db.assessments.replace_one({"_id": assessment["_id"]}, assessment)
+        
+        return success_response("Topic added successfully", {
+            "topic": new_topic
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error adding custom topic: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add topic: {str(exc)}") from exc
+
+
+@router.post("/improve-topic")
+async def improve_topic_endpoint(
+    payload: ImproveTopicRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Improve a single topic (not regenerate from scratch).
+    Takes the previous topic label and returns an improved version of the SAME topic.
+    Preserves questionRows and question state.
+    """
+    try:
+        # Get assessment
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        # Get topics_v2
+        topics_v2 = assessment.get("topics_v2", [])
+        topic_index = None
+        for idx, topic in enumerate(topics_v2):
+            if topic.get("id") == payload.topicId:
+                topic_index = idx
+                break
+        
+        if topic_index is None:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        current_topic = topics_v2[topic_index]
+        
+        # Check if topic is locked
+        if current_topic.get("locked", False):
+            raise HTTPException(status_code=400, detail="Topic is locked and cannot be improved")
+        
+        # Check if full topic regeneration is locked
+        if assessment.get("fullTopicRegenLocked", False):
+            raise HTTPException(status_code=400, detail="Topic improvement is locked after preview")
+        
+        # Get skill metadata if available
+        skill_context = None
+        skill_description = None
+        importance_level = None
+        
+        if payload.skillMetadataProvided:
+            skill_context = payload.skillMetadataProvided.get("skill_name")
+            skill_description = payload.skillMetadataProvided.get("description")
+            importance_level = payload.skillMetadataProvided.get("importance_level")
+        
+        # Improve the topic
+        improved_label = await improve_topic(
+            previous_topic_label=payload.previousTopicLabel,
+            skill_context=skill_context,
+            skill_description=skill_description,
+            importance_level=importance_level,
+            experience_mode=payload.experienceMode,
+            experience_min=payload.experienceMin,
+            experience_max=payload.experienceMax
+        )
+        
+        # Update topic with improved label
+        # Preserve previous version in history
+        previous_versions = current_topic.get("previousVersion", [])
+        if payload.previousTopicLabel not in previous_versions:
+            previous_versions.append(payload.previousTopicLabel)
+        
+        current_topic["label"] = improved_label
+        current_topic["regenerated"] = True
+        current_topic["previousVersion"] = previous_versions
+        
+        # Preserve questionRows and question state (do NOT reset)
+        # Only update the label
+        
+        # Update assessment
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response(
+            "Topic improved successfully",
+            {
+                "topic": current_topic,
+                "updatedTopicLabel": improved_label
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error improving topic: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to improve topic: {str(exc)}") from exc
+
+
+@router.post("/improve-all-topics")
+async def improve_all_topics_endpoint(
+    payload: ImproveAllTopicsRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Improve all topics (not regenerate from scratch).
+    Takes previous topic labels and returns improved versions of the SAME topics.
+    Preserves questionRows and question state for all topics.
+    """
+    try:
+        # Get assessment
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        # Check if full topic regeneration is locked
+        if assessment.get("fullTopicRegenLocked", False):
+            raise HTTPException(status_code=400, detail="Topic improvement is locked after preview")
+        
+        # Get topics_v2
+        topics_v2 = assessment.get("topics_v2", [])
+        
+        # Create a map of topicId -> topic for quick lookup
+        topic_map = {topic.get("id"): topic for topic in topics_v2}
+        
+        # Improve each topic
+        improved_count = 0
+        for previous_topic in payload.previousTopics:
+            topic_id = previous_topic.get("topicId")
+            if not topic_id:
+                continue
+            
+            current_topic = topic_map.get(topic_id)
+            if not current_topic:
+                logger.warning(f"Topic {topic_id} not found in assessment, skipping")
+                continue
+            
+            # Check if topic is locked
+            if current_topic.get("locked", False):
+                logger.info(f"Topic {topic_id} is locked, skipping improvement")
+                continue
+            
+            previous_label = previous_topic.get("previousTopicLabel")
+            if not previous_label:
+                logger.warning(f"No previousTopicLabel for topic {topic_id}, skipping")
+                continue
+            
+            # Get skill context
+            related_skill = previous_topic.get("relatedSkill")
+            
+            skill_context = related_skill
+            skill_description = None
+            importance_level = None
+            
+            # Try to find skill metadata from combinedSkills
+            if payload.combinedSkills and related_skill:
+                for skill in payload.combinedSkills:
+                    # CombinedSkill is a Pydantic model, use attribute access
+                    if skill.skill_name == related_skill:
+                        skill_description = skill.description
+                        importance_level = skill.importance_level
+                        break
+            
+            # Improve the topic
+            improved_label = await improve_topic(
+                previous_topic_label=previous_label,
+                skill_context=skill_context,
+                skill_description=skill_description,
+                importance_level=importance_level,
+                experience_mode=payload.experienceMode,
+                experience_min=payload.experienceMin,
+                experience_max=payload.experienceMax
+            )
+            
+            # Update topic with improved label
+            previous_versions = current_topic.get("previousVersion", [])
+            if previous_label not in previous_versions:
+                previous_versions.append(previous_label)
+            
+            current_topic["label"] = improved_label
+            current_topic["regenerated"] = True
+            current_topic["previousVersion"] = previous_versions
+            
+            improved_count += 1
+        
+        # Update assessment
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {"topics_v2": topics_v2, "updatedAt": assessment["updatedAt"]}}
+        )
+        
+        return success_response(
+            f"Improved {improved_count} topic(s) successfully",
+            {
+                "topics": topics_v2,
+                "improvedCount": improved_count
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error improving all topics: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to improve topics: {str(exc)}") from exc
+
+
+@router.post("/regenerate-question")
+async def regenerate_question_endpoint(
+    payload: RegenerateQuestionRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(require_editor),
+):
+    """
+    Regenerate a single question based on the old question text and optional feedback.
+    """
+    try:
+        assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        _check_assessment_access(assessment, current_user)
+        
+        topics_v2 = assessment.get("topics_v2", [])
+        topic = next((t for t in topics_v2 if t.get("id") == payload.topicId), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        row = next((r for r in topic.get("questionRows", []) if r.get("rowId") == payload.rowId), None)
+        if not row:
+            raise HTTPException(status_code=404, detail="Question row not found")
+        
+        questions = row.get("questions", [])
+        if payload.questionIndex < 0 or payload.questionIndex >= len(questions):
+            raise HTTPException(status_code=404, detail="Question not found")
+        
+        old_question_obj = questions[payload.questionIndex]
+        
+        # Get old question text (format based on question type)
+        old_question_text = payload.oldQuestion
+        
+        # Regenerate the question
+        regenerated_question = await regenerate_question(
+            old_question=old_question_text,
+            question_type=payload.questionType,
+            difficulty=payload.difficulty,
+            experience_mode=payload.experienceMode,
+            experience_min=payload.experienceMin,
+            experience_max=payload.experienceMax,
+            additional_requirements=payload.additionalRequirements,
+            feedback=payload.feedback,
+            topic_name=topic.get("label"),
+        )
+        
+        # Preserve timer and score from old question
+        new_question_obj = {
+            **regenerated_question,
+            "timer": old_question_obj.get("timer"),
+            "score": old_question_obj.get("score"),
+            "status": "regenerated",
+            "oldVersions": old_question_obj.get("oldVersions", []) + [{
+                "question": old_question_obj,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }],
+        }
+        
+        # Update the question in the array
+        questions[payload.questionIndex] = new_question_obj
+        row["questions"] = questions
+        
+        # Update assessment
+        assessment["topics_v2"] = topics_v2
+        assessment["updatedAt"] = datetime.now(timezone.utc)
+        
+        await db.assessments.update_one(
+            {"_id": to_object_id(payload.assessmentId)},
+            {"$set": {
+                "topics_v2": topics_v2,
+                "updatedAt": assessment["updatedAt"]
+            }}
+        )
+        
+        return success_response(
+            data={"question": new_question_obj},
+            message="Question regenerated successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error regenerating question: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate question: {str(exc)}") from exc
 
 

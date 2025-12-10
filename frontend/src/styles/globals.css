@@ -1,8 +1,10 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* Tailwind CSS directives - these are valid and processed by Tailwind */
+/* @tailwind directives are processed by PostCSS/Tailwind during build */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 :root {
   /* Mint Cream Theme - Primary Colors */
@@ -180,9 +182,26 @@ button {
 }
 
 .container {
-  max-width: 1200px;
+  max-width: 90%;
+  width: 90%;
   margin: 0 auto;
   padding: 2rem 1.5rem;
+}
+
+/* Desktop: 80-90% width */
+@media (min-width: 1024px) {
+  .container {
+    max-width: 85%;
+    width: 85%;
+  }
+}
+
+/* Large Desktop: Keep it reasonable */
+@media (min-width: 1440px) {
+  .container {
+    max-width: 80%;
+    width: 80%;
+  }
 }
 
 /* Mint Cream Theme - Card Components */
@@ -511,6 +530,8 @@ label {
 /* Mobile Devices (up to 640px) */
 @media (max-width: 640px) {
   .container {
+    max-width: 100%;
+    width: 100%;
     padding: 1rem;
   }
   
@@ -595,6 +616,8 @@ label {
 /* Tablet Devices (641px to 768px) */
 @media (min-width: 641px) and (max-width: 768px) {
   .container {
+    max-width: 95%;
+    width: 95%;
     padding: 1.5rem 1rem;
   }
   
@@ -623,8 +646,10 @@ label {
 }
 
 /* Small Desktop (769px to 1024px) */
-@media (min-width: 769px) and (max-width: 1090px) {
+@media (min-width: 769px) and (max-width: 1024px) {
   .container {
+    max-width: 90%;
+    width: 90%;
     padding: 2rem 1.25rem;
   }
   .enterprise-header-content img {
@@ -677,6 +702,19 @@ label {
     flex-direction: column !important;
   }
   
+}
+
+/* Screen reader only class for accessibility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }
 
 /* Responsive Grid Utilities */
