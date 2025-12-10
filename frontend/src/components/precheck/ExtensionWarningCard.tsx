@@ -1,5 +1,5 @@
 import React from "react";
-import type { DetectedExtension, ExtensionCategory, ExtensionScanResult } from "@/hooks/usePrecheckExtensions";
+import type { ExtensionScanResult, ExtensionInfo } from "@/hooks/usePrecheckExtensions";
 
 interface ExtensionWarningCardProps {
   scanResult: ExtensionScanResult;
@@ -9,16 +9,7 @@ interface ExtensionWarningCardProps {
   isRequestingHelp?: boolean;
 }
 
-// Category display info
-const CATEGORY_INFO: Record<ExtensionCategory, { label: string; icon: string; color: string }> = {
-  screen_recorder: { label: "Screen Recorder", icon: "🎥", color: "#ef4444" },
-  automation: { label: "Automation Tool", icon: "🤖", color: "#ef4444" },
-  remote_desktop: { label: "Remote Desktop", icon: "🖥️", color: "#ef4444" },
-  clipboard_manager: { label: "Clipboard Manager", icon: "📋", color: "#f59e0b" },
-  devtools: { label: "Developer Tools", icon: "🔧", color: "#6b7280" },
-  ad_blocker: { label: "Ad Blocker", icon: "🛡️", color: "#f59e0b" },
-  unknown: { label: "Other Extension", icon: "🔌", color: "#6b7280" },
-};
+// Simplified - just show extensions without categories since ExtensionInfo doesn't have category
 
 // Disable instructions by browser
 const DISABLE_INSTRUCTIONS = {
@@ -77,18 +68,10 @@ export function ExtensionWarningCard({
   onRequestHelp,
   isRequestingHelp = false,
 }: ExtensionWarningCardProps) {
-  const { extensions, hasHighRisk } = scanResult;
+  const extensions = scanResult.details?.extensions || [];
+  const hasHighRisk = scanResult.confidence === "high";
   
   if (extensions.length === 0) return null;
-
-  // Group extensions by category
-  const grouped = extensions.reduce((acc, ext) => {
-    if (!acc[ext.category]) {
-      acc[ext.category] = [];
-    }
-    acc[ext.category].push(ext);
-    return acc;
-  }, {} as Record<ExtensionCategory, DetectedExtension[]>);
 
   // Detect browser
   const isEdge = typeof navigator !== "undefined" && navigator.userAgent.includes("Edg");
@@ -142,76 +125,27 @@ export function ExtensionWarningCard({
           marginBottom: "0.75rem",
         }}
       >
-        {Object.entries(grouped).map(([category, exts]) => {
-          const info = CATEGORY_INFO[category as ExtensionCategory];
-          return (
-            <div key={category} style={{ marginBottom: "0.5rem" }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.375rem",
-                  marginBottom: "0.25rem",
-                }}
-              >
-                <span>{info.icon}</span>
-                <span
-                  style={{
-                    fontSize: "0.8125rem",
-                    fontWeight: 600,
-                    color: info.color,
-                  }}
-                >
-                  {info.label}
-                </span>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    backgroundColor: `${info.color}20`,
-                    color: info.color,
-                    padding: "0.125rem 0.375rem",
-                    borderRadius: "0.25rem",
-                  }}
-                >
-                  {exts.length}
-                </span>
-              </div>
-              <ul
-                style={{
-                  margin: "0 0 0 1.5rem",
-                  padding: 0,
-                  listStyle: "disc",
-                  fontSize: "0.75rem",
-                  color: "#64748b",
-                }}
-              >
-                {exts.map((ext) => (
-                  <li key={ext.id} style={{ marginBottom: "0.125rem" }}>
-                    {ext.description}
-                    {ext.confidence === "high" && (
-                      <span
-                        style={{
-                          marginLeft: "0.375rem",
-                          fontSize: "0.625rem",
-                          backgroundColor: "#fef2f2",
-                          color: "#ef4444",
-                          padding: "0.0625rem 0.25rem",
-                          borderRadius: "0.125rem",
-                        }}
-                      >
-                        HIGH RISK
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          );
-        })}
+        <ul
+          style={{
+            margin: 0,
+            padding: 0,
+            listStyle: "disc",
+            paddingLeft: "1.5rem",
+            fontSize: "0.75rem",
+            color: "#64748b",
+          }}
+        >
+          {extensions.map((ext: ExtensionInfo) => (
+            <li key={ext.id} style={{ marginBottom: "0.25rem" }}>
+              {ext.name || ext.id}
+              {ext.version && <span style={{ color: "#94a3b8", marginLeft: "0.25rem" }}>(v{ext.version})</span>}
+            </li>
+          ))}
+        </ul>
       </div>
 
-      {/* Remote Desktop Instructions */}
-      {Object.keys(grouped).includes("remote_desktop") && (
+      {/* Remote Desktop Instructions - Removed category check since we don't have categories */}
+      {false && (
         <div
           style={{
             backgroundColor: "#fef2f2",
@@ -278,7 +212,7 @@ export function ExtensionWarningCard({
       )}
 
       {/* Extension Instructions */}
-      {hasHighRisk && !Object.keys(grouped).includes("remote_desktop") && (
+      {hasHighRisk && (
         <div
           style={{
             backgroundColor: "#f8fafc",
