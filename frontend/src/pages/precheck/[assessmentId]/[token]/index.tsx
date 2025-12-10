@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
+import { usePrecheckExtensions } from "@/hooks/usePrecheckExtensions";
+import { KNOWN_EXTENSIONS } from "@/lib/extensionDatabase";
+import { EXTENSION_DETECTION_CONFIG, formatMessage } from "@/config/precheckConfig";
+import USBDeviceCheck from "@/components/precheck/USBDeviceCheck";
 
 interface PrecheckStep {
   id: string;
@@ -24,6 +28,15 @@ interface BrowserInfo {
   hasScreenCapture: boolean;
   hasWebRTC: boolean;
 }
+
+// Microphone Check Configuration - Industry Standard
+const MIC_CHECK_CONFIG = {
+  THRESHOLD_DB: -40,              // Industry standard (Zoom, Teams, Meet)
+  REQUIRED_SAMPLES: 1,            // Only 1 sample needed to pass (just verify mic works)
+  DURATION_MS: 3000,              // 3 seconds
+  SAMPLE_INTERVAL_MS: 100,        // Sample every 100ms
+  PHRASE: "I confirm my microphone is working properly",
+};
 
 export default function PrecheckPage() {
   const router = useRouter();
@@ -51,6 +64,10 @@ export default function PrecheckPage() {
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState<string>("");
   const [audioDataArray, setAudioDataArray] = useState<Uint8Array | null>(null);
   const [isListening, setIsListening] = useState(false);
+  const [extensionsCertified, setExtensionsCertified] = useState(false);
+  const [samplesAboveThreshold, setSamplesAboveThreshold] = useState(0);
+  const [totalSamples, setTotalSamples] = useState(0);
+  const [micTestStarted, setMicTestStarted] = useState(false);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -58,6 +75,15 @@ export default function PrecheckPage() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const faceDetectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Extension detection
+  const {
+    isScanning: isExtensionScanning,
+    scanResult: extensionScanResult,
+    scan: scanExtensions,
+    requestPermission,
+  } = usePrecheckExtensions();
+
   
   // Load candidate info
   useEffect(() => {
@@ -417,18 +443,27 @@ export default function PrecheckPage() {
     }
   }, [selectedAudioDeviceId]);
   
-  // Step 4: Microphone Check
+  // Step 4: Microphone Check - Industry Standard Threshold-Based
   const checkMicrophone = useCallback(async (): Promise<boolean> => {
+    // Reset state
+    setSamplesAboveThreshold(0);
+    setTotalSamples(0);
+    setMicTestStarted(true);
+    setIsListening(true);
+    
     setSteps(prev => prev.map((step, idx) => 
       idx === 3 ? { ...step, status: "running", message: "Accessing microphone..." } : step
     ));
     
     try {
       // Always start a fresh stream for the check
+      // IMPORTANT: Enable echo cancellation and AGC for Bluetooth headset compatibility
       const audioConstraints: MediaTrackConstraints = {
-        echoCancellation: false, // Disable to get raw audio
-        noiseSuppression: false,
-        autoGainControl: false,
+        echoCancellation: true,  // Enable for Bluetooth compatibility
+        noiseSuppression: false, // Keep disabled for accurate detection
+        autoGainControl: true,   // Enable for Bluetooth compatibility
+        // Try to force specific sample rate for Bluetooth (may not be supported by all browsers)
+        sampleRate: 16000,
       };
       
       // Use selected device if available
@@ -442,235 +477,486 @@ export default function PrecheckPage() {
       
       setMicrophoneStream(stream);
       
-      // Setup audio analysis
-      const audioContext = new AudioContext();
+      // Verify stream is active
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0 || !audioTracks[0].enabled) {
+        throw new Error("No audio track available or track is disabled");
+      }
+      
+      const trackSettings = audioTracks[0].getSettings();
+      const trackCapabilities = audioTracks[0].getCapabilities();
+      console.log("[Microphone] Stream:", {
+        active: stream.active,
+        label: audioTracks[0].label,
+        enabled: audioTracks[0].enabled,
+        readyState: audioTracks[0].readyState,
+        settings: trackSettings,
+        capabilities: trackCapabilities
+      });
+      
+      // Check if this is a Bluetooth device
+      const isBluetooth = audioTracks[0].label.toLowerCase().includes('bluetooth') || 
+                         audioTracks[0].label.toLowerCase().includes('headset');
+      
+      if (isBluetooth) {
+        console.warn("[Microphone] ⚠️ Bluetooth device detected. Web Audio API has known limitations with Bluetooth headsets.");
+        console.warn("[Microphone] If audio data is not detected, try:");
+        console.warn("  1. Ensure headset is in HFP/HSP mode (not A2DP)");
+        console.warn("  2. Set Bluetooth as 'Default Communication Device' in Windows");
+        console.warn("  3. Try using built-in microphone instead");
+      }
+      
+      // Setup audio analysis with Bluetooth-compatible sample rate
+      // Use cross-browser AudioContext and resume it
+      const AudioContextClass =
+        (window as any).AudioContext || (window as any).webkitAudioContext;
+      
+      // Force 16kHz sample rate for Bluetooth compatibility
+      const audioContext = new AudioContextClass({ 
+        sampleRate: 16000  // Bluetooth-compatible rate
+      });
       audioContextRef.current = audioContext;
+      
+      console.log("[Microphone] AudioContext created with sample rate:", audioContext.sampleRate, "State:", audioContext.state);
+      
+      // VERY IMPORTANT: resume if suspended (required for Chrome/Edge)
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+        console.log("[Microphone] AudioContext resumed from suspended state");
+      }
+      
       const source = audioContext.createMediaStreamSource(stream);
+      
+      // Add gain node to boost quiet signals (helps with Bluetooth)
+      const gainNode = audioContext.createGain();
+      gainNode.gain.value = 3.0; // Boost by 3x (adjust if needed)
+      
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048; // Larger FFT for better sensitivity
       analyser.smoothingTimeConstant = 0.3; // Less smoothing for more sensitivity
-      source.connect(analyser);
+      
+      // Connect: source → gain → analyser
+      // NOTE: For Bluetooth, connecting to destination can sometimes cause issues
+      // The analyser works fine without destination connection for analysis purposes
+      source.connect(gainNode);
+      gainNode.connect(analyser);
+      // Try without destination first - if still no data, we'll try with destination
+      // analyser.connect(audioContext.destination); // Commented out for Bluetooth compatibility
+      
+      console.log("[Microphone] Audio chain: source → gain (3.0x) → analyser (no destination for Bluetooth compatibility)");
+      console.log("[Microphone] Track settings:", trackSettings);
+      console.log("[Microphone] Track capabilities:", audioTracks[0].getCapabilities());
+      
       analyserRef.current = analyser;
       
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       const timeDataArray = new Uint8Array(analyser.frequencyBinCount);
       
-      // Wait a bit for stream to stabilize
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // Wait for stream to stabilize - Bluetooth needs longer
+      // Also try to "prime" the analyser by reading data a few times
+      await new Promise(resolve => setTimeout(resolve, 1500)); // Increased for Bluetooth initialization
       
-      // Monitor audio levels with real-time visualization
-      let maxLevel = -Infinity;
-      let minLevel = Infinity;
-      let detectionCount = 0;
-      let variationDetected = false;
-      let previousRms = 0;
-      let rmsValues: number[] = [];
-      let samplesCollected = 0;
-      let hasAnyAudioSignal = false;
-      let maxSampleRange = 0;
-      const totalSamples = 90; // Collect 90 samples over 3 seconds
+      // Prime the analyser by reading data a few times (helps with Bluetooth)
+      for (let i = 0; i < 5; i++) {
+        analyser.getByteTimeDomainData(timeDataArray);
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      console.log("[Microphone] Analyser primed with 5 initial reads");
       
-      const checkAudio = () => {
-        if (!analyserRef.current) return;
+      // Verify we're getting data with multiple checks
+      // BLUETOOTH FIX: Check both time and frequency domain with better variance detection
+      let dataCheckAttempts = 0;
+      let hasAudioData = false;
+      const MAX_ATTEMPTS = 10; // Increased from 5 to 10
+      const RETRY_DELAY_MS = 300; // 300ms between attempts
+
+      while (dataCheckAttempts < MAX_ATTEMPTS && !hasAudioData) {
+        // Try BOTH time domain AND frequency domain
+        analyser.getByteTimeDomainData(timeDataArray);
+        analyser.getByteFrequencyData(dataArray);
         
-        // Get time domain data for better audio detection (more reliable)
-        analyserRef.current.getByteTimeDomainData(timeDataArray);
-        
-        // Calculate RMS (Root Mean Square) for better audio level detection
-        let sum = 0;
-        let maxSample = 0;
-        let minSample = 255;
-        
+        // Better variance detection: Check for actual min/max variance
+        let min = 255, max = 0;
         for (let i = 0; i < timeDataArray.length; i++) {
           const value = timeDataArray[i];
-          maxSample = Math.max(maxSample, value);
-          minSample = Math.min(minSample, value);
-          const normalized = (value - 128) / 128;
+          if (value < min) min = value;
+          if (value > max) max = value;
+        }
+        let variance = max - min;
+        
+        const timeSum = timeDataArray.reduce((a, b) => a + Math.abs(b - 128), 0);
+        const freqSum = dataArray.reduce((a, b) => a + b, 0);
+        
+        // If still no variance after 3 attempts, try connecting to destination
+        if (dataCheckAttempts === 3 && variance === 0) {
+          console.log("[Microphone] Attempting to connect analyser to destination (Bluetooth workaround)");
+          try {
+            analyser.connect(audioContext.destination);
+            console.log("[Microphone] Connected to destination, waiting 500ms...");
+            await new Promise(resolve => setTimeout(resolve, 500));
+            // Re-read data after connecting
+            analyser.getByteTimeDomainData(timeDataArray);
+            analyser.getByteFrequencyData(dataArray);
+            // Recalculate variance
+            min = 255; max = 0;
+            for (let i = 0; i < timeDataArray.length; i++) {
+              const value = timeDataArray[i];
+              if (value < min) min = value;
+              if (value > max) max = value;
+            }
+            const newVariance = max - min;
+            console.log("[Microphone] After destination connection - variance:", newVariance);
+            if (newVariance > 0) {
+              variance = newVariance; // Update variance for the check below
+            }
+          } catch (e) {
+            console.warn("[Microphone] Could not connect to destination:", e);
+          }
+        }
+        
+        // If still no variance after 5 attempts, try recreating the audio context
+        if (dataCheckAttempts === 5 && variance === 0 && isBluetooth) {
+          console.log("[Microphone] Attempting to recreate AudioContext (Bluetooth workaround)");
+          try {
+            // Close old context
+            if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+              audioContextRef.current.close();
+            }
+            
+            // Create new context without forcing sample rate (let browser decide)
+            const newAudioContext = new AudioContextClass();
+            audioContextRef.current = newAudioContext;
+            
+            if (newAudioContext.state === "suspended") {
+              await newAudioContext.resume();
+            }
+            
+            // Recreate the chain
+            const newSource = newAudioContext.createMediaStreamSource(stream);
+            const newGainNode = newAudioContext.createGain();
+            newGainNode.gain.value = 3.0;
+            const newAnalyser = newAudioContext.createAnalyser();
+            newAnalyser.fftSize = 2048;
+            newAnalyser.smoothingTimeConstant = 0.3;
+            
+            newSource.connect(newGainNode);
+            newGainNode.connect(newAnalyser);
+            analyserRef.current = newAnalyser;
+            
+            console.log("[Microphone] Recreated AudioContext, waiting 500ms...");
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            // Re-read data
+            newAnalyser.getByteTimeDomainData(timeDataArray);
+            newAnalyser.getByteFrequencyData(dataArray);
+            
+            // Recalculate variance
+            min = 255; max = 0;
+            for (let i = 0; i < timeDataArray.length; i++) {
+              const value = timeDataArray[i];
+              if (value < min) min = value;
+              if (value > max) max = value;
+            }
+            const newVariance = max - min;
+            console.log("[Microphone] After AudioContext recreation - variance:", newVariance);
+            if (newVariance > 0) {
+              variance = newVariance; // Update variance for the check below
+            }
+          } catch (e) {
+            console.warn("[Microphone] Could not recreate AudioContext:", e);
+          }
+        }
+        
+        // Enhanced logging with first values and context state
+        console.log(`[Mic DataCheck] Attempt ${dataCheckAttempts + 1}/${MAX_ATTEMPTS}:`, {
+          variance: variance, // Key metric: should be > 0 (even silence shows 1-5)
+          min: min,
+          max: max,
+          timeDomainSum: timeSum,
+          frequencySum: freqSum,
+          timeDomainAvg: (timeSum / timeDataArray.length).toFixed(2),
+          frequencyAvg: (freqSum / dataArray.length).toFixed(2),
+          firstValues: Array.from(timeDataArray.slice(0, 10)),
+          audioContextState: audioContextRef.current?.state,
+          streamActive: stream.active,
+          trackInfo: {
+            label: audioTracks[0].label,
+            enabled: audioTracks[0].enabled,
+            readyState: audioTracks[0].readyState,
+          },
+        });
+        
+        // Accept if variance > 0 (even silence should show 1-5 variance from noise floor)
+        // OR if frequency domain shows activity
+        if (variance > 0 || freqSum > 10) {
+          hasAudioData = true;
+          console.log("[Microphone] ✅ Audio data detected (variance:", variance, 
+            variance > 0 ? "time domain" : "frequency domain", "), proceeding with test");
+        } else {
+          console.warn(`[Microphone] ⚠️ No variance detected (variance: ${variance}) on attempt ${dataCheckAttempts + 1}, retrying...`);
+          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+        }
+        
+        dataCheckAttempts++;
+      }
+
+      if (!hasAudioData) {
+        console.error(`[Microphone] ❌ Failed to get audio data after ${MAX_ATTEMPTS} attempts`);
+        console.error("[Microphone] Troubleshooting tips:");
+        console.error("  1. Check system microphone settings - ensure mic is not muted");
+        console.error("  2. Try selecting a different microphone from the dropdown");
+        console.error("  3. Close other apps using microphone (Zoom, Teams, Discord, Skype)");
+        console.error("  4. For Bluetooth: Ensure headset is in HFP/HSP mode (not A2DP)");
+        console.error("  5. In Windows: Set Bluetooth as 'Default Communication Device'");
+        console.error("  6. Try disconnecting and reconnecting Bluetooth headset");
+        console.error("  7. Try using built-in microphone to verify code works");
+        throw new Error(`No audio data after ${MAX_ATTEMPTS} attempts. Please check: 1) Microphone is not muted, 2) Correct mic selected, 3) Mic not in use by another app, 4) Bluetooth settings (HFP/HSP mode), 5) Try a different device`);
+      }
+      
+      // Threshold-based detection
+      // IMPORTANT: Start timing AFTER audio data is confirmed (after any AudioContext recreation)
+      let samplesAboveThresholdCount = 0;
+      let totalSamplesCount = 0;
+      let maxDbReached = -Infinity;
+      const startTime = Date.now(); // Start time is set after audio data is confirmed
+      let sampleIntervalId: number | null = null;
+      let visualizationFrameId: number | null = null;
+      
+      console.log("[Microphone] Starting audio sampling. Duration:", MIC_CHECK_CONFIG.DURATION_MS, "ms, Interval:", MIC_CHECK_CONFIG.SAMPLE_INTERVAL_MS, "ms");
+      
+      // Continuous visualization update (runs at 60fps for smooth UI)
+      const updateVisualization = () => {
+        if (!analyserRef.current) return;
+        
+        // Get time domain data for visualization
+        analyserRef.current.getByteTimeDomainData(timeDataArray);
+        setAudioDataArray(new Uint8Array(timeDataArray));
+        
+        // Get frequency data for visualization
+        analyserRef.current.getByteFrequencyData(dataArray);
+        
+        // Calculate current audio level for display (same clean RMS logic as sampling)
+        let sum = 0;
+        for (let i = 0; i < timeDataArray.length; i++) {
+          const normalized = (timeDataArray[i] - 128) / 128;
           sum += normalized * normalized;
         }
         
         const rms = Math.sqrt(sum / timeDataArray.length);
-        // Calculate dB level - use a minimum threshold to avoid -Infinity
-        const dbLevel = rms > 0.00001 ? 20 * Math.log10(Math.max(rms, 0.00001)) : -100;
+        let dbLevel = -100;
         
-        // Check if there's ANY variation in the raw samples (very sensitive)
-        const sampleRange = maxSample - minSample;
-        if (sampleRange > maxSampleRange) {
-          maxSampleRange = sampleRange;
-        }
-        // Even the smallest variation indicates audio
-        if (sampleRange > 0) {
-          hasAnyAudioSignal = true;
+        if (rms > 0.00001) {
+          dbLevel = 20 * Math.log10(rms);
         }
         
-        // Also check if we're getting non-zero data (microphone is active)
-        // Check for any deviation from the center value (128 for 8-bit audio)
-        const centerDeviation = Math.abs(maxSample - 128) + Math.abs(minSample - 128);
-        if (centerDeviation > 0) {
-          hasAnyAudioSignal = true;
-        }
+        setAudioLevel(dbLevel);
         
-        // Also get frequency data for visualization
-        analyserRef.current.getByteFrequencyData(dataArray);
-        const freqSum = dataArray.reduce((a, b) => a + b);
-        const freqAverage = freqSum / dataArray.length;
-        const freqDbLevel = freqAverage > 0 ? 20 * Math.log10(Math.max(freqAverage / 255, 0.00001)) : -100;
-        
-        // Use the higher of the two levels, but also consider raw sample variation
-        const currentLevel = Math.max(dbLevel, freqDbLevel);
-        
-        // If we have any sample variation, boost the level reading to show activity
-        if (sampleRange > 0) {
-          // Adjust level based on sample range to show activity
-          // Even small variations should show a reasonable level
-          const adjustedLevel = sampleRange > 0 
-            ? Math.max(currentLevel, -60 + (Math.min(sampleRange, 50) / 50) * 40)
-            : currentLevel;
-          setAudioLevel(adjustedLevel);
-        } else {
-          setAudioLevel(currentLevel);
-        }
-        
-        // Update states (audioLevel is set above with adjustment)
-        setAudioDataArray(new Uint8Array(timeDataArray));
-        
-        // Track levels
-        if (currentLevel > maxLevel) {
-          maxLevel = currentLevel;
-        }
-        if (currentLevel < minLevel && currentLevel > -100) {
-          minLevel = currentLevel;
-        }
-        
-        // Store RMS values for variation detection
-        rmsValues.push(rms);
-        if (rmsValues.length > 20) {
-          rmsValues.shift(); // Keep last 20 samples
-        }
-        
-        // Detect variation using RMS (extremely sensitive)
-        if (rmsValues.length >= 2) {
-          const rmsVariation = Math.abs(rms - previousRms);
-          // Very low threshold - detect even tiny variations
-          if (rmsVariation > 0.0001 || sampleRange > 0) {
-            variationDetected = true;
-          }
-        }
-        previousRms = rms;
-        
-        // Count detections - extremely lenient (ANY signal counts, even silence with variation)
-        if (currentLevel > -100 || rms > 0.00001 || sampleRange > 0 || freqSum > 0 || centerDeviation > 0) {
-          detectionCount++;
-          hasAnyAudioSignal = true; // Mark as detected if any condition is met
-        }
-        
-        samplesCollected++;
-        
-        // Continue monitoring
-        if (samplesCollected < totalSamples) {
-          animationFrameRef.current = requestAnimationFrame(checkAudio);
+        // Continue visualization
+        const elapsed = Date.now() - startTime;
+        if (elapsed < MIC_CHECK_CONFIG.DURATION_MS) {
+          visualizationFrameId = requestAnimationFrame(updateVisualization);
         }
       };
       
-      checkAudio();
+      // Start visualization
+      updateVisualization();
       
-      // Wait 3 seconds to collect samples
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      
-      // Calculate variation from collected RMS values
-      if (rmsValues.length >= 2) {
-        const rmsRange = Math.max(...rmsValues) - Math.min(...rmsValues);
-        if (rmsRange > 0.0001) {
-          variationDetected = true;
+      // Sample audio every 100ms for threshold checking
+      const sampleAudio = () => {
+        if (!analyserRef.current) return;
+        
+        // Get time domain data (raw audio samples)
+        analyserRef.current.getByteTimeDomainData(timeDataArray);
+        
+        // Calculate RMS (Root Mean Square) - Industry standard for audio level
+        let sum = 0;
+        for (let i = 0; i < timeDataArray.length; i++) {
+          const normalized = (timeDataArray[i] - 128) / 128;
+          sum += normalized * normalized;
         }
+        
+        const rms = Math.sqrt(sum / timeDataArray.length);
+        
+        // Convert RMS to dB: dB = 20 * log10(rms)
+        // For voice: typical RMS ranges from 0.01 (quiet) to 0.3 (loud)
+        // RMS 0.01 = -40 dB, RMS 0.1 = -20 dB, RMS 0.3 = -10 dB
+        let dbLevel = -100; // Default to silent
+        
+        if (rms > 0.00001) {
+          dbLevel = 20 * Math.log10(rms);
+        }
+        
+        // Track max dB reached
+        if (dbLevel > maxDbReached) {
+          maxDbReached = dbLevel;
+        }
+        
+        // Check if above threshold (STRICT: -40 dB minimum)
+        const isAboveThreshold = dbLevel >= MIC_CHECK_CONFIG.THRESHOLD_DB;
+        
+        if (isAboveThreshold) {
+          samplesAboveThresholdCount++;
+        }
+        
+        totalSamplesCount++;
+        
+        // Update state for UI
+        setSamplesAboveThreshold(samplesAboveThresholdCount);
+        setTotalSamples(totalSamplesCount);
+        
+        // Calculate progress percentage
+        const progressPercent = Math.min(100, (samplesAboveThresholdCount / MIC_CHECK_CONFIG.REQUIRED_SAMPLES) * 100);
+        
+        // Dynamic progress messages
+        let progressMessage = "";
+        if (totalSamplesCount <= 2 && samplesAboveThresholdCount === 0) {
+          progressMessage = "🔊 Speak louder! We can't hear you clearly.";
+        } else if (progressPercent < 30) {
+          progressMessage = `📢 Keep reading: "${MIC_CHECK_CONFIG.PHRASE}"`;
+        } else if (progressPercent < 70) {
+          progressMessage = "👍 Good! Keep speaking clearly...";
+        } else if (progressPercent < 100) {
+          progressMessage = "✅ Almost there! Continue speaking...";
+        } else {
+          progressMessage = "✅ Perfect! Voice detected successfully.";
+        }
+        
+        // Update step message
+        setSteps(prev => prev.map((step, idx) => 
+          idx === 3 ? {
+            ...step,
+            status: "running",
+            message: `${progressMessage} (${samplesAboveThresholdCount}/${MIC_CHECK_CONFIG.REQUIRED_SAMPLES} samples)`
+          } : step
+        ));
+        
+        // Debug logging (every 5 samples)
+        if (totalSamplesCount % 5 === 0) {
+          console.log(`[Mic Sample ${totalSamplesCount}]`, {
+            rms: rms.toFixed(4),
+            dbLevel: dbLevel.toFixed(2),
+            threshold: MIC_CHECK_CONFIG.THRESHOLD_DB,
+            aboveThreshold: isAboveThreshold,
+            progress: `${samplesAboveThresholdCount}/${MIC_CHECK_CONFIG.REQUIRED_SAMPLES}`
+          });
+        }
+        
+        // Continue sampling until duration is reached
+        const elapsed = Date.now() - startTime;
+        if (elapsed < MIC_CHECK_CONFIG.DURATION_MS) {
+          sampleIntervalId = window.setTimeout(sampleAudio, MIC_CHECK_CONFIG.SAMPLE_INTERVAL_MS) as unknown as number;
+        }
+      };
+      
+      // Start sampling every 100ms
+      sampleAudio();
+      
+      // Wait for full duration + a small buffer to ensure all samples are collected
+      // Add 200ms buffer to account for timing variations
+      const totalWaitTime = MIC_CHECK_CONFIG.DURATION_MS + 200;
+      await new Promise(resolve => setTimeout(resolve, totalWaitTime));
+      
+      console.log("[Microphone] Sampling complete. Total samples collected:", totalSamplesCount, "Expected:", Math.floor(MIC_CHECK_CONFIG.DURATION_MS / MIC_CHECK_CONFIG.SAMPLE_INTERVAL_MS));
+      
+      // Cleanup intervals
+      if (sampleIntervalId) {
+        clearTimeout(sampleIntervalId);
+      }
+      if (visualizationFrameId) {
+        cancelAnimationFrame(visualizationFrameId);
       }
       
-      // EXTREMELY lenient detection - if stream is active, pass if we detected ANY signal
-      // This includes even the smallest variation in samples (microphone is working)
-      const hasVariation = variationDetected || (maxLevel - minLevel) > 0.1 || hasAnyAudioSignal || maxSampleRange > 0;
-      const hasAudioLevel = maxLevel > -100 || detectionCount > 0 || rmsValues.some(rms => rms > 0.00001) || hasAnyAudioSignal || maxSampleRange > 0;
+      // Final check
+      const passed = samplesAboveThresholdCount >= MIC_CHECK_CONFIG.REQUIRED_SAMPLES;
       
-      // Check if audio track is enabled and active
-      const audioTracks = stream.getAudioTracks();
-      const hasActiveTrack = audioTracks.length > 0 && audioTracks[0].enabled && audioTracks[0].readyState === "live";
-      
-      // ULTRA-LENIENT: If stream is active and track is live, pass if:
-      // 1. We detected ANY variation in samples (maxSampleRange > 0)
-      // 2. We collected any RMS values (microphone is sending data)
-      // 3. We got any detection count (any signal was detected)
-      // Basically: if microphone is connected and active, and we got ANY data, it passes
-      const passed = stream.active && hasActiveTrack && (
-        maxSampleRange > 0 ||  // ANY sample variation means microphone is working
-        rmsValues.length > 0 || // We collected data, microphone is working
-        detectionCount > 0 ||   // We detected something
-        hasAnyAudioSignal        // Any signal detected
-      );
-      
-      console.log("[Microphone] Final check:", {
-        streamActive: stream.active,
-        hasActiveTrack,
-        audioTrackEnabled: audioTracks[0]?.enabled,
-        audioTrackState: audioTracks[0]?.readyState,
-        hasVariation,
-        hasAudioLevel,
-        hasAnyAudioSignal,
-        detectionCount,
-        maxSampleRange,
-        maxLevel: maxLevel.toFixed(2),
-        minLevel: minLevel.toFixed(2),
-        rmsValuesCount: rmsValues.length,
-        passed,
-        willPass: stream.active && hasActiveTrack && (maxSampleRange > 0 || rmsValues.length > 0 || detectionCount > 0 || hasAnyAudioSignal)
-      });
-      
+      // Cleanup
       setIsListening(false);
+      setMicTestStarted(false);
+      if (sampleIntervalId) {
+        clearTimeout(sampleIntervalId);
+      }
+      if (visualizationFrameId) {
+        cancelAnimationFrame(visualizationFrameId);
+      }
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
       
-      // Debug logging
-      console.log("[Microphone Check] Results:", {
+      // Detailed logging
+      const expectedSamples = Math.floor(MIC_CHECK_CONFIG.DURATION_MS / MIC_CHECK_CONFIG.SAMPLE_INTERVAL_MS);
+      console.log("[Microphone Check] Final Results:", {
         passed,
-        maxLevel: maxLevel.toFixed(2),
-        minLevel: minLevel.toFixed(2),
-        detectionCount,
-        variationDetected,
-        hasVariation,
-        hasAudioLevel,
-        hasAnyAudioSignal,
-        maxSampleRange,
-        rmsRange: rmsValues.length >= 2 ? (Math.max(...rmsValues) - Math.min(...rmsValues)).toFixed(4) : 0,
-        streamActive: stream.active,
-        rmsValues: rmsValues.slice(-5).map(v => v.toFixed(4)),
-        timeDataSample: timeDataArray.slice(0, 10).join(",")
+        samplesAboveThreshold: samplesAboveThresholdCount,
+        requiredSamples: MIC_CHECK_CONFIG.REQUIRED_SAMPLES,
+        totalSamples: totalSamplesCount,
+        expectedSamples: expectedSamples,
+        samplesCollected: `${totalSamplesCount}/${expectedSamples}`,
+        maxDbReached: maxDbReached.toFixed(2),
+        thresholdDb: MIC_CHECK_CONFIG.THRESHOLD_DB,
+        successRate: totalSamplesCount > 0 ? `${((samplesAboveThresholdCount / totalSamplesCount) * 100).toFixed(1)}%` : "0%",
+        note: totalSamplesCount < expectedSamples ? "⚠️ Fewer samples than expected - test may have started late" : "✅ Sample count OK"
       });
+      
+      // Set final status
+      let finalMessage = "";
+      if (passed) {
+        finalMessage = `✅ Microphone check passed! Voice detected clearly (${samplesAboveThresholdCount}/${MIC_CHECK_CONFIG.REQUIRED_SAMPLES} samples above ${MIC_CHECK_CONFIG.THRESHOLD_DB} dB)`;
+      } else if (samplesAboveThresholdCount === 0) {
+        finalMessage = "❌ No audio detected. Please check your microphone is connected and unmuted.";
+      } else {
+        finalMessage = `❌ Voice too quiet. Detected only ${samplesAboveThresholdCount}/${MIC_CHECK_CONFIG.REQUIRED_SAMPLES} samples above ${MIC_CHECK_CONFIG.THRESHOLD_DB} dB. Please speak louder.`;
+      }
       
       setSteps(prev => prev.map((step, idx) => 
         idx === 3 ? {
           ...step,
           status: passed ? "passed" : "failed",
-          message: passed 
-            ? "Microphone check passed - Audio detected successfully" 
-            : !stream.active
-            ? "Microphone stream is not active. Please check your microphone connection."
-            : !hasAnyAudioSignal && detectionCount === 0 && maxSampleRange === 0
-            ? "No audio signal detected. Please check your microphone is connected and working, then speak or make noise. Click 'Retry' to test again."
-            : "Microphone check failed. Please ensure your microphone is working and try again. Click 'Retry' to test again."
+          message: finalMessage
         } : step
       ));
       
       return passed;
     } catch (error: any) {
+      // Cleanup on error
       setIsListening(false);
+      setMicTestStarted(false);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+        try {
+          audioContextRef.current.close();
+        } catch (e) {
+          // Ignore close errors
+        }
+      }
+      
+      // Better error messages based on error type
+      let errorMessage = "Microphone check failed. Please check your microphone.";
+      if (error.name === "NotAllowedError") {
+        errorMessage = "Microphone permission denied. Please allow microphone access in your browser settings.";
+      } else if (error.name === "NotFoundError") {
+        errorMessage = "No microphone found. Please connect a microphone and try again.";
+      } else if (error.name === "NotReadableError") {
+        errorMessage = "Microphone is already in use by another application. Please close other apps (Zoom, Teams, Discord, etc.) and try again.";
+      } else if (error.name === "OverconstrainedError") {
+        errorMessage = "Microphone settings are not supported. Please try selecting a different microphone.";
+      } else if (error.message && error.message.includes("No audio data")) {
+        errorMessage = error.message; // Use the detailed message from our validation
+      }
+      
+      console.error("[Microphone] Error:", error.name, error.message);
+      
       setSteps(prev => prev.map((step, idx) => 
         idx === 3 ? {
           ...step,
           status: "failed",
-          message: error.name === "NotAllowedError" 
-            ? "Microphone permission denied. Please allow microphone access."
-            : "Microphone check failed. Please check your microphone."
+          message: errorMessage
         } : step
       ));
       return false;
     }
-  }, [audioLevel, selectedAudioDeviceId]);
+  }, [selectedAudioDeviceId]);
   
   // Run current step check
   const runCurrentStep = useCallback(async (forceRetry = false) => {
@@ -730,17 +1016,35 @@ export default function PrecheckPage() {
     }
     
     if (passed) {
-      // Auto-advance to next step (or complete if last step)
-      if (currentStep < 3) {
-        setTimeout(() => setCurrentStep(currentStep + 1), 1000);
-      } else {
-        // Last step (microphone) passed - trigger completion after a brief delay
+      // On browser step, wait for extension scan to complete before allowing progression
+      if (currentStep === 0) {
+        // Auto-trigger extension scan if not already scanning and no result
+        if (!extensionScanResult && !isExtensionScanning) {
         setTimeout(() => {
-          // The completion will be handled by the "Continue" button logic
-        }, 1500);
+            scanExtensions().catch(err => {
+              console.error("Auto-scan failed:", err);
+            });
+          }, 100);
+          return; // Wait for scan to complete
+        }
+        
+        // If extension scan hasn't completed yet, don't auto-advance
+        if (!extensionScanResult && isExtensionScanning) {
+          return; // Wait for extension scan to complete
+        }
+        
+        // If extensions are detected, don't advance
+        const hasExtensions = extensionScanResult?.hasExtensions ?? false;
+        if (hasExtensions) {
+          // Extensions detected - don't advance, user must remove them first
+          return;
+        }
       }
+      
+      // Don't auto-advance - user must click "Next" button manually
+      // The Next button will be shown in the UI
     }
-  }, [currentStep, checkBrowser, checkNetwork, checkCamera, checkMicrophone, cameraStream, microphoneStream, fetchAudioDevices]);
+  }, [currentStep, checkBrowser, checkNetwork, checkCamera, checkMicrophone, cameraStream, microphoneStream, fetchAudioDevices, extensionScanResult, isExtensionScanning]);
   
   // Fetch audio devices when microphone step becomes active
   useEffect(() => {
@@ -750,11 +1054,63 @@ export default function PrecheckPage() {
   }, [currentStep, audioDevices.length, fetchAudioDevices]);
   
   // Auto-run step when it becomes current
+  // IMPORTANT: Skip auto-run for microphone step (3) - must be user-triggered
   useEffect(() => {
-    if (!isLoading && steps[currentStep].status === "pending") {
+    if (isLoading) return;
+    
+    // Auto-run for steps 0,1,2 only. Microphone (3) must be user-triggered.
+    if (steps[currentStep].status === "pending" && currentStep !== 3) {
       runCurrentStep();
     }
   }, [currentStep, isLoading, steps, runCurrentStep]);
+
+  // Auto-scan extensions when browser check step is active
+  useEffect(() => {
+    if (currentStep === 0 && !isLoading && !extensionScanResult && !isExtensionScanning) {
+      // Automatically scan for extensions when browser check step is shown
+      // The scan function already has a 750ms delay built-in
+      const timer = setTimeout(() => {
+        scanExtensions().catch((err) => {
+          console.error("Extension scan error:", err);
+        });
+      }, 100);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [currentStep, isLoading, extensionScanResult, isExtensionScanning, scanExtensions]);
+  
+  // Update browser step status based on extension scan results
+  useEffect(() => {
+    // Only update if we're on browser step (step 0) and extension scan has completed
+    if (currentStep === 0 && extensionScanResult && browserInfo) {
+      const hasExtensions = extensionScanResult.hasExtensions;
+      
+      setSteps(prev => prev.map((step, idx) => {
+        if (idx === 0) {
+          // If extensions are detected, mark browser step as failed
+          // This prevents auto-advance and shows the blocking message
+          if (hasExtensions) {
+            return {
+              ...step,
+              status: "failed",
+              message: "Browser extensions detected - Please remove all extensions to continue"
+            };
+          } else {
+            // If no extensions and browser is compatible, mark as passed
+            // This allows progression to next step
+            if (browserInfo.isSupported) {
+              return {
+                ...step,
+                status: "passed",
+                message: "Your browser is compatible and no extensions detected"
+              };
+            }
+          }
+        }
+        return step;
+      }));
+    }
+  }, [extensionScanResult, currentStep, browserInfo]);
   
   
   // Handle retry for current step
@@ -773,9 +1129,15 @@ export default function PrecheckPage() {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      if (audioContextRef.current) {
+      if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+        try {
         audioContextRef.current.close();
+        } catch (e) {
+          // AudioContext might already be closed
+          console.log("[Microphone] AudioContext already closed in cleanup");
       }
+      }
+      audioContextRef.current = null;
     };
   }, [cameraStream, microphoneStream]);
   
@@ -783,6 +1145,8 @@ export default function PrecheckPage() {
   const handleComplete = useCallback(async () => {
     const allPassed = steps.every(step => step.status === "passed");
     
+    // Note: Extension blocking is handled on browser step (step 0) only
+    // If user reaches here, they've already passed the browser step without extensions
     if (!allPassed) return;
     
     // Store precheck completion
@@ -815,7 +1179,47 @@ export default function PrecheckPage() {
   }, [steps, assessmentId, token, email, name, capturedPhoto, router]);
   
   const allStepsPassed = steps.every(step => step.status === "passed");
+  const hasExtensions = extensionScanResult?.hasExtensions ?? false;
+  // Extension detection is informational only - no longer blocks progression
+  const canProceedToNext = allStepsPassed;
   const currentStepData = steps[currentStep];
+  
+  // Auto-redirect to instructions page when all steps pass
+  useEffect(() => {
+    console.log("[Precheck] Checking redirect conditions:", {
+      allStepsPassed,
+      assessmentId,
+      token,
+      stepsStatus: steps.map(s => ({ id: s.id, status: s.status }))
+    });
+    
+    if (allStepsPassed && assessmentId && token) {
+      console.log("[Precheck] ✅ All steps passed! Redirecting to instructions page in 1.5 seconds...");
+      // Small delay to show completion message
+      const redirectTimer = setTimeout(() => {
+        console.log("[Precheck] Executing redirect now...");
+        handleComplete();
+      }, 1500); // 1.5 second delay to show success message
+      
+      return () => {
+        console.log("[Precheck] Clearing redirect timer");
+        clearTimeout(redirectTimer);
+      };
+    } else {
+      console.log("[Precheck] ⚠️ Not redirecting - conditions not met:", {
+        allStepsPassed,
+        hasAssessmentId: !!assessmentId,
+        hasToken: !!token
+      });
+    }
+  }, [allStepsPassed, assessmentId, token, handleComplete, steps]);
+  
+  // Reset certification when leaving browser step
+  useEffect(() => {
+    if (currentStep !== 0) {
+      setExtensionsCertified(false);
+    }
+  }, [currentStep]);
   
   if (isLoading) {
     return (
@@ -951,17 +1355,351 @@ export default function PrecheckPage() {
               {currentStepData.status === "failed" && (
                 <div style={{
                   padding: "1rem",
-                  backgroundColor: "#fffbeb",
-                  border: "1px solid #fcd34d",
+                  backgroundColor: extensionScanResult?.hasExtensions ? "#fef2f2" : "#fffbeb",
+                  border: `1px solid ${extensionScanResult?.hasExtensions ? "#fecaca" : "#fcd34d"}`,
                   borderRadius: "0.5rem",
                   marginTop: "1rem"
                 }}>
-                  <p style={{ margin: 0, color: "#92400e", fontSize: "0.875rem" }}>
-                    <strong>Solution:</strong> Please use Chrome (version 110+) or Edge (version 110+) to continue.
-                    Update your browser if needed.
+                  <p style={{ margin: 0, color: extensionScanResult?.hasExtensions ? "#991b1b" : "#92400e", fontSize: "0.875rem", fontWeight: 600 }}>
+                    {extensionScanResult?.hasExtensions 
+                      ? "🚫 Cannot proceed: Browser extensions detected. Please remove all extensions before continuing."
+                      : "⚠️ Browser not supported. Please use Chrome (version 110+) or Edge (version 110+) to continue. Update your browser if needed."}
                   </p>
                 </div>
               )}
+
+              {/* USB Device Detection */}
+              {currentStep === 0 && (
+                <div style={{ marginTop: "1.5rem" }}>
+                  <USBDeviceCheck
+                    assessmentId={Array.isArray(assessmentId) ? assessmentId[0] : assessmentId || ""}
+                    userId={email || ""}
+                    onComplete={(hasSuspiciousDevices) => {
+                      console.log("[Precheck] USB devices:", hasSuspiciousDevices ? "Suspicious devices found" : "All clear");
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* Extension Detection */}
+              {currentStep === 0 && (
+                <>
+                  {/* Scanning State */}
+                  {isExtensionScanning && (
+                    <div style={{
+                      padding: "1.25rem",
+                      backgroundColor: "#f8fafc",
+                      border: "2px solid #e2e8f0",
+                      borderRadius: "0.75rem",
+                      marginTop: "1.5rem",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                        <div style={{
+                          width: "24px",
+                          height: "24px",
+                          border: "2px solid #e2e8f0",
+                          borderTopColor: "#10b981",
+                          borderRadius: "50%",
+                          animation: "spin 1s linear infinite",
+                        }} />
+                        <div style={{ flex: 1 }}>
+                          <p style={{ 
+                            margin: 0, 
+                            fontSize: "0.875rem", 
+                            fontWeight: 600,
+                            color: "#1e293b" 
+                          }}>
+                            {EXTENSION_DETECTION_CONFIG.MESSAGES.SCANNING}
+                          </p>
+                          <p style={{ 
+                            margin: "0.25rem 0 0 0", 
+                            fontSize: "0.8125rem", 
+                            color: "#64748b" 
+                          }}>
+                            {EXTENSION_DETECTION_CONFIG.MESSAGES.SCANNING_DESCRIPTION(KNOWN_EXTENSIONS.length)}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Web-based Detection Results */}
+                  {extensionScanResult && !extensionScanResult.permissionGranted && (
+                    <div style={{
+                      padding: "1.25rem",
+                      backgroundColor: extensionScanResult.hasExtensions ? "#fef2f2" : "#f0fdf4",
+                      border: `2px solid ${extensionScanResult.hasExtensions ? "#fecaca" : "#86efac"}`,
+                      borderRadius: "0.75rem",
+                      marginTop: "1.5rem",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem" }}>
+                        <span style={{ fontSize: "1.5rem" }}>
+                          {extensionScanResult.hasExtensions ? "⚠️" : "✅"}
+                        </span>
+                        <div style={{ flex: 1 }}>
+                          <p style={{ 
+                            margin: "0 0 0.5rem 0", 
+                            fontSize: "0.9375rem", 
+                            fontWeight: 700, 
+                            color: extensionScanResult.hasExtensions ? "#991b1b" : "#065f46"
+                          }}>
+                            {extensionScanResult.hasExtensions 
+                              ? `Extension Indicators Detected (${extensionScanResult.count})` 
+                              : "No Extension Indicators Found"}
+                          </p>
+                          {extensionScanResult.hasExtensions ? (
+                            <>
+                              <p style={{ 
+                                margin: "0 0 0.75rem 0", 
+                                fontSize: "0.875rem", 
+                                color: "#991b1b"
+                              }}>
+                                Extension database detection found the following extensions. Please disable them to continue.
+                              </p>
+                              {extensionScanResult.details.extensions.length > 0 ? (
+                                <div style={{
+                                  padding: "0.75rem",
+                                  backgroundColor: "#ffffff",
+                                  borderRadius: "0.375rem",
+                                  marginBottom: "0.75rem",
+                                }}>
+                                  <p style={{ margin: "0 0 0.5rem 0", fontSize: "0.8125rem", fontWeight: 600, color: "#991b1b" }}>
+                                    Detected Extensions:
+                                  </p>
+                                  <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#991b1b" }}>
+                                    {extensionScanResult.details.extensions.map((ext, idx) => (
+                                      <li key={idx} style={{ marginBottom: "0.25rem", padding: "0.5rem", backgroundColor: "#fef2f2", borderRadius: "0.375rem", border: "1px solid #fecaca" }}>
+                                        <strong>{ext.name}</strong> {ext.version && <span style={{ color: "#64748b", fontSize: "0.8125rem" }}>(v{ext.version})</span>}
+                                        {ext.id && <span style={{ color: "#64748b", fontSize: "0.75rem", display: "block", marginTop: "0.25rem" }}>ID: {ext.id.substring(0, 8)}...</span>}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : extensionScanResult.details.uniqueExtensionIds.length > 0 ? (
+                                <div style={{
+                                  padding: "0.75rem",
+                                  backgroundColor: "#ffffff",
+                                  borderRadius: "0.375rem",
+                                  marginBottom: "0.75rem",
+                                }}>
+                                  <p style={{ margin: "0 0 0.5rem 0", fontSize: "0.8125rem", fontWeight: 600, color: "#991b1b" }}>
+                                    Detected Extension IDs (names not available):
+                                  </p>
+                                  <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.8125rem", color: "#991b1b" }}>
+                                    {extensionScanResult.details.uniqueExtensionIds.map((id, idx) => (
+                                      <li key={idx}>{id}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+                              <div style={{
+                                padding: "0.75rem",
+                                backgroundColor: "#fffbeb",
+                                borderRadius: "0.375rem",
+                                marginBottom: "0.75rem",
+                              }}>
+                                <p style={{ 
+                                  margin: "0 0 0.5rem 0", 
+                                  fontSize: "0.8125rem", 
+                                  fontWeight: 600,
+                                  color: "#92400e"
+                                }}>
+                                  How to disable:
+                                </p>
+                                <ol style={{ 
+                                  margin: 0, 
+                                  paddingLeft: "1.25rem",
+                                  fontSize: "0.8125rem",
+                                  color: "#92400e"
+                                }}>
+                                  <li>Go to <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>{EXTENSION_DETECTION_CONFIG.EXTENSION_MANAGEMENT_URLS.CHROME}</code> or <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>{EXTENSION_DETECTION_CONFIG.EXTENSION_MANAGEMENT_URLS.EDGE}</code></li>
+                                  <li>Toggle OFF each extension listed above</li>
+                                  <li>Click &quot;Re-scan&quot; below to verify</li>
+                                </ol>
+                              </div>
+                              <button
+                                onClick={async () => {
+                                  await scanExtensions();
+                                }}
+                                disabled={isExtensionScanning}
+                                style={{
+                                  width: "100%",
+                                  padding: "0.875rem",
+                                  backgroundColor: "#f59e0b",
+                                  color: "#ffffff",
+                                  border: "none",
+                                  borderRadius: "0.5rem",
+                                  fontSize: "0.875rem",
+                                  fontWeight: 600,
+                                  cursor: isExtensionScanning ? "not-allowed" : "pointer",
+                                  opacity: isExtensionScanning ? 0.6 : 1,
+                                }}
+                              >
+                                {isExtensionScanning ? "⏳ Scanning..." : "🔄 Re-scan Extensions"}
+                              </button>
+                            </>
+                          ) : (
+                            <p style={{ 
+                              margin: "0 0 0.75rem 0", 
+                              fontSize: "0.875rem", 
+                              color: "#065f46"
+                            }}>
+                              Web-based detection completed. No extension indicators found. However, some extensions may not be detectable. Please manually verify all extensions are disabled.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Extensions Detected (Permission Granted) */}
+                  {extensionScanResult && extensionScanResult.permissionGranted && (
+                    <div style={{
+                      padding: "1.25rem",
+                      backgroundColor: extensionScanResult.hasExtensions ? "#fef2f2" : "#f0fdf4",
+                      border: `2px solid ${extensionScanResult.hasExtensions ? "#fecaca" : "#86efac"}`,
+                      borderRadius: "0.75rem",
+                      marginTop: "1.5rem",
+                    }}>
+                      <h3 style={{ 
+                        margin: "0 0 0.75rem 0", 
+                        fontSize: "1rem", 
+                        fontWeight: 600,
+                        color: extensionScanResult.hasExtensions ? "#dc2626" : "#065f46"
+                      }}>
+                        {extensionScanResult.hasExtensions 
+                          ? `🚫 ${extensionScanResult.count} Extension(s) Detected` 
+                          : "✅ No Extensions Detected"}
+                      </h3>
+
+                      {extensionScanResult.hasExtensions && (
+                        <>
+                          <p style={{ 
+                            margin: "0 0 0.75rem 0", 
+                            fontSize: "0.875rem", 
+                            color: "#991b1b"
+                          }}>
+                            The following extensions must be disabled:
+                          </p>
+                          
+                          <ul style={{ 
+                            margin: "0 0 1rem 0", 
+                            paddingLeft: "1.25rem",
+                            fontSize: "0.875rem",
+                            color: "#991b1b"
+                          }}>
+                            {extensionScanResult.details.extensions.map((ext, idx) => (
+                              <li key={idx} style={{ marginBottom: "0.25rem", padding: "0.5rem", backgroundColor: "#ffffff", borderRadius: "0.375rem", border: "1px solid #fecaca" }}>
+                                <strong>{ext.name}</strong> {ext.version && <span style={{ color: "#64748b", fontSize: "0.8125rem" }}>(v{ext.version})</span>}
+                              </li>
+                            ))}
+                          </ul>
+
+                          <div style={{
+                            padding: "0.75rem",
+                            backgroundColor: "#fffbeb",
+                            borderRadius: "0.375rem",
+                            marginBottom: "0.75rem",
+                          }}>
+                            <p style={{ 
+                              margin: "0 0 0.5rem 0", 
+                              fontSize: "0.8125rem", 
+                              fontWeight: 600,
+                              color: "#92400e"
+                            }}>
+                              How to disable:
+                            </p>
+                            <ol style={{ 
+                              margin: 0, 
+                              paddingLeft: "1.25rem",
+                              fontSize: "0.8125rem",
+                              color: "#92400e"
+                            }}>
+                                  <li>Go to <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>{EXTENSION_DETECTION_CONFIG.EXTENSION_MANAGEMENT_URLS.CHROME}</code> or <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>{EXTENSION_DETECTION_CONFIG.EXTENSION_MANAGEMENT_URLS.EDGE}</code></li>
+                              <li>Toggle OFF each extension listed above</li>
+                              <li>Click &quot;Re-scan&quot; below</li>
+                            </ol>
+                          </div>
+
+                          <button
+                            onClick={async () => {
+                              await scanExtensions();
+                            }}
+                            disabled={isExtensionScanning}
+                            style={{
+                              width: "100%",
+                              padding: "0.875rem",
+                              backgroundColor: "#f59e0b",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.5rem",
+                              fontSize: "0.875rem",
+                              fontWeight: 600,
+                              cursor: isExtensionScanning ? "not-allowed" : "pointer",
+                              opacity: isExtensionScanning ? 0.6 : 1,
+                            }}
+                          >
+                            {isExtensionScanning ? "⏳ Scanning..." : "🔄 Re-scan Extensions"}
+                          </button>
+                        </>
+                      )}
+
+                      {!extensionScanResult.hasExtensions && (
+                        <p style={{ 
+                          margin: 0, 
+                          fontSize: "0.875rem", 
+                          color: "#065f46"
+                        }}>
+                          ✅ Your browser is clean - No extensions detected
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Fallback: Manual Certification if Permission Not Granted */}
+                  {extensionScanResult && !extensionScanResult.permissionGranted && (
+                <div style={{
+                  padding: "1rem",
+                  backgroundColor: "#fffbeb",
+                  border: "1px solid #fcd34d",
+                  borderRadius: "0.5rem",
+                      marginTop: "1rem",
+                    }}>
+                      <p style={{ 
+                        margin: "0 0 0.75rem 0", 
+                        fontSize: "0.875rem", 
+                        fontWeight: 600,
+                        color: "#92400e"
+                      }}>
+                        Alternative: Manual Certification
+                      </p>
+                      <label style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: "0.75rem",
+                        cursor: "pointer",
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={extensionsCertified}
+                          onChange={(e) => setExtensionsCertified(e.target.checked)}
+                          style={{
+                            marginTop: "0.25rem",
+                            width: "1.25rem",
+                            height: "1.25rem",
+                            cursor: "pointer",
+                          }}
+                        />
+                        <span style={{ fontSize: "0.8125rem", color: "#92400e" }}>
+                          I certify that I have manually disabled ALL browser extensions
+                          by going to <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>{EXTENSION_DETECTION_CONFIG.EXTENSION_MANAGEMENT_URLS.CHROME}</code> or <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>{EXTENSION_DETECTION_CONFIG.EXTENSION_MANAGEMENT_URLS.EDGE}</code> and toggling them all OFF.
+                        </span>
+                      </label>
+                </div>
+              )}
+                </>
+              )}
+
             </div>
           )}
           
@@ -1088,6 +1826,63 @@ export default function PrecheckPage() {
           {/* Microphone Check */}
           {currentStep === 3 && (
             <div>
+              {/* Instructions Card */}
+              {!micTestStarted && currentStepData.status !== "running" && (
+                <div style={{
+                  padding: "1.25rem",
+                  backgroundColor: "#eff6ff",
+                  border: "2px solid #3b82f6",
+                  borderRadius: "0.75rem",
+                  marginBottom: "1.5rem"
+                }}>
+                  <h3 style={{ 
+                    margin: "0 0 0.75rem 0", 
+                    fontSize: "1rem", 
+                    fontWeight: 700, 
+                    color: "#1e40af" 
+                  }}>
+                    🎤 Microphone Test Instructions
+                  </h3>
+                  <p style={{ 
+                    margin: "0 0 0.75rem 0", 
+                    fontSize: "0.9375rem", 
+                    fontWeight: 600, 
+                    color: "#1e40af" 
+                  }}>
+                    Please read this phrase clearly:
+                  </p>
+                  <div style={{
+                    padding: "0.75rem",
+                    backgroundColor: "#ffffff",
+                    borderRadius: "0.5rem",
+                    marginBottom: "0.75rem",
+                    border: "1px solid #93c5fd"
+                  }}>
+                    <p style={{ 
+                      margin: 0, 
+                      fontSize: "1rem", 
+                      fontWeight: 600, 
+                      color: "#1e40af",
+                      fontStyle: "italic"
+                    }}>
+                      "{MIC_CHECK_CONFIG.PHRASE}"
+                    </p>
+                  </div>
+                  <ol style={{ 
+                    margin: 0, 
+                    paddingLeft: "1.25rem",
+                    fontSize: "0.875rem",
+                    color: "#1e40af"
+                  }}>
+                    <li>Click "Start Microphone Check" below</li>
+                    <li>Read the phrase clearly when testing begins</li>
+                    <li>Speak at normal volume (don't whisper)</li>
+                    <li>Watch the progress bar fill up as you speak</li>
+                    <li>Test takes 3 seconds - keep speaking!</li>
+                  </ol>
+                </div>
+              )}
+
               {/* Microphone Selection Dropdown */}
               {audioDevices.length > 0 && (
                 <div style={{ marginBottom: "1.5rem" }}>
@@ -1111,12 +1906,21 @@ export default function PrecheckPage() {
                         if (animationFrameRef.current) {
                           cancelAnimationFrame(animationFrameRef.current);
                         }
-                        if (audioContextRef.current) {
+                        if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+                          try {
                           audioContextRef.current.close();
+                          } catch (e) {
+                            // AudioContext might already be closed
+                            console.log("[Microphone] AudioContext already closed");
                         }
+                        }
+                        audioContextRef.current = null;
                         setAudioLevel(-Infinity);
                         setAudioDataArray(null);
                         setIsListening(false);
+                        setMicTestStarted(false);
+                        setSamplesAboveThreshold(0);
+                        setTotalSamples(0);
                       }
                     }}
                     style={{
@@ -1149,8 +1953,7 @@ export default function PrecheckPage() {
                 </div>
               )}
               
-              
-              {/* Audio Visualizer */}
+              {/* Enhanced Audio Visualizer with Threshold Line */}
               <div style={{
                 height: "150px",
                 backgroundColor: "#f8fafc",
@@ -1171,14 +1974,37 @@ export default function PrecheckPage() {
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    padding: "1rem"
+                    padding: "1rem",
+                    position: "relative"
                   }}>
                     <svg width="100%" height="100%" style={{ overflow: "visible" }}>
+                      {/* Threshold line at -40 dB (shown at 50% height) */}
+                      <line
+                        x1="0%"
+                        y1="50%"
+                        x2="100%"
+                        y2="50%"
+                        stroke="#fbbf24"
+                        strokeWidth="2"
+                        strokeDasharray="4,4"
+                        opacity={0.8}
+                      />
+                      <text
+                        x="2%"
+                        y="48%"
+                        fill="#fbbf24"
+                        fontSize="10"
+                        fontWeight="600"
+                      >
+                        -40 dB
+                      </text>
+                      {/* Waveform bars */}
                       {Array.from(audioDataArray).slice(0, 128).map((value, index) => {
                         const normalizedValue = (value - 128) / 128;
                         const barHeight = Math.abs(normalizedValue) * 60;
                         const x = (index / 128) * 100 + "%";
-                        const color = audioLevel > -50 ? "#10b981" : "#3b82f6";
+                        // Color: green if above threshold, blue if below
+                        const color = audioLevel >= MIC_CHECK_CONFIG.THRESHOLD_DB ? "#10b981" : "#3b82f6";
                         
                         return (
                           <rect
@@ -1221,7 +2047,7 @@ export default function PrecheckPage() {
                   </div>
                 )}
                 
-                {/* Audio Level Indicator */}
+                {/* Enhanced Audio Level Indicator with Color Coding */}
                 <div style={{
                   position: "absolute",
                   bottom: "0.5rem",
@@ -1230,69 +2056,205 @@ export default function PrecheckPage() {
                   display: "flex",
                   alignItems: "center",
                   gap: "0.5rem",
-                  backgroundColor: "rgba(255, 255, 255, 0.9)",
-                  padding: "0.25rem 0.75rem",
+                  backgroundColor: "rgba(255, 255, 255, 0.95)",
+                  padding: "0.375rem 0.875rem",
                   borderRadius: "1rem",
-                  fontSize: "0.875rem"
+                  fontSize: "0.875rem",
+                  boxShadow: "0 2px 4px rgba(0,0,0,0.1)"
                 }}>
+                  {audioLevel > -Infinity ? (
+                    <>
                   <div style={{
-                    width: "8px",
-                    height: "8px",
+                        width: "10px",
+                        height: "10px",
                     borderRadius: "50%",
-                    backgroundColor: audioLevel > -Infinity ? "#10b981" : "#ef4444",
-                    animation: audioLevel > -Infinity ? "pulse 1s ease-in-out infinite" : "none"
-                  }} />
-                  <span style={{ color: "#64748b" }}>
-                    {audioLevel > -Infinity 
-                      ? `${audioLevel.toFixed(1)} dB` 
-                      : "No audio detected"}
+                        backgroundColor: audioLevel >= MIC_CHECK_CONFIG.THRESHOLD_DB 
+                          ? "#10b981" 
+                          : audioLevel > -80 
+                          ? "#fbbf24" 
+                          : "#ef4444",
+                        animation: audioLevel >= MIC_CHECK_CONFIG.THRESHOLD_DB ? "pulse 1s ease-in-out infinite" : "none"
+                      }} />
+                      <span style={{ 
+                        color: audioLevel >= MIC_CHECK_CONFIG.THRESHOLD_DB 
+                          ? "#065f46" 
+                          : audioLevel > -80 
+                          ? "#92400e" 
+                          : "#991b1b",
+                        fontWeight: 600
+                      }}>
+                        {audioLevel >= MIC_CHECK_CONFIG.THRESHOLD_DB 
+                          ? `🟢 ${audioLevel.toFixed(1)} dB ✓ Good!`
+                          : audioLevel > -80 
+                          ? `🟡 ${audioLevel.toFixed(1)} dB`
+                          : `🔴 ${audioLevel.toFixed(1)} dB`}
                   </span>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{
+                        width: "10px",
+                        height: "10px",
+                        borderRadius: "50%",
+                        backgroundColor: "#ef4444"
+                      }} />
+                      <span style={{ color: "#991b1b", fontWeight: 600 }}>
+                        No audio detected
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
               
-              {/* Audio Level Bar */}
+              {/* Progress Tracking (during test only) */}
+              {isListening && micTestStarted && (
+                <div style={{ marginBottom: "1rem" }}>
               <div style={{
-                height: "8px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: "0.5rem"
+                  }}>
+                    <span style={{ 
+                      fontSize: "0.875rem", 
+                      fontWeight: 600, 
+                      color: "#374151" 
+                    }}>
+                      Voice Detection Progress
+                    </span>
+                    <span style={{ 
+                      fontSize: "0.875rem", 
+                      fontWeight: 700, 
+                      color: "#10b981" 
+                    }}>
+                      {Math.min(100, Math.round((samplesAboveThreshold / MIC_CHECK_CONFIG.REQUIRED_SAMPLES) * 100))}%
+                    </span>
+                  </div>
+                  <div style={{
+                    height: "12px",
                 backgroundColor: "#e2e8f0",
-                borderRadius: "4px",
-                marginBottom: "1rem",
+                    borderRadius: "6px",
                 overflow: "hidden",
                 position: "relative"
               }}>
                 <div style={{
-                  width: `${Math.max(0, Math.min(100, ((audioLevel + 100) / 100) * 100))}%`,
+                      width: `${Math.min(100, (samplesAboveThreshold / MIC_CHECK_CONFIG.REQUIRED_SAMPLES) * 100)}%`,
                   height: "100%",
-                  backgroundColor: audioLevel > -Infinity ? "#10b981" : "#e2e8f0",
-                  borderRadius: "4px",
-                  transition: "width 0.1s ease, background-color 0.2s ease",
-                  boxShadow: audioLevel > -Infinity ? "0 0 8px rgba(16, 185, 129, 0.5)" : "none"
-                }} />
+                      backgroundColor: "#10b981",
+                      borderRadius: "6px",
+                      transition: "width 0.2s ease",
+                      position: "relative",
+                      overflow: "hidden"
+                    }}>
+                      {isListening && (
+                        <div style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)",
+                          animation: "shimmer 1.5s infinite"
+                        }} />
+                      )}
               </div>
+                  </div>
+                  <p style={{ 
+                    margin: "0.5rem 0 0 0", 
+                    fontSize: "0.75rem", 
+                    color: "#6b7280" 
+                  }}>
+                    Minimum required: {MIC_CHECK_CONFIG.REQUIRED_SAMPLES} samples above {MIC_CHECK_CONFIG.THRESHOLD_DB} dB
+                  </p>
+                </div>
+              )}
+
+              {/* Dynamic Status Messages */}
+              {currentStepData.status === "running" && isListening && (
               <div style={{
                 padding: "1rem",
-                backgroundColor: isListening && audioLevel > -Infinity ? "#f0fdf4" : "#f8fafc",
-                border: isListening && audioLevel > -Infinity ? "1px solid #10b981" : "1px solid #e2e8f0",
+                  backgroundColor: "#f0fdf4",
+                  border: "1px solid #10b981",
                 borderRadius: "0.5rem",
                 marginBottom: "1rem"
               }}>
-                <p style={{ margin: 0, color: "#64748b", fontSize: "0.875rem" }}>
-                  <strong>Tip:</strong> {isListening 
-                    ? "Speak clearly or make any noise. The system is automatically testing your microphone for 3 seconds."
-                    : "The microphone check will start automatically. Please speak or make noise when testing begins."}
-                  {audioDevices.length > 1 && " If you have multiple microphones, select the correct one from the dropdown above."}
-                </p>
-                {isListening && audioLevel > -Infinity && (
-                  <p style={{ margin: "0.5rem 0 0 0", color: "#065f46", fontSize: "0.875rem", fontWeight: 600 }}>
-                    ✓ Audio detected! Testing microphone...
+                  <p style={{ 
+                    margin: 0, 
+                    color: "#065f46", 
+                    fontSize: "0.875rem", 
+                    fontWeight: 600 
+                  }}>
+                    {currentStepData.message}
                   </p>
-                )}
               </div>
+              )}
+
+              {/* Final Status Message */}
+              {currentStepData.status !== "running" && (
+                <div style={{
+                  padding: "1rem",
+                  backgroundColor: currentStepData.status === "passed" ? "#f0fdf4" : currentStepData.status === "failed" ? "#fef2f2" : "#f8fafc",
+                  border: `1px solid ${currentStepData.status === "passed" ? "#10b981" : currentStepData.status === "failed" ? "#ef4444" : "#e2e8f0"}`,
+                  borderRadius: "0.5rem",
+                  marginBottom: "1rem"
+                }}>
               <p style={{ 
+                    margin: 0, 
                 color: currentStepData.status === "passed" ? "#065f46" : currentStepData.status === "failed" ? "#991b1b" : "#64748b",
-                marginBottom: currentStepData.status === "failed" ? "1rem" : "0"
+                    fontSize: "0.875rem",
+                    fontWeight: currentStepData.status !== "pending" ? 600 : 400
               }}>
                 {currentStepData.message}
               </p>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              {!micTestStarted && currentStepData.status !== "running" && currentStepData.status !== "passed" && (
+                <button
+                  onClick={async () => {
+                    await checkMicrophone();
+                  }}
+                  disabled={isListening}
+                  style={{
+                    width: "100%",
+                    padding: "1rem",
+                    backgroundColor: "#3b82f6",
+                    color: "#ffffff",
+                    border: "none",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                    fontWeight: 600,
+                    cursor: isListening ? "not-allowed" : "pointer",
+                    opacity: isListening ? 0.6 : 1,
+                    marginBottom: "1rem"
+                  }}
+                >
+                  🎤 Start Microphone Check
+                </button>
+              )}
+
+              {isListening && micTestStarted && (
+                <div style={{
+                  width: "100%",
+                  padding: "1rem",
+                  backgroundColor: "#eff6ff",
+                  border: "2px solid #3b82f6",
+                  borderRadius: "0.5rem",
+                  textAlign: "center",
+                  marginBottom: "1rem"
+                }}>
+                  <p style={{ 
+                    margin: 0, 
+                    color: "#1e40af", 
+                    fontSize: "0.9375rem", 
+                    fontWeight: 600 
+                  }}>
+                    🎙️ Testing in progress... Keep speaking!
+                  </p>
+                </div>
+              )}
+
               {currentStepData.status === "failed" && (
                 <button
                   onClick={handleRetry}
@@ -1305,8 +2267,7 @@ export default function PrecheckPage() {
                     borderRadius: "0.5rem",
                     fontSize: "1rem",
                     fontWeight: 600,
-                    cursor: "pointer",
-                    marginTop: "1rem"
+                    cursor: "pointer"
                   }}
                 >
                   🔄 Retry Microphone Check
@@ -1329,23 +2290,96 @@ export default function PrecheckPage() {
               }} />
             </div>
           )}
+
+          {/* Next Button - Show when current step passes */}
+          {currentStepData.status === "passed" && currentStep < steps.length - 1 && (
+            <div style={{ marginTop: "1.5rem", paddingTop: "1.5rem", borderTop: "1px solid #e2e8f0" }}>
+              {/* Certification checkbox for browser step */}
+              {currentStep === 0 && extensionScanResult && !extensionScanResult.permissionGranted && (
+                <div style={{
+                  padding: "1rem",
+                  backgroundColor: "#fef2f2",
+                  border: "2px solid #fecaca",
+                  borderRadius: "0.5rem",
+                  marginBottom: "1rem",
+                }}>
+                  <label style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: "0.75rem",
+                    cursor: "pointer",
+                  }}>
+                    <input
+                      type="checkbox"
+                      required
+                      checked={extensionsCertified}
+                      onChange={(e) => setExtensionsCertified(e.target.checked)}
+                      style={{
+                        marginTop: "0.25rem",
+                        width: "1.25rem",
+                        height: "1.25rem",
+                        cursor: "pointer",
+                      }}
+                    />
+                    <span style={{ fontSize: "0.875rem", color: "#991b1b" }}>
+                      <strong>REQUIRED: I certify that I have manually disabled ALL browser extensions</strong>
+                      <br />
+                      <span style={{ fontSize: "0.8125rem" }}>
+                        I have gone to <code style={{ backgroundColor: "#fee2e2", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>{EXTENSION_DETECTION_CONFIG.EXTENSION_MANAGEMENT_URLS.CHROME}</code> or <code style={{ backgroundColor: "#fee2e2", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>{EXTENSION_DETECTION_CONFIG.EXTENSION_MANAGEMENT_URLS.EDGE}</code> and toggled OFF all extensions.
+                        I understand that using extensions during the assessment will result in disqualification.
+                      </span>
+                    </span>
+                  </label>
+        </div>
+              )}
+
+              <button
+                onClick={() => {
+                  if (currentStep < steps.length - 1) {
+                    setCurrentStep(currentStep + 1);
+                  }
+                }}
+                style={{
+                  width: "100%",
+                  padding: "1rem",
+                  backgroundColor: "#10b981",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "0.5rem",
+                  fontSize: "1rem",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  transition: "all 0.2s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "0.5rem",
+                }}
+              >
+                Next: {steps[currentStep + 1]?.title || "Next Step"} →
+              </button>
+            </div>
+          )}
         </div>
         
-        {/* Continue Button */}
+        {/* Continue Button - Only shown when all steps are complete */}
         {allStepsPassed && (
           <button
             onClick={handleComplete}
+            disabled={!canProceedToNext}
             style={{
               width: "100%",
               padding: "1rem 2rem",
-              backgroundColor: "#6953a3",
+              backgroundColor: canProceedToNext ? "#6953a3" : "#9ca3af",
               color: "#ffffff",
               border: "none",
               borderRadius: "0.5rem",
               fontSize: "1.125rem",
               fontWeight: 600,
-              cursor: "pointer",
-              boxShadow: "0 4px 6px -1px rgba(105, 83, 163, 0.3)"
+              cursor: canProceedToNext ? "pointer" : "not-allowed",
+              boxShadow: canProceedToNext ? "0 4px 6px -1px rgba(105, 83, 163, 0.3)" : "none",
+              transition: "all 0.2s ease",
+              opacity: canProceedToNext ? 1 : 0.7,
             }}
           >
             Continue to Instructions →
@@ -1361,6 +2395,10 @@ export default function PrecheckPage() {
         @keyframes pulse {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.5; }
+        }
+        @keyframes shimmer {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
         }
       `}</style>
     </div>
