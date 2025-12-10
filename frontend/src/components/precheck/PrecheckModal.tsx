@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { usePrecheck, type CheckType } from "@/hooks/usePrecheck";
+import USBDeviceCheck from "./USBDeviceCheck";
 import { usePrecheckExtensions } from "@/hooks/usePrecheckExtensions";
 
 interface PrecheckModalProps {
@@ -64,6 +65,16 @@ const NEXT_STEP_LABELS: Record<number, string> = {
   3: "Complete Pre-Check →",
 };
 
+const getNextButtonLabel = (currentStep: number, canProceed: boolean, hasExtensions: boolean): string => {
+  if (currentStep === 0 && hasExtensions) {
+    return "⚠️ Remove Extensions to Continue";
+  }
+  if (!canProceed) {
+    return NEXT_STEP_LABELS[currentStep] || "Continue →";
+  }
+  return NEXT_STEP_LABELS[currentStep] || "Continue →";
+};
+
 export function PrecheckModal({
   isOpen,
   onComplete,
@@ -75,12 +86,14 @@ export function PrecheckModal({
 }: PrecheckModalProps) {
   const [currentStep, setCurrentStep] = useState(0);
   const [isChecking, setIsChecking] = useState(false);
+  const [extensionsCertified, setExtensionsCertified] = useState(false);
   
   // Extension detection
   const {
     isScanning: isExtensionScanning,
     scanResult: extensionScanResult,
     scan: scanExtensions,
+    requestPermission,
   } = usePrecheckExtensions();
 
   // Precheck hook
@@ -143,6 +156,31 @@ export function PrecheckModal({
     }
   }, [isOpen, stopAllStreams]);
 
+  // Auto-scan extensions when browser check step is active
+  useEffect(() => {
+    if (isOpen && currentCheckType === "browser" && !isExtensionScanning) {
+      // Automatically scan for extensions when browser check step is shown
+      // Only scan if we don't have results yet
+      // The scan function already has a 1000ms delay built-in
+      if (!extensionScanResult) {
+        const timer = setTimeout(() => {
+          scanExtensions().catch((err) => {
+            console.error("Extension scan error:", err);
+          });
+        }, 100); // Small delay to ensure DOM is ready
+        
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [isOpen, currentCheckType, extensionScanResult, isExtensionScanning, scanExtensions]);
+
+  // Reset certification checkbox when leaving browser step
+  useEffect(() => {
+    if (currentCheckType !== "browser") {
+      setExtensionsCertified(false);
+    }
+  }, [currentCheckType]);
+
   // Handle running current check
   const handleRunCheck = useCallback(async () => {
     if (isChecking) return;
@@ -151,9 +189,12 @@ export function PrecheckModal({
     try {
       await runCheck(currentCheckType);
       
-      // For browser check, also scan extensions
+      // For browser check, also scan extensions (run in parallel, don't wait)
       if (currentCheckType === "browser") {
-        await scanExtensions();
+        // Don't await - let it run in background
+        scanExtensions().catch((err) => {
+          console.error("Extension scan error:", err);
+        });
       }
     } finally {
       setIsChecking(false);
@@ -306,13 +347,26 @@ export function PrecheckModal({
     };
   }, [currentCheckType, microphoneStream]);
 
+  // Auto-scan extensions when browser check is active
+  useEffect(() => {
+    if (currentCheckType === "browser" && !extensionScanResult && !isExtensionScanning) {
+      const timer = setTimeout(() => {
+        scanExtensions().catch(err => {
+          console.error("Auto-scan failed:", err);
+        });
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [currentCheckType, extensionScanResult, isExtensionScanning, scanExtensions]);
+
   if (!isOpen) return null;
 
-  // Only block if HARMFUL extension is detected (screen recorder, automation, remote desktop)
-  const hasHarmfulExtension = extensionScanResult?.hasHarmfulExtension ?? false;
+  // Extension detection is informational only - no longer blocks progression
+  const hasExtensions = extensionScanResult?.hasExtensions ?? false;
+  const extensionCount = extensionScanResult?.count ?? 0;
+  
   const canProceed = currentCheck?.status === "passed" && 
-    (currentCheckType !== "microphone" || thresholdReached) &&
-    (currentCheckType !== "browser" || !hasHarmfulExtension);
+    (currentCheckType !== "microphone" || thresholdReached);
 
   return (
     <div
@@ -445,7 +499,7 @@ export function PrecheckModal({
           {/* Browser Check */}
           {currentCheckType === "browser" && (
             <div>
-              {currentCheck?.status === "passed" && !hasHarmfulExtension ? (
+              {currentCheck?.status === "passed" ? (
                 <div style={{
                   backgroundColor: "#f0fdf4",
                   borderRadius: "0.75rem",
@@ -506,32 +560,170 @@ export function PrecheckModal({
                 </div>
               )}
 
-              {/* Extension Warnings - Only show for HARMFUL extensions */}
-              {extensionScanResult && hasHarmfulExtension && (
-                <div
-                  style={{
-                    padding: "1rem",
+              {/* Extension Detection with Permission Request */}
+              {currentCheckType === "browser" && (
+                <>
+                  {/* Scanning State */}
+                  {isExtensionScanning && (
+                    <div style={{
+                      padding: "1.25rem",
+                      backgroundColor: "#f8fafc",
+                      border: "2px solid #e2e8f0",
+                      borderRadius: "0.75rem",
+                      marginBottom: "1rem",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                        <div style={{
+                          width: "24px",
+                          height: "24px",
+                          border: "2px solid #e2e8f0",
+                          borderTopColor: "#10b981",
+                          borderRadius: "50%",
+                          animation: "spin 1s linear infinite",
+                        }} />
+                        <div style={{ flex: 1 }}>
+                          <p style={{ 
+                            margin: 0, 
+                            fontSize: "0.875rem", 
+                            color: "#64748b" 
+                          }}>
+                            Scanning for browser extensions...
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Permission Not Granted or Web-based Detection */}
+                  {extensionScanResult && !extensionScanResult.permissionGranted && (
+                    <div style={{
+                      padding: "1.25rem",
                     backgroundColor: "#fef2f2",
-                    border: "1px solid #fecaca",
+                      border: "2px solid #fecaca",
                     borderRadius: "0.75rem",
                     marginBottom: "1rem",
-                  }}
-                >
-                  <p style={{ fontWeight: 600, marginBottom: "0.5rem", color: "#dc2626", margin: 0 }}>
-                    ⚠️ Harmful Extensions Detected
-                  </p>
-                  <ul style={{ margin: "0.5rem 0 0", paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#dc2626" }}>
-                    {extensionScanResult.extensions
-                      .filter(ext => ext.category === "screen_recorder" || ext.category === "automation" || ext.category === "remote_desktop")
-                      .map((ext, i) => (
-                        <li key={i} style={{ marginBottom: "0.25rem" }}>
-                          {ext.description}
+                    }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem" }}>
+                        <span style={{ fontSize: "1.5rem" }}>🔐</span>
+                        <div style={{ flex: 1 }}>
+                          <p style={{ 
+                            margin: "0 0 0.5rem 0", 
+                            fontSize: "0.9375rem", 
+                            fontWeight: 700, 
+                            color: "#991b1b" 
+                          }}>
+                            Permission Required to Detect Extensions
+                          </p>
+                          {extensionScanResult.hasExtensions ? (
+                            <>
+                              <p style={{ 
+                                margin: "0 0 0.75rem 0", 
+                                fontSize: "0.875rem", 
+                                color: "#991b1b"
+                              }}>
+                                Web-based detection found {extensionScanResult.count} extension indicator(s). 
+                                Some extensions may not be detected. Please manually verify all extensions are disabled.
+                              </p>
+                              <div style={{
+                                padding: "0.75rem",
+                                backgroundColor: "#ffffff",
+                                borderRadius: "0.375rem",
+                                marginBottom: "0.75rem",
+                              }}>
+                                <p style={{ margin: "0 0 0.5rem 0", fontSize: "0.8125rem", fontWeight: 600, color: "#991b1b" }}>
+                                  Detected Extension IDs:
+                                </p>
+                                <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.8125rem", color: "#991b1b" }}>
+                                  {extensionScanResult.details.uniqueExtensionIds.map((id, idx) => (
+                                    <li key={idx}>{id}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            </>
+                          ) : (
+                            <p style={{ 
+                              margin: "0 0 0.75rem 0", 
+                              fontSize: "0.875rem", 
+                              color: "#991b1b"
+                            }}>
+                              Web-based detection completed. No extensions detected via DOM scanning. 
+                              However, some extensions may not be detectable. Please manually verify all extensions are disabled.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Extensions Detected (Permission Granted) */}
+                  {extensionScanResult && extensionScanResult.permissionGranted && (
+                    <div style={{
+                      padding: "1.25rem",
+                      backgroundColor: extensionScanResult.hasExtensions ? "#fef2f2" : "#f0fdf4",
+                      border: `2px solid ${extensionScanResult.hasExtensions ? "#fecaca" : "#86efac"}`,
+                      borderRadius: "0.75rem",
+                      marginBottom: "1rem",
+                    }}>
+                      <h3 style={{ 
+                        margin: "0 0 0.75rem 0", 
+                        fontSize: "1rem", 
+                        fontWeight: 600,
+                        color: extensionScanResult.hasExtensions ? "#dc2626" : "#065f46"
+                      }}>
+                        {extensionScanResult.hasExtensions 
+                          ? `🚫 ${extensionScanResult.count} Extension(s) Detected` 
+                          : "✅ No Extensions Detected"}
+                      </h3>
+
+                      {extensionScanResult.hasExtensions && (
+                        <>
+                          <p style={{ 
+                            margin: "0 0 0.75rem 0", 
+                            fontSize: "0.875rem", 
+                            color: "#991b1b"
+                          }}>
+                            The following extensions must be disabled:
+                          </p>
+                          
+                          <ul style={{ 
+                            margin: "0 0 1rem 0", 
+                            paddingLeft: "1.25rem",
+                            fontSize: "0.875rem",
+                            color: "#991b1b"
+                          }}>
+                            {extensionScanResult.details.extensions.map((ext, idx) => (
+                              <li key={idx} style={{ marginBottom: "0.25rem", padding: "0.5rem", backgroundColor: "#ffffff", borderRadius: "0.375rem", border: "1px solid #fecaca" }}>
+                                <strong>{ext.name}</strong> {ext.version && <span style={{ color: "#64748b", fontSize: "0.8125rem" }}>(v{ext.version})</span>}
                         </li>
                       ))}
                   </ul>
-                  <p style={{ marginTop: "0.75rem", marginBottom: "0.75rem", fontSize: "0.875rem", color: "#dc2626" }}>
-                    These extensions can interfere with the assessment. Please disable them and click &quot;Re-scan&quot;.
-                  </p>
+
+                          <div style={{
+                            padding: "0.75rem",
+                            backgroundColor: "#fffbeb",
+                            borderRadius: "0.375rem",
+                            marginBottom: "0.75rem",
+                          }}>
+                            <p style={{ 
+                              margin: "0 0 0.5rem 0", 
+                              fontSize: "0.8125rem", 
+                              fontWeight: 600,
+                              color: "#92400e"
+                            }}>
+                              How to disable:
+                            </p>
+                            <ol style={{ 
+                              margin: 0, 
+                              paddingLeft: "1.25rem",
+                              fontSize: "0.8125rem",
+                              color: "#92400e"
+                            }}>
+                              <li>Go to <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>chrome://extensions</code> or <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>edge://extensions</code></li>
+                              <li>Toggle OFF each extension listed above</li>
+                              <li>Click &quot;Re-scan&quot; below</li>
+                            </ol>
+                          </div>
+
                   <button
                     onClick={async () => {
                       setIsChecking(true);
@@ -541,8 +733,8 @@ export function PrecheckModal({
                     disabled={isChecking || isExtensionScanning}
                     style={{
                       width: "100%",
-                      padding: "0.75rem",
-                      backgroundColor: "#dc2626",
+                              padding: "0.875rem",
+                              backgroundColor: "#f59e0b",
                       color: "#ffffff",
                       border: "none",
                       borderRadius: "0.5rem",
@@ -552,9 +744,65 @@ export function PrecheckModal({
                       opacity: isChecking || isExtensionScanning ? 0.6 : 1,
                     }}
                   >
-                    {isExtensionScanning ? "Scanning..." : "🔄 Re-scan for Extensions"}
+                            {isExtensionScanning ? "⏳ Scanning..." : "🔄 Re-scan Extensions"}
                   </button>
+                        </>
+                      )}
+
+                      {!extensionScanResult.hasExtensions && (
+                        <p style={{ 
+                          margin: 0, 
+                          fontSize: "0.875rem", 
+                          color: "#065f46"
+                        }}>
+                          ✅ Your browser is clean - No extensions detected
+                        </p>
+                      )}
                 </div>
+                  )}
+
+                  {/* Fallback: Manual Certification if Permission Not Granted */}
+                  {extensionScanResult && !extensionScanResult.permissionGranted && (
+                    <div style={{
+                      padding: "1rem",
+                      backgroundColor: "#fffbeb",
+                      border: "1px solid #fcd34d",
+                      borderRadius: "0.5rem",
+                      marginTop: "1rem",
+                    }}>
+                      <p style={{ 
+                        margin: "0 0 0.75rem 0", 
+                        fontSize: "0.875rem", 
+                        fontWeight: 600,
+                        color: "#92400e"
+                      }}>
+                        Alternative: Manual Certification
+                      </p>
+                      <label style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: "0.75rem",
+                        cursor: "pointer",
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={extensionsCertified}
+                          onChange={(e) => setExtensionsCertified(e.target.checked)}
+                          style={{
+                            marginTop: "0.25rem",
+                            width: "1.25rem",
+                            height: "1.25rem",
+                            cursor: "pointer",
+                          }}
+                        />
+                        <span style={{ fontSize: "0.8125rem", color: "#92400e" }}>
+                          I certify that I have manually disabled ALL browser extensions
+                          by going to <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>chrome://extensions</code> or <code style={{ backgroundColor: "#fef3c7", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>edge://extensions</code> and toggling them all OFF.
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                </>
               )}
 
               {(!currentCheck || currentCheck.status === "pending") && (
@@ -1097,6 +1345,48 @@ export function PrecheckModal({
           padding: "1rem 1.5rem 1.5rem", 
           borderTop: "1px solid #f1f5f9",
         }}>
+          {/* Certification only shown if permission not granted */}
+          {currentCheckType === "browser" && currentCheck?.status === "passed" && 
+           extensionScanResult && !extensionScanResult.permissionGranted && (
+            <div style={{
+              padding: "1rem",
+              backgroundColor: "#fef2f2",
+              border: "2px solid #fecaca",
+              borderRadius: "0.5rem",
+              marginBottom: "1rem",
+            }}>
+              <label style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "0.75rem",
+                cursor: "pointer",
+              }}>
+                <input
+                  type="checkbox"
+                  required
+                  checked={extensionsCertified}
+                  onChange={(e) => setExtensionsCertified(e.target.checked)}
+                  style={{
+                    marginTop: "0.25rem",
+                    width: "1.25rem",
+                    height: "1.25rem",
+                    cursor: "pointer",
+                  }}
+                />
+                <span style={{ fontSize: "0.875rem", color: "#991b1b" }}>
+                  <strong>REQUIRED: I certify that I have manually disabled ALL browser extensions</strong>
+                  <br />
+                  <span style={{ fontSize: "0.8125rem" }}>
+                    I have gone to <code style={{ backgroundColor: "#fee2e2", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>chrome://extensions</code> or <code style={{ backgroundColor: "#fee2e2", padding: "0.125rem 0.25rem", borderRadius: "0.25rem" }}>edge://extensions</code> and toggled OFF all extensions.
+                    I understand that using extensions during the assessment will result in disqualification.
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
+
+          {/* Next Button - Always visible, enabled when check passes */}
+          {currentCheck?.status === "passed" ? (
           <button
             onClick={handleNext}
             disabled={!canProceed}
@@ -1111,10 +1401,33 @@ export function PrecheckModal({
               fontWeight: 600,
               cursor: canProceed ? "pointer" : "not-allowed",
               transition: "all 0.2s ease",
-            }}
-          >
-            {NEXT_STEP_LABELS[currentStep]}
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "0.5rem",
+              }}
+              title={!canProceed ? "Complete the current check to continue" : ""}
+            >
+              {canProceed ? (
+                <>
+                  {currentStep < CHECK_ORDER.length - 1 ? "Next Step →" : "Complete Pre-Check →"}
+                </>
+              ) : (
+                "Complete Check First"
+              )}
           </button>
+          ) : (
+            <div style={{
+              padding: "0.75rem",
+              backgroundColor: "#f8fafc",
+              borderRadius: "0.5rem",
+              textAlign: "center",
+              color: "#64748b",
+              fontSize: "0.875rem",
+            }}>
+              Complete the current check to proceed
+            </div>
+          )}
         </div>
 
         {/* CSS for animations */}
