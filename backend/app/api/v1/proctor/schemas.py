@@ -27,6 +27,11 @@ PROCTOR_EVENT_TYPES = {
     "CAMERA_ERROR",
     "PRECHECK_WARNING",
     "REFERENCE_PHOTO_CAPTURED",
+    # New unified proctoring engine events
+    "NO_FACE_DETECTED",
+    "MULTIPLE_FACES_DETECTED",
+    "FACE_OBSTRUCTED",
+    "COPY_PASTE_ATTEMPT",
     # Live human proctoring events
     "PROCTOR_SESSION_STARTED",
     "PROCTOR_SESSION_VIEWING",
@@ -54,6 +59,11 @@ EVENT_TYPE_LABELS: Dict[str, str] = {
     "CAMERA_ERROR": "Camera error occurred",
     "PRECHECK_WARNING": "Pre-check warning",
     "REFERENCE_PHOTO_CAPTURED": "Reference photo captured",
+    # New unified proctoring engine events
+    "NO_FACE_DETECTED": "No face detected in camera",
+    "MULTIPLE_FACES_DETECTED": "Multiple faces detected in camera",
+    "FACE_OBSTRUCTED": "Face is obstructed or not visible",
+    "COPY_PASTE_ATTEMPT": "Copy/paste attempt detected",
     # Live human proctoring events
     "PROCTOR_SESSION_STARTED": "Human proctor session started",
     "PROCTOR_SESSION_VIEWING": "Proctor is viewing candidate",

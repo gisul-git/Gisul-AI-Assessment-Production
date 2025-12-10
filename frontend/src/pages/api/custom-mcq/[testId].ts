@@ -4,8 +4,8 @@ import { authOptions } from "../auth/[...nextauth]";
 import fastApiClient from "../../../lib/fastapi";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "GET" && req.method !== "PUT") {
-    res.setHeader("Allow", "GET, PUT");
+  if (req.method !== "GET" && req.method !== "PUT" && req.method !== "DELETE") {
+    res.setHeader("Allow", "GET, PUT, DELETE");
     return res.status(405).json({ message: "Method Not Allowed" });
   }
 
@@ -31,6 +31,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(response.status || 200).json(response.data);
     } else if (req.method === "PUT") {
       const response = await fastApiClient.put(`/api/v1/custom-mcq/${testId}`, req.body, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      return res.status(response.status || 200).json(response.data);
+    } else if (req.method === "DELETE") {
+      const response = await fastApiClient.delete(`/api/v1/custom-mcq/${testId}`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },

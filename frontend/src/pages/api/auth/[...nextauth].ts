@@ -30,12 +30,47 @@ export const authOptions: NextAuthOptions = {
   },
   providers: [
     CredentialsProvider({
+      id: "credentials",
       name: "Password Credentials",
       credentials: {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
+        mfaToken: { label: "MFA Token", type: "text" }, // For post-MFA login
+        refreshToken: { label: "Refresh Token", type: "text" }, // For post-MFA login
       },
       async authorize(credentials) {
+        // If mfaToken is provided, this is a post-MFA login
+        if (credentials?.mfaToken) {
+          try {
+            // Verify the token is valid by getting user info
+            const userResponse = await fastApiClient.get("/api/v1/users/me", {
+              headers: {
+                Authorization: `Bearer ${credentials.mfaToken}`,
+              },
+            });
+            
+            const userData = userResponse.data?.data;
+            if (!userData || userData.role !== "super_admin") {
+              return null;
+            }
+
+            const backendUser: BackendUser = {
+              id: userData.id,
+              name: userData.name,
+              email: userData.email,
+              role: userData.role,
+              organization: userData.organization,
+              phone: userData.phone || undefined,
+              country: userData.country || undefined,
+              token: credentials.mfaToken,
+              refreshToken: (credentials as any).refreshToken || "",
+            } as BackendUser;
+            return backendUser;
+          } catch (err) {
+            console.error("MFA token verification failed:", err);
+            return null;
+          }
+        }
         if (!credentials?.email || !credentials?.password) {
           return null; // Return null instead of throwing for invalid credentials
         }
@@ -47,6 +82,14 @@ export const authOptions: NextAuthOptions = {
           });
 
           const data = response.data?.data;
+          
+          // Check if MFA is required for super_admin
+          if (data?.require_mfa) {
+            // Return null instead of throwing - let frontend handle MFA redirect
+            // This prevents NextAuth from showing an error
+            return null;
+          }
+          
           if (!data?.token || !data?.user) {
             console.error("Invalid response from authentication service:", response.data);
             return null; // Return null for invalid response
@@ -65,12 +108,29 @@ export const authOptions: NextAuthOptions = {
           } as BackendUser;
           return backendUser;
         } catch (error: any) {
+          // Check if MFA is required - if so, return null silently
+          if (error?.response?.data?.data?.require_mfa || error?.response?.data?.require_mfa) {
+            return null; // Return null for MFA - frontend will handle redirect
+          }
+
+          // Check for connection errors (backend not running)
+          if (error?.code === "ECONNREFUSED" || error?.code === "ENOTFOUND" || error?.message?.includes("not found")) {
+            console.error("Backend server connection error. Is the backend running?", {
+              baseURL: fastApiClient.defaults.baseURL,
+              message: error?.message,
+              code: error?.code,
+            });
+            // Return null to prevent NextAuth error - frontend will handle it
+            return null;
+          }
+
           // Log the error for debugging
           console.error("Credentials authentication error:", {
             message: error?.message,
             response: error?.response?.data,
             status: error?.response?.status,
             code: error?.code,
+            baseURL: fastApiClient.defaults.baseURL,
           });
 
           // Extract error message from backend response

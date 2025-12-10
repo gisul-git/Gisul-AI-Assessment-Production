@@ -42,7 +42,7 @@ export default function HomePage() {
           const userRole = session?.user?.role;
           
           if (userRole === "super_admin") {
-            router.replace("/super-admin");
+            router.replace("/super-admin/dashboard");
           } else if (userRole) {
             router.replace("/dashboard");
           } else {

@@ -35,6 +35,9 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
   
   // Use server session if available, fallback to client session
   const activeSession = serverSession || session;
+  
+  // Check if user is super_admin - show back button for super admins
+  const isSuperAdmin = Boolean(activeSession && (activeSession as any)?.user?.role === "super_admin");
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -264,6 +267,14 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         // Delete DSA test
         await dsaApi.delete(`/tests/${assessmentId}`);
         setAssessments(assessments.filter((a) => a.id !== assessmentId));
+      } else if (assessmentType === 'custom_mcq') {
+        // Delete custom MCQ test
+        const response = await axios.delete(`/api/custom-mcq/${assessmentId}`);
+        if (response.data?.success) {
+          setAssessments(assessments.filter((a) => a.id !== assessmentId));
+        } else {
+          setError(response.data?.message || "Failed to delete custom MCQ test");
+        }
       } else {
         // Delete regular assessment
       const response = await axios.delete(`/api/assessments/delete-assessment?assessmentId=${assessmentId}`);
@@ -350,6 +361,36 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       <header className="enterprise-header">
         <div className="enterprise-header-content">
           <div style={{ display: "flex", alignItems: "center", gap: "1rem", flex: 1, minWidth: 0, marginLeft: "-5rem" }}>
+            {isSuperAdmin && (
+              <button
+                type="button"
+                onClick={() => router.push("/super-admin/dashboard")}
+                style={{
+                  padding: "0.5rem 1rem",
+                  backgroundColor: "rgba(255, 255, 255, 0.2)",
+                  border: "1px solid rgba(255, 255, 255, 0.3)",
+                  borderRadius: "0.5rem",
+                  color: "#ffffff",
+                  fontSize: "0.875rem",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  transition: "background-color 0.2s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = "rgba(255, 255, 255, 0.3)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
+                }}
+                title="Back to Super Admin Dashboard"
+              >
+                <span>←</span>
+                <span>Back to Super Admin</span>
+              </button>
+            )}
             <Image 
               src="/gisullogo.png" 
               alt="Gisul Logo" 

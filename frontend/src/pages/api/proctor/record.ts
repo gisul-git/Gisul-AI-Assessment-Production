@@ -21,6 +21,11 @@ const VALID_EVENT_TYPES = new Set([
   "CAMERA_ERROR",
   "PRECHECK_WARNING",
   "REFERENCE_PHOTO_CAPTURED",
+  // New unified proctoring engine events
+  "NO_FACE_DETECTED",
+  "MULTIPLE_FACES_DETECTED",
+  "FACE_OBSTRUCTED",
+  "COPY_PASTE_ATTEMPT",
   // Live human proctoring events
   "PROCTOR_SESSION_STARTED",
   "PROCTOR_SESSION_VIEWING",

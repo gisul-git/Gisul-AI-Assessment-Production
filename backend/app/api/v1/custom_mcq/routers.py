@@ -255,7 +255,27 @@ async def list_custom_mcq_tests(
     try:
         # Build query based on user role
         query: Dict[str, Any] = {}
-        if current_user.get("role") != "super_admin":
+        if current_user.get("role") == "super_admin":
+            # For super_admin: only show tests created by super_admins (any super_admin)
+            # Query users collection to get all super_admin user IDs
+            super_admin_cursor = db.users.find(
+                {"role": "super_admin"},
+                {"_id": 1}
+            )
+            super_admin_ids = [doc["_id"] async for doc in super_admin_cursor]
+            
+            if super_admin_ids:
+                # Filter tests where createdBy is in the list of super_admin IDs
+                # Convert to ObjectId for proper matching (createdBy is stored as ObjectId)
+                try:
+                    query["createdBy"] = {"$in": [to_object_id(str(sid)) for sid in super_admin_ids]}
+                except (ValueError, TypeError):
+                    # If conversion fails, try as strings (for backward compatibility)
+                    query["createdBy"] = {"$in": [str(sid) for sid in super_admin_ids]}
+            else:
+                # No super_admins found - return empty result
+                query["createdBy"] = {"$in": []}
+        else:
             # Filter by createdBy to ensure users only see their own tests
             user_id = current_user.get("id")
             if user_id:
@@ -813,5 +833,46 @@ async def publish_draft(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to publish draft: {str(exc)}"
+        ) from exc
+
+
+@router.delete("/{test_id}")
+async def delete_custom_mcq_test(
+    test_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Delete a custom MCQ test. Only users with access to the test can delete it."""
+    try:
+        oid = to_object_id(test_id)
+        test = await db.custom_mcq_tests.find_one({"_id": oid})
+        
+        if not test:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Test not found"
+            )
+        
+        _check_test_access(test, current_user)
+        
+        # Delete the test
+        result = await db.custom_mcq_tests.delete_one({"_id": oid})
+        
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Test not found or already deleted",
+            )
+        
+        logger.info(f"Custom MCQ test deleted: {test_id} by user {current_user['id']}")
+        
+        return success_response("Custom MCQ test deleted successfully", {"testId": test_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error deleting custom MCQ test: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete test: {str(exc)}",
         ) from exc
 
