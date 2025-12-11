@@ -1,7 +1,7 @@
 'use client'
 
 import { Button } from '../ui/button'
-import { Send, CheckCircle2, Circle, AlertCircle, ArrowLeft, Clock } from 'lucide-react'
+import { Send, CheckCircle2, Circle, AlertCircle, ArrowLeft } from 'lucide-react'
 import { useState } from 'react'
 import { useRouter } from 'next/router'
 
@@ -18,7 +18,6 @@ interface QuestionSidebarProps {
   onSubmit: () => void
   submitting: boolean
   questionStatus?: Record<string, 'solved' | 'attempted' | 'not-attempted'>
-  timeRemaining?: number
   onBack?: () => void
 }
 
@@ -30,18 +29,10 @@ export function QuestionSidebar({
   onSubmit,
   submitting,
   questionStatus = {},
-  timeRemaining,
   onBack
 }: QuestionSidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
   const router = useRouter()
-
-  const formatTime = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600)
-    const minutes = Math.floor((seconds % 3600) / 60)
-    const secs = seconds % 60
-    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
-  }
 
   const getStatusIcon = (questionId: string, index: number) => {
     const status = questionStatus[questionId] || 'not-attempted'
@@ -110,12 +101,6 @@ export function QuestionSidebar({
             ←
           </button>
         </div>
-        {timeRemaining !== undefined && (
-          <div className="flex items-center gap-2 text-sm text-slate-300 bg-slate-900/50 px-3 py-2 rounded-md">
-            <Clock className="h-4 w-4 text-yellow-400" />
-            <span className="font-mono">{formatTime(timeRemaining)}</span>
-          </div>
-        )}
       </div>
 
       {/* Questions List */}

@@ -667,7 +667,7 @@ export function MultiProctorGrid({
           </svg>
           <p style={{ marginTop: "1rem", fontSize: "1.125rem", fontWeight: 600 }}>No Active Candidates</p>
           <p style={{ color: "#64748b", fontSize: "0.875rem", marginTop: "0.5rem", textAlign: "center", maxWidth: "400px" }}>
-            No candidates are currently taking the test. The live proctoring dashboard will automatically show candidates when they start their assessment.
+            There are no active candidates taking the test. Click "Refresh" to check for new candidates.
           </p>
         </div>
       ) : (

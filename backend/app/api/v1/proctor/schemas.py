@@ -36,6 +36,13 @@ PROCTOR_EVENT_TYPES = {
     "PROCTOR_SESSION_STARTED",
     "PROCTOR_SESSION_VIEWING",
     "PROCTOR_SESSION_ENDED",
+    # USB device monitoring events
+    "USB_DEVICE_CONNECTED",
+    "USB_DEVICE_DISCONNECTED",
+    "USB_DEVICE_CHANGED",
+    "USB_STORAGE_DETECTED",
+    "USB_KEYBOARD_DETECTED",
+    "USB_NETWORK_DETECTED",
 }
 
 # Human-readable labels for event types
@@ -68,6 +75,13 @@ EVENT_TYPE_LABELS: Dict[str, str] = {
     "PROCTOR_SESSION_STARTED": "Human proctor session started",
     "PROCTOR_SESSION_VIEWING": "Proctor is viewing candidate",
     "PROCTOR_SESSION_ENDED": "Human proctor session ended",
+    # USB device monitoring events
+    "USB_DEVICE_CONNECTED": "USB device connected",
+    "USB_DEVICE_DISCONNECTED": "USB device disconnected",
+    "USB_DEVICE_CHANGED": "USB device changed",
+    "USB_STORAGE_DETECTED": "USB storage device detected",
+    "USB_KEYBOARD_DETECTED": "USB keyboard detected",
+    "USB_NETWORK_DETECTED": "USB network adapter detected",
 }
 
 

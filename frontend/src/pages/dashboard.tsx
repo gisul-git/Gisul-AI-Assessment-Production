@@ -278,9 +278,13 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         await dsaApi.delete(`/tests/${assessmentId}`);
         setAssessments(assessments.filter((a) => a.id !== assessmentId));
       } else if (assessmentType === 'custom_mcq') {
-        // Delete custom MCQ assessment
-        await customMCQApi.deleteAssessment(assessmentId);
-        setAssessments(assessments.filter((a) => a.id !== assessmentId));
+        // Delete custom MCQ test
+        const response = await axios.delete(`/api/custom-mcq/${assessmentId}`);
+        if (response.data?.success) {
+          setAssessments(assessments.filter((a) => a.id !== assessmentId));
+        } else {
+          setError(response.data?.message || "Failed to delete custom MCQ test");
+        }
       } else {
         // Delete regular assessment
       const response = await axios.delete(`/api/assessments/delete-assessment?assessmentId=${assessmentId}`);
@@ -306,6 +310,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         return { bg: "rgba(201, 244, 212, 0.2)", text: "#1E5A3B", border: "#C9F4D4" }; // Mint Cream theme
       case "active":
         return { bg: "#dbeafe", text: "#1e40af", border: "#3b82f6" }; // Keep info blue
+      case "published":
+        return { bg: "#dbeafe", text: "#1e40af", border: "#3b82f6" }; // Same as active (info blue)
       default:
         return { bg: "rgba(232, 250, 240, 0.5)", text: "#2D7A52", border: "#A8E8BC" }; // Mint 50/400
     }
@@ -739,22 +745,22 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       {/* CASE A: Draft - Show Edit and Delete, HIDE Analytics */}
                       {assessment.status === 'draft' && assessment.type !== 'dsa' && (
                         <>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.5rem 1rem",
-                              marginTop: 0,
-                              width: "100%",
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{
+                            fontSize: "0.875rem",
+                            padding: "0.5rem 1rem",
+                            marginTop: 0,
+                            width: "100%",
+                          }}
+                          onClick={(e) => {
+                            e.stopPropagation();
                               router.push(`/assessments/create-new?id=${assessment.id}`);
-                            }}
-                          >
-                            Edit
-                          </button>
+                          }}
+                        >
+                          Edit
+                        </button>
                           <button
                             type="button"
                             style={{
@@ -784,8 +790,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                         </>
                       )}
                       
-                      {/* CASE B: Active - Show Analytics and Delete, HIDE Edit */}
-                      {assessment.status === 'active' && assessment.type !== 'dsa' && (
+                      {/* CASE B: Active/Published - Show Analytics and Delete, HIDE Edit */}
+                      {(assessment.status === 'active' || assessment.status === 'published') && (
                         <>
                           <button
                             type="button"
@@ -802,7 +808,12 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              router.push(`/assessments/${assessment.id}/analytics`);
+                              // DSA assessments use different analytics route
+                              if (assessment.type === 'dsa') {
+                                router.push(`/dsa/tests/${assessment.id}/analytics`);
+                              } else {
+                                router.push(`/assessments/${assessment.id}/analytics`);
+                              }
                             }}
                           >
                             <svg 
@@ -851,7 +862,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       )}
                       
                       {/* CASE C: Completed - Show Analytics and Delete, HIDE Edit */}
-                      {assessment.status === 'completed' && assessment.type !== 'dsa' && (
+                      {assessment.status === 'completed' && (
                         <>
                           <button
                             type="button"
@@ -868,7 +879,12 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              router.push(`/assessments/${assessment.id}/analytics`);
+                              // DSA assessments use different analytics route
+                              if (assessment.type === 'dsa') {
+                                router.push(`/dsa/tests/${assessment.id}/analytics`);
+                              } else {
+                                router.push(`/assessments/${assessment.id}/analytics`);
+                              }
                             }}
                           >
                             <svg 
@@ -887,32 +903,32 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             </svg>
                             Analytics
                           </button>
-                          <button
-                            type="button"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.5rem 1rem",
-                              backgroundColor: "#ef4444",
-                              color: "#ffffff",
-                              border: "none",
-                              borderRadius: "0.375rem",
-                              cursor: "pointer",
-                              transition: "background-color 0.2s",
-                              width: "100%",
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = "#dc2626";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = "#ef4444";
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                            }}
-                          >
-                            Delete
-                          </button>
+                      <button
+                        type="button"
+                        style={{
+                          fontSize: "0.875rem",
+                          padding: "0.5rem 1rem",
+                          backgroundColor: "#ef4444",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "0.375rem",
+                          cursor: "pointer",
+                          transition: "background-color 0.2s",
+                          width: "100%",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.backgroundColor = "#dc2626";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.backgroundColor = "#ef4444";
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
+                        }}
+                      >
+                        Delete
+                      </button>
                         </>
                       )}
                                           </div>

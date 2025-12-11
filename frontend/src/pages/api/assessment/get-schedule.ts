@@ -14,8 +14,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
+    // Use the correct backend route: /api/v1/candidate/get-assessment-schedule
     const response = await fastApiClient.get(
-      `/api/v1/assessment/get-schedule?assessmentId=${assessmentId}&token=${token}`
+      `/api/v1/candidate/get-assessment-schedule?assessmentId=${assessmentId}&token=${token}`
     );
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {

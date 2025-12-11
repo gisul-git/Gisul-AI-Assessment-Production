@@ -1,34 +1,30 @@
 import { useState, useCallback, useRef } from "react";
-
-// ============================================================================
-// Types
-// ============================================================================
-
-export type ExtensionCategory = 
-  | "screen_recorder"
-  | "automation"
-  | "clipboard_manager"
-  | "devtools"
-  | "ad_blocker"
-  | "remote_desktop"
-  | "unknown";
+import { KNOWN_EXTENSIONS, type ExtensionSignature } from "../lib/extensionDatabase";
+import { EXTENSION_DETECTION_CONFIG } from "../config/precheckConfig";
 
 export type ConfidenceLevel = "high" | "medium" | "low";
 
-export interface DetectedExtension {
+export interface ExtensionInfo {
   id: string;
-  category: ExtensionCategory;
-  signature: string;
-  confidence: ConfidenceLevel;
-  description: string;
+  name: string;
+  version?: string;
+  enabled?: boolean;
 }
 
 export interface ExtensionScanResult {
-  extensions: DetectedExtension[];
-  hasHighRisk: boolean; // Screen recorders, automation, remote desktop
-  hasMediumRisk: boolean;
-  hasAnyExtension: boolean;
-  hasHarmfulExtension: boolean; // Only block if harmful extension detected
+  count: number;
+  hasExtensions: boolean;
+  confidence: ConfidenceLevel;
+  permissionGranted: boolean;
+  permissionDenied: boolean;
+  details: {
+    uniqueExtensionIds: string[];
+    extensions: ExtensionInfo[];
+    injectedScripts: number;
+    injectedStyles: number;
+    modifiedElements: number;
+    totalIndicators: number;
+  };
   scanTime: number;
 }
 
@@ -37,152 +33,364 @@ interface UsePrecheckExtensionsReturn {
   scanResult: ExtensionScanResult | null;
   error: string | null;
   scan: () => Promise<ExtensionScanResult>;
+  requestPermission: () => Promise<boolean>;
   reportWarning: (assessmentId: string, userId: string) => Promise<void>;
 }
 
-// ============================================================================
-// Detection Signatures
-// ============================================================================
-
-interface GlobalVarSignature {
-  name: string;
-  category: ExtensionCategory;
-  confidence: ConfidenceLevel;
-  description: string;
+/**
+ * Detect extension by attempting to fetch its web-accessible resource
+ * Based on method from: https://github.com/abrahamjuliot/creepjs
+ * If the fetch succeeds, the extension is installed.
+ */
+async function detectExtensionById(extension: ExtensionSignature): Promise<boolean> {
+  const url = `${EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.CHROME}${extension.id}/${extension.file}`;
+  
+  return new Promise((resolve) => {
+    // Use Image loading as primary method (works for images, CSS, etc.)
+    const img = new Image();
+    let resolved = false;
+    
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        // Fallback: try fetch for non-image resources
+        fetch(url, { method: 'HEAD', mode: 'no-cors' })
+          .then(() => {
+            if (!resolved) {
+              resolved = true;
+              console.log(`[ExtensionDetection] ✅ Detected via fetch: ${extension.name}`);
+              resolve(true);
+            }
+          })
+          .catch(() => {
+            if (!resolved) {
+              resolved = true;
+              console.log(`[ExtensionDetection] ❌ Not detected: ${extension.name} (ID: ${extension.id.substring(0, 8)}...)`);
+              resolve(false);
+            }
+          });
+      }
+    }, EXTENSION_DETECTION_CONFIG.EXTENSION_CHECK_TIMEOUT_MS);
+    
+    img.onload = () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        console.log(`[ExtensionDetection] ✅ Detected via image: ${extension.name}`);
+        resolve(true);
+      }
+    };
+    
+    img.onerror = () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        // Try fetch as fallback for non-image resources
+        fetch(url, { method: 'HEAD' })
+          .then((res) => {
+            if (res.ok) {
+              if (!resolved) {
+                resolved = true;
+                console.log(`[ExtensionDetection] ✅ Detected via fetch fallback: ${extension.name}`);
+                resolve(true);
+              }
+            } else {
+              if (!resolved) {
+                resolved = true;
+                console.log(`[ExtensionDetection] ❌ Not detected: ${extension.name} (ID: ${extension.id.substring(0, 8)}...)`);
+                resolve(false);
+              }
+            }
+          })
+          .catch(() => {
+            if (!resolved) {
+              resolved = true;
+              console.log(`[ExtensionDetection] ❌ Not detected: ${extension.name} (ID: ${extension.id.substring(0, 8)}...)`);
+              resolve(false);
+            }
+          });
+      }
+    };
+    
+    // Start detection
+    img.src = url;
+  });
 }
 
-const GLOBAL_VAR_SIGNATURES: GlobalVarSignature[] = [
-  // Screen recorders
-  { name: "__OBSPLUGIN__", category: "screen_recorder", confidence: "high", description: "OBS Browser Plugin" },
-  { name: "ScreenRecorder", category: "screen_recorder", confidence: "high", description: "Screen Recorder Extension" },
-  { name: "__screenCaptureEnabled__", category: "screen_recorder", confidence: "high", description: "Screen Capture API" },
-  { name: "screencastify", category: "screen_recorder", confidence: "high", description: "Screencastify" },
-  { name: "__loom__", category: "screen_recorder", confidence: "high", description: "Loom Screen Recorder" },
-  
-  // Remote Desktop / Screen Sharing (HIGH RISK)
-  { name: "AnyDesk", category: "remote_desktop", confidence: "high", description: "AnyDesk Remote Desktop" },
-  { name: "__anydesk__", category: "remote_desktop", confidence: "high", description: "AnyDesk Remote Desktop" },
-  { name: "TeamViewer", category: "remote_desktop", confidence: "high", description: "TeamViewer" },
-  { name: "__teamviewer__", category: "remote_desktop", confidence: "high", description: "TeamViewer" },
-  { name: "RemoteDesktop", category: "remote_desktop", confidence: "high", description: "Remote Desktop App" },
-  { name: "__chrome_remote_desktop__", category: "remote_desktop", confidence: "high", description: "Chrome Remote Desktop" },
-  { name: "parsec", category: "remote_desktop", confidence: "high", description: "Parsec Remote Desktop" },
-  { name: "rustdesk", category: "remote_desktop", confidence: "high", description: "RustDesk Remote Desktop" },
-  
-  // Clipboard managers
-  { name: "_clipboardJS", category: "clipboard_manager", confidence: "medium", description: "Clipboard.js Extension" },
-  { name: "__CLIP__", category: "clipboard_manager", confidence: "medium", description: "Clipboard Extension" },
-  
-  // DevTools
-  { name: "__REACT_DEVTOOLS_GLOBAL_HOOK__", category: "devtools", confidence: "low", description: "React DevTools" },
-  { name: "__VUE_DEVTOOLS_GLOBAL_HOOK__", category: "devtools", confidence: "low", description: "Vue DevTools" },
-  { name: "__REDUX_DEVTOOLS_EXTENSION__", category: "devtools", confidence: "low", description: "Redux DevTools" },
-  
-  // Automation tools
-  { name: "__selenium_unwrapped", category: "automation", confidence: "high", description: "Selenium WebDriver" },
-  { name: "__webdriver_evaluate", category: "automation", confidence: "high", description: "WebDriver Automation" },
-  { name: "__nightmare", category: "automation", confidence: "high", description: "Nightmare.js" },
-  { name: "callPhantom", category: "automation", confidence: "high", description: "PhantomJS" },
-  { name: "__puppeteer__", category: "automation", confidence: "high", description: "Puppeteer" },
-];
+/**
+ * Detect all known extensions using the extension database method
+ * This is the PRIMARY detection method - works without browser permissions
+ */
+async function detectAllKnownExtensions(): Promise<{ extensionIds: Set<string>; extensionMap: Map<string, ExtensionInfo>; totalIndicators: number }> {
+  const extensionIds = new Set<string>();
+  const extensionMap = new Map<string, ExtensionInfo>();
+  let totalIndicators = 0;
 
-interface DomSignature {
-  selector: string;
-  category: ExtensionCategory;
-  confidence: ConfidenceLevel;
-  description: string;
+  const totalExtensions = KNOWN_EXTENSIONS.length;
+  console.log('[ExtensionDetection] Scanning', totalExtensions, 'known extensions using extension database method...');
+
+  // Test all known extensions in parallel (with batching to avoid overwhelming)
+  const batchSize = EXTENSION_DETECTION_CONFIG.BATCH_SIZE;
+  let processedCount = 0;
+  
+  // Add maximum scan time limit
+  const maxScanTime = EXTENSION_DETECTION_CONFIG.MAX_SCAN_TIME_MS;
+  const startTime = Date.now();
+  
+  for (let i = 0; i < totalExtensions; i += batchSize) {
+    // Check if we've exceeded max scan time
+    if (Date.now() - startTime > maxScanTime) {
+      console.log('[ExtensionDetection] ⏱️ Scan time limit reached, stopping early');
+      break;
+    }
+    
+    const batch = KNOWN_EXTENSIONS.slice(i, i + batchSize);
+    processedCount += batch.length;
+    
+    console.log(`[ExtensionDetection] Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(totalExtensions / batchSize)} (${processedCount}/${totalExtensions} extensions)...`);
+    
+    const detectionPromises = batch.map(async (ext) => {
+      const detected = await detectExtensionById(ext);
+      if (detected) {
+        console.log('[ExtensionDetection] ✅ Found:', ext.name, `(${ext.id})`);
+        extensionIds.add(ext.id);
+        extensionMap.set(ext.id, {
+          id: ext.id,
+          name: ext.name,
+          enabled: true,
+        });
+        totalIndicators += 2;
+      }
+      return detected;
+    });
+
+    await Promise.all(detectionPromises);
+    
+    // Minimal delay between batches for faster scanning
+    if (i + batchSize < totalExtensions) {
+      await new Promise(resolve => setTimeout(resolve, EXTENSION_DETECTION_CONFIG.BATCH_DELAY_MS));
+    }
+  }
+  
+  console.log(`[ExtensionDetection] Completed scanning ${processedCount} extensions`);
+
+  console.log('[ExtensionDetection] Extension database scan complete. Found:', extensionIds.size, 'extensions');
+
+  return { extensionIds, extensionMap, totalIndicators };
 }
 
-const DOM_SIGNATURES: DomSignature[] = [
-  // Screen recorder overlays
-  { selector: ".obs-control", category: "screen_recorder", confidence: "high", description: "OBS Browser Plugin" },
-  { selector: "#screencapture-overlay", category: "screen_recorder", confidence: "high", description: "Screen Capture Extension" },
-  { selector: "[data-screencastify]", category: "screen_recorder", confidence: "high", description: "Screencastify" },
-  { selector: ".loom-container", category: "screen_recorder", confidence: "high", description: "Loom" },
-  
-  // Common browser extensions that inject DOM elements
-  { selector: "[data-grammarly-shadow-root]", category: "unknown", confidence: "high", description: "Grammarly Extension" },
-  { selector: "grammarly-desktop-integration", category: "unknown", confidence: "high", description: "Grammarly Extension" },
-  { selector: "#lastpass-icon", category: "unknown", confidence: "high", description: "LastPass Extension" },
-  { selector: "[data-lastpass-icon-root]", category: "unknown", confidence: "high", description: "LastPass Extension" },
-  { selector: ".dashlane-icon", category: "unknown", confidence: "high", description: "Dashlane Extension" },
-  { selector: "[data-1p-extension]", category: "unknown", confidence: "high", description: "1Password Extension" },
-  { selector: "#bitwarden-wrapper", category: "unknown", confidence: "high", description: "Bitwarden Extension" },
-  { selector: "[data-honey-container]", category: "unknown", confidence: "high", description: "Honey Extension" },
-  { selector: "#honey-button", category: "unknown", confidence: "high", description: "Honey Extension" },
-  { selector: "[data-rakuten]", category: "unknown", confidence: "high", description: "Rakuten Extension" },
-  { selector: ".mcafee-icon", category: "unknown", confidence: "high", description: "McAfee Extension" },
-  { selector: "[data-translate-extension]", category: "unknown", confidence: "high", description: "Translate Extension" },
-  { selector: ".dark-reader", category: "unknown", confidence: "high", description: "Dark Reader Extension" },
-  { selector: "[data-darkreader]", category: "unknown", confidence: "high", description: "Dark Reader Extension" },
-  
-  // Automation markers
-  { selector: "[webdriver]", category: "automation", confidence: "high", description: "Browser Automation Detected" },
-];
+// Web-based detection fallback (DOM-based)
+function detectExtensionsWebBased(): { extensionIds: Set<string>; extensionMap: Map<string, ExtensionInfo>; totalIndicators: number } {
+  const extensionIds = new Set<string>();
+  const extensionMap = new Map<string, ExtensionInfo>();
+  let totalIndicators = 0;
 
-// ============================================================================
-// Known Extension IDs for Direct Detection
-// ============================================================================
+  try {
+    // Check for extension URLs in scripts
+    const scripts = document.querySelectorAll("script[src]");
+    scripts.forEach((script) => {
+      if (script instanceof HTMLScriptElement) {
+        const src = script.src;
+        const extensionProtocols = [
+          EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.CHROME,
+          EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.FIREFOX,
+          EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.SAFARI,
+        ];
+        if (extensionProtocols.some(protocol => src.includes(protocol))) {
+          totalIndicators++;
+          const match = src.match(/(?:chrome-extension|moz-extension|safari-web-extension):\/\/([a-z0-9]+)/i);
+          if (match && match[1]) {
+            extensionIds.add(match[1]);
+            // Try to find name from database
+            const knownExt = KNOWN_EXTENSIONS.find(e => e.id === match[1]);
+            extensionMap.set(match[1], { 
+              id: match[1], 
+              name: knownExt ? knownExt.name : `Extension ${match[1].substring(0, 8)}` 
+            });
+          }
+        }
+      }
+    });
 
-interface KnownExtension {
-  id: string;
-  name: string;
-  category: ExtensionCategory;
-  // Some extensions expose web accessible resources we can check
-  testPaths: string[];
+    // Check for extension URLs in stylesheets
+    const links = document.querySelectorAll('link[rel="stylesheet"]');
+    links.forEach((link) => {
+      if (link instanceof HTMLLinkElement) {
+        const href = link.href;
+        const extensionProtocols = [
+          EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.CHROME,
+          EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.FIREFOX,
+          EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.SAFARI,
+        ];
+        if (extensionProtocols.some(protocol => href.includes(protocol))) {
+          totalIndicators++;
+          const protocolPattern = [
+            EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.CHROME.replace("://", ""),
+            EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.FIREFOX.replace("://", ""),
+            EXTENSION_DETECTION_CONFIG.EXTENSION_PROTOCOLS.SAFARI.replace("://", ""),
+          ].join("|");
+          const match = href.match(new RegExp(`(?:${protocolPattern}):\\/\\/([a-z0-9]+)`, "i"));
+          if (match && match[1]) {
+            extensionIds.add(match[1]);
+            // Try to find name from database
+            const knownExt = KNOWN_EXTENSIONS.find(e => e.id === match[1]);
+            extensionMap.set(match[1], { 
+              id: match[1], 
+              name: knownExt ? knownExt.name : `Extension ${match[1].substring(0, 8)}` 
+          });
+        }
+      }
+      }
+    });
+  } catch (e) {
+    console.error('[ExtensionDetection] Web-based detection error:', e);
+  }
+
+  return { extensionIds, extensionMap, totalIndicators };
 }
 
-const KNOWN_EXTENSIONS: KnownExtension[] = [
-  // Screen Recorders (HARMFUL - should block)
-  {
-    id: "mmeijimgabbpbgpdklnllpncmdofkcpn",
-    name: "Screencastify",
-    category: "screen_recorder",
-    testPaths: ["images/icon16.png", "images/icon48.png", "manifest.json"],
-  },
-  {
-    id: "liecbddmkiiihnedobmlmillhodjkdmb",
-    name: "Loom",
-    category: "screen_recorder",
-    testPaths: ["images/icon16.png", "icon16.png", "manifest.json"],
-  },
-  {
-    id: "hniebljpgcogalllopnjokppmgbhaden",
-    name: "Awesome Screenshot",
-    category: "screen_recorder",
-    testPaths: ["images/icon16.png", "manifest.json"],
-  },
-  {
-    id: "alelhddbbhepgpmgidjdcjakblofbmce",
-    name: "Full Page Screen Capture",
-    category: "screen_recorder",
-    testPaths: ["images/icon16.png", "manifest.json"],
-  },
-  // Ad Blockers (NOT harmful - allow)
-  {
-    id: "gighmmpiobklfepjocnamgkkbiglidom",
-    name: "AdBlock",
-    category: "ad_blocker",
-    testPaths: ["icons/icon16.png", "adblock-icon-16.png", "manifest.json"],
-  },
-  {
-    id: "cjpalhdlnbpafiamejdnhcphjbkeiagm",
-    name: "uBlock Origin",
-    category: "ad_blocker",
-    testPaths: ["img/icon_16.png", "manifest.json"],
-  },
-  // Remote Desktop (HARMFUL - should block)
-  {
-    id: "gbchcmhmhahfdphkhkmpfmihenigjmpp",
-    name: "Chrome Remote Desktop",
-    category: "remote_desktop",
-    testPaths: ["icon16.png", "manifest.json"],
-  },
-];
+async function detectExtensionsWithPermission(): Promise<ExtensionScanResult> {
+  const detectionResults = {
+    extensionIds: new Set<string>(),
+    extensionMap: new Map<string, ExtensionInfo>(),
+    totalIndicators: 0,
+    permissionGranted: false,
+    permissionDenied: false,
+  };
 
-// ============================================================================
-// Hook Implementation
-// ============================================================================
+  console.log('[ExtensionDetection] Starting comprehensive scan...');
+
+  // METHOD 1: Extension Database Detection (PRIMARY - works without permissions)
+  // This is the proven method from creepjs - detects known extensions by fetching their resources
+  try {
+    console.log('[ExtensionDetection] Method 1: Extension database detection...');
+    const knownExtResults = await detectAllKnownExtensions();
+    
+    // Merge results
+    knownExtResults.extensionIds.forEach(id => detectionResults.extensionIds.add(id));
+    knownExtResults.extensionMap.forEach((info, id) => {
+      detectionResults.extensionMap.set(id, info);
+    });
+    detectionResults.totalIndicators += knownExtResults.totalIndicators;
+    
+    console.log('[ExtensionDetection] Extension database method found:', knownExtResults.extensionIds.size, 'extensions');
+  } catch (error) {
+    console.error('[ExtensionDetection] Extension database detection error:', error);
+  }
+
+  // METHOD 2: DOM-based detection (fallback - finds extensions injecting into page)
+  try {
+    console.log('[ExtensionDetection] Method 2: DOM-based detection...');
+    const webResults = detectExtensionsWebBased();
+    
+    // Merge results (avoid duplicates)
+    webResults.extensionIds.forEach(id => {
+      if (!detectionResults.extensionIds.has(id)) {
+        detectionResults.extensionIds.add(id);
+        detectionResults.extensionMap.set(id, webResults.extensionMap.get(id)!);
+        detectionResults.totalIndicators += 1;
+      }
+    });
+    
+    console.log('[ExtensionDetection] DOM-based method found:', webResults.extensionIds.size, 'additional extensions');
+  } catch (error) {
+    console.error('[ExtensionDetection] DOM-based detection error:', error);
+  }
+
+  // METHOD 3: chrome.management API (only works in extension context, not web pages)
+  // Check if we're in an extension context
+  const isExtensionContext = typeof (window as any).chrome !== 'undefined' && 
+                             (window as any).chrome.runtime && 
+                             (window as any).chrome.runtime.id;
+
+  if (isExtensionContext) {
+    try {
+      if ((window as any).chrome.management) {
+        console.log('[ExtensionDetection] Method 3: chrome.management API (extension context only)...');
+        
+        try {
+          const extensions = await new Promise<any[]>((resolve, reject) => {
+            (window as any).chrome.management.getAll((exts: any[]) => {
+              if ((window as any).chrome.runtime?.lastError) {
+                const error = (window as any).chrome.runtime.lastError;
+                console.error('[ExtensionDetection] API error:', error);
+                reject(error);
+              } else {
+                resolve(exts || []);
+              }
+            });
+          });
+
+          console.log('[ExtensionDetection] chrome.management found:', extensions.length, 'extensions');
+          detectionResults.permissionGranted = true;
+
+          const actualExtensions = extensions.filter(ext => 
+            ext.type === 'extension' && 
+            ext.enabled === true &&
+            !ext.isApp
+          );
+
+          actualExtensions.forEach(ext => {
+            if (!detectionResults.extensionIds.has(ext.id)) {
+              detectionResults.extensionIds.add(ext.id);
+              detectionResults.extensionMap.set(ext.id, {
+                id: ext.id,
+                name: ext.name,
+                version: ext.version,
+                enabled: ext.enabled,
+              });
+              detectionResults.totalIndicators += 2;
+            }
+          });
+
+          console.log('[ExtensionDetection] chrome.management detected:', actualExtensions.length, 'new extensions');
+        } catch (error: any) {
+          console.error('[ExtensionDetection] Permission error:', error);
+          if (error?.message && (error.message.includes('denied') || error.message.includes('not allowed'))) {
+            detectionResults.permissionDenied = true;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[ExtensionDetection] Extension API error:', e);
+    }
+  } else {
+    console.log('[ExtensionDetection] chrome.management API not available (web page context)');
+  }
+
+  const extensions = Array.from(detectionResults.extensionMap.values());
+  const uniqueExtensionCount = detectionResults.extensionIds.size;
+
+  // Determine confidence level
+  let confidence: ConfidenceLevel = "medium";
+  if (detectionResults.permissionGranted) {
+    confidence = "high"; // chrome.management API gives high confidence
+  } else if (uniqueExtensionCount > 0) {
+    confidence = "high"; // Extension database method is also high confidence
+  } else {
+    confidence = "low"; // No extensions found
+  }
+
+  console.log('[ExtensionDetection] Total unique extensions detected:', uniqueExtensionCount);
+  console.log('[ExtensionDetection] Confidence level:', confidence);
+
+  return {
+    count: uniqueExtensionCount,
+    hasExtensions: uniqueExtensionCount > 0,
+    confidence,
+    permissionGranted: detectionResults.permissionGranted,
+    permissionDenied: detectionResults.permissionDenied,
+    details: {
+      uniqueExtensionIds: Array.from(detectionResults.extensionIds),
+      extensions,
+      injectedScripts: 0,
+      injectedStyles: 0,
+      modifiedElements: 0,
+      totalIndicators: detectionResults.totalIndicators,
+    },
+    scanTime: 0, // Will be set by caller
+  };
+}
 
 export function usePrecheckExtensions(): UsePrecheckExtensionsReturn {
   const [isScanning, setIsScanning] = useState(false);
@@ -190,339 +398,41 @@ export function usePrecheckExtensions(): UsePrecheckExtensionsReturn {
   const [error, setError] = useState<string | null>(null);
   const scanIdRef = useRef(0);
 
-  // Detect global variables
-  const detectGlobalVars = useCallback((): DetectedExtension[] => {
-    const detected: DetectedExtension[] = [];
-    
-    if (typeof window === "undefined") return detected;
-    
-    for (const sig of GLOBAL_VAR_SIGNATURES) {
-      try {
-        // Check if the global variable exists
-        if ((window as any)[sig.name] !== undefined) {
-          detected.push({
-            id: `global_${sig.name}`,
-            category: sig.category,
-            signature: `window.${sig.name}`,
-            confidence: sig.confidence,
-            description: sig.description,
-          });
-        }
-      } catch (e) {
-        // Some properties may throw on access
-        continue;
-      }
-    }
-    
-    // Additional WebDriver detection
+  const requestPermission = useCallback(async (): Promise<boolean> => {
     try {
-      if (navigator.webdriver === true) {
-        detected.push({
-          id: "navigator_webdriver",
-          category: "automation",
-          signature: "navigator.webdriver",
-          confidence: "high",
-          description: "Browser Automation Detected",
-        });
-      }
-    } catch (e) {
-      // Ignore
-    }
-    
-    return detected;
-  }, []);
+      // Check if we're in an extension context
+      const isExtensionContext = typeof (window as any).chrome !== 'undefined' && 
+                                 (window as any).chrome.runtime && 
+                                 (window as any).chrome.runtime.id;
 
-  // Detect DOM signatures
-  const detectDomSignatures = useCallback((): DetectedExtension[] => {
-    const detected: DetectedExtension[] = [];
-    
-    if (typeof document === "undefined") return detected;
-    
-    for (const sig of DOM_SIGNATURES) {
-      try {
-        const element = document.querySelector(sig.selector);
-        if (element) {
-          detected.push({
-            id: `dom_${sig.selector.replace(/[^a-zA-Z0-9]/g, "_")}`,
-            category: sig.category,
-            signature: sig.selector,
-            confidence: sig.confidence,
-            description: sig.description,
-          });
-        }
-      } catch (e) {
-        // Invalid selector or other error
-        continue;
-      }
-    }
-    
-    return detected;
-  }, []);
-
-  // Detect remote desktop / screen sharing activity
-  const detectRemoteDesktop = useCallback(async (): Promise<DetectedExtension[]> => {
-    const detected: DetectedExtension[] = [];
-    
-    if (typeof window === "undefined" || typeof navigator === "undefined") return detected;
-    
-    try {
-      // Method 1: Check for active screen capture tracks
-      // This can detect if screen is being shared via WebRTC
-      if (navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === "function") {
-        // Check if getDisplayMedia has been used (screen sharing active)
-        // We can't directly check this, but we can look for signs
-      }
-      
-      // Method 2: Check for multiple monitors (potential for hidden monitor with remote viewer)
-      // Note: isExtended is part of the Multi-Screen Window Placement API (not widely supported)
-      if (typeof window.screen !== "undefined" && (window.screen as any).isExtended === true) {
-        detected.push({
-          id: "extended_display",
-          category: "remote_desktop",
-          signature: "screen.isExtended",
-          confidence: "low",
-          description: "Extended Display Detected (multiple monitors)",
-        });
-      }
-      
-      // Method 3: Check for known remote desktop browser extensions
-      const remoteDesktopSelectors = [
-        "[data-anydesk]",
-        "[data-teamviewer]", 
-        "#anydesk-overlay",
-        "#teamviewer-overlay",
-        ".chrome-remote-desktop",
-        "[data-chrome-remote-desktop]",
-        "#crd-overlay",
-        ".parsec-overlay",
-      ];
-      
-      for (const selector of remoteDesktopSelectors) {
-        try {
-          if (document.querySelector(selector)) {
-            detected.push({
-              id: `remote_dom_${selector.replace(/[^a-zA-Z0-9]/g, "_")}`,
-              category: "remote_desktop",
-              signature: selector,
-              confidence: "high",
-              description: "Remote Desktop Overlay Detected",
-            });
-            break; // One detection is enough
-          }
-        } catch (e) {
-          continue;
-        }
-      }
-      
-      // Method 4: Check for WebRTC peer connections that might indicate screen sharing
-      // Note: This is a heuristic - legitimate video calls also use WebRTC
-      if (typeof (window as any).RTCPeerConnection !== "undefined") {
-        // Check if there are any active peer connections
-        // This is limited because we can't enumerate all connections
-        const originalRTCPeerConnection = (window as any).__originalRTCPeerConnection__;
-        if (originalRTCPeerConnection) {
-          detected.push({
-            id: "rtc_hooked",
-            category: "remote_desktop",
-            signature: "RTCPeerConnection hooked",
-            confidence: "medium",
-            description: "WebRTC Connection Monitoring Detected",
-          });
-        }
-      }
-      
-      // Method 5: Check window dimensions vs screen dimensions
-      // Remote desktop viewers sometimes have different dimensions
-      const screenWidth = window.screen.width;
-      const screenHeight = window.screen.height;
-      const outerWidth = window.outerWidth;
-      const outerHeight = window.outerHeight;
-      
-      // If browser window is larger than screen, something is off
-      if (outerWidth > screenWidth + 50 || outerHeight > screenHeight + 50) {
-        detected.push({
-          id: "dimension_mismatch",
-          category: "remote_desktop",
-          signature: "Window > Screen dimensions",
-          confidence: "medium",
-          description: "Unusual Window Dimensions (possible remote viewing)",
-        });
-      }
-      
-    } catch (err) {
-      console.error("[ExtensionDetection] Remote desktop detection error:", err);
-    }
-    
-    return detected;
-  }, []);
-
-  // Detect extensions by their known Chrome extension IDs
-  // This works by trying to load web-accessible resources from the extension
-  const detectByExtensionId = useCallback(async (): Promise<DetectedExtension[]> => {
-    const detected: DetectedExtension[] = [];
-    
-    if (typeof window === "undefined") return detected;
-    
-    // Function to check if an extension resource is accessible
-    const checkExtensionResource = async (extensionId: string, resourcePath: string): Promise<boolean> => {
-      return new Promise((resolve) => {
-        const img = new Image();
-        const url = `chrome-extension://${extensionId}/${resourcePath}`;
-        
-        // Set a timeout to avoid hanging
-        const timeout = setTimeout(() => {
-          resolve(false);
-        }, 500);
-        
-        img.onload = () => {
-          clearTimeout(timeout);
-          resolve(true);
-        };
-        
-        img.onerror = () => {
-          clearTimeout(timeout);
-          resolve(false);
-        };
-        
-        img.src = url;
-      });
-    };
-    
-    // Alternative method using fetch (for non-image resources)
-    const checkExtensionFetch = async (extensionId: string, resourcePath: string): Promise<boolean> => {
-      return new Promise((resolve) => {
-        const url = `chrome-extension://${extensionId}/${resourcePath}`;
-        const controller = new AbortController();
-        const timeout = setTimeout(() => {
-          controller.abort();
-          resolve(false);
-        }, 500);
-        
-        fetch(url, { method: "HEAD", signal: controller.signal, mode: "no-cors" })
-          .then(() => {
-            clearTimeout(timeout);
-            // no-cors doesn't give us the actual response, but if it doesn't throw, extension might exist
-            resolve(true);
-          })
-          .catch(() => {
-            clearTimeout(timeout);
+      if (isExtensionContext && (window as any).chrome.permissions) {
+        console.log('[ExtensionDetection] Requesting permission in extension context');
+        const granted = await new Promise<boolean>((resolve) => {
+          (window as any).chrome.permissions.request(
+            { permissions: ['management'] },
+            (granted: boolean) => {
+              if ((window as any).chrome.runtime?.lastError) {
+                console.error('[ExtensionDetection] Permission request error:', (window as any).chrome.runtime.lastError);
             resolve(false);
-          });
-      });
-    };
-    
-    // Check each known extension
-    for (const ext of KNOWN_EXTENSIONS) {
-      let found = false;
-      
-      // Try each test path
-      for (const testPath of ext.testPaths) {
-        if (testPath.endsWith(".png") || testPath.endsWith(".jpg") || testPath.endsWith(".gif") || testPath.endsWith(".ico")) {
-          // Use image loading for image resources
-          found = await checkExtensionResource(ext.id, testPath);
         } else {
-          // Use fetch for other resources
-          found = await checkExtensionFetch(ext.id, testPath);
-        }
-        
-        if (found) break;
-      }
-      
-      if (found) {
-        detected.push({
-          id: `ext_${ext.id}`,
-          category: ext.category,
-          signature: ext.id,
-          confidence: "high",
-          description: ext.name,
+                resolve(granted);
+              }
+            }
+          );
         });
+        return granted;
+      } else {
+        // In web page context, chrome.permissions is not available
+        // We'll use web-based detection instead
+        console.log('[ExtensionDetection] Permission API not available in web page context - using web-based detection');
+        return false;
       }
+    } catch (err) {
+      console.error('[ExtensionDetection] Permission request failed:', err);
+      return false;
     }
-    
-    return detected;
   }, []);
 
-  // Detect extensions by scanning for injected DOM elements dynamically
-  const detectInjectedElements = useCallback((): DetectedExtension[] => {
-    if (typeof document === "undefined") return [];
-    
-    const detected: DetectedExtension[] = [];
-    
-    // Get all elements and check for extension-injected attributes/elements
-    const allElements = document.querySelectorAll("*");
-    const extensionPatterns: { pattern: RegExp; description: string }[] = [
-      { pattern: /^grammarly/i, description: "Grammarly Extension" },
-      { pattern: /^lastpass/i, description: "LastPass Extension" },
-      { pattern: /^bitwarden/i, description: "Bitwarden Extension" },
-      { pattern: /^1password/i, description: "1Password Extension" },
-      { pattern: /^dashlane/i, description: "Dashlane Extension" },
-      { pattern: /^honey/i, description: "Honey Extension" },
-      { pattern: /^rakuten/i, description: "Rakuten Extension" },
-      { pattern: /^dark-?reader/i, description: "Dark Reader Extension" },
-      { pattern: /^ublock/i, description: "uBlock Extension" },
-      { pattern: /^adblock/i, description: "AdBlock Extension" },
-    ];
-    
-    const detectedIds = new Set<string>();
-    
-    allElements.forEach((el) => {
-      const tagName = el.tagName.toLowerCase();
-      const id = el.id?.toLowerCase() || "";
-      const className = el.className?.toString?.()?.toLowerCase() || "";
-      
-      // Check for custom elements (extensions often inject custom tags)
-      if (tagName.includes("-") && !tagName.startsWith("data-")) {
-        for (const { pattern, description } of extensionPatterns) {
-          if (pattern.test(tagName) && !detectedIds.has(description)) {
-            detectedIds.add(description);
-            detected.push({
-              id: `injected_${tagName}`,
-              category: "unknown",
-              signature: tagName,
-              confidence: "high",
-              description,
-            });
-          }
-        }
-      }
-      
-      // Check IDs and classes
-      for (const { pattern, description } of extensionPatterns) {
-        if ((pattern.test(id) || pattern.test(className)) && !detectedIds.has(description)) {
-          detectedIds.add(description);
-          detected.push({
-            id: `injected_${id || className}`,
-            category: "unknown",
-            signature: id || className,
-            confidence: "high",
-            description,
-          });
-        }
-      }
-      
-      // Check for data attributes commonly used by extensions
-      const attrs = el.attributes;
-      for (let i = 0; i < attrs.length; i++) {
-        const attrName = attrs[i].name.toLowerCase();
-        for (const { pattern, description } of extensionPatterns) {
-          if (pattern.test(attrName) && !detectedIds.has(description)) {
-            detectedIds.add(description);
-            detected.push({
-              id: `attr_${attrName}`,
-              category: "unknown",
-              signature: attrName,
-              confidence: "high",
-              description,
-            });
-          }
-        }
-      }
-    });
-    
-    return detected;
-  }, []);
-
-  // Main scan function
   const scan = useCallback(async (): Promise<ExtensionScanResult> => {
     setIsScanning(true);
     setError(null);
@@ -531,58 +441,65 @@ export function usePrecheckExtensions(): UsePrecheckExtensionsReturn {
     const startTime = performance.now();
     
     try {
-      // Run all detections - NO MORE FAKE AD BLOCKER DETECTION
-      const [globalVars, domSignatures, injectedElements, remoteDesktop, extensionIds] = await Promise.all([
-        Promise.resolve(detectGlobalVars()),
-        Promise.resolve(detectDomSignatures()),
-        Promise.resolve(detectInjectedElements()),
-        detectRemoteDesktop(),
-        detectByExtensionId(),
-      ]);
+      // Initial delay before starting scan
+      await new Promise((resolve) => setTimeout(resolve, EXTENSION_DETECTION_CONFIG.INITIAL_DELAY_MS));
       
-      // Check if this scan is still current
       if (currentScanId !== scanIdRef.current) {
         throw new Error("Scan cancelled");
       }
       
-      // Combine results and deduplicate
-      const allExtensions = [...globalVars, ...domSignatures, ...injectedElements, ...remoteDesktop, ...extensionIds];
-      
-      // Deduplicate by description (more user-friendly)
-      const seen = new Set<string>();
-      const uniqueExtensions = allExtensions.filter((ext) => {
-        if (seen.has(ext.description)) return false;
-        seen.add(ext.description);
-        return true;
+      // Add maximum timeout for entire scan
+      const scanPromise = detectExtensionsWithPermission();
+      const timeoutPromise = new Promise<ExtensionScanResult>((resolve) => {
+        setTimeout(() => {
+          console.log('[ExtensionDetection] ⏱️ Scan timeout reached, returning partial results');
+          resolve({
+            hasExtensions: false,
+            count: 0,
+            details: {
+              extensions: [],
+              uniqueExtensionIds: [],
+              injectedScripts: 0,
+              injectedStyles: 0,
+              modifiedElements: 0,
+              totalIndicators: 0,
+            },
+            confidence: "low",
+            permissionGranted: false,
+            permissionDenied: false,
+            scanTime: EXTENSION_DETECTION_CONFIG.MAX_SCAN_TIME_MS,
+          });
+        }, EXTENSION_DETECTION_CONFIG.MAX_SCAN_TIME_MS);
       });
+      
+      const detectionResult = await Promise.race([scanPromise, timeoutPromise]);
+
+      if (currentScanId !== scanIdRef.current) {
+        throw new Error("Scan cancelled");
+      }
       
       const scanTime = performance.now() - startTime;
       
-      // Harmful categories that should block the assessment
-      const harmfulCategories: ExtensionCategory[] = ["screen_recorder", "automation", "remote_desktop"];
-      
       const result: ExtensionScanResult = {
-        extensions: uniqueExtensions,
-        hasHighRisk: uniqueExtensions.some(
-          (e) => e.confidence === "high" && harmfulCategories.includes(e.category)
-        ),
-        hasMediumRisk: uniqueExtensions.some(
-          (e) => e.confidence === "medium" || e.confidence === "high"
-        ),
-        hasAnyExtension: uniqueExtensions.length > 0,
-        // Only block if harmful extension is detected (screen recorder, automation, remote desktop)
-        hasHarmfulExtension: uniqueExtensions.some(
-          (e) => harmfulCategories.includes(e.category)
-        ),
+        ...detectionResult,
         scanTime,
       };
       
       setScanResult(result);
+      
+      console.log('[ExtensionDetection] Complete:', {
+        count: result.count,
+        permissionGranted: result.permissionGranted,
+        permissionDenied: result.permissionDenied,
+        extensions: result.details.extensions.map(e => e.name),
+      });
+      
       return result;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Scan failed";
       if (errorMessage !== "Scan cancelled") {
         setError(errorMessage);
+        console.error('[ExtensionDetection] Error:', errorMessage);
       }
       throw err;
     } finally {
@@ -590,11 +507,11 @@ export function usePrecheckExtensions(): UsePrecheckExtensionsReturn {
         setIsScanning(false);
       }
     }
-  }, [detectGlobalVars, detectDomSignatures, detectInjectedElements, detectRemoteDesktop, detectByExtensionId]);
+  }, []);
 
-  // Report warning to backend
-  const reportWarning = useCallback(async (assessmentId: string, userId: string): Promise<void> => {
-    if (!scanResult || scanResult.extensions.length === 0) return;
+  const reportWarning = useCallback(
+    async (assessmentId: string, userId: string): Promise<void> => {
+      if (!scanResult || !scanResult.hasExtensions) return;
     
     try {
       await fetch("/api/proctor/record", {
@@ -607,29 +524,31 @@ export function usePrecheckExtensions(): UsePrecheckExtensionsReturn {
           userId,
           metadata: {
             source: "extension_detection",
-            extensions: scanResult.extensions.map((e) => ({
-              category: e.category,
-              signature: e.signature,
-              confidence: e.confidence,
-            })),
-            hasHighRisk: scanResult.hasHighRisk,
-            hasMediumRisk: scanResult.hasMediumRisk,
+              extensionCount: scanResult.count,
+              hasExtensions: scanResult.hasExtensions,
+              confidence: scanResult.confidence,
+              permissionGranted: scanResult.permissionGranted,
+              details: scanResult.details,
           },
         }),
       });
+        
+        console.log("[ExtensionDetection] Warning reported to backend");
     } catch (err) {
       console.error("[ExtensionDetection] Failed to report warning:", err);
     }
-  }, [scanResult]);
+    },
+    [scanResult]
+  );
 
   return {
     isScanning,
     scanResult,
     error,
     scan,
+    requestPermission,
     reportWarning,
   };
 }
 
 export default usePrecheckExtensions;
-

@@ -39,7 +39,7 @@ class TestInviteRequest(BaseModel):
     user_emails: List[str]  # List of emails to invite
 
 class AddCandidateRequest(BaseModel):
-    test_id: str
+    test_id: Optional[str] = None  # Optional since it's in the path
     name: str
     email: str
 

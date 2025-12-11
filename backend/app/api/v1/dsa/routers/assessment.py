@@ -298,7 +298,7 @@ def format_hidden_result_for_admin(result: Dict[str, Any], test_number: int,
 # API Endpoints
 # ============================================================================
 
-@router.post("/run-single")
+@router.post("/assessment/run-single")
 async def run_single_test(request: RunSingleTestRequest):
     """
     Run a single test case without saving to database.
@@ -321,7 +321,7 @@ async def run_single_test(request: RunSingleTestRequest):
     }
 
 
-@router.post("/run")
+@router.post("/assessment/run")
 async def run_code(request: RunCodeRequest):
     """
     RUN CODE - Execute only PUBLIC test cases.
@@ -416,7 +416,7 @@ async def run_code(request: RunCodeRequest):
     return response
 
 
-@router.post("/submit")
+@router.post("/assessment/submit")
 async def submit_code(
     request: SubmitCodeRequest,
     user_id: str = Query(None, description="User ID for tracking submission"),

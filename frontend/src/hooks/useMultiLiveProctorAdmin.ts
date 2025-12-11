@@ -74,6 +74,9 @@ export function useMultiLiveProctorAdmin({
   const isHMRRef = useRef(false);
   const isConnectingRef = useRef<Map<string, boolean>>(new Map()); // Guard: prevent duplicate connections
   const processedOffersRef = useRef<Map<string, string>>(new Map()); // Track processed offer SDPs to prevent duplicates
+  const consecutiveEmptyPollsRef = useRef<number>(0); // Track consecutive polls with no active candidates
+  const MAX_CONSECUTIVE_EMPTY_POLLS = 3; // Stop polling after 3 consecutive empty polls (15 seconds)
+  const isDSATestRef = useRef<boolean | null>(null); // Cache whether this is a DSA test to avoid repeated 404 checks
 
   // HMR Detection and restoration
   useEffect(() => {
@@ -543,7 +546,6 @@ export function useMultiLiveProctorAdmin({
       try {
         // Check if monitoring is still active
         if (!isMonitoringRef.current) {
-          log(`Monitoring stopped, stopping polling for ${candidateName}`);
           const interval = pollIntervalsRef.current.get(key);
           if (interval) {
             clearInterval(interval);
@@ -838,6 +840,10 @@ export function useMultiLiveProctorAdmin({
     pollIntervalsRef.current.forEach((interval) => clearInterval(interval));
     pollIntervalsRef.current.clear();
 
+    // Reset empty poll counter and DSA test cache when starting monitoring
+    consecutiveEmptyPollsRef.current = 0;
+    isDSATestRef.current = null; // Reset cache when restarting
+
     isMonitoringRef.current = true;
     setIsLoading(true);
     log("Starting multi-candidate monitoring...");
@@ -860,49 +866,76 @@ export function useMultiLiveProctorAdmin({
         session.status !== "ended" && session.status !== "completed"
       );
       
-      // Additional check: Verify candidates haven't submitted by checking assessment
+      // Additional check: Verify candidates haven't submitted by checking assessment/test
       // This is a safety check in case session status wasn't updated properly
-      try {
-        const assessmentRes = await fetch(`${API_URL}/api/assessments/get-questions?assessmentId=${assessmentId}`);
-        const assessmentData = await assessmentRes.json();
-        
-        if (assessmentData.success && assessmentData.data?.assessment?.candidateResponses) {
-          const candidateResponses = assessmentData.data.assessment.candidateResponses;
-          const submittedCandidates = new Set<string>();
+      // For DSA tests, this check is optional and failures are ignored
+      // Only check if we haven't determined it's a DSA test yet
+      if (isDSATestRef.current !== true) {
+        try {
+          // Try assessment endpoint first (for regular assessments)
+          const assessmentRes = await fetch(`${API_URL}/api/assessments/get-questions?assessmentId=${assessmentId}`);
           
-          // Extract submitted candidate emails
-          Object.values(candidateResponses).forEach((response: any) => {
-            if (response.submittedAt) {
-              submittedCandidates.add(response.email?.toLowerCase() || '');
+          // If 404, it's likely a DSA test - cache this and skip future checks
+          if (assessmentRes.status === 404) {
+            isDSATestRef.current = true; // Cache that this is a DSA test
+            log("Assessment endpoint not found - likely a DSA test, skipping submission check");
+          } else if (assessmentRes.ok) {
+            isDSATestRef.current = false; // Cache that this is NOT a DSA test
+            const assessmentData = await assessmentRes.json();
+            
+            if (assessmentData.success && assessmentData.data?.assessment?.candidateResponses) {
+              const candidateResponses = assessmentData.data.assessment.candidateResponses;
+              const submittedCandidates = new Set<string>();
+              
+              // Extract submitted candidate emails
+              Object.values(candidateResponses).forEach((response: any) => {
+                if (response.submittedAt) {
+                  submittedCandidates.add(response.email?.toLowerCase() || '');
+                }
+              });
+              
+              // Filter out sessions for candidates who have submitted
+              activeSessions = activeSessions.filter(session => {
+                const candidateEmail = session.candidateId?.toLowerCase() || '';
+                const hasSubmitted = submittedCandidates.has(candidateEmail);
+                if (hasSubmitted) {
+                  log(`Filtering out ${session.candidateName || session.candidateId} - candidate has submitted`);
+                }
+                return !hasSubmitted;
+              });
             }
-          });
-          
-          // Filter out sessions for candidates who have submitted
-          activeSessions = activeSessions.filter(session => {
-            const candidateEmail = session.candidateId?.toLowerCase() || '';
-            const hasSubmitted = submittedCandidates.has(candidateEmail);
-            if (hasSubmitted) {
-              log(`Filtering out ${session.candidateName || session.candidateId} - candidate has submitted`);
-            }
-            return !hasSubmitted;
-          });
+          }
+        } catch (err: any) {
+          // Only log non-404 errors (404 means it's a DSA test, which is expected)
+          if (err?.response?.status !== 404 && err?.status !== 404) {
+            log("Error checking candidate submissions, using session status only:", err);
+          } else {
+            // 404 error - cache that this is a DSA test
+            isDSATestRef.current = true;
+          }
         }
-      } catch (err) {
-        log("Error checking candidate submissions, using session status only:", err);
       }
       
       log(`Filtered to ${activeSessions.length} active sessions (excluded ${sessions.length - activeSessions.length} ended/completed/submitted sessions)`);
 
-      const sessionsWithNames = activeSessions.map(session => ({
-        ...session,
-        candidateName: session.candidateName || session.candidateId || "Unknown",
-      }));
+      // If no active sessions, reset counter and show empty state
+      if (activeSessions.length === 0) {
+        consecutiveEmptyPollsRef.current = MAX_CONSECUTIVE_EMPTY_POLLS; // Set to max to pause polling immediately
+        setActiveCandidates([]);
+        activeCandidatesRef.current = [];
+        log("No active candidates found - polling will pause");
+      } else {
+        consecutiveEmptyPollsRef.current = 0; // Reset counter when active candidates found
+        const sessionsWithNames = activeSessions.map(session => ({
+          ...session,
+          candidateName: session.candidateName || session.candidateId || "Unknown",
+        }));
 
-      setActiveCandidates(sessionsWithNames);
-      activeCandidatesRef.current = sessionsWithNames; // Update ref
+        setActiveCandidates(sessionsWithNames);
+        activeCandidatesRef.current = sessionsWithNames; // Update ref
 
-      // Connect to each candidate (only if not already connected or if PC is unhealthy)
-      for (const session of sessionsWithNames) {
+        // Connect to each candidate (only if not already connected or if PC is unhealthy)
+        for (const session of sessionsWithNames) {
         const candidateId = session.candidateId;
         const existingPc = peerConnectionsRef.current.get(candidateId);
         
@@ -938,10 +971,13 @@ export function useMultiLiveProctorAdmin({
           // Other state - try to connect (will be handled by connectToCandidate guards)
         await connectToCandidate(session);
         }
+        }
       }
 
       // Poll for new candidates (with strict guards)
-      mainPollIntervalRef.current = setInterval(async () => {
+      // Stop polling if no active candidates for consecutive polls
+      // Resume polling when candidates become active (handled by manual refresh)
+      const pollForCandidates = async () => {
         if (!isMonitoringRef.current) {
           if (mainPollIntervalRef.current) {
             clearInterval(mainPollIntervalRef.current);
@@ -964,33 +1000,77 @@ export function useMultiLiveProctorAdmin({
             
             // Additional check: Filter out candidates who have submitted
             // This is a safety check in case session status wasn't updated properly
-            try {
-              const assessmentRes = await fetch(`${API_URL}/api/v1/assessments/get-questions?assessmentId=${assessmentId}`);
-              const assessmentData = await assessmentRes.json();
-              
-              if (assessmentData.success && assessmentData.data?.assessment?.candidateResponses) {
-                const candidateResponses = assessmentData.data.assessment.candidateResponses;
-                const submittedCandidates = new Set<string>();
+            // For DSA tests, this check is optional and failures are ignored
+            // Only check if we haven't determined it's a DSA test yet, or if it's not a DSA test
+            if (isDSATestRef.current !== true) {
+              try {
+                // Try assessment endpoint first (for regular assessments)
+                const assessmentRes = await fetch(`${API_URL}/api/v1/assessments/get-questions?assessmentId=${assessmentId}`);
                 
-                // Extract submitted candidate emails
-                Object.values(candidateResponses).forEach((response: any) => {
-                  if (response.submittedAt) {
-                    submittedCandidates.add(response.email?.toLowerCase() || '');
+                // If 404, it's likely a DSA test - cache this and skip future checks
+                if (assessmentRes.status === 404) {
+                  isDSATestRef.current = true; // Cache that this is a DSA test
+                  // Silently skip for DSA tests - this is expected
+                } else if (assessmentRes.ok) {
+                  isDSATestRef.current = false; // Cache that this is NOT a DSA test
+                  const assessmentData = await assessmentRes.json();
+                  
+                  if (assessmentData.success && assessmentData.data?.assessment?.candidateResponses) {
+                    const candidateResponses = assessmentData.data.assessment.candidateResponses;
+                    const submittedCandidates = new Set<string>();
+                    
+                    // Extract submitted candidate emails
+                    Object.values(candidateResponses).forEach((response: any) => {
+                      if (response.submittedAt) {
+                        submittedCandidates.add(response.email?.toLowerCase() || '');
+                      }
+                    });
+                    
+                    // Filter out sessions for candidates who have submitted
+                    activeNewSessions = activeNewSessions.filter(session => {
+                      const candidateEmail = session.candidateId?.toLowerCase() || '';
+                      const hasSubmitted = submittedCandidates.has(candidateEmail);
+                      if (hasSubmitted) {
+                        log(`Filtering out ${session.candidateName || session.candidateId} - candidate has submitted`);
+                      }
+                      return !hasSubmitted;
+                    });
                   }
-                });
-                
-                // Filter out sessions for candidates who have submitted
-                activeNewSessions = activeNewSessions.filter(session => {
-                  const candidateEmail = session.candidateId?.toLowerCase() || '';
-                  const hasSubmitted = submittedCandidates.has(candidateEmail);
-                  if (hasSubmitted) {
-                    log(`Filtering out ${session.candidateName || session.candidateId} - candidate has submitted`);
-                  }
-                  return !hasSubmitted;
-                });
+                }
+              } catch (err: any) {
+                // Only log non-404 errors (404 means it's a DSA test, which is expected)
+                if (err?.response?.status !== 404 && err?.status !== 404) {
+                  log("Error checking candidate submissions in polling, using session status only:", err);
+                } else {
+                  // 404 error - cache that this is a DSA test
+                  isDSATestRef.current = true;
+                }
               }
-            } catch (err) {
-              log("Error checking candidate submissions in polling, using session status only:", err);
+            }
+            
+            // Check if there are no active candidates
+            if (activeNewSessions.length === 0) {
+              consecutiveEmptyPollsRef.current += 1;
+              log(`No active candidates found (empty poll ${consecutiveEmptyPollsRef.current}/${MAX_CONSECUTIVE_EMPTY_POLLS})`);
+              
+              // Stop polling after consecutive empty polls
+              if (consecutiveEmptyPollsRef.current >= MAX_CONSECUTIVE_EMPTY_POLLS) {
+                log(`No active candidates for ${consecutiveEmptyPollsRef.current} consecutive polls - pausing polling`);
+                if (mainPollIntervalRef.current) {
+                  clearInterval(mainPollIntervalRef.current);
+                  mainPollIntervalRef.current = null;
+                }
+                // Clear active candidates to show empty state
+                setActiveCandidates([]);
+                activeCandidatesRef.current = [];
+                return; // Exit early - polling is paused
+              }
+            } else {
+              // Reset counter when active candidates are found
+              if (consecutiveEmptyPollsRef.current > 0) {
+                log(`Active candidates found - resetting empty poll counter`);
+              }
+              consecutiveEmptyPollsRef.current = 0;
             }
             
             const newSessionsWithNames = activeNewSessions.map(session => ({
@@ -1094,11 +1174,28 @@ export function useMultiLiveProctorAdmin({
               setActiveCandidates(newSessionsWithNames);
               activeCandidatesRef.current = newSessionsWithNames; // Update ref
             }
+          } else {
+            // No sessions returned - increment empty poll counter
+            consecutiveEmptyPollsRef.current += 1;
+            log(`No sessions returned (empty poll ${consecutiveEmptyPollsRef.current}/${MAX_CONSECUTIVE_EMPTY_POLLS})`);
+            
+            if (consecutiveEmptyPollsRef.current >= MAX_CONSECUTIVE_EMPTY_POLLS) {
+              log(`No active candidates for ${consecutiveEmptyPollsRef.current} consecutive polls - pausing polling`);
+              if (mainPollIntervalRef.current) {
+                clearInterval(mainPollIntervalRef.current);
+                mainPollIntervalRef.current = null;
+              }
+              setActiveCandidates([]);
+              activeCandidatesRef.current = [];
+            }
           }
         } catch (err) {
           log("Error polling for sessions:", err);
         }
-      }, 5000);
+      };
+      
+      // Start polling interval
+      mainPollIntervalRef.current = setInterval(pollForCandidates, 5000);
     } catch (err) {
       log("Error starting monitoring:", err);
       onError?.(err instanceof Error ? err.message : "Failed to start monitoring");
@@ -1115,7 +1212,6 @@ export function useMultiLiveProctorAdmin({
 
   // Stop monitoring
   const stopMonitoring = useCallback(() => {
-    log("Stopping monitoring...");
     isMonitoringRef.current = false;
 
     if (mainPollIntervalRef.current) {
@@ -1137,9 +1233,7 @@ export function useMultiLiveProctorAdmin({
     setCandidateStreams(new Map());
         setActiveCandidates([]);
         activeCandidatesRef.current = []; // Update ref
-    
-    log("Monitoring stopped");
-  }, [log, closePeerConnection]);
+  }, [closePeerConnection]);
 
   // Refresh a specific candidate's connection
   const refreshCandidate = useCallback(async (identifier: string) => {
@@ -1167,6 +1261,20 @@ export function useMultiLiveProctorAdmin({
       await connectToCandidate(session);
   }, [activeCandidates, connectToCandidate, closePeerConnection, log]);
 
+  // Resume polling if it was paused (when refresh is called)
+  const resumePollingIfPaused = useCallback(async () => {
+    if (!isMonitoringRef.current || !assessmentId) return;
+    
+    // If polling is paused (no interval), restart it by calling startMonitoring
+    if (!mainPollIntervalRef.current) {
+      log("Resuming polling - restarting monitoring");
+      consecutiveEmptyPollsRef.current = 0; // Reset counter
+      
+      // Restart monitoring which will set up the polling interval again
+      await startMonitoring();
+    }
+  }, [assessmentId, startMonitoring, log]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -1188,5 +1296,6 @@ export function useMultiLiveProctorAdmin({
     startMonitoring,
     stopMonitoring,
     refreshCandidate,
+    resumePollingIfPaused,
   };
 }

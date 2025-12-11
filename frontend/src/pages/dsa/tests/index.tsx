@@ -117,9 +117,8 @@ export default function TestsListPage() {
     setAddingCandidate(true)
     try {
       const response = await dsaApi.post(`/tests/${testId}/add-candidate`, {
-        test_id: testId,
-        name: candidateName,
-        email: candidateEmail,
+        name: candidateName.trim(),
+        email: candidateEmail.trim(),
       })
       
       // Candidate added successfully (no unique link - using shared link)
