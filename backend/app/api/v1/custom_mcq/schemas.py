@@ -2,142 +2,88 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
 
-from pydantic import BaseModel, Field, validator
+
+class MCQOption(BaseModel):
+    """MCQ Option model"""
+    label: str  # A, B, C, D, E, etc.
+    text: str
 
 
 class MCQQuestion(BaseModel):
-    """
-    Single MCQ question structure.
-    
-    IMPORTANT: MCQ questions support exactly 4 options (A, B, C, D) only.
-    No additional options (E, F, etc.) are supported.
-    """
-    question: str = Field(..., description="Question text")
-    optionA: str = Field(..., description="Option A (required - exactly 4 options supported)")
-    optionB: str = Field(..., description="Option B (required - exactly 4 options supported)")
-    optionC: str = Field(..., description="Option C (required - exactly 4 options supported)")
-    optionD: str = Field(..., description="Option D (required - exactly 4 options supported)")
-    correctAnswer: str = Field(..., description="Correct answer (must be exactly A, B, C, or D - only 4 options supported)")
-    marks: int = Field(..., gt=0, description="Marks for this question")
-
-    @validator("correctAnswer")
-    def validate_correct_answer(cls, v):
-        v_upper = v.upper().strip()
-        if v_upper not in ["A", "B", "C", "D"]:
-            raise ValueError("correctAnswer must be exactly A, B, C, or D (only 4 options are supported)")
-        return v_upper
+    """MCQ Question model"""
+    id: Optional[str] = None
+    section: str
+    question: str
+    options: List[MCQOption]  # Dynamic options (A, B, C, D, E, ...)
+    correctAn: str  # Single: "A" or Multiple: "A,B" or "A,B,C"
+    answerType: str = Field(default="single", pattern=r"^(single|multiple_all|multiple_any)$")
+    marks: int = Field(default=1, ge=1)
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
 
 
-class Section(BaseModel):
-    """Section containing multiple MCQ questions."""
-    name: str = Field(..., description="Section name")
-    timeLimit: Optional[int] = Field(None, description="Time limit in minutes (for per-section timer)")
-    questions: List[MCQQuestion] = Field(default_factory=list, description="Questions in this section")
+class Candidate(BaseModel):
+    """Candidate model"""
+    name: str
+    email: str
 
 
-class CustomMCQTestSettings(BaseModel):
-    """Test settings for custom MCQ test."""
-    title: str = Field(..., description="Test title")
-    description: Optional[str] = Field(None, description="Test description")
-    instructions: Optional[str] = Field(None, description="Test instructions")
-    passingPercentage: float = Field(50.0, ge=0, le=100, description="Passing percentage")
-    shuffleQuestions: bool = Field(False, description="Shuffle questions within sections")
-    shuffleOptions: bool = Field(False, description="Shuffle options for each question")
-    allowNegativeMarking: bool = Field(False, description="Allow negative marking for wrong answers")
-    attemptLimit: int = Field(1, ge=1, description="Maximum number of attempts allowed")
+class CreateCustomMCQAssessmentRequest(BaseModel):
+    """Request to create a custom MCQ assessment"""
+    title: str
+    description: Optional[str] = None
+    questions: List[MCQQuestion]
+    candidates: Optional[List[Candidate]] = None
+    accessMode: str = Field(default="private", pattern=r"^(private|public)$")
+    examMode: str = Field(default="strict", pattern=r"^(strict|flexible)$")
+    startTime: Optional[datetime] = None
+    endTime: Optional[datetime] = None
+    duration: Optional[int] = None  # In minutes, for flexible mode
+    passPercentage: int = Field(default=50, ge=0, le=100)
 
 
-class TimerSettings(BaseModel):
-    """Timer configuration."""
-    timerMode: str = Field(..., description="'per-section' or 'single-exam'")
-    examDuration: Optional[int] = Field(None, description="Total exam duration in minutes (for single-exam mode)")
-    sectionTimes: Optional[Dict[str, int]] = Field(None, description="Time per section in minutes (for per-section mode)")
+class UpdateCustomMCQAssessmentRequest(BaseModel):
+    """Request to update a custom MCQ assessment"""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    questions: Optional[List[MCQQuestion]] = None
+    candidates: Optional[List[Candidate]] = None
+    accessMode: Optional[str] = Field(default=None, pattern=r"^(private|public)$")
+    examMode: Optional[str] = Field(default=None, pattern=r"^(strict|flexible)$")
+    startTime: Optional[datetime] = None
+    endTime: Optional[datetime] = None
+    duration: Optional[int] = None
+    passPercentage: Optional[int] = Field(default=None, ge=0, le=100)
 
 
-class ProctoringSettings(BaseModel):
-    """Proctoring configuration."""
-    enabled: bool = Field(False, description="Enable proctoring")
-    multiFaceDetection: bool = Field(False, description="Multiple face detection")
-    fullscreenMonitoring: bool = Field(False, description="Fullscreen monitoring")
-    copyPasteBlocking: bool = Field(False, description="Copy-paste blocking")
-    tabSwitchDetection: bool = Field(False, description="Tab switching detection")
-    frameMatchRecognition: bool = Field(False, description="Frame capture + face matching")
-    externalDeviceDetection: bool = Field(False, description="External device detection")
-    browserExtensionMonitoring: bool = Field(False, description="Browser extension monitoring")
-    concentrationTracking: bool = Field(False, description="User concentration tracking")
-    liveCameraAndScreenMonitoring: bool = Field(False, description="Live camera + screen monitoring")
+class ValidateCSVRequest(BaseModel):
+    """Request to validate CSV file"""
+    csvData: List[Dict[str, Any]]
 
 
-class CandidateInfo(BaseModel):
-    """Candidate information."""
-    name: str = Field(..., description="Candidate name")
-    email: str = Field(..., description="Candidate email")
-    phone: Optional[str] = Field(None, description="Candidate phone number")
+class CandidateSubmission(BaseModel):
+    """Candidate submission model"""
+    questionId: str
+    selectedAnswers: List[str]  # List of selected option labels (e.g., ["A", "B"])
 
 
-class ScheduleSettings(BaseModel):
-    """Schedule configuration."""
-    startTime: datetime = Field(..., description="Test start time (IST)")
-    endTime: datetime = Field(..., description="Test end time (IST)")
-    candidateRequirements: Optional[Dict[str, bool]] = Field(None, description="Required candidate fields")
+class SubmitCustomMCQRequest(BaseModel):
+    """Request to submit custom MCQ answers"""
+    assessmentId: str
+    token: str
+    email: str
+    name: str
+    submissions: List[CandidateSubmission]
+    startedAt: Optional[datetime] = None
+    submittedAt: Optional[datetime] = None
 
 
-class CreateCustomMCQTestRequest(BaseModel):
-    """Request to create a custom MCQ test."""
-    settings: CustomMCQTestSettings
-    sections: List[Section]
-    timerSettings: TimerSettings
-    proctoringSettings: ProctoringSettings
-    schedule: ScheduleSettings
-    accessMode: str = Field("private", description="'private' or 'public'")
-    candidates: Optional[List[CandidateInfo]] = Field(None, description="List of candidates (for private mode)")
-
-
-class CSVUploadRequest(BaseModel):
-    """Request to upload and validate CSV."""
-    csvContent: str = Field(..., description="CSV file content as string")
-
-
-class CSVValidationResponse(BaseModel):
-    """Response from CSV validation."""
-    valid: bool
-    errors: List[str] = Field(default_factory=list)
-    questions: List[Dict[str, Any]] = Field(default_factory=list)
-    sections: List[str] = Field(default_factory=list)
-
-
-class DraftData(BaseModel):
-    """Draft data structure for Custom MCQ Test."""
-    csvRawData: Optional[str] = Field(None, description="Raw CSV content")
-    parsedQuestions: List[Dict[str, Any]] = Field(default_factory=list, description="Parsed questions from CSV")
-    sections: List[Dict[str, Any]] = Field(default_factory=list, description="Section structure")
-    settings: Optional[Dict[str, Any]] = Field(None, description="Test settings")
-    scheduling: Optional[Dict[str, Any]] = Field(None, description="Schedule settings")
-    candidates: List[Dict[str, Any]] = Field(default_factory=list, description="Candidate list")
-    proctoringSettings: Optional[Dict[str, Any]] = Field(None, description="Proctoring settings")
-
-
-class CreateDraftRequest(BaseModel):
-    """Request to create a new draft."""
-    title: Optional[str] = Field(None, description="Optional title for the draft")
-
-
-class UpdateDraftRequest(BaseModel):
-    """Request to update a draft."""
-    draftData: DraftData
-    progressStep: int = Field(..., ge=1, le=7, description="Current step (1-7)")
-    timestamp: Optional[str] = Field(None, description="Optional timestamp")
-
-
-class PublishDraftRequest(BaseModel):
-    """Request to publish a draft."""
-    # All fields from CreateCustomMCQTestRequest are required for publishing
-    settings: CustomMCQTestSettings
-    sections: List[Section]
-    timerSettings: TimerSettings
-    proctoringSettings: ProctoringSettings
-    schedule: ScheduleSettings
-    accessMode: str = Field("private", description="'private' or 'public'")
-    candidates: Optional[List[CandidateInfo]] = Field(None, description="List of candidates (for private mode)")
+class VerifyCustomMCQCandidateRequest(BaseModel):
+    """Request to verify candidate access to custom MCQ"""
+    assessmentId: str
+    token: str
+    email: str
+    name: str
 

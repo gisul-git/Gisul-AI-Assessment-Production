@@ -7,6 +7,7 @@ import Link from "next/link";
 import Image from "next/image";
 import axios from "axios";
 import dsaApi from "../lib/dsa/api";
+import { customMCQApi } from "../lib/custom-mcq/api";
 
 interface Assessment {
   id: string;
@@ -23,6 +24,8 @@ interface Assessment {
   updatedAt?: string;
   type?: 'assessment' | 'dsa' | 'custom_mcq'; // Add type to distinguish
   isDraft?: boolean; // Add isDraft to interface
+  submissionsCount?: number;
+  totalQuestions?: number;
 }
 
 interface DashboardPageProps {
@@ -133,12 +136,12 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         console.error("[Dashboard] CRITICAL: No user ID found in session - cannot filter DSA tests securely");
       }
       
-      // Fetch regular assessments, DSA tests, and custom MCQ tests in parallel
+      // Fetch regular assessments, DSA tests, and custom MCQ assessments in parallel
       // CRITICAL: DSA tests endpoint filters by created_by automatically via authentication
-      const [assessmentsResponse, dsaTestsResponse, customMcqResponse] = await Promise.allSettled([
+      const [assessmentsResponse, dsaTestsResponse, customMCQResponse] = await Promise.allSettled([
         axios.get("/api/assessments/list"),
         dsaApi.get("/tests/", { params: { active_only: false } }),  // Explicit trailing slash and params
-        axios.get("/api/custom-mcq/list")
+        customMCQApi.listAssessments().catch(() => []),  // Fetch custom MCQ assessments
       ]);
       
       const allAssessments: Assessment[] = [];
@@ -152,24 +155,6 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         allAssessments.push(...regularAssessments);
       } else if (assessmentsResponse.status === 'rejected') {
         console.error("Error fetching regular assessments:", assessmentsResponse.reason);
-      }
-      
-      // Process custom MCQ tests
-      if (customMcqResponse.status === 'fulfilled' && customMcqResponse.value.data?.success && Array.isArray(customMcqResponse.value.data.data)) {
-        const customMcqTests = customMcqResponse.value.data.data.map((test: any) => ({
-          id: test.id,
-          title: test.title || 'Untitled Custom MCQ Test',
-          status: test.isDraft ? 'draft' : (test.status || 'published'),
-          isDraft: test.isDraft || false,
-          hasSchedule: false, // Custom MCQ tests have schedule in schedule object
-          createdAt: test.createdAt,
-          updatedAt: test.createdAt,
-          type: 'custom_mcq' as const,
-        }));
-        allAssessments.push(...customMcqTests);
-        console.log(`[Dashboard] Loaded ${customMcqTests.length} custom MCQ tests`);
-      } else if (customMcqResponse.status === 'rejected') {
-        console.error("Error fetching custom MCQ tests:", customMcqResponse.reason);
       }
       
       // Process DSA tests
@@ -231,6 +216,31 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         console.error("DSA tests response error details:", dsaTestsResponse.reason?.response?.data);
       }
       
+      // Process custom MCQ assessments
+      if (customMCQResponse.status === 'fulfilled' && Array.isArray(customMCQResponse.value)) {
+        const customMCQAssessments = customMCQResponse.value.map((a: any) => ({
+          id: a.id,
+          title: a.title || 'Untitled Custom MCQ',
+          status: a.status || 'draft',
+          hasSchedule: !!(a.startTime && a.endTime),
+          scheduleStatus: a.startTime && a.endTime ? {
+            startTime: a.startTime,
+            endTime: a.endTime,
+            duration: a.duration || 0,
+            isActive: new Date(a.endTime) > new Date() && new Date(a.startTime) <= new Date(),
+          } : null,
+          createdAt: a.createdAt || null,
+          updatedAt: a.updatedAt || null,
+          type: 'custom_mcq' as const,
+          submissionsCount: a.submissionsCount || 0,
+          totalQuestions: a.totalQuestions || 0,
+        }));
+        allAssessments.push(...customMCQAssessments);
+        console.log(`[Dashboard] Loaded ${customMCQAssessments.length} custom MCQ assessments`);
+      } else if (customMCQResponse.status === 'rejected') {
+        console.error("Error fetching custom MCQ assessments:", customMCQResponse.reason);
+      }
+      
       // Sort by creation date (newest first)
       allAssessments.sort((a, b) => {
         const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
@@ -268,13 +278,9 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         await dsaApi.delete(`/tests/${assessmentId}`);
         setAssessments(assessments.filter((a) => a.id !== assessmentId));
       } else if (assessmentType === 'custom_mcq') {
-        // Delete custom MCQ test
-        const response = await axios.delete(`/api/custom-mcq/${assessmentId}`);
-        if (response.data?.success) {
-          setAssessments(assessments.filter((a) => a.id !== assessmentId));
-        } else {
-          setError(response.data?.message || "Failed to delete custom MCQ test");
-        }
+        // Delete custom MCQ assessment
+        await customMCQApi.deleteAssessment(assessmentId);
+        setAssessments(assessments.filter((a) => a.id !== assessmentId));
       } else {
         // Delete regular assessment
       const response = await axios.delete(`/api/assessments/delete-assessment?assessmentId=${assessmentId}`);
@@ -510,10 +516,10 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                 Signed in as <strong>{activeSession?.user?.name || activeSession?.user?.email || "User"}</strong>
               </p>
             </div>
-            <div style={{ display: "flex", gap: "1rem", width: "100%" }}>
+            <div style={{ display: "flex", gap: "1rem", width: "100%", flexWrap: "wrap" }}>
               <Link 
                 href="/assessments/create-new" 
-                style={{ flex: 1 }}
+                style={{ flex: 1, minWidth: "200px" }}
                 onClick={() => {
                   // Clear any draft from localStorage to ensure a fresh start
                   try {
@@ -527,34 +533,14 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                   + Create New Assessment (AI)
                 </button>
               </Link>
-              <button
-                type="button"
-                onClick={() => router.push("/custom-mcq/create")}
-                style={{
-                  flex: 1,
-                  marginTop: 0,
-                  padding: "0.75rem 1.5rem",
-                  backgroundColor: "#10b981",
-                  color: "#ffffff",
-                  border: "none",
-                  borderRadius: "0.5rem",
-                  fontSize: "0.875rem",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  transition: "all 0.2s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = "#059669";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = "#10b981";
-                }}
-              >
-                + Create Custom MCQ Test (CSV)
-              </button>
-              <Link href="/dsa" style={{ flex: 1 }}>
+              <Link href="/dsa" style={{ flex: 1, minWidth: "200px" }}>
                 <button type="button" className="btn-primary" style={{ marginTop: 0, width: "100%" }}>
                   Create DSA Competency
+                </button>
+              </Link>
+              <Link href="/custom-mcq/create" style={{ flex: 1, minWidth: "200px" }}>
+                <button type="button" className="btn-primary" style={{ marginTop: 0, width: "100%" }}>
+                  Create Custom MCQ
                 </button>
               </Link>
             </div>
@@ -654,8 +640,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       if (assessment.type === 'dsa') {
                         router.push(`/dsa/tests`);
                       } else if (assessment.type === 'custom_mcq') {
-                        // Route to create page with testId for editing (works for both draft and published)
-                        router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                        // For custom MCQ, show details/analytics
+                        router.push(`/custom-mcq/${assessment.id}`);
                       } else if (assessment.status === 'draft') {
                         router.push(`/assessments/create-new?id=${assessment.id}`);
                       } else {
@@ -684,36 +670,6 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                         {assessment.title}
                       </h3>
                       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                        {assessment.type === 'custom_mcq' && (
-                          <>
-                            <span
-                              className="badge"
-                              style={{
-                                backgroundColor: "#10b981",
-                                color: "#ffffff",
-                                fontSize: "0.75rem",
-                                padding: "0.25rem 0.5rem",
-                                borderRadius: "0.25rem",
-                              }}
-                            >
-                              Custom MCQ
-                            </span>
-                            {assessment.isDraft && (
-                              <span
-                                className="badge"
-                                style={{
-                                  backgroundColor: "#fbbf24",
-                                  color: "#ffffff",
-                                  fontSize: "0.75rem",
-                                  padding: "0.25rem 0.5rem",
-                                  borderRadius: "0.25rem",
-                                }}
-                              >
-                                Draft
-                              </span>
-                            )}
-                          </>
-                        )}
                         {assessment.type === 'dsa' && (
                           <span
                             className="badge"
@@ -726,6 +682,20 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             }}
                           >
                             DSA
+                          </span>
+                        )}
+                        {assessment.type === 'custom_mcq' && (
+                          <span
+                            className="badge"
+                            style={{
+                              backgroundColor: "#E8FAF0",
+                              color: "#2D7A52",
+                              border: "1px solid #A8E8BC",
+                              fontSize: "0.75rem",
+                              padding: "0.25rem 0.5rem",
+                            }}
+                          >
+                            Custom MCQ
                           </span>
                         )}
                         <span
@@ -752,6 +722,16 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           ) : (
                             <span style={{ color: "#f59e0b" }}>⏸️ Scheduled</span>
                           )}
+                        </div>
+                      )}
+                      {assessment.type === 'custom_mcq' && (
+                        <div style={{ marginTop: "0.5rem" }}>
+                          <span style={{ marginRight: "1rem" }}>
+                            <strong>Questions:</strong> {assessment.totalQuestions || 0}
+                          </span>
+                          <span>
+                            <strong>Submissions:</strong> {assessment.submissionsCount || 0}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -935,55 +915,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           </button>
                         </>
                       )}
-                      
-                      {/* Custom MCQ - Show Edit and Delete */}
-                      {assessment.type === 'custom_mcq' && (
-                        <>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.5rem 1rem",
-                              marginTop: 0,
-                              width: "100%",
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
-                            }}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.5rem 1rem",
-                              backgroundColor: "#ef4444",
-                              color: "#ffffff",
-                              border: "none",
-                              borderRadius: "0.375rem",
-                              cursor: "pointer",
-                              transition: "background-color 0.2s",
-                              width: "100%",
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = "#dc2626";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = "#ef4444";
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                            }}
-                          >
-                            Delete
-                          </button>
-                        </>
-                      )}
-                    </div>
+                                          </div>
                   </div>
                 );
               })}
