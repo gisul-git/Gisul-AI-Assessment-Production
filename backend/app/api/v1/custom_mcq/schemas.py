@@ -32,9 +32,9 @@ class Candidate(BaseModel):
 
 class CreateCustomMCQAssessmentRequest(BaseModel):
     """Request to create a custom MCQ assessment"""
-    title: str
+    title: Optional[str] = None  # Optional for drafts
     description: Optional[str] = None
-    questions: List[MCQQuestion]
+    questions: Optional[List[MCQQuestion]] = None  # Optional for drafts
     candidates: Optional[List[Candidate]] = None
     accessMode: str = Field(default="private", pattern=r"^(private|public)$")
     examMode: str = Field(default="strict", pattern=r"^(strict|flexible)$")
@@ -42,6 +42,8 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     endTime: Optional[datetime] = None
     duration: Optional[int] = None  # In minutes, for flexible mode
     passPercentage: int = Field(default=50, ge=0, le=100)
+    status: Optional[str] = Field(default="draft", pattern=r"^(draft|scheduled)$")  # Draft or scheduled
+    currentStation: Optional[int] = Field(default=1, ge=1, le=5)  # Track which station user is on
 
 
 class UpdateCustomMCQAssessmentRequest(BaseModel):
@@ -56,6 +58,8 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     endTime: Optional[datetime] = None
     duration: Optional[int] = None
     passPercentage: Optional[int] = Field(default=None, ge=0, le=100)
+    status: Optional[str] = Field(default=None, pattern=r"^(draft|scheduled)$")  # Allow status updates
+    currentStation: Optional[int] = Field(default=None, ge=1, le=5)  # Track which station user is on
 
 
 class ValidateCSVRequest(BaseModel):
@@ -86,4 +90,12 @@ class VerifyCustomMCQCandidateRequest(BaseModel):
     token: str
     email: str
     name: str
+
+
+class SendCustomMCQInvitationRequest(BaseModel):
+    """Request to send invitation emails for custom MCQ assessment"""
+    assessmentId: str
+    candidates: List[Candidate]
+    assessmentUrl: str
+    template: Optional[Dict[str, Any]] = None
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
 import { GetServerSideProps } from "next";
 import { requireAuth } from "../../lib/auth";
@@ -33,6 +33,9 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
   const [createdAssessmentUrl, setCreatedAssessmentUrl] = useState<string | null>(null);
   const [assessmentToken, setAssessmentToken] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isInitialLoadRef = useRef(true);
 
   const stations = [
     { id: 1, name: "Assessment Information", icon: "📋" },
@@ -42,34 +45,175 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
     { id: 5, name: "Schedule", icon: "📅" },
   ];
 
-  // Load draft from localStorage if exists
+  // Load draft from backend if assessmentId is in URL, otherwise check localStorage
   useEffect(() => {
-    try {
-      const draft = localStorage.getItem("custom_mcq_draft");
-      if (draft) {
-        const parsed = JSON.parse(draft);
-        setAssessmentData(parsed);
-        if (parsed.currentStation) {
-          setCurrentStation(parsed.currentStation);
+    const loadDraft = async () => {
+      try {
+        const { id } = router.query;
+        
+        if (id && typeof id === "string") {
+          // Load existing draft from backend
+          try {
+            const assessment = await customMCQApi.getAssessment(id);
+            setAssessmentId(id);
+            setAssessmentData({
+              title: assessment.title || "",
+              description: assessment.description || "",
+              questions: assessment.questions || [],
+              candidates: assessment.candidates || [],
+              accessMode: assessment.accessMode || "private",
+              examMode: assessment.examMode || "strict",
+              startTime: assessment.startTime,
+              endTime: assessment.endTime,
+              duration: assessment.duration,
+              passPercentage: assessment.passPercentage || 50,
+            });
+            
+            // Set current station from backend or default to 1
+            const station = (assessment as any).currentStation || 1;
+            setCurrentStation(station);
+            isInitialLoadRef.current = false;
+          } catch (err) {
+            console.error("Error loading draft from backend:", err);
+            // Fallback to localStorage if backend load fails
+            const draft = localStorage.getItem("custom_mcq_draft");
+            if (draft) {
+              const parsed = JSON.parse(draft);
+              setAssessmentData(parsed);
+              if (parsed.currentStation) {
+                setCurrentStation(parsed.currentStation);
+              }
+            }
+          }
+        } else {
+          // No ID in URL, check localStorage
+          const draft = localStorage.getItem("custom_mcq_draft");
+          if (draft) {
+            const parsed = JSON.parse(draft);
+            setAssessmentData(parsed);
+            if (parsed.currentStation) {
+              setCurrentStation(parsed.currentStation);
+            }
+          }
         }
+      } catch (err) {
+        console.error("Error loading draft:", err);
+      } finally {
+        isInitialLoadRef.current = false;
       }
-    } catch (err) {
-      console.error("Error loading draft:", err);
-    }
-  }, []);
+    };
 
-  // Save draft to localStorage
-  useEffect(() => {
-    try {
-      const draft = {
-        ...assessmentData,
-        currentStation,
-      };
-      localStorage.setItem("custom_mcq_draft", JSON.stringify(draft));
-    } catch (err) {
-      console.error("Error saving draft:", err);
+    if (router.isReady) {
+      loadDraft();
     }
-  }, [assessmentData, currentStation]);
+  }, [router.isReady, router.query]);
+
+  // Auto-save draft to backend on every change (debounced)
+  const saveDraftToBackend = useCallback(async () => {
+    // Skip save on initial load
+    if (isInitialLoadRef.current) {
+      return;
+    }
+
+    // Clear existing timeout
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    // Debounce: wait 1 second after last change before saving
+    saveTimeoutRef.current = setTimeout(async () => {
+      try {
+        setIsSaving(true);
+        
+        const draftData: any = {
+          title: assessmentData.title || "",
+          description: assessmentData.description || "",
+          questions: assessmentData.questions || [],
+          candidates: assessmentData.candidates || [],
+          accessMode: assessmentData.accessMode || "private",
+          examMode: assessmentData.examMode || "strict",
+          startTime: assessmentData.startTime,
+          endTime: assessmentData.endTime,
+          duration: assessmentData.duration,
+          passPercentage: assessmentData.passPercentage || 50,
+          status: "draft",
+          currentStation: currentStation,
+        };
+
+        if (assessmentId) {
+          // Update existing draft
+          await customMCQApi.updateAssessment(assessmentId, {
+            ...draftData,
+            status: "draft",
+            currentStation: currentStation,
+          });
+        } else {
+          // Create new draft
+          const result = await customMCQApi.createAssessment({
+            ...draftData,
+            status: "draft",
+            currentStation: currentStation,
+          } as any);
+          setAssessmentId(result.assessmentId);
+        }
+      } catch (err) {
+        console.error("Error auto-saving draft:", err);
+        // Don't show error to user for auto-save failures
+      } finally {
+        setIsSaving(false);
+      }
+    }, 1000); // 1 second debounce
+  }, [assessmentData, currentStation, assessmentId]);
+
+  // Auto-save when data changes
+  useEffect(() => {
+    saveDraftToBackend();
+    
+    // Cleanup timeout on unmount
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [saveDraftToBackend]);
+
+  // Save draft before page unload
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      // Save synchronously before leaving
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+      
+      // Use sendBeacon for reliable save on page unload
+      if (assessmentId || assessmentData.title || (assessmentData.questions && assessmentData.questions.length > 0)) {
+        const draftData = {
+          title: assessmentData.title || "",
+          description: assessmentData.description || "",
+          questions: assessmentData.questions || [],
+          candidates: assessmentData.candidates || [],
+          accessMode: assessmentData.accessMode || "private",
+          examMode: assessmentData.examMode || "strict",
+          startTime: assessmentData.startTime,
+          endTime: assessmentData.endTime,
+          duration: assessmentData.duration,
+          passPercentage: assessmentData.passPercentage || 50,
+          status: "draft",
+          currentStation: currentStation,
+        };
+
+        // Note: We rely on the debounced auto-save mechanism
+        // sendBeacon doesn't support custom headers needed for authentication
+        // The debounced save will handle the save before navigation
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [assessmentData, currentStation, assessmentId]);
 
   const updateAssessmentData = (updates: Partial<CustomMCQAssessment>) => {
     setAssessmentData((prev) => ({ ...prev, ...updates }));
@@ -128,8 +272,8 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         }
       }
 
-      // Prepare data for API
-      const createData: CustomMCQAssessment = {
+      // Prepare data for API - change status from draft to scheduled
+      const createData: any = {
         title: assessmentData.title!,
         description: assessmentData.description || "",
         questions: assessmentData.questions!,
@@ -140,20 +284,27 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         endTime: assessmentData.endTime,
         duration: assessmentData.duration,
         passPercentage: assessmentData.passPercentage || 50,
+        status: "scheduled", // Change from draft to scheduled
+        currentStation: currentStation,
       };
 
       let result: any;
       if (assessmentId) {
-        // Update existing
-        await customMCQApi.updateAssessment(assessmentId, createData);
+        // Update existing draft to scheduled
+        const updateResponse = await customMCQApi.updateAssessment(assessmentId, createData);
         result = await customMCQApi.getAssessment(assessmentId);
+        // Get the token and URL from the update response if available
+        if (updateResponse && (updateResponse as any).assessmentToken) {
+          result.assessmentToken = (updateResponse as any).assessmentToken;
+          result.assessmentUrl = (updateResponse as any).assessmentUrl;
+        }
       } else {
-        // Create new
+        // Create new as scheduled
         result = await customMCQApi.createAssessment(createData);
         setAssessmentId(result.assessmentId);
       }
 
-      // Clear draft
+      // Clear localStorage draft
       localStorage.removeItem("custom_mcq_draft");
 
       // Store the assessment URL for display - always construct full URL
@@ -206,7 +357,14 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
   return (
     <div style={{ backgroundColor: "#ffffff", minHeight: "100vh", padding: "2rem" }}>
       <div className="container" style={{ maxWidth: "1200px", margin: "0 auto" }}>
-        <h1 style={{ marginBottom: "2rem", color: "#1E5A3B" }}>Create Custom MCQ Assessment</h1>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2rem" }}>
+          <h1 style={{ margin: 0, color: "#1E5A3B" }}>Create Custom MCQ Assessment</h1>
+          {isSaving && (
+            <span style={{ fontSize: "0.875rem", color: "#2D7A52", fontStyle: "italic" }}>
+              💾 Saving draft...
+            </span>
+          )}
+        </div>
 
         {/* Metro Station Navigation */}
         <div
@@ -366,13 +524,14 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
               onCreateAssessment={handleCreateAssessment}
               loading={loading}
               createdAssessmentUrl={createdAssessmentUrl}
+              assessmentId={assessmentId}
               router={router}
             />
           )}
         </div>
 
         {/* Navigation Buttons */}
-        <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "center" }}>
           <button
             type="button"
             onClick={handlePrevious}
@@ -385,6 +544,52 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
             }}
           >
             ← Previous
+          </button>
+
+          {/* Back to Dashboard Button - Always Visible */}
+          <button
+            type="button"
+            onClick={async () => {
+              // Save draft before navigating away
+              if (saveTimeoutRef.current) {
+                clearTimeout(saveTimeoutRef.current);
+              }
+              try {
+                const draftData: any = {
+                  title: assessmentData.title || "",
+                  description: assessmentData.description || "",
+                  questions: assessmentData.questions || [],
+                  candidates: assessmentData.candidates || [],
+                  accessMode: assessmentData.accessMode || "private",
+                  examMode: assessmentData.examMode || "strict",
+                  startTime: assessmentData.startTime,
+                  endTime: assessmentData.endTime,
+                  duration: assessmentData.duration,
+                  passPercentage: assessmentData.passPercentage || 50,
+                  status: "draft",
+                  currentStation: currentStation,
+                };
+
+                if (assessmentId) {
+                  await customMCQApi.updateAssessment(assessmentId, draftData);
+                } else if (assessmentData.title || (assessmentData.questions && assessmentData.questions.length > 0)) {
+                  const result = await customMCQApi.createAssessment(draftData);
+                  setAssessmentId(result.assessmentId);
+                }
+              } catch (err) {
+                console.error("Error saving draft before navigation:", err);
+              }
+              router.push("/dashboard");
+            }}
+            className="btn-secondary"
+            style={{
+              padding: "0.75rem 1.5rem",
+              backgroundColor: "#ffffff",
+              color: "#2D7A52",
+              border: "1px solid #A8E8BC",
+            }}
+          >
+            ← Back to Dashboard
           </button>
 
           {currentStation < 5 ? (

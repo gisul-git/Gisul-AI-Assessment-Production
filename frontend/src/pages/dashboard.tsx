@@ -278,13 +278,9 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         await dsaApi.delete(`/tests/${assessmentId}`);
         setAssessments(assessments.filter((a) => a.id !== assessmentId));
       } else if (assessmentType === 'custom_mcq') {
-        // Delete custom MCQ test
-        const response = await axios.delete(`/api/custom-mcq/${assessmentId}`);
-        if (response.data?.success) {
-          setAssessments(assessments.filter((a) => a.id !== assessmentId));
-        } else {
-          setError(response.data?.message || "Failed to delete custom MCQ test");
-        }
+        // Delete custom MCQ test - use the customMCQApi
+        await customMCQApi.deleteAssessment(assessmentId);
+        setAssessments(assessments.filter((a) => a.id !== assessmentId));
       } else {
         // Delete regular assessment
       const response = await axios.delete(`/api/assessments/delete-assessment?assessmentId=${assessmentId}`);
@@ -646,8 +642,12 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       if (assessment.type === 'dsa') {
                         router.push(`/dsa/tests`);
                       } else if (assessment.type === 'custom_mcq') {
-                        // For custom MCQ, show details/analytics
-                        router.push(`/custom-mcq/${assessment.id}`);
+                        // For draft custom_mcq, go to edit/create page, otherwise details page
+                        if (assessment.status === 'draft') {
+                          router.push(`/custom-mcq/create?id=${assessment.id}`);
+                        } else {
+                          router.push(`/custom-mcq/${assessment.id}`);
+                        }
                       } else if (assessment.status === 'draft') {
                         router.push(`/assessments/create-new?id=${assessment.id}`);
                       } else {
@@ -742,8 +742,74 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       )}
                     </div>
                     <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem", paddingTop: "1rem", borderTop: "1px solid #E8FAF0" }}>
+                      {/* Custom MCQ - Show Edit for drafts, View for scheduled/active, and Delete */}
+                      {assessment.type === 'custom_mcq' && (
+                        <>
+                          {assessment.status === 'draft' ? (
+                            <button
+                              type="button"
+                              className="btn-primary"
+                              style={{
+                                fontSize: "0.875rem",
+                                padding: "0.5rem 1rem",
+                                marginTop: 0,
+                                width: "100%",
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                router.push(`/custom-mcq/create?id=${assessment.id}`);
+                              }}
+                            >
+                              ✏️ Edit
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn-primary"
+                              style={{
+                                fontSize: "0.875rem",
+                                padding: "0.5rem 1rem",
+                                marginTop: 0,
+                                width: "100%",
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                router.push(`/custom-mcq/${assessment.id}`);
+                              }}
+                            >
+                              View
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.5rem 1rem",
+                              backgroundColor: "#ef4444",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: "pointer",
+                              transition: "background-color 0.2s",
+                              width: "100%",
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = "#dc2626";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = "#ef4444";
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
                       {/* CASE A: Draft - Show Edit and Delete, HIDE Analytics */}
-                      {assessment.status === 'draft' && assessment.type !== 'dsa' && (
+                      {assessment.status === 'draft' && assessment.type !== 'dsa' && assessment.type !== 'custom_mcq' && (
                         <>
                         <button
                           type="button"

@@ -24,6 +24,7 @@ from .schemas import (
     ValidateCSVRequest,
     SubmitCustomMCQRequest,
     VerifyCustomMCQCandidateRequest,
+    SendCustomMCQInvitationRequest,
     MCQQuestion,
     Candidate,
     CandidateSubmission,
@@ -211,43 +212,62 @@ async def create_custom_mcq_assessment(
     current_user: Dict[str, Any] = Depends(require_editor),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Create a new custom MCQ assessment"""
+    """Create a new custom MCQ assessment (supports draft and scheduled status)"""
     try:
         user_id = current_user.get("id") or current_user.get("_id")
         if not user_id:
             return error_response("User ID not found", status_code=401)
         user_id = str(user_id)
         
-        # Validate exam mode requirements
-        if request.examMode == "flexible" and not request.duration:
-            return error_response("Duration is required for flexible exam mode", status_code=400)
+        # Determine status (default to draft)
+        status = request.status or "draft"
+        is_draft = status == "draft"
         
-        if request.examMode == "strict" and (not request.startTime or not request.endTime):
-            return error_response("Start time and end time are required for strict exam mode", status_code=400)
+        # For scheduled assessments, validate all required fields
+        if not is_draft:
+            if not request.title or not request.title.strip():
+                return error_response("Title is required for scheduled assessments", status_code=400)
+            if not request.questions or len(request.questions) == 0:
+                return error_response("At least one question is required for scheduled assessments", status_code=400)
+            # Validate exam mode requirements
+            if request.examMode == "flexible" and not request.duration:
+                return error_response("Duration is required for flexible exam mode", status_code=400)
+            if request.examMode == "strict" and (not request.startTime or not request.endTime):
+                return error_response("Start time and end time are required for strict exam mode", status_code=400)
         
-        # Generate assessment token
-        assessment_token = _generate_assessment_token()
+        # Generate assessment token (only for scheduled, or if not exists for draft)
+        assessment_token = None
+        assessment_url = None
+        if not is_draft:
+            assessment_token = _generate_assessment_token()
+            # Generate assessment URL only for scheduled assessments
+            # We'll generate it after insert for drafts
         
         # Prepare questions with IDs
         questions_with_ids = []
-        for idx, q in enumerate(request.questions):
-            q_dict = q.model_dump()
-            q_dict["id"] = f"q_{idx + 1}"
-            q_dict["createdAt"] = _now_utc()
-            q_dict["updatedAt"] = _now_utc()
-            questions_with_ids.append(q_dict)
+        if request.questions:
+            for idx, q in enumerate(request.questions):
+                q_dict = q.model_dump()
+                q_dict["id"] = q_dict.get("id") or f"q_{idx + 1}"
+                if "createdAt" not in q_dict or not q_dict.get("createdAt"):
+                    q_dict["createdAt"] = _now_utc()
+                q_dict["updatedAt"] = _now_utc()
+                questions_with_ids.append(q_dict)
         
         # Prepare candidates
         candidates_list = []
         if request.candidates:
             candidates_list = [c.model_dump() for c in request.candidates]
         
+        # Calculate total marks
+        total_marks = sum(q["marks"] for q in questions_with_ids) if questions_with_ids else 0
+        
         # Create assessment document
         assessment_doc = {
-            "title": request.title,
+            "title": request.title or "",
             "description": request.description or "",
             "type": "custom_mcq",
-            "status": "scheduled",
+            "status": status,
             "created_by": user_id,
             "created_at": _now_utc(),
             "updated_at": _now_utc(),
@@ -261,17 +281,22 @@ async def create_custom_mcq_assessment(
                 "duration": request.duration,  # In minutes
             },
             "passPercentage": request.passPercentage,
-            "assessmentToken": assessment_token,
             "submissions": {},  # Store candidate submissions
-            "totalMarks": sum(q["marks"] for q in questions_with_ids),
+            "totalMarks": total_marks,
+            "currentStation": request.currentStation or 1,  # Track current station
         }
+        
+        # Only add token and URL for scheduled assessments
+        if assessment_token:
+            assessment_doc["assessmentToken"] = assessment_token
         
         # Insert into database
         result = await db.custom_mcq_assessments.insert_one(assessment_doc)
         assessment_id = str(result.inserted_id)
         
-        # Generate assessment URL (relative path - frontend will add origin)
-        assessment_url = f"/custom-mcq/entry/{assessment_id}?token={assessment_token}"
+        # Generate assessment URL for scheduled assessments
+        if assessment_token:
+            assessment_url = f"/custom-mcq/entry/{assessment_id}?token={assessment_token}"
         
         return success_response(
             "Custom MCQ assessment created successfully",
@@ -280,7 +305,9 @@ async def create_custom_mcq_assessment(
                 "assessmentToken": assessment_token,
                 "assessmentUrl": assessment_url,
                 "totalQuestions": len(questions_with_ids),
-                "totalMarks": assessment_doc["totalMarks"],
+                "totalMarks": total_marks,
+                "status": status,
+                "currentStation": assessment_doc["currentStation"],
             }
         )
         
@@ -320,6 +347,7 @@ async def list_custom_mcq_assessments(
                 "submissionsCount": submissions_count,
                 "createdAt": assessment_serialized.get("created_at"),
                 "updatedAt": assessment_serialized.get("updated_at"),
+                "currentStation": assessment_serialized.get("currentStation", 1),  # Include current station
             })
         
         return success_response(
@@ -438,28 +466,75 @@ async def update_custom_mcq_assessment(
         if request.examMode is not None:
             update_doc["examMode"] = request.examMode
         
-        if request.startTime is not None or request.endTime is not None:
-            schedule = assessment.get("schedule", {})
-            if request.startTime is not None:
-                schedule["startTime"] = request.startTime.isoformat()
-            if request.endTime is not None:
-                schedule["endTime"] = request.endTime.isoformat()
-            update_doc["schedule"] = schedule
+        # Handle schedule updates - merge with existing schedule
+        schedule_updated = False
+        schedule = dict(assessment.get("schedule", {}))  # Copy existing schedule
         
+        if request.startTime is not None:
+            schedule["startTime"] = request.startTime.isoformat()
+            schedule_updated = True
+        if request.endTime is not None:
+            schedule["endTime"] = request.endTime.isoformat()
+            schedule_updated = True
         if request.duration is not None:
-            schedule = assessment.get("schedule", {})
             schedule["duration"] = request.duration
+            schedule_updated = True
+        
+        if schedule_updated:
             update_doc["schedule"] = schedule
         
         if request.passPercentage is not None:
             update_doc["passPercentage"] = request.passPercentage
+        
+        # Handle status update (draft -> scheduled)
+        if request.status is not None:
+            update_doc["status"] = request.status
+            # If changing from draft to scheduled, validate and generate token if needed
+            if request.status == "scheduled":
+                # Validate required fields for scheduled
+                current_title = update_doc.get("title") or assessment.get("title", "")
+                current_questions = update_doc.get("questions") or assessment.get("questions", [])
+                
+                if not current_title or not current_title.strip():
+                    return error_response("Title is required for scheduled assessments", status_code=400)
+                if not current_questions or len(current_questions) == 0:
+                    return error_response("At least one question is required for scheduled assessments", status_code=400)
+                
+                # Validate exam mode requirements
+                current_exam_mode = update_doc.get("examMode") or assessment.get("examMode", "strict")
+                current_schedule = update_doc.get("schedule") or assessment.get("schedule", {})
+                
+                if current_exam_mode == "flexible" and not current_schedule.get("duration"):
+                    return error_response("Duration is required for flexible exam mode", status_code=400)
+                if current_exam_mode == "strict" and (not current_schedule.get("startTime") or not current_schedule.get("endTime")):
+                    return error_response("Start time and end time are required for strict exam mode", status_code=400)
+                
+                # Generate assessment token if not exists
+                if not assessment.get("assessmentToken"):
+                    assessment_token = _generate_assessment_token()
+                    update_doc["assessmentToken"] = assessment_token
+        
+        # Update current station if provided
+        if request.currentStation is not None:
+            update_doc["currentStation"] = request.currentStation
         
         await db.custom_mcq_assessments.update_one(
             {"_id": assessment_oid},
             {"$set": update_doc}
         )
         
-        return success_response("Assessment updated successfully")
+        # Get updated assessment to return token if it was generated
+        updated_assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        response_data = {"message": "Assessment updated successfully"}
+        
+        # If status changed to scheduled and token was generated, include it
+        if request.status == "scheduled" and updated_assessment and updated_assessment.get("assessmentToken"):
+            assessment_id = str(updated_assessment["_id"])
+            assessment_token = updated_assessment["assessmentToken"]
+            response_data["assessmentToken"] = assessment_token
+            response_data["assessmentUrl"] = f"/custom-mcq/entry/{assessment_id}?token={assessment_token}"
+        
+        return success_response("Assessment updated successfully", response_data)
         
     except Exception as e:
         logger.exception(f"Error updating custom MCQ assessment: {e}")
@@ -791,4 +866,170 @@ async def submit_custom_mcq(
     except Exception as e:
         logger.exception(f"Error submitting custom MCQ: {e}")
         return error_response(f"Failed to submit assessment: {str(e)}", status_code=500)
+
+
+@router.post("/send-invitations")
+async def send_custom_mcq_invitations(
+    request: SendCustomMCQInvitationRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """Send invitation emails to candidates for custom MCQ assessment"""
+    try:
+        from ....utils.email import get_email_service
+        from ....config.settings import get_settings
+        
+        user_id = current_user.get("id") or current_user.get("_id")
+        if not user_id:
+            return error_response("User ID not found", status_code=401)
+        user_id = str(user_id)
+        
+        assessment_oid = to_object_id(request.assessmentId)
+        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
+        
+        # Check ownership
+        if str(assessment["created_by"]) != user_id:
+            return error_response("Access denied", status_code=403)
+        
+        # Get email service and verify it's configured
+        settings = get_settings()
+        
+        # Check email configuration based on provider
+        email_configured = False
+        if settings.email_provider.lower() == "sendgrid":
+            email_configured = bool(settings.sendgrid_api_key and settings.sendgrid_from_email)
+        elif settings.email_provider.lower() == "azure":
+            email_configured = bool(settings.azure_comm_connection_string and settings.azure_comm_sender_address)
+        elif settings.email_provider.lower() == "aws":
+            email_configured = bool(settings.aws_access_key and settings.aws_secret_key and settings.aws_email_source)
+        
+        if not email_configured:
+            return error_response(
+                f"Email service ({settings.email_provider}) is not configured. Please set email provider credentials.",
+                status_code=500
+            )
+        
+        email_service = get_email_service()
+        
+        # Get template values or use defaults
+        template = request.template or {}
+        subject_template = template.get("subject", "Assessment Invitation - {{assessment_title}}")
+        message_template = template.get("message", "Dear {{candidate_name}},\n\nYou have been invited to take the assessment: {{assessment_title}}.\n\nPlease click the button below to start the assessment.")
+        footer = template.get("footer", "")
+        sent_by = template.get("sentBy", "AI Assessment Platform")
+        
+        assessment_title = assessment.get("title", "Assessment")
+        
+        # Replace assessment title in subject
+        subject = subject_template.replace("{{assessment_title}}", assessment_title)
+        
+        sent_count = 0
+        failed_emails = []
+        error_messages = []
+        
+        for candidate in request.candidates:
+            email = candidate.email.strip().lower()
+            name = candidate.name.strip()
+            
+            if not email or not name:
+                failed_emails.append(email or "unknown")
+                error_messages.append(f"Invalid candidate data: email={email}, name={name}")
+                continue
+            
+            # Build assessment URL with token
+            assessment_url = request.assessmentUrl
+            assessment_token = assessment.get("assessmentToken")
+            if assessment_token:
+                # Ensure URL has token parameter
+                if "token=" not in assessment_url:
+                    separator = "&" if "?" in assessment_url else "?"
+                    assessment_url = f"{assessment_url}{separator}token={assessment_token}"
+            
+            # Replace placeholders in message
+            email_body = message_template
+            email_body = email_body.replace("{{candidate_name}}", name)
+            email_body = email_body.replace("{{candidate_email}}", email)
+            email_body = email_body.replace("{{assessment_title}}", assessment_title)
+            email_body = email_body.replace("\n", "<br>")  # Convert newlines to HTML breaks
+            
+            # Build HTML email
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ text-align: center; margin-bottom: 30px; }}
+                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #2D7A52; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; font-weight: 600; }}
+                    .button:hover {{ background-color: #1E5A3B; }}
+                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #2D7A52; }}
+                    .candidate-info p {{ margin: 5px 0; }}
+                    .candidate-info strong {{ color: #1e293b; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="content">
+                        <p>{email_body}</p>
+                        
+                        <div class="candidate-info">
+                            <p><strong>Your Details:</strong></p>
+                            <p><strong>Name:</strong> {name}</p>
+                            <p><strong>Email:</strong> {email}</p>
+                        </div>
+                        
+                        <div style="text-align: center;">
+                            <a href="{assessment_url}" class="button">Start Assessment</a>
+                        </div>
+                    </div>
+                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                    <div class="footer">
+                        <p>Sent by {sent_by}</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            try:
+                logger.info(f"Attempting to send invitation email to {email} via {settings.email_provider}")
+                await email_service.send_email(email, subject, html_content)
+                logger.info(f"Email sent successfully to {email}")
+                sent_count += 1
+            except Exception as exc:
+                error_msg = f"Failed to send invitation to {email}: {str(exc)}"
+                logger.error(error_msg, exc_info=True)
+                failed_emails.append(email)
+                error_messages.append(error_msg)
+        
+        if sent_count == 0 and len(failed_emails) > 0:
+            return error_response(
+                f"Failed to send all invitations. Errors: {', '.join(error_messages[:3])}",
+                status_code=500
+            )
+        
+        message = f"Invitations sent to {sent_count} candidate(s)"
+        if len(failed_emails) > 0:
+            message += f". {len(failed_emails)} failed: {', '.join(failed_emails[:5])}"
+        
+        return success_response(
+            message,
+            {
+                "sentCount": sent_count,
+                "failedCount": len(failed_emails),
+                "failedEmails": failed_emails,
+                "errorMessages": error_messages,
+            }
+        )
+        
+    except Exception as e:
+        logger.exception(f"Error sending invitation emails: {e}")
+        return error_response(f"Failed to send invitations: {str(e)}", status_code=500)
 

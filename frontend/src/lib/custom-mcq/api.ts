@@ -42,12 +42,14 @@ export const customMCQApi = {
   },
 
   // Create assessment
-  createAssessment: async (assessment: CustomMCQAssessment): Promise<{
+  createAssessment: async (assessment: CustomMCQAssessment & { status?: string; currentStation?: number }): Promise<{
     assessmentId: string;
-    assessmentToken: string;
-    assessmentUrl: string;
+    assessmentToken?: string;
+    assessmentUrl?: string;
     totalQuestions: number;
     totalMarks: number;
+    status?: string;
+    currentStation?: number;
   }> => {
     const response = await fastApiClient.post(`${BASE_URL}/create`, assessment);
     
@@ -68,12 +70,15 @@ export const customMCQApi = {
   },
 
   // Update assessment
-  updateAssessment: async (assessmentId: string, updates: Partial<CustomMCQAssessment>): Promise<void> => {
+  updateAssessment: async (assessmentId: string, updates: Partial<CustomMCQAssessment> & { status?: string; currentStation?: number }): Promise<any> => {
     const response = await fastApiClient.put(`${BASE_URL}/${assessmentId}`, updates);
     
     if (!response.data.success) {
       throw new Error(response.data.message || "Failed to update assessment");
     }
+    
+    // Return response data in case it contains token/URL for scheduled assessments
+    return response.data.data || {};
   },
 
   // List assessments
@@ -170,6 +175,36 @@ export const customMCQApi = {
       return response.data.data;
     }
     throw new Error(response.data.message || "Failed to submit assessment");
+  },
+
+  // Send invitation emails
+  sendInvitations: async (
+    assessmentId: string,
+    candidates: Array<{ name: string; email: string }>,
+    assessmentUrl: string,
+    template?: {
+      subject?: string;
+      message?: string;
+      footer?: string;
+      sentBy?: string;
+    }
+  ): Promise<{
+    sentCount: number;
+    failedCount: number;
+    failedEmails: string[];
+    errorMessages: string[];
+  }> => {
+    const response = await fastApiClient.post(`${BASE_URL}/send-invitations`, {
+      assessmentId,
+      candidates,
+      assessmentUrl,
+      template,
+    });
+    
+    if (response.data.success) {
+      return response.data.data;
+    }
+    throw new Error(response.data.message || "Failed to send invitations");
   },
 };
 

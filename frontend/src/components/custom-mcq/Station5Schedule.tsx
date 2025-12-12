@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { CustomMCQAssessment } from "../../types/custom-mcq";
+import { customMCQApi } from "../../lib/custom-mcq/api";
+import EmailInvitationModal from "./EmailInvitationModal";
 
 interface Station5Props {
   assessmentData: Partial<CustomMCQAssessment>;
@@ -7,10 +9,11 @@ interface Station5Props {
   onCreateAssessment: () => void;
   loading: boolean;
   createdAssessmentUrl?: string | null;
+  assessmentId?: string | null;
   router?: any;
 }
 
-export default function Station5Schedule({ assessmentData, updateAssessmentData, onCreateAssessment, loading, createdAssessmentUrl, router }: Station5Props) {
+export default function Station5Schedule({ assessmentData, updateAssessmentData, onCreateAssessment, loading, createdAssessmentUrl, assessmentId, router }: Station5Props) {
   const [accessMode, setAccessMode] = useState<"private" | "public">(assessmentData.accessMode || "private");
   const [examMode, setExamMode] = useState<"strict" | "flexible">(assessmentData.examMode || "strict");
   const [startTime, setStartTime] = useState(
@@ -21,6 +24,8 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   );
   const [duration, setDuration] = useState(assessmentData.duration?.toString() || "");
   const [passPercentage, setPassPercentage] = useState(assessmentData.passPercentage?.toString() || "50");
+  const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
+  const [sendingEmails, setSendingEmails] = useState(false);
 
   useEffect(() => {
     updateAssessmentData({
@@ -32,6 +37,29 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
     });
   }, [accessMode, examMode, startTime, endTime, duration, passPercentage]);
+
+  const handleSendInvitations = async (template: {
+    subject: string;
+    message: string;
+    footer: string;
+    sentBy: string;
+  }) => {
+    if (!assessmentId || !createdAssessmentUrl) {
+      throw new Error("Assessment ID or URL is missing");
+    }
+
+    const candidates = assessmentData.candidates || [];
+    if (candidates.length === 0) {
+      throw new Error("No candidates found to send invitations to");
+    }
+
+    setSendingEmails(true);
+    try {
+      await customMCQApi.sendInvitations(assessmentId, candidates, createdAssessmentUrl, template);
+    } finally {
+      setSendingEmails(false);
+    }
+  };
 
   return (
     <div>
@@ -278,6 +306,23 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
                 📋 Copy URL
               </button>
             </div>
+            {/* Send Invitation Email Button */}
+            {assessmentData.candidates && assessmentData.candidates.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setIsEmailModalOpen(true)}
+                className="btn-primary"
+                style={{
+                  marginTop: "1rem",
+                  width: "100%",
+                  padding: "0.75rem",
+                  backgroundColor: "#2D7A52",
+                }}
+                disabled={sendingEmails}
+              >
+                📧 Send Invitation Email
+              </button>
+            )}
             {router && (
               <button
                 type="button"
@@ -293,6 +338,18 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
               </button>
             )}
           </div>
+        )}
+        
+        {/* Email Invitation Modal */}
+        {isEmailModalOpen && assessmentId && createdAssessmentUrl && (
+          <EmailInvitationModal
+            isOpen={isEmailModalOpen}
+            onClose={() => setIsEmailModalOpen(false)}
+            candidates={assessmentData.candidates || []}
+            assessmentTitle={assessmentData.title || "Assessment"}
+            assessmentUrl={createdAssessmentUrl}
+            onSend={handleSendInvitations}
+          />
         )}
       </div>
     </div>
