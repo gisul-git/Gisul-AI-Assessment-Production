@@ -46,26 +46,86 @@ export default function Station4AddCandidates({ assessmentData, updateAssessment
     updateAssessmentData({ candidates: newCandidates });
   };
 
+  // Helper function to parse CSV line properly handling quoted fields
+  const parseCSVLine = (line: string): string[] => {
+    const result: string[] = [];
+    let current = "";
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      const nextChar = line[i + 1];
+
+      if (char === '"') {
+        if (inQuotes && nextChar === '"') {
+          // Escaped quote inside quoted field
+          current += '"';
+          i++; // Skip next quote
+        } else {
+          // Toggle quote state
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        // End of field
+        result.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    
+    // Add last field
+    result.push(current.trim());
+    return result;
+  };
+
   const handleFileUpload = async (file: File) => {
     try {
       setUploading(true);
 
       // Read CSV file
-      const text = await file.text();
-      const lines = text.split("\n").filter((line) => line.trim());
+      let text = await file.text();
+      
+      // Remove BOM (Byte Order Mark) if present (common in Excel exports)
+      if (text.charCodeAt(0) === 0xFEFF) {
+        text = text.slice(1);
+      }
+      
+      const lines = text.split(/\r?\n/).filter((line) => line.trim());
       
       if (lines.length < 2) {
         alert("CSV file must have at least a header and one data row");
         return;
       }
 
-      // Parse CSV (simple parsing - assumes name,email format)
-      const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
-      const nameIndex = headers.findIndex((h) => h === "name" || h === "name");
-      const emailIndex = headers.findIndex((h) => h === "email" || h === "email");
+      // Parse CSV header properly handling quoted fields
+      const rawHeaders = parseCSVLine(lines[0]);
+      const headers = rawHeaders.map((h) => {
+        // Remove surrounding quotes if present and clean up
+        let cleaned = h.replace(/^["']|["']$/g, '').trim();
+        // Remove any BOM or special characters
+        cleaned = cleaned.replace(/^\uFEFF/, '');
+        // Handle extra spaces and normalize
+        cleaned = cleaned.toLowerCase().replace(/\s+/g, ' ').trim();
+        return cleaned;
+      });
+      
+      // Try to find name and email columns (flexible matching)
+      const nameIndex = headers.findIndex((h) => {
+        const normalized = h.toLowerCase().trim();
+        return normalized === "name" || normalized === "candidate name" || normalized === "full name" || normalized === "student name";
+      });
+      
+      const emailIndex = headers.findIndex((h) => {
+        const normalized = h.toLowerCase().trim();
+        return normalized === "email" || normalized === "email address" || normalized === "e-mail" || normalized === "email id";
+      });
 
       if (nameIndex === -1 || emailIndex === -1) {
-        alert("CSV must have 'name' and 'email' columns");
+        const foundColumns = headers.length > 0 ? headers.join(', ') : 'none detected';
+        alert(`CSV must have 'name' and 'email' columns.\n\nFound columns: ${foundColumns}\n\nPlease ensure your CSV has a header row with 'name' and 'email' columns (case-insensitive).`);
+        console.error("CSV parsing error - Headers found:", headers);
+        console.error("Raw first line:", lines[0]);
         return;
       }
 
@@ -73,7 +133,11 @@ export default function Station4AddCandidates({ assessmentData, updateAssessment
       const existingEmails = new Set(candidates.map((c) => c.email.toLowerCase()));
 
       for (let i = 1; i < lines.length; i++) {
-        const values = lines[i].split(",").map((v) => v.trim());
+        const values = parseCSVLine(lines[i]).map((v) => {
+          // Remove surrounding quotes if present
+          return v.replace(/^"|"$/g, '').trim();
+        });
+        
         const name = values[nameIndex];
         const email = values[emailIndex]?.toLowerCase();
 
@@ -106,6 +170,34 @@ export default function Station4AddCandidates({ assessmentData, updateAssessment
     if (file) {
       handleFileUpload(file);
     }
+  };
+
+  const handleDownloadSampleCSV = () => {
+    // Create sample CSV content
+    const sampleData = [
+      ["name", "email"],
+      ["John Doe", "john.doe@example.com"],
+      ["Jane Smith", "jane.smith@example.com"],
+      ["Robert Johnson", "robert.johnson@example.com"],
+    ];
+
+    // Convert to CSV format
+    const csvContent = sampleData.map(row => 
+      row.map(cell => `"${cell}"`).join(",")
+    ).join("\n");
+
+    // Create blob and download
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    
+    link.setAttribute("href", url);
+    link.setAttribute("download", "sample_candidates.csv");
+    link.style.visibility = "hidden";
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   if (accessMode === "public") {
@@ -169,25 +261,47 @@ export default function Station4AddCandidates({ assessmentData, updateAssessment
 
         {/* Bulk Upload */}
         <div style={{ padding: "1.5rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}>
-          <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Bulk Upload from CSV/Excel</h3>
+          <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Bulk Upload from CSV</h3>
           <p style={{ marginBottom: "1rem", color: "#2D7A52", fontSize: "0.875rem" }}>
             Upload a CSV file with columns: <strong>name, email</strong>
+            <br />
+            <span style={{ fontSize: "0.75rem", color: "#64748b" }}>
+              Note: If you have an Excel file, please export it as CSV format first (File → Save As → CSV)
+            </span>
           </p>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv,.xlsx,.xls"
-            onChange={handleFileChange}
-            style={{ display: "none" }}
-          />
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="btn-primary"
-          >
-            {uploading ? "Uploading..." : "📤 Upload CSV/Excel File"}
-          </button>
+          <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", alignItems: "center" }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv"
+              onChange={handleFileChange}
+              style={{ display: "none" }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              className="btn-primary"
+            >
+              {uploading ? "Uploading..." : "📤 Upload CSV File"}
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadSampleCSV}
+              className="btn-secondary"
+              style={{
+                padding: "0.75rem 1.5rem",
+                border: "1px solid #A8E8BC",
+                backgroundColor: "#ffffff",
+                color: "#2D7A52",
+                borderRadius: "0.5rem",
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              📥 Download Sample CSV
+            </button>
+          </div>
         </div>
 
         {/* Candidates List */}
