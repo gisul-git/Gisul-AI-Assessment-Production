@@ -14,41 +14,44 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const payload = req.body;
+  const { assessmentId } = req.query;
+  const { newTitle, keepSchedule = false, keepCandidates = false } = req.body || {};
 
-  if (!payload.csvContent) {
-    return res.status(400).json({ message: "CSV content is required" });
+  if (!assessmentId || typeof assessmentId !== "string") {
+    return res.status(400).json({ message: "Assessment ID is required" });
+  }
+
+  if (!newTitle || typeof newTitle !== "string" || newTitle.trim().length < 3) {
+    return res.status(400).json({ message: "New assessment name is required and must be at least 3 characters" });
   }
 
   try {
     const token = (session as any)?.backendToken;
-    if (!token) {
-      return res.status(401).json({ message: "Authentication token not found" });
-    }
-
-    const response = await fastApiClient.post("/api/v1/custom-mcq/validate-csv", payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
+    const response = await fastApiClient.post(
+      `/api/v1/assessments/${assessmentId}/clone`,
+      {
+        newTitle: newTitle.trim(),
+        keepSchedule: keepSchedule,
+        keepCandidates: keepCandidates,
       },
-    });
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
-    console.error("Error in validate-csv API route:", error);
+    console.error("Error in clone API route:", error);
     const statusCode = error?.response?.status || 500;
     const errorMessage =
       error?.response?.data?.detail ||
       error?.response?.data?.message ||
       error?.message ||
-      "Failed to validate CSV";
+      "Failed to clone assessment";
     return res.status(statusCode).json({
       message: errorMessage,
     });
   }
 }
-
-
-
-
-
-
 

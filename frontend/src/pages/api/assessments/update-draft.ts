@@ -29,6 +29,7 @@ interface UpdateAssessmentDraftPayload {
   schedule?: any;
   candidates?: Array<{ email: string; name: string }>;
   assessmentUrl?: string;
+  proctoringSettings?: any; // Unified proctoring settings schema
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {

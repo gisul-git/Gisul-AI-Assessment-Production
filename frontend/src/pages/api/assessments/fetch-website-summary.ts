@@ -14,41 +14,39 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const payload = req.body;
+  const { assessmentId, url } = req.body;
 
-  if (!payload.csvContent) {
-    return res.status(400).json({ message: "CSV content is required" });
+  // Assessment ID is optional - can be empty string, null, or undefined
+  // Use "temp" as placeholder if not provided
+  const assessmentIdParam = (assessmentId && typeof assessmentId === "string" && assessmentId.trim()) ? assessmentId : "temp";
+  
+  if (!url || typeof url !== "string") {
+    return res.status(400).json({ message: "URL is required" });
   }
 
   try {
     const token = (session as any)?.backendToken;
-    if (!token) {
-      return res.status(401).json({ message: "Authentication token not found" });
-    }
-
-    const response = await fastApiClient.post("/api/v1/custom-mcq/validate-csv", payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
+    const response = await fastApiClient.post(
+      `/api/v1/assessments/${assessmentIdParam}/fetch-website-summary`,
+      { url },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
-    console.error("Error in validate-csv API route:", error);
+    console.error("Error in fetch-website-summary API route:", error);
     const statusCode = error?.response?.status || 500;
     const errorMessage =
       error?.response?.data?.detail ||
       error?.response?.data?.message ||
       error?.message ||
-      "Failed to validate CSV";
+      "Failed to fetch website summary";
     return res.status(statusCode).json({
       message: errorMessage,
     });
   }
 }
-
-
-
-
-
-
 

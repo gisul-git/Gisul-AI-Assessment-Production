@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     email_provider: str = "sendgrid"
     # OpenAI
     openai_api_key: str | None = None
+    # Gemini
+    gemini_api_key: str | None = None
+    gemini_model_summary: str = "gemini-pro"  # Default to stable gemini-pro model
     # OTP and Email Verification
     otp_ttl_minutes: int = 5
     email_verification_code_ttl_minutes: int = 1

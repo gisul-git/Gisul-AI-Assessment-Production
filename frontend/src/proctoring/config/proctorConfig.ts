@@ -51,19 +51,51 @@ export const defaultProctorConfig: ProctorConfig = {
 
 /**
  * Convert proctoring settings from backend format to ProctorConfig
- * Backend uses different property names (multiFaceDetection, etc.)
+ * Supports both old schema (backward compatibility) and new unified schema
  */
 export function normalizeProctorConfig(backendSettings: any): ProctorConfig {
-  return {
-    enableFaceMonitoring: backendSettings?.multiFaceDetection || backendSettings?.frameMatchRecognition || false,
-    enableTabSwitchDetection: backendSettings?.tabSwitchDetection || false,
-    enableFullscreenMonitoring: backendSettings?.fullscreenMonitoring || false,
-    enableCopyPasteBlocking: backendSettings?.copyPasteBlocking || false,
-    enableScreenShareMonitoring: backendSettings?.liveCameraAndScreenMonitoring || false,
-    enableExtensionDetection: backendSettings?.browserExtensionMonitoring || false,
-    enableHumanCameraMonitoring: backendSettings?.liveCameraAndScreenMonitoring || false,
-    enableExternalDeviceDetection: backendSettings?.externalDeviceDetection || false,
-  };
+  // Check if this is the new unified schema
+  const isNewSchema = backendSettings && (
+    'aiProctoring' in backendSettings ||
+    'liveProctoring' in backendSettings ||
+    'enforcedDefaults' in backendSettings
+  );
+
+  if (isNewSchema) {
+    // New unified schema
+    const aiEnabled = backendSettings?.aiProctoring || false;
+    const liveEnabled = backendSettings?.liveProctoring || false;
+    const aiOptions = backendSettings?.aiProctoringOptions || {};
+    const liveOptions = backendSettings?.liveProctoringOptions || {};
+    const enforced = backendSettings?.enforcedDefaults || {};
+
+    return {
+      enableFaceMonitoring: aiEnabled && (
+        aiOptions.multipleFaceDetection ||
+        aiOptions.gazeAway ||
+        aiOptions.outOfScreen
+      ),
+      enableTabSwitchDetection: enforced.tabSwitchBlock !== false, // Always enforced
+      enableFullscreenMonitoring: enforced.fullscreen !== false, // Always enforced
+      enableCopyPasteBlocking: enforced.copyPasteBlock !== false, // Always enforced
+      enableScreenShareMonitoring: liveEnabled && liveOptions.screenShare,
+      enableExtensionDetection: false, // Not in new schema, can be added later
+      enableHumanCameraMonitoring: liveEnabled && liveOptions.webcamStreaming,
+      enableExternalDeviceDetection: false, // Not in new schema, can be added later
+    };
+  } else {
+    // Old schema (backward compatibility)
+    return {
+      enableFaceMonitoring: backendSettings?.multiFaceDetection || backendSettings?.frameMatchRecognition || false,
+      enableTabSwitchDetection: backendSettings?.tabSwitchDetection || false,
+      enableFullscreenMonitoring: backendSettings?.fullscreenMonitoring || false,
+      enableCopyPasteBlocking: backendSettings?.copyPasteBlocking || false,
+      enableScreenShareMonitoring: backendSettings?.liveCameraAndScreenMonitoring || false,
+      enableExtensionDetection: backendSettings?.browserExtensionMonitoring || false,
+      enableHumanCameraMonitoring: backendSettings?.liveCameraAndScreenMonitoring || false,
+      enableExternalDeviceDetection: backendSettings?.externalDeviceDetection || false,
+    };
+  }
 }
 
 
