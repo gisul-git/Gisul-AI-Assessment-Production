@@ -168,21 +168,43 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       }
       
       // Process custom MCQ tests
-      if (customMcqResponse.status === 'fulfilled' && customMcqResponse.value.data?.success && Array.isArray(customMcqResponse.value.data.data)) {
-        const customMcqTests = customMcqResponse.value.data.data.map((test: any) => ({
-          id: test.id,
-          title: test.title || 'Untitled Custom MCQ Test',
-          status: test.isDraft ? 'draft' : (test.status || 'published'),
-          isDraft: test.isDraft || false,
-          hasSchedule: false, // Custom MCQ tests have schedule in schedule object
-          createdAt: test.createdAt,
-          updatedAt: test.createdAt,
-          type: 'custom_mcq' as const,
-        }));
+      if (customMcqResponse.status === 'fulfilled' && customMcqResponse.value.data?.success && customMcqResponse.value.data.data?.assessments) {
+        const assessmentsList = Array.isArray(customMcqResponse.value.data.data.assessments) 
+          ? customMcqResponse.value.data.data.assessments 
+          : [];
+        const customMcqTests = assessmentsList.map((test: any) => {
+          // Backend returns status field, not isDraft, so check status === 'draft'
+          const testStatus = test.status || 'draft';
+          const isDraft = testStatus === 'draft';
+          
+          // Check if schedule exists (startTime and endTime in schedule object or direct fields)
+          const schedule = test.schedule || {};
+          const hasSchedule = !!(schedule.startTime || schedule.endTime || test.startTime || test.endTime);
+          const scheduleStatus = hasSchedule ? {
+            startTime: schedule.startTime || test.startTime,
+            endTime: schedule.endTime || test.endTime,
+            duration: schedule.duration || test.duration,
+            isActive: testStatus === 'active', // Active if status is active
+          } : null;
+          
+          return {
+            id: test.id,
+            title: test.title || 'Untitled Custom MCQ Test',
+            status: testStatus,
+            isDraft: isDraft,
+            hasSchedule: hasSchedule,
+            scheduleStatus: scheduleStatus,
+            createdAt: test.createdAt,
+            updatedAt: test.updatedAt || test.createdAt,
+            type: 'custom_mcq' as const,
+          };
+        });
         allAssessments.push(...customMcqTests);
-        console.log(`[Dashboard] Loaded ${customMcqTests.length} custom MCQ tests`);
+        console.log(`[Dashboard] Loaded ${customMcqTests.length} custom MCQ tests`, customMcqTests);
       } else if (customMcqResponse.status === 'rejected') {
         console.error("Error fetching custom MCQ tests:", customMcqResponse.reason);
+      } else {
+        console.warn("[Dashboard] Custom MCQ response structure unexpected:", customMcqResponse.status === 'fulfilled' ? customMcqResponse.value.data : 'rejected');
       }
       
       // Process DSA tests
@@ -370,7 +392,16 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
     
     try {
       setError(null);
-      const response = await axios.post(`/api/assessments/pause?assessmentId=${assessmentId}`);
+      // Find the assessment to determine its type
+      const assessment = assessments.find(a => a.id === assessmentId);
+      const assessmentType = assessment?.type || 'assessment';
+      
+      // Use different endpoint for custom MCQ
+      const endpoint = assessmentType === 'custom_mcq'
+        ? `/api/custom-mcq/pause?assessmentId=${assessmentId}`
+        : `/api/assessments/pause?assessmentId=${assessmentId}`;
+      
+      const response = await axios.post(endpoint);
       
       // Handle both response formats (with or without success wrapper)
       const updatedAssessment = response.data?.data?.assessment || response.data?.data || response.data?.assessment || response.data;
@@ -404,7 +435,16 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
     
     try {
       setError(null);
-      const response = await axios.post(`/api/assessments/resume?assessmentId=${assessmentId}`);
+      // Find the assessment to determine its type
+      const assessment = assessments.find(a => a.id === assessmentId);
+      const assessmentType = assessment?.type || 'assessment';
+      
+      // Use different endpoint for custom MCQ
+      const endpoint = assessmentType === 'custom_mcq'
+        ? `/api/custom-mcq/resume?assessmentId=${assessmentId}`
+        : `/api/assessments/resume?assessmentId=${assessmentId}`;
+      
+      const response = await axios.post(endpoint);
       
       // Handle both response formats (with or without success wrapper)
       const updatedAssessment = response.data?.data?.assessment || response.data?.data || response.data?.assessment || response.data;
@@ -448,7 +488,12 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       const originalAssessment = assessments.find(a => a.id === assessmentId);
       const assessmentType = originalAssessment?.type || 'assessment';
       
-      const response = await axios.post(`/api/assessments/clone?assessmentId=${assessmentId}`, {
+      // Use different endpoint for custom MCQ
+      const endpoint = assessmentType === 'custom_mcq' 
+        ? `/api/custom-mcq/clone?assessmentId=${assessmentId}`
+        : `/api/assessments/clone?assessmentId=${assessmentId}`;
+      
+      const response = await axios.post(endpoint, {
         newTitle: newTitle.trim(),
         keepSchedule: false,
         keepCandidates: false,
@@ -1170,14 +1215,20 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                     onClick={() => {
                       if (assessment.type === 'dsa') {
                         router.push(`/dsa/tests`);
-                      } else if (assessment.type === 'custom_mcq') {
-                        // Route to create page with testId for editing (works for both draft and published)
-                        router.push(`/custom-mcq/create?testId=${assessment.id}`);
                       } else if (assessment.status === 'draft') {
-                        router.push(`/assessments/create-new?id=${assessment.id}`);
+                        if (assessment.type === 'custom_mcq') {
+                          router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                        } else {
+                          router.push(`/assessments/create-new?id=${assessment.id}`);
+                        }
                       } else {
-                        // For active/completed assessments, go to Analytics (NO EDIT)
-                        router.push(`/assessments/${assessment.id}/analytics`);
+                        // For active/paused/completed assessments, go to View/Analytics (NO EDIT)
+                        // Edit should only be accessed via Edit button, not card click
+                        if (assessment.type === 'custom_mcq') {
+                          router.push(`/custom-mcq/${assessment.id}`);
+                        } else {
+                          router.push(`/assessments/${assessment.id}/analytics`);
+                        }
                       }
                     }}
                   >
@@ -1373,36 +1424,6 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             </div>
                           )}
                         </div>
-                        {assessment.type === 'custom_mcq' && (
-                          <>
-                            <span
-                              className="badge"
-                              style={{
-                                backgroundColor: "#10b981",
-                                color: "#ffffff",
-                                fontSize: "0.75rem",
-                                padding: "0.25rem 0.5rem",
-                                borderRadius: "0.25rem",
-                              }}
-                            >
-                              Custom MCQ
-                            </span>
-                            {assessment.isDraft && (
-                              <span
-                                className="badge"
-                                style={{
-                                  backgroundColor: "#fbbf24",
-                                  color: "#ffffff",
-                                  fontSize: "0.75rem",
-                                  padding: "0.25rem 0.5rem",
-                                  borderRadius: "0.25rem",
-                                }}
-                              >
-                                Draft
-                              </span>
-                            )}
-                          </>
-                        )}
                         {assessment.type === 'dsa' && (
                           <span
                             className="badge"
@@ -1528,7 +1549,11 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           }}
                           onClick={(e) => {
                             e.stopPropagation();
+                            if (assessment.type === 'custom_mcq') {
+                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                            } else {
                               router.push(`/assessments/create-new?id=${assessment.id}`);
+                            }
                           }}
                           onMouseEnter={(e) => {
                             e.currentTarget.style.transform = "translateY(-1px)";
@@ -1707,6 +1732,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               // DSA assessments use different analytics route
                               if (assessment.type === 'dsa') {
                                 router.push(`/dsa/tests/${assessment.id}/analytics`);
+                              } else if (assessment.type === 'custom_mcq') {
+                                router.push(`/custom-mcq/${assessment.id}`);
                               } else {
                                 router.push(`/assessments/${assessment.id}/analytics`);
                               }
@@ -1837,85 +1864,6 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               <line x1="6" y1="20" x2="6" y2="14" />
                             </svg>
                             Analytics
-                          </button>
-                          <button
-                            type="button"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              backgroundColor: "#ef4444",
-                              color: "#ffffff",
-                              border: "none",
-                              borderRadius: "0.5rem",
-                              cursor: "pointer",
-                              transition: "all 0.15s ease",
-                              flex: 1,
-                              fontWeight: 600,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = "#dc2626";
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(239, 68, 68, 0.3)";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = "#ef4444";
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                            }}
-                          >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="3 6 5 6 21 6" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                            Delete
-                          </button>
-                        </>
-                      )}
-                      
-                      {/* Custom MCQ - Show Edit and Delete */}
-                      {assessment.type === 'custom_mcq' && (
-                        <>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              marginTop: 0,
-                              width: "100%",
-                              fontWeight: 600,
-                              transition: "all 0.15s ease",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 4px rgba(0, 0, 0, 0.1)";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                            }}
-                          >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                            </svg>
-                            Edit
                           </button>
                           <button
                             type="button"

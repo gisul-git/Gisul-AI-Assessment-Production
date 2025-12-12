@@ -57,6 +57,26 @@ export default withAuth(
         if (pathname.startsWith("/api/proctor/")) {
           return true;
         }
+
+  // Custom MCQ assessment routes (use token from URL, not session)
+        if (pathname.startsWith("/custom-mcq/entry/") ||
+            pathname.startsWith("/custom-mcq/take/") ||
+            pathname.startsWith("/custom-mcq/result/")) {
+          return true; // These routes have their own token-based auth
+        }
+ 
+        // Candidate-facing API routes should remain public (token validated server-side)
+        if (pathname.startsWith("/api/assessment/")) {
+          return true;
+        }
+       
+        // Custom MCQ API routes - public (candidates aren't logged in via NextAuth, token validated server-side)
+        if (pathname.startsWith("/api/v1/custom-mcq/verify-candidate") ||
+            pathname.startsWith("/api/v1/custom-mcq/take/") ||
+            pathname.startsWith("/api/v1/custom-mcq/submit")) {
+          return true;
+        }
+ 
         
         // All other routes require authentication
         return !!token;
