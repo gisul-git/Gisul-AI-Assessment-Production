@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 QUESTION_TYPES = {"MCQ", "Subjective", "Pseudo Code", "Descriptive", "Aptitude", "Reasoning", "coding"}
 DIFFICULTY_LEVELS = {"Easy", "Medium", "Hard"}
-STATUS_VALUES = {"draft", "ready", "scheduled", "active", "completed"}
+STATUS_VALUES = {"draft", "ready", "scheduled", "active", "paused", "completed"}
 
 
 class QuestionConfig(BaseModel):
@@ -275,7 +275,9 @@ class UpdateAssessmentDraftRequest(BaseModel):
     assessmentUrl: Optional[str] = None
     accessMode: Optional[str] = None
     invitationTemplate: Optional[str] = None
-    proctoringSettings: Optional[Dict[str, Any]] = None
+    additionalRequirements: Optional[str] = None
+    companyContext: Optional[str] = None  # New: free text or URL input
+    contextSummary: Optional[Dict[str, Any]] = None  # New: processed context (from URL or text)
     # Also support a draft wrapper for backward compatibility
     draft: Optional[Dict[str, Any]] = Field(default=None, description="Optional draft data wrapper (for backward compatibility)")
 

@@ -9,14 +9,8 @@ import logging
 import re
 import uuid
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
 
 from fastapi import HTTPException
-
-try:
-    import httpx
-except ImportError:
-    httpx = None
 
 try:
     from openai import AsyncOpenAI, APIError, APIConnectionError, AuthenticationError, RateLimitError
@@ -48,254 +42,6 @@ except (ImportError, ModuleNotFoundError) as e:
 logger = logging.getLogger(__name__)
 
 
-# List of frameworks/libraries not supported by Judge0
-JUDGE0_UNSUPPORTED_FRAMEWORKS = [
-    "django",
-    "flask",
-    "fastapi",
-    "react",
-    "angular",
-    "vue",
-    "next",
-    "nextjs",
-    "express",
-    "spring",
-    "hibernate",
-    "laravel",
-    "symfony",
-    "rails",
-    "ruby on rails",
-    "asp.net",
-    "dotnet",
-    ".net",
-    "tensorflow",
-    "pytorch",
-    "keras",
-    "scikit-learn",
-    "scikit",
-    "pandas",
-    "numpy",
-    "matplotlib",
-    "seaborn",
-    "jupyter",
-    "jupyter notebook",
-    "selenium",
-    "cypress",
-    "jest",
-    "mocha",
-    "junit",
-    "pytest",
-    "unittest",
-    "maven",
-    "gradle",
-    "npm",
-    "yarn",
-    "webpack",
-    "babel",
-    "gulp",
-    "grunt",
-]
-
-
-def is_judge0_supported(skill_name: str) -> bool:
-    """
-    Check if a skill/topic name is supported by Judge0.
-    Judge0 only supports pure programming languages, not frameworks
-    that require additional setup.
-    """
-    if not skill_name:
-        return True
-    
-    skill_lower = skill_name.lower().strip()
-    
-    # Check if the skill matches any unsupported framework
-    # Check for exact match, prefix match, or if framework appears as a word in the string
-    for framework in JUDGE0_UNSUPPORTED_FRAMEWORKS:
-        framework_lower = framework.lower()
-        # Exact match
-        if skill_lower == framework_lower:
-            return False
-        # Starts with framework followed by space
-        if skill_lower.startswith(framework_lower + " "):
-            return False
-        # Framework appears as a whole word in the string (using word boundaries)
-        # Check if framework is surrounded by non-word characters or at start/end
-        pattern = r'\b' + re.escape(framework_lower) + r'\b'
-        if re.search(pattern, skill_lower):
-            return False
-    
-    return True
-
-
-def filter_judge0_unsupported_skills(skills: List[str]) -> List[str]:
-    """
-    Filter out skills that are not supported by Judge0.
-    """
-    return [skill for skill in skills if is_judge0_supported(skill)]
-
-
-def contains_unsupported_framework(text: str, skills: Optional[List[str]] = None) -> tuple[bool, Optional[str]]:
-    """
-    Check if a text (topic label) contains any framework that's not supported by Judge0.
-    Returns (is_framework, framework_name) tuple.
-    """
-    if not text:
-        return (False, None)
-    
-    text_lower = text.lower()
-    
-    # First, check if the text itself contains any framework name
-    for framework in JUDGE0_UNSUPPORTED_FRAMEWORKS:
-        framework_lower = framework.lower()
-        # Check if framework appears as a whole word in the text
-        pattern = r'\b' + re.escape(framework_lower) + r'\b'
-        if re.search(pattern, text_lower):
-            return (True, framework)
-    
-    # Second, check if any skill from the provided list is a framework and appears in the text
-    if skills:
-        for skill in skills:
-            if not is_judge0_supported(skill):
-                skill_lower = skill.lower().strip()
-                # Check if this framework skill appears in the topic label
-                pattern = r'\b' + re.escape(skill_lower) + r'\b'
-                if re.search(pattern, text_lower):
-                    return (True, skill)
-    
-    return (False, None)
-
-
-def _validate_and_fix_function_signature(
-    func_sig_raw: Any,
-    topic: Optional[str] = None,
-    title: Optional[str] = None,
-    context: str = "validation"
-) -> Optional[Dict[str, Any]]:
-    """
-    Validate and fix function signature structure.
-    Ensures the function signature has required fields: name, parameters, return_type.
-    
-    Args:
-        func_sig_raw: Raw function signature (dict, str, or None)
-        topic: Topic name for inference
-        title: Title for inference
-        context: Context string for logging
-    
-    Returns:
-        Validated and fixed function signature dict, or None if invalid
-    """
-    if func_sig_raw is None:
-        return None
-    
-    # If it's a string, try to parse it or return None
-    if isinstance(func_sig_raw, str):
-        # If it's an empty string, return None
-        if not func_sig_raw.strip():
-            return None
-        # Could try to parse string format like "functionName(param1: type1, param2: type2): returnType"
-        # For now, return None and let the caller handle it
-        logger.warning(f"[{context}] Function signature is a string, cannot validate structure: {func_sig_raw[:50]}")
-        return None
-    
-    # Must be a dict
-    if not isinstance(func_sig_raw, dict):
-        logger.warning(f"[{context}] Function signature is not a dict, got {type(func_sig_raw)}")
-        return None
-    
-    func_sig = func_sig_raw.copy()  # Work with a copy
-    fixed = False
-    
-    # Ensure 'name' field exists
-    if "name" not in func_sig or not func_sig.get("name"):
-        # Try to infer from title or topic
-        if title:
-            inferred_name = title.lower().replace(" ", "_").replace("-", "_")
-            # Remove special characters, keep only alphanumeric and underscore
-            inferred_name = re.sub(r'[^a-z0-9_]', '', inferred_name)
-            inferred_name = inferred_name[:20] or "solve"
-        elif topic:
-            inferred_name = topic.lower().replace(" ", "_").replace("-", "_")
-            inferred_name = re.sub(r'[^a-z0-9_]', '', inferred_name)
-            inferred_name = inferred_name[:20] or "solve"
-        else:
-            inferred_name = "solve"
-        
-        func_sig["name"] = inferred_name
-        fixed = True
-        logger.debug(f"[{context}] Function signature missing 'name', inferred: {inferred_name}")
-    
-    # Ensure 'parameters' field exists and is a list
-    if "parameters" not in func_sig:
-        func_sig["parameters"] = []
-        fixed = True
-        logger.debug(f"[{context}] Function signature missing 'parameters', using empty array")
-    elif not isinstance(func_sig["parameters"], list):
-        logger.warning(f"[{context}] Function signature.parameters is not an array, converting...")
-        func_sig["parameters"] = []
-        fixed = True
-    
-    # Validate parameters structure if present
-    if func_sig["parameters"]:
-        validated_params = []
-        for param in func_sig["parameters"]:
-            if isinstance(param, dict):
-                # Ensure param has name and type
-                if "name" not in param or not param.get("name"):
-                    continue  # Skip invalid params
-                if "type" not in param:
-                    param["type"] = "any"  # Default type
-                validated_params.append(param)
-            elif isinstance(param, str):
-                # Try to parse string format like "name: type" or just "name"
-                parts = param.split(":", 1)
-                param_name = parts[0].strip()
-                param_type = parts[1].strip() if len(parts) > 1 else "any"
-                validated_params.append({"name": param_name, "type": param_type})
-        
-        if len(validated_params) != len(func_sig["parameters"]):
-            fixed = True
-        func_sig["parameters"] = validated_params
-    
-    # Ensure 'return_type' field exists
-    if "return_type" not in func_sig or not func_sig.get("return_type"):
-        func_sig["return_type"] = "int"  # Default return type
-        fixed = True
-        logger.debug(f"[{context}] Function signature missing 'return_type', using default: 'int'")
-    
-    if fixed:
-        logger.debug(f"[{context}] Fixed function signature: {func_sig}")
-    
-    return func_sig
-
-
-def filter_topics_with_coding_unsupported(topics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Filter out topics that have coding questions but are not supported by Judge0.
-    """
-    filtered_topics = []
-    for topic in topics:
-        # Check if topic has any coding question rows
-        question_rows = topic.get("questionRows", [])
-        has_coding_questions = any(
-            row.get("questionType") == "Coding" for row in question_rows
-        )
-        
-        # If topic has coding questions, check if it's supported by Judge0
-        if has_coding_questions:
-            topic_label = topic.get("label", "")
-            if is_judge0_supported(topic_label):
-                filtered_topics.append(topic)
-            else:
-                logger.warning(
-                    f"Filtered out topic '{topic_label}' - has coding questions but not supported by Judge0"
-                )
-        else:
-            # If no coding questions, keep the topic
-            filtered_topics.append(topic)
-    
-    return filtered_topics
-
-
 def _build_openai_payload(
     model: str,
     messages: List[Dict[str, str]],
@@ -309,15 +55,15 @@ def _build_openai_payload(
 ) -> Dict[str, Any]:
     """
     Build OpenAI API payload, excluding unsupported parameters for o3-mini and o1-mini models.
-    
+   
     o3-mini and o1-mini do NOT support:
     - temperature
     - top_p
     - frequency_penalty
     - presence_penalty
-    
+   
     They also require max_completion_tokens instead of max_tokens.
-    
+   
     Args:
         model: The model name (e.g., "o3-mini", "gpt-4o-mini")
         messages: List of message dicts
@@ -328,7 +74,7 @@ def _build_openai_payload(
         frequency_penalty: Frequency penalty (ignored for o3-mini/o1-mini)
         presence_penalty: Presence penalty (ignored for o3-mini/o1-mini)
         **kwargs: Additional parameters
-    
+   
     Returns:
         Dict with OpenAI API payload
     """
@@ -336,7 +82,7 @@ def _build_openai_payload(
         "model": model,
         "messages": messages,
     }
-    
+   
     # o3-mini and o1-mini don't support sampling parameters
     if model not in ["o3-mini", "o1-mini"]:
         payload["temperature"] = temperature
@@ -345,7 +91,7 @@ def _build_openai_payload(
             payload["frequency_penalty"] = frequency_penalty
         if presence_penalty != 0.0:
             payload["presence_penalty"] = presence_penalty
-    
+   
     # Handle max_tokens vs max_completion_tokens
     if model in ["o3-mini", "o1-mini"]:
         if max_completion_tokens is not None:
@@ -355,10 +101,10 @@ def _build_openai_payload(
     else:
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-    
+   
     # Add any additional kwargs
     payload.update(kwargs)
-    
+   
     # Debug logging to confirm temperature is removed for o3-mini/o1-mini
     if model in ["o3-mini", "o1-mini"]:
         logger.debug(f"Payload for model {model} (no sampling params): {payload}")
@@ -367,21 +113,21 @@ def _build_openai_payload(
             logger.warning(f"WARNING: Sampling parameters found in payload for {model} - this should not happen!")
     else:
         logger.debug(f"Payload for model {model}: {payload}")
-    
+   
     return payload
 
 
 def _parse_json_response(content: str, error_context: str = "JSON") -> Any:
     """
     Robustly parse JSON from OpenAI response, handling markdown code blocks and control characters.
-    
+   
     Args:
         content: Raw content from OpenAI response
         error_context: Context string for error messages
-        
+       
     Returns:
         Parsed JSON object (usually a list)
-        
+       
     Raises:
         HTTPException: If JSON parsing fails after all attempts
     """
@@ -397,13 +143,13 @@ def _parse_json_response(content: str, error_context: str = "JSON") -> Any:
             elif content.startswith("JSON"):
                 content = content[4:]
         content = content.strip()
-    
+   
     # First, try to parse as-is
     try:
         return json.loads(content)
     except json.JSONDecodeError:
         pass  # Continue to cleaning steps
-    
+   
     # Clean control characters and escape unescaped newlines in string values
     # The issue is that OpenAI sometimes returns JSON with unescaped newlines in strings
     # We need to escape newlines within string values (between quotes)
@@ -412,11 +158,11 @@ def _parse_json_response(content: str, error_context: str = "JSON") -> Any:
     i = 0
     in_string = False
     escape_next = False
-    
+   
     while i < len(content):
         char = content[i]
         char_code = ord(char)
-        
+       
         # Track if we're inside a string (between unescaped quotes)
         if not escape_next:
             if char == '"':
@@ -437,14 +183,14 @@ def _parse_json_response(content: str, error_context: str = "JSON") -> Any:
                 cleaned_content += char
                 i += 1
                 continue
-        
+       
         # Reset escape flag after processing escaped character
         if escape_next:
             escape_next = False
             cleaned_content += char
             i += 1
             continue
-        
+       
         # If we're inside a string, escape unescaped newlines and control chars
         if in_string:
             # Check if this character is escaped
@@ -456,7 +202,7 @@ def _parse_json_response(content: str, error_context: str = "JSON") -> Any:
                     backslash_count += 1
                     j -= 1
                 is_escaped = (backslash_count % 2 == 1)
-            
+           
             if not is_escaped:
                 if char == '\n':
                     # Escape unescaped newline
@@ -483,9 +229,9 @@ def _parse_json_response(content: str, error_context: str = "JSON") -> Any:
                 cleaned_content += ' '
             else:
                 cleaned_content += char
-        
+       
         i += 1
-    
+   
     # Try to parse cleaned JSON
     try:
         return json.loads(cleaned_content)
@@ -499,20 +245,20 @@ def _parse_json_response(content: str, error_context: str = "JSON") -> Any:
                 logger.error(f"{error_context} parsing failed even after regex extraction. Error: {e2}")
                 logger.error(f"Content preview (first 500 chars): {cleaned_content[:500]}")
                 raise HTTPException(
-                    status_code=500, 
+                    status_code=500,
                     detail=f"Failed to parse {error_context}. Please try regenerating."
                 ) from e2
         else:
             logger.error(f"{error_context} parsing failed. Error: {json_err}")
             logger.error(f"Content preview (first 500 chars): {cleaned_content[:500]}")
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=f"Failed to parse {error_context}. Please try regenerating."
             ) from json_err
 
 
 async def _find_semantically_suitable_topic(
-    topics: List[Dict[str, Any]], 
+    topics: List[Dict[str, Any]],
     target_question_type: str
 ) -> Optional[int]:
     """
@@ -521,7 +267,7 @@ async def _find_semantically_suitable_topic(
     """
     if not topics:
         return None
-    
+   
     # Build topic list for analysis
     topic_labels = [topic.get("label", "") for topic in topics]
     current_types = []
@@ -531,7 +277,7 @@ async def _find_semantically_suitable_topic(
             current_types.append(question_rows[0].get("questionType", "MCQ"))
         else:
             current_types.append("MCQ")
-    
+   
     # Define semantic criteria for each question type
     semantic_criteria = {
         "MCQ": "factual knowledge, terminology, syntax, basic recall, quick assessment",
@@ -539,9 +285,9 @@ async def _find_semantically_suitable_topic(
         "PseudoCode": "algorithm design, workflow, process flow, problem-solving steps, logic breakdown, structured thinking",
         "Coding": "implementation, writing executable code, building features, programming tasks"
     }
-    
+   
     criteria = semantic_criteria.get(target_question_type, "")
-    
+   
     prompt = f"""You are an expert at semantic topic analysis. Analyze these topics and identify which one is MOST SEMANTICALLY SUITABLE for a {target_question_type} question type.
 
 Question Type: {target_question_type}
@@ -559,7 +305,7 @@ Rules:
 - If multiple are equally suitable, return the first one
 
 Return ONLY a number between 1 and {len(topics)}, no explanations."""
-    
+   
     try:
         client = _get_openai_client()
         response = await client.chat.completions.create(
@@ -574,7 +320,7 @@ Return ONLY a number between 1 and {len(topics)}, no explanations."""
             temperature=0.3,  # Lower temperature for more consistent results
             max_tokens=10,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         # Extract number from response
         numbers = re.findall(r'\d+', content)
@@ -587,7 +333,7 @@ Return ONLY a number between 1 and {len(topics)}, no explanations."""
                     current_type = question_rows[0].get("questionType", "MCQ")
                     if current_type != target_question_type:
                         return topic_idx
-        
+       
         return None
     except Exception as exc:
         logger.warning(f"Error in semantic topic matching: {exc}. Using fallback.")
@@ -597,7 +343,7 @@ Return ONLY a number between 1 and {len(topics)}, no explanations."""
 async def _ensure_all_question_types_present(topics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Post-process topics to ensure all question types appear at least once.
-    
+   
     Rules:
     - MCQ, Subjective, PseudoCode must appear at least once
     - Coding must appear at least once ONLY if at least one topic supports it (canUseJudge0 = true)
@@ -605,11 +351,11 @@ async def _ensure_all_question_types_present(topics: List[Dict[str, Any]]) -> Li
     """
     if not topics:
         return topics
-    
+   
     # Collect existing question types from first row of each topic
     existing_types = set()
     coding_supported = False
-    
+   
     # First pass: check if ANY topic supports Coding
     for topic in topics:
         question_rows = topic.get("questionRows", [])
@@ -618,7 +364,7 @@ async def _ensure_all_question_types_present(topics: List[Dict[str, Any]]) -> Li
             if first_row.get("canUseJudge0", False):
                 coding_supported = True
                 break
-    
+   
     # Second pass: collect existing question types
     for topic in topics:
         question_rows = topic.get("questionRows", [])
@@ -626,25 +372,25 @@ async def _ensure_all_question_types_present(topics: List[Dict[str, Any]]) -> Li
             first_row = question_rows[0]
             qtype = first_row.get("questionType", "MCQ")
             existing_types.add(qtype)
-    
+   
     # Required types
     required_types = {"MCQ", "Subjective", "PseudoCode"}
     if coding_supported:
         required_types.add("Coding")
-    
+   
     # Find missing types
     missing_types = required_types - existing_types
-    
+   
     if not missing_types:
         # All types already present
         return topics
-    
+   
     logger.info(f"Missing question types: {missing_types}. Ensuring all types appear at least once.")
-    
+   
     # For each missing type, find a suitable topic to update
     for missing_type in missing_types:
         topic_updated = False
-        
+       
         # Special handling for Coding: only assign if topic supports it
         if missing_type == "Coding":
             # Find a topic that supports Coding (canUseJudge0 = true)
@@ -652,32 +398,26 @@ async def _ensure_all_question_types_present(topics: List[Dict[str, Any]]) -> Li
                 question_rows = topic.get("questionRows", [])
                 if question_rows:
                     first_row = question_rows[0]
-                    topic_label = topic.get("label", "")
                     # Check if this topic can support Coding
                     if first_row.get("canUseJudge0", False):
-                        # Additional safety check: verify topic doesn't contain frameworks
-                        is_framework, framework_name = contains_unsupported_framework(topic_label, None)
-                        if is_framework:
-                            logger.warning(f"Topic '{topic_label}' has canUseJudge0=True but contains framework '{framework_name}'. Skipping Coding assignment.")
-                            continue
                         # Update the first row to Coding
                         first_row["questionType"] = "Coding"
                         topic_updated = True
                         logger.info(f"Updated topic '{topic.get('label')}' to Coding type")
                         break
-            
+           
             if not topic_updated:
                 # No topic supports Coding, skip it
                 logger.warning("Coding type required but no topic supports canUseJudge0. Skipping Coding requirement.")
                 continue
-        
+       
         else:
             # For MCQ, Subjective, PseudoCode: use semantic matching
             # Find the most semantically suitable topic using OpenAI
             best_topic_idx = await _find_semantically_suitable_topic(
                 topics, missing_type
             )
-            
+           
             if best_topic_idx is not None:
                 topic = topics[best_topic_idx]
                 question_rows = topic.get("questionRows", [])
@@ -689,7 +429,7 @@ async def _ensure_all_question_types_present(topics: List[Dict[str, Any]]) -> Li
                         first_row["canUseJudge0"] = False
                     topic_updated = True
                     logger.info(f"Semantically updated topic '{topic.get('label')}' to {missing_type} type")
-            
+           
             # Fallback: if semantic matching didn't work, use first available topic
             if not topic_updated:
                 for topic in topics:
@@ -703,7 +443,7 @@ async def _ensure_all_question_types_present(topics: List[Dict[str, Any]]) -> Li
                             topic_updated = True
                             logger.info(f"Fallback: Updated topic '{topic.get('label')}' to {missing_type} type")
                             break
-            
+           
             if not topic_updated:
                 # Fallback: update the first topic that doesn't have this type
                 for topic in topics:
@@ -717,20 +457,20 @@ async def _ensure_all_question_types_present(topics: List[Dict[str, Any]]) -> Li
                             topic_updated = True
                             logger.info(f"Fallback: Updated topic '{topic.get('label')}' to {missing_type} type")
                             break
-    
+   
     # Verify all required types are now present
     final_types = set()
     for topic in topics:
         question_rows = topic.get("questionRows", [])
         if question_rows:
             final_types.add(question_rows[0].get("questionType", "MCQ"))
-    
+   
     missing_after = required_types - final_types
     if missing_after:
         logger.warning(f"Still missing question types after post-processing: {missing_after}")
     else:
         logger.info(f"✅ All required question types are now present: {final_types}")
-    
+   
     return topics
 
 
@@ -778,39 +518,10 @@ async def generate_topics_v2(
         experience_level, _ = _get_experience_level_corporate(experience_min, experience_max)
     else:
         experience_level, _ = _get_experience_level_student(experience_min, experience_max)
-    
-    # Filter out unsupported frameworks from skills (since coding questions might be generated)
-    # This ensures that topics with coding questions will only use Judge0-supported technologies
-    filtered_skills = filter_judge0_unsupported_skills(selected_skills)
-    
-    # Check if any skills are Judge0-compatible programming languages
-    # BUT exclude if the skill is a framework/library
-    judge0_languages = ["python", "java", "javascript", "typescript", "c", "c++", "cpp", "go", "ruby", "php", "rust", "kotlin", "swift", "bash", "csharp", "cs"]
-    has_judge0_compatible_skill = False
-    has_framework_skill = False
-    
-    for skill in selected_skills:
-        skill_lower = skill.lower().strip()
-        # Check if skill is a framework/library (not supported by Judge0)
-        if not is_judge0_supported(skill):
-            has_framework_skill = True
-            continue
-        # Check if skill is a pure programming language
-        if any(lang in skill_lower for lang in judge0_languages):
-            has_judge0_compatible_skill = True
-    
-    # If we have framework skills, we should NOT require Coding topics
-    # Only require Coding if we have pure programming languages (not frameworks)
-    if has_framework_skill and not has_judge0_compatible_skill:
-        has_judge0_compatible_skill = False
-    
-    if not filtered_skills:
-        logger.warning("All skills were filtered out as unsupported by Judge0. Using original skills list.")
-        filtered_skills = selected_skills
-    
-    skills_text = ", ".join(filtered_skills)
+   
+    skills_text = ", ".join(selected_skills)
     title_text = assessment_title if assessment_title else "Not specified"
-    
+   
     prompt = f"""You are an expert assessment designer. Generate topics with UNIVERSAL, DOMAIN-AGNOSTIC question type assignment.
 
 Generate a list of highly relevant assessment topics using:
@@ -887,7 +598,7 @@ Generate 8-12 topics. Return only the JSON array, no explanations."""
     except ValueError as exc:
         logger.error(f"OpenAI API key not configured: {exc}")
         raise HTTPException(status_code=500, detail="OpenAI API key not configured") from exc
-    
+   
     try:
         response = await client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -900,7 +611,7 @@ Generate 8-12 topics. Return only the JSON array, no explanations."""
             ],
             temperature=0.7,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         # Remove markdown code blocks if present
         if content.startswith("```"):
@@ -908,39 +619,28 @@ Generate 8-12 topics. Return only the JSON array, no explanations."""
             if content.startswith("json"):
                 content = content[4:]
             content = content.strip()
-        
+       
         topics_data = json.loads(content)
-        
+       
         # Transform to multi-row model format
         topics = []
         for idx, topic_data in enumerate(topics_data):
             question_type = topic_data.get("questionType", "MCQ")
             difficulty = topic_data.get("difficulty", "Medium")
             can_use_judge0 = topic_data.get("canUseJudge0", False)
-            topic_label = topic_data.get("label", "")
-            
+           
             # Validate question type
             if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding"]:
                 question_type = "MCQ"
-            
+           
             # Validate difficulty
             if difficulty not in ["Easy", "Medium", "Hard"]:
                 difficulty = "Medium"
-            
-            # CRITICAL: If question type is Coding, validate it's supported by Judge0
-            # Check both the topic label and the skills list
-            if question_type == "Coding":
-                # Use comprehensive framework detection
-                is_framework, framework_name = contains_unsupported_framework(topic_label, selected_skills)
-                if is_framework:
-                    logger.warning(f"Topic '{topic_label}' was assigned Coding but contains framework '{framework_name}'. Converting to PseudoCode.")
-                    question_type = "PseudoCode"
-                    can_use_judge0 = False
-            
+           
             # Ensure canUseJudge0 is only True for Coding
             if question_type != "Coding":
                 can_use_judge0 = False
-            
+           
             # Create topic with first questionRow
             topic = {
                 "id": str(uuid.uuid4()),
@@ -959,56 +659,14 @@ Generate 8-12 topics. Return only the JSON array, no explanations."""
                     }
                 ]
             }
-            
+           
             topics.append(topic)
-        
-        # Don't force question types - let AI decide based on semantic meaning
-        # Only filter out topics that have coding questions but are not supported by Judge0
-        topics = filter_topics_with_coding_unsupported(topics)
-        
-        # Post-process: If programming languages are detected but no Coding topic exists, 
-        # try to convert one appropriate topic to Coding
-        if has_judge0_compatible_skill:
-            has_coding_topic = any(
-                topic.get("questionRows", [{}])[0].get("questionType") == "Coding"
-                for topic in topics
-            )
-            
-            if not has_coding_topic and topics:
-                # Find the most suitable topic to convert to Coding
-                # Prefer topics that mention algorithms, functions, or implementation
-                coding_keywords = ["algorithm", "function", "implement", "code", "program", "solve", "write", "create", "build", "develop"]
-                best_topic_idx = None
-                best_score = 0
-                
-                for idx, topic in enumerate(topics):
-                    label = topic.get("label", "").lower()
-                    score = sum(1 for keyword in coding_keywords if keyword in label)
-                    if score > best_score:
-                        best_score = score
-                        best_topic_idx = idx
-                
-                # If no good match found, use the first topic
-                if best_topic_idx is None:
-                    best_topic_idx = 0
-                
-                # Convert the selected topic to Coding
-                if best_topic_idx < len(topics):
-                    topic = topics[best_topic_idx]
-                    topic_label = topic.get("label", "")
-                    question_rows = topic.get("questionRows", [])
-                    if question_rows:
-                        # Validate that topic doesn't contain frameworks before converting
-                        is_framework, framework_name = contains_unsupported_framework(topic_label, selected_skills)
-                        if is_framework:
-                            logger.warning(f"Cannot convert topic '{topic_label}' to Coding - contains framework '{framework_name}'. Keeping original type.")
-                        else:
-                            question_rows[0]["questionType"] = "Coding"
-                            question_rows[0]["canUseJudge0"] = True
-                            logger.info(f"Converted topic '{topic.get('label')}' to Coding type to meet requirement")
-        
+       
+        # Post-process: Ensure all question types appear at least once
+        topics = await _ensure_all_question_types_present(topics)
+       
         return topics
-        
+       
     except json.JSONDecodeError as exc:
         logger.error(f"Failed to parse OpenAI response as JSON: {exc}")
         raise HTTPException(status_code=500, detail="Failed to parse topic generation response") from exc
@@ -1025,14 +683,12 @@ async def generate_questions_for_row_v2(
     can_use_judge0: bool,
     coding_language: str = "python",
     additional_requirements: Optional[str] = None,
-    experience_mode: Optional[str] = None,
-    website_summary: Optional[Dict[str, Any]] = None,
-    company_context: Optional[Dict[str, Any]] = None
+    experience_mode: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Generate questions for a single question row based on question type.
     Returns questions in appropriate format for each type.
-    
+   
     Args:
         topic_label: The topic label
         question_type: Type of question (MCQ, Subjective, PseudoCode, Coding)
@@ -1053,60 +709,21 @@ async def generate_questions_for_row_v2(
         question_type_normalized = "PseudoCode"
     elif question_type_normalized.lower() == "coding":
         question_type_normalized = "Coding"
-    
+   
     # Normalize experience mode
     if not experience_mode or experience_mode.lower() in ["student", "college"]:
         experience_mode = "college"
     else:
         experience_mode = "corporate"
-    
-    # Priority order for additional requirements/context:
-    # 1. Topic/row-level additional_requirements (passed as parameter - highest priority)
-    # 2. Company context (from textarea - text or URL summary)
-    # 3. Website summary (legacy, only if no company_context)
-    
-    # Build context from company_context (new unified field) or website_summary (legacy)
-    context_text = ""
-    if company_context:
-        # Use company context (from new textarea field)
-        context_parts = []
-        if company_context.get("company_name"):
-            context_parts.append(f"Company: {company_context['company_name']}")
-        if company_context.get("company_type"):
-            context_parts.append(f"Industry: {company_context['company_type']}")
-        if company_context.get("short_summary"):
-            context_parts.append(f"Context: {company_context['short_summary']}")
-        if company_context.get("key_topics") and len(company_context.get("key_topics", [])) > 0:
-            context_parts.append(f"Key Topics: {', '.join(company_context['key_topics'])}")
-        if context_parts:
-            context_text = "\n".join(context_parts)
-    elif website_summary and website_summary.get("useForQuestions"):
-        # Legacy: use website summary if company_context not available
-        context_parts = []
-        if website_summary.get("company_name"):
-            context_parts.append(f"Company: {website_summary['company_name']}")
-        if website_summary.get("company_type"):
-            context_parts.append(f"Industry: {website_summary['company_type']}")
-        if website_summary.get("short_summary"):
-            context_parts.append(f"Context: {website_summary['short_summary']}")
-        if website_summary.get("key_topics"):
-            context_parts.append(f"Key Topics: {', '.join(website_summary['key_topics'])}")
-        if context_parts:
-            context_text = "\n".join(context_parts)
-    
-    # final_additional_requirements: prioritize topic/row-level, then company context
-    final_additional_requirements = additional_requirements
-    if context_text and not additional_requirements:
-        final_additional_requirements = context_text
-    
+   
     if question_type_normalized == "MCQ":
-        return await _generate_mcq_questions(topic_label, difficulty, questions_count, experience_mode, final_additional_requirements)
+        return await _generate_mcq_questions(topic_label, difficulty, questions_count, experience_mode, additional_requirements)
     elif question_type_normalized == "Subjective":
-        return await _generate_subjective_questions(topic_label, difficulty, questions_count, experience_mode, final_additional_requirements)
+        return await _generate_subjective_questions(topic_label, difficulty, questions_count, experience_mode, additional_requirements)
     elif question_type_normalized == "PseudoCode":
-        return await _generate_pseudocode_questions(topic_label, difficulty, questions_count, experience_mode, final_additional_requirements)
+        return await _generate_pseudocode_questions(topic_label, difficulty, questions_count, experience_mode, additional_requirements)
     elif question_type_normalized == "Coding":
-        return await _generate_coding_questions(topic_label, difficulty, questions_count, can_use_judge0, coding_language, experience_mode, final_additional_requirements)
+        return await _generate_coding_questions(topic_label, difficulty, questions_count, can_use_judge0, coding_language, experience_mode, additional_requirements)
     else:
         logger.error(f"Unsupported question type: {question_type} (normalized: {question_type_normalized})")
         raise HTTPException(status_code=400, detail=f"Unsupported question type: {question_type}. Supported types: MCQ, Subjective, PseudoCode, Coding")
@@ -1128,7 +745,7 @@ async def generate_questions_for_topic_v2(
 async def _generate_mcq_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate MCQ questions - PRODUCTION-GRADE REWRITE.
-    
+   
     Rules:
     - MCQ must include exactly 4 options
     - One correct answer
@@ -1141,18 +758,18 @@ async def _generate_mcq_questions(topic: str, difficulty: str, count: int, exper
         experience_mode = "college"
     else:
         experience_mode = "corporate"
-    
+   
     # Build experience mode rules
     experience_rules = ""
     if experience_mode == "college":
         experience_rules = "\nCOLLEGE MODE RULES:\n- Beginner/intermediate academic level\n- Avoid enterprise/production terminology\n- Use small academic examples\n- Focus on conceptual understanding\n- NO job-role context\n"
     else:
         experience_rules = "\nCORPORATE MODE RULES:\n- Realistic, industry-driven scenarios\n- Include production workflows, optimization, best practices\n- Use professional terminology\n- Expect deeper critical thinking\n"
-    
+   
     additional_req_text = ""
     if additional_requirements:
         additional_req_text = f"\nAdditional Requirements: {additional_requirements}\n"
-    
+   
     prompt = f"""You are an expert technical assessment writer. Generate {count} Multiple Choice Question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -1186,7 +803,7 @@ IMPORTANT:
             system_message += " Generate questions appropriate for college/student level - avoid enterprise terminology and focus on academic concepts."
         else:
             system_message += " Generate questions appropriate for corporate/professional level - use industry terminology and real-world scenarios."
-        
+       
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -1198,10 +815,10 @@ IMPORTANT:
             ],
             temperature=0.7,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         questions = _parse_json_response(content, "MCQ questions JSON")
-        
+       
         # Validate questions
         validated_questions = []
         for q in questions:
@@ -1218,138 +835,21 @@ IMPORTANT:
                     logger.warning(f"MCQ doesn't have exactly 4 options, skipping question")
             else:
                 logger.warning(f"MCQ missing required fields, skipping question")
-        
+       
         if len(validated_questions) < count:
             logger.warning(f"Generated only {len(validated_questions)} valid MCQ questions out of {count} requested")
-        
+       
         return validated_questions[:count]
-        
+       
     except Exception as exc:
         logger.error(f"Error generating MCQ questions: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate MCQ questions: {str(exc)}") from exc
 
 
-def _is_url(text: str) -> bool:
-    """
-    Check if the given text is a URL.
-    
-    Args:
-        text: Text to check
-        
-    Returns:
-        True if text is a URL, False otherwise
-    """
-    if not text or not isinstance(text, str):
-        return False
-    
-    text = text.strip()
-    if not text:
-        return False
-    
-    # Check if it starts with http:// or https://
-    if text.startswith(("http://", "https://")):
-        try:
-            result = urlparse(text)
-            return all([result.scheme, result.netloc])
-        except Exception:
-            return False
-    
-    return False
-
-
-async def _fetch_and_summarize_url(url: str) -> str:
-    """
-    Fetch content from URL and summarize it using OpenAI.
-    
-    Args:
-        url: URL to fetch and summarize
-        
-    Returns:
-        Summarized text from the URL
-    """
-    if not httpx:
-        logger.error("httpx not available, cannot fetch URL")
-        raise HTTPException(status_code=500, detail="URL fetching not available")
-    
-    try:
-        # Fetch URL content
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, max_redirects=5) as client:
-            response = await client.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            })
-            response.raise_for_status()
-            content = response.text
-        
-        # Limit content length to avoid token limits (first 10000 characters)
-        content_preview = content[:10000] if len(content) > 10000 else content
-        
-        # Summarize using OpenAI
-        client = _get_openai_client()
-        summarize_prompt = f"""Please summarize the following content from a webpage. 
-Extract the key information, main points, and important details that would be useful for generating technical assessment questions.
-
-Content:
-{content_preview}
-
-Provide a concise but comprehensive summary (200-500 words) that captures the essential information:"""
-
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert at summarizing technical content. Provide clear, concise summaries that capture key information."
-                },
-                {"role": "user", "content": summarize_prompt}
-            ],
-            temperature=0.3,
-        )
-        
-        summary = response.choices[0].message.content.strip()
-        logger.info(f"Successfully fetched and summarized URL: {url[:50]}...")
-        return summary
-        
-    except Exception as exc:
-        logger.error(f"Error fetching or summarizing URL {url}: {exc}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch or summarize URL: {str(exc)}") from exc
-
-
-async def _process_requirements_for_subjective(requirements: Optional[str]) -> Optional[str]:
-    """
-    Process requirements text for subjective question generation.
-    - If it's a URL, fetch and summarize it
-    - If it's plain text, use it directly
-    
-    Args:
-        requirements: Requirements text or URL
-        
-    Returns:
-        Processed requirements text (summarized if URL, original if text, None if empty)
-    """
-    if not requirements or not requirements.strip():
-        return None
-    
-    requirements = requirements.strip()
-    
-    # Check if it's a URL
-    if _is_url(requirements):
-        logger.info(f"Detected URL in requirements, fetching and summarizing: {requirements[:50]}...")
-        try:
-            summarized = await _fetch_and_summarize_url(requirements)
-            return summarized
-        except Exception as exc:
-            logger.warning(f"Failed to fetch/summarize URL, using URL as-is: {exc}")
-            # Fallback: return a note about the URL
-            return f"Reference URL: {requirements}"
-    
-    # It's plain text, use it directly
-    return requirements
-
-
 async def _generate_subjective_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Subjective questions - PRODUCTION-GRADE REWRITE.
-    
+   
     Rules:
     - ONLY scenario-based, real-world, case-study style questions
     - Minimum 2-4 sentences
@@ -1357,7 +857,7 @@ async def _generate_subjective_questions(topic: str, difficulty: str, count: int
     - NO: MCQ-like phrasing, "which of the following", one-liners
     - Should reflect real-world usage of the topic
     - Must be context-aware (topic, category, difficulty, experience mode)
-    
+   
     Difficulty Mapping:
     - EASY → simple but meaningful real-life context
     - MEDIUM → multi-step reasoning with explanation
@@ -1383,25 +883,20 @@ async def _generate_subjective_questions(topic: str, difficulty: str, count: int
         - Team collaboration
         - Customer-facing problems
         """
-    
+   
     # Difficulty-specific requirements
     difficulty_requirements = {
         "Easy": "Simple but meaningful real-life context. Short scenario, simple decision or explanation needed.",
         "Medium": "Multi-step scenario with constraints or trade-offs. Requires reasoning and explanation.",
         "Hard": "Complex real-world scenario with multiple stakeholders or constraints. Deep design decisions, trade-offs, and evaluation required."
     }
-    
+   
     difficulty_req = difficulty_requirements.get(difficulty, difficulty_requirements["Medium"])
-    
-    # Process requirements: if URL, fetch and summarize; if text, use directly
-    processed_requirements = None
-    if additional_requirements:
-        processed_requirements = await _process_requirements_for_subjective(additional_requirements)
-    
+   
     additional_req_text = ""
-    if processed_requirements:
-        additional_req_text = f"\n11. Additional Requirements: {processed_requirements}\n"
-    
+    if additional_requirements:
+        additional_req_text = f"\n11. Additional Requirements: {additional_requirements}\n"
+   
     prompt = f"""You are an expert technical assessment writer. Generate {count} scenario-based subjective question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -1451,10 +946,10 @@ Return ONLY a JSON array with question text."""
             ],
             temperature=0.8,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         questions = _parse_json_response(content, "Subjective questions JSON")
-        
+       
         # Validate and transform questions
         validated_questions = []
         for q in questions:
@@ -1465,12 +960,12 @@ Return ONLY a JSON array with question text."""
                     validated_questions.append({"question": question_text})
                 else:
                     logger.warning(f"Generated subjective question too short or invalid, skipping: {question_text[:50]}...")
-        
+       
         if len(validated_questions) < count:
             logger.warning(f"Generated only {len(validated_questions)} valid subjective questions out of {count} requested")
-        
+       
         return validated_questions[:count]
-        
+       
     except Exception as exc:
         logger.error(f"Error generating Subjective questions: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate Subjective questions: {str(exc)}") from exc
@@ -1479,7 +974,7 @@ Return ONLY a JSON array with question text."""
 async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Pseudocode questions - PRODUCTION-GRADE REWRITE.
-    
+   
     Rules:
     - Generate a pseudocode-related question ONLY
     - Should require algorithmic thinking
@@ -1490,7 +985,7 @@ async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int
     additional_req_text = ""
     if additional_requirements:
         additional_req_text = f"\n9. Additional Requirements: {additional_requirements}\n"
-    
+   
     prompt = f"""You are an expert technical assessor. Generate {count} pseudocode question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -1543,10 +1038,10 @@ Return ONLY valid JSON. No markdown, no explanations, NO answer fields."""
             ],
             temperature=0.8,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         questions = _parse_json_response(content, "PseudoCode questions JSON")
-        
+       
         # Validate and transform questions
         validated_questions = []
         for q in questions:
@@ -1559,12 +1054,12 @@ Return ONLY valid JSON. No markdown, no explanations, NO answer fields."""
                 # Handle alternative field name
                 question_text = q["question"].strip()
                 validated_questions.append({"questionText": question_text})
-        
+       
         if len(validated_questions) < count:
             logger.warning(f"Generated only {len(validated_questions)} valid pseudocode questions out of {count} requested")
-        
+       
         return validated_questions[:count]
-        
+       
     except HTTPException:
         raise
     except Exception as exc:
@@ -1575,10 +1070,10 @@ Return ONLY valid JSON. No markdown, no explanations, NO answer fields."""
 def _get_starter_code_template(language: str) -> str:
     """
     Get starter code template for a given language.
-    
+   
     Args:
         language: Programming language (python, java, cpp, c, javascript, typescript, go, ruby)
-        
+       
     Returns:
         Starter code template string
     """
@@ -1642,10 +1137,10 @@ end""",
 def _get_judge0_language_id(language: str) -> int:
     """
     Get Judge0 language ID for a given language.
-    
+   
     Args:
         language: Programming language name
-        
+       
     Returns:
         Judge0 language ID
     """
@@ -1665,14 +1160,14 @@ def _get_judge0_language_id(language: str) -> int:
 async def _generate_coding_questions(topic: str, difficulty: str, count: int, can_use_judge0: bool, coding_language: str = "python", experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Coding questions (Judge0-compatible) using DSA module architecture.
-    
+   
     Args:
         topic: Topic label
         difficulty: Difficulty level (Easy, Medium, Hard)
         count: Number of questions to generate
         can_use_judge0: Whether Judge0 can be used
         coding_language: Programming language for coding questions (python, java, cpp, c, javascript, typescript, go, ruby)
-    
+   
     Returns questions in DSA-compatible format with:
     - questionText (description + examples + constraints)
     - starterCode (for specified language)
@@ -1685,13 +1180,13 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
     """
     if not can_use_judge0:
         raise HTTPException(status_code=400, detail="Coding questions require canUseJudge0 to be true")
-    
+   
     # Normalize language
     coding_language = coding_language.lower()
     if coding_language not in ["python", "java", "cpp", "c", "javascript", "typescript", "go", "ruby"]:
         logger.warning(f"Unknown language '{coding_language}', defaulting to 'python'")
         coding_language = "python"
-    
+   
     # Use DSA module's AI generator if available
     if DSA_AVAILABLE and dsa_generate_question is not None:
         try:
@@ -1700,7 +1195,7 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
             for i in range(count):
                 # Map difficulty: Easy -> easy, Medium -> medium, Hard -> hard
                 dsa_difficulty = difficulty.lower()
-                
+               
                 # Generate using DSA module with the specified language
                 dsa_question = await dsa_generate_question(
                     difficulty=dsa_difficulty,
@@ -1708,14 +1203,14 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                     concepts=None,
                     languages=[coding_language]  # Use the specified language
                 )
-                
+               
                 # Transform DSA format to assessment format
                 # DSA format has: title, description, examples, constraints, public_testcases, hidden_testcases, starter_code, function_signature
                 # Assessment format needs: questionText, starterCode, visibleTestCases, hiddenTestCases, constraints, functionSignature, explanation
-                
+               
                 # Build questionText from description + examples
                 question_text = dsa_question.get("description", "")
-                
+               
                 # Add examples if available
                 examples = dsa_question.get("examples", [])
                 if examples:
@@ -1726,14 +1221,14 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                         question_text += f"Output: {ex.get('output', '')}\n"
                         if ex.get("explanation"):
                             question_text += f"Explanation: {ex.get('explanation')}\n"
-                
+               
                 # Get starter code for the specified language
                 starter_code_dict = dsa_question.get("starter_code", {})
                 starter_code = starter_code_dict.get(coding_language) if starter_code_dict else ""
                 # Fallback to template if DSA didn't provide starter code for this language
                 if not starter_code:
                     starter_code = _get_starter_code_template(coding_language)
-                
+               
                 # Transform test cases
                 visible_testcases = []
                 for tc in dsa_question.get("public_testcases", []):
@@ -1741,23 +1236,21 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                         "input": tc.get("input", ""),
                         "output": tc.get("expected_output", "")
                     })
-                
+               
                 hidden_testcases = []
                 for tc in dsa_question.get("hidden_testcases", []):
                     hidden_testcases.append({
                         "input": tc.get("input", ""),
                         "output": tc.get("expected_output", "")
                     })
-                
+               
                 # Get constraints
                 constraints_list = dsa_question.get("constraints", [])
                 constraints_text = "\n".join(f"- {c}" for c in constraints_list) if constraints_list else ""
-                
-                # Get function signature and validate/fix it
-                func_sig_raw = dsa_question.get("function_signature", {})
-                title = dsa_question.get("title", topic)
-                func_sig = _validate_and_fix_function_signature(func_sig_raw, topic=topic, title=title, context="DSA module")
-                
+               
+                # Get function signature
+                func_sig = dsa_question.get("function_signature", {})
+               
                 # Format function signature as string for frontend editing
                 func_sig_string = ""
                 if func_sig and isinstance(func_sig, dict):
@@ -1769,11 +1262,11 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                     else:
                         param_str = ""
                     func_sig_string = f"{func_name}({param_str}): {return_type}"
-                
+               
                 # Extract title and problem statement for legacy format
                 title = dsa_question.get("title", topic)
                 problem_statement = dsa_question.get("description", question_text)
-                
+               
                 # Extract input/output format and sample input/output from first example
                 input_format = ""
                 output_format = ""
@@ -1788,7 +1281,7 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                         input_format = "See sample input format below"
                     if sample_output:
                         output_format = "See sample output format below"
-                
+               
                 # Build assessment question object with both new and legacy formats
                 assessment_question = {
                     # New format (DSA-compatible)
@@ -1812,15 +1305,15 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                     # Function signature as string for textarea editing (frontend expects string, not object)
                     "functionSignatureString": func_sig_string,
                 }
-                
+               
                 questions.append(assessment_question)
-            
+           
             return questions
-            
+           
         except Exception as dsa_exc:
             logger.warning(f"DSA module generation failed, falling back to basic generation: {dsa_exc}")
             # Fall through to basic generation
-    
+   
     # Fallback: Basic generation if DSA module not available or failed
     starter_template = _get_starter_code_template(coding_language)
     prompt = f"""Generate {count} fully Judge0-compatible coding questions for: {topic}.
@@ -1875,7 +1368,7 @@ Return ONLY a JSON array. Example format for {coding_language.upper()}:
   }}
 ]
 
-IMPORTANT: 
+IMPORTANT:
 - All starter code MUST be in {coding_language.upper()}, NOT Python (unless language=python)
 - Starter code should be incomplete - candidate must implement the logic
 - DO NOT provide the solution or answer
@@ -1895,20 +1388,20 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
             ],
             temperature=0.7,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         questions = _parse_json_response(content, "Coding questions JSON")
-        
+       
         # Ensure all questions have language information and remove any solution/answer fields
         validated_questions = []
         for question in questions:
             if not isinstance(question, dict):
                 continue
-            
+           
             # Remove any solution/answer fields
-            clean_question = {k: v for k, v in question.items() 
+            clean_question = {k: v for k, v in question.items()
                             if k not in ["solution", "answer", "completeCode", "finalCode", "implementation"]}
-            
+           
             # Ensure required fields
             if not clean_question.get("language"):
                 clean_question["language"] = str(_get_judge0_language_id(coding_language))
@@ -1917,7 +1410,7 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
             # Ensure starter code is in the correct language (fallback to template if missing)
             if not clean_question.get("starterCode"):
                 clean_question["starterCode"] = _get_starter_code_template(coding_language)
-            
+           
             # Add legacy format fields for frontend compatibility
             if not clean_question.get("title"):
                 # Extract title from questionText if available, or use topic
@@ -1928,17 +1421,12 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
                     clean_question["title"] = first_line[:100] if len(first_line) > 100 else first_line or topic
                 else:
                     clean_question["title"] = topic
-            
+           
             if not clean_question.get("problemStatement"):
                 clean_question["problemStatement"] = clean_question.get("questionText", "")
-            
-            # Validate and fix function signature (same logic as DSA module)
-            func_sig_raw = clean_question.get("functionSignature")
-            title = clean_question.get("title", topic)
-            func_sig = _validate_and_fix_function_signature(func_sig_raw, topic=topic, title=title, context="fallback generation")
-            clean_question["functionSignature"] = func_sig  # Update with validated/fixed version
-            
-            # Format function signature as string for frontend editing
+           
+            # Format function signature as string
+            func_sig = clean_question.get("functionSignature")
             if func_sig and isinstance(func_sig, dict):
                 func_name = func_sig.get("name", "function")
                 params = func_sig.get("parameters", [])
@@ -1950,7 +1438,7 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
                 clean_question["functionSignatureString"] = f"{func_name}({param_str}): {return_type}"
             elif func_sig and isinstance(func_sig, str):
                 clean_question["functionSignatureString"] = func_sig
-            
+           
             # Extract sample input/output from visible test cases
             visible_tcs = clean_question.get("visibleTestCases", [])
             if visible_tcs and len(visible_tcs) > 0:
@@ -1963,18 +1451,18 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
                     clean_question["inputFormat"] = "See sample input format below"
                 if not clean_question.get("outputFormat"):
                     clean_question["outputFormat"] = "See sample output format below"
-            
+           
             # Validate required fields
             if clean_question.get("questionText") and clean_question.get("starterCode"):
                 validated_questions.append(clean_question)
             else:
                 logger.warning(f"Coding question missing required fields, skipping")
-        
+       
         if len(validated_questions) < count:
             logger.warning(f"Generated only {len(validated_questions)} valid coding questions out of {count} requested")
-        
+       
         return validated_questions[:count]
-        
+       
     except Exception as exc:
         logger.error(f"Error generating Coding questions: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate Coding questions: {str(exc)}") from exc
@@ -1993,14 +1481,14 @@ async def generate_topics_unified(
     """
     if not combined_skills:
         return []
-    
+   
     # Group skills by source
     role_skills = [s for s in combined_skills if s.get("source") == "role"]
     manual_skills = [s for s in combined_skills if s.get("source") == "manual"]
     csv_skills = [s for s in combined_skills if s.get("source") == "csv"]
-    
+   
     all_topics = []
-    
+   
     # Generate topics for role-based skills
     if role_skills and job_designation:
         role_skill_names = [s.get("skill_name", "") for s in role_skills]
@@ -2016,7 +1504,7 @@ async def generate_topics_unified(
             topic["source"] = "ai"
             topic["status"] = "pending"
         all_topics.extend(role_topics)
-    
+   
     # Generate topics for manual skills
     if manual_skills:
         for skill in manual_skills:
@@ -2034,7 +1522,7 @@ async def generate_topics_unified(
                     topic["source"] = "manual"
                     topic["status"] = "pending"
                 all_topics.extend(manual_topics)
-    
+   
     # Generate topics for CSV skills
     if csv_skills:
         csv_topics = await generate_topics_from_requirements_v2(
@@ -2044,7 +1532,7 @@ async def generate_topics_unified(
             experience_mode=experience_mode
         )
         all_topics.extend(csv_topics)
-    
+   
     # Deduplicate topics by label
     seen_labels = set()
     unique_topics = []
@@ -2053,10 +1541,7 @@ async def generate_topics_unified(
         if label and label not in seen_labels:
             seen_labels.add(label)
             unique_topics.append(topic)
-    
-    # Filter out topics that have coding questions but are not supported by Judge0
-    unique_topics = filter_topics_with_coding_unsupported(unique_topics)
-    
+   
     return unique_topics
 
 
@@ -2071,34 +1556,23 @@ async def generate_topics_from_requirements_v2(
     """
     if not requirements:
         return []
-    
+   
     # Get experience level
     if experience_mode == "corporate":
         experience_level, _ = _get_experience_level_corporate(experience_min, experience_max)
     else:
         experience_level, _ = _get_experience_level_student(experience_min, experience_max)
-    
+   
     all_topics = []
-    
+   
     for req in requirements:
         skill_name = req.get("skill_name", "")
         skill_description = req.get("skill_description", "") or req.get("description", "")
         importance_level = req.get("importance_level", "Medium")
-        
+       
         if not skill_name:
             continue
-        
-        # Check if skill is a Judge0-compatible programming language
-        # BUT exclude if the skill is a framework/library
-        judge0_languages = ["python", "java", "javascript", "typescript", "c", "c++", "cpp", "go", "ruby", "php", "rust", "kotlin", "swift", "bash", "csharp", "cs"]
-        skill_lower = skill_name.lower()
-        is_framework = not is_judge0_supported(skill_name)
-        has_judge0_compatible = False
-        
-        # Only consider it compatible if it's a pure language AND not a framework
-        if not is_framework:
-            has_judge0_compatible = any(lang in skill_lower for lang in judge0_languages)
-        
+       
         # Build prompt for CSV requirement
         prompt = f"""Generate 2-4 assessment topics for the following skill requirement:
 
@@ -2125,7 +1599,7 @@ Return ONLY JSON array:
 ]
 
 Generate 2-4 topics. Return only the JSON array, no explanations."""
-        
+       
         try:
             client = _get_openai_client()
             response = await client.chat.completions.create(
@@ -2139,42 +1613,28 @@ Generate 2-4 topics. Return only the JSON array, no explanations."""
                 ],
                 temperature=0.7,
             )
-            
+           
             content = response.choices[0].message.content.strip()
             if content.startswith("```"):
                 content = content.split("```")[1]
                 if content.startswith("json"):
                     content = content[4:]
                 content = content.strip()
-            
+           
             topics_data = json.loads(content)
-            
+           
             for topic_data in topics_data:
                 question_type = topic_data.get("questionType", "MCQ")
                 difficulty = topic_data.get("difficulty", "Medium")
                 can_use_judge0 = topic_data.get("canUseJudge0", False)
-                topic_label = topic_data.get("label", "")
-                
+               
                 if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding"]:
                     question_type = "MCQ"
                 if difficulty not in ["Easy", "Medium", "Hard"]:
                     difficulty = "Medium"
-                
-                # CRITICAL: If question type is Coding, validate it's supported by Judge0
-                # Check both the topic label and the skill name
-                if question_type == "Coding":
-                    # Use comprehensive framework detection
-                    skills_list = [skill_name] if skill_name else []
-                    is_framework, framework_name = contains_unsupported_framework(topic_label, skills_list)
-                    if is_framework:
-                        logger.warning(f"Topic '{topic_label}' was assigned Coding but contains framework '{framework_name}'. Converting to PseudoCode.")
-                        question_type = "PseudoCode"
-                        can_use_judge0 = False
-                
-                # Ensure canUseJudge0 is only True for Coding
                 if question_type != "Coding":
                     can_use_judge0 = False
-                
+               
                 topic = {
                     "id": str(uuid.uuid4()),
                     "label": topic_data.get("label", ""),
@@ -2195,11 +1655,11 @@ Generate 2-4 topics. Return only the JSON array, no explanations."""
                     ]
                 }
                 all_topics.append(topic)
-                
+               
         except Exception as exc:
             logger.error(f"Error generating topics for requirement {skill_name}: {exc}", exc_info=True)
             continue
-    
+   
     return all_topics
 
 
@@ -2210,59 +1670,19 @@ async def improve_topic(
     importance_level: Optional[str] = None,
     experience_mode: str = "corporate",
     experience_min: int = 0,
-    experience_max: int = 10,
-    combined_skills: Optional[List[Dict[str, Any]]] = None,
-    job_designation: Optional[str] = None,
-    assessment_title: Optional[str] = None
-) -> Dict[str, Any]:
+    experience_max: int = 10
+) -> str:
     """
-    Improve a topic label and regenerate its question type using the same prompt logic as generate_topics_v2.
-    Returns both the improved label and the question type with canUseJudge0 flag.
+    Improve a topic label while maintaining the same domain and purpose.
     """
     # Get experience level
     if experience_mode == "corporate":
         experience_level, _ = _get_experience_level_corporate(experience_min, experience_max)
     else:
         experience_level, _ = _get_experience_level_student(experience_min, experience_max)
-    
-    # Check if skill context is a Judge0-compatible programming language
-    # BUT exclude if the skill is a framework/library
-    judge0_languages = ["python", "java", "javascript", "typescript", "c", "c++", "cpp", "go", "ruby", "php", "rust", "kotlin", "swift", "bash", "csharp", "cs"]
-    has_judge0_compatible = False
-    has_framework_skill = False
-    
-    if skill_context:
-        skill_lower = skill_context.lower()
-        # Check if skill is a framework
-        if not is_judge0_supported(skill_context):
-            has_framework_skill = True
-        else:
-            has_judge0_compatible = any(lang in skill_lower for lang in judge0_languages)
-    
-    # Check combined_skills for programming languages
-    if combined_skills:
-        for skill in combined_skills:
-            # Handle both Pydantic models and dictionaries
-            if hasattr(skill, "skill_name"):
-                skill_name = skill.skill_name
-            elif isinstance(skill, dict):
-                skill_name = skill.get("skill_name", "")
-            else:
-                skill_name = str(skill) if skill else ""
-            
-            if skill_name:
-                skill_lower = skill_name.lower()
-                # Check if skill is a framework
-                if not is_judge0_supported(skill_name):
-                    has_framework_skill = True
-                elif any(lang in skill_lower for lang in judge0_languages):
-                    has_judge0_compatible = True
-    
-    # If we have framework skills and no pure languages, don't require Coding
-    if has_framework_skill and not has_judge0_compatible:
-        has_judge0_compatible = False
-    
-    # Build context text
+   
+    system_message = """You are an expert assessment designer. Improve the provided topic so that it is clearer, deeper, more technically accurate, and more assessable. Maintain the same domain, same conceptual scope, and same purpose. DO NOT generate a different topic. DO NOT change the domain. Produce 1 improved topic only."""
+   
     context_parts = []
     if skill_context:
         context_parts.append(f"Skill: {skill_context}")
@@ -2270,34 +1690,10 @@ async def improve_topic(
         context_parts.append(f"Description: {skill_description}")
     if importance_level:
         context_parts.append(f"Importance: {importance_level}")
-    
+   
     context_text = "\n".join(context_parts) if context_parts else "N/A"
-    
-    # Build skills text for prompt
-    skills_list = []
-    if combined_skills:
-        for s in combined_skills:
-            # Handle both Pydantic models and dictionaries
-            if hasattr(s, "skill_name"):
-                skill_name = s.skill_name
-            elif isinstance(s, dict):
-                skill_name = s.get("skill_name", "")
-            else:
-                skill_name = str(s) if s else ""
-            
-            if skill_name:
-                skills_list.append(skill_name)
-    elif skill_context:
-        skills_list = [skill_context]
-    
-    skills_text = ", ".join(skills_list) if skills_list else "Not specified"
-    title_text = assessment_title if assessment_title else "Not specified"
-    job_text = job_designation if job_designation else (skill_context if skill_context else "Not specified")
-    
-    # First, improve the topic label using the simpler prompt from usethislogic.py
-    system_message = """You are an expert assessment designer. Improve the provided topic so that it is clearer, deeper, more technically accurate, and more assessable. Maintain the same domain, same conceptual scope, and same purpose. DO NOT generate a different topic. DO NOT change the domain. Produce 1 improved topic only."""
-    
-    user_message_label = f"""Improve the following topic while keeping the same domain and purpose. It must be a better version of the previous topic without repeating the same wording. DO NOT simplify it.
+   
+    user_message = f"""Improve the following topic while keeping the same domain and purpose. It must be a better version of the previous topic without repeating the same wording. DO NOT simplify it.
 
 Experience mode: {experience_mode}
 Experience level: {experience_level}
@@ -2306,126 +1702,23 @@ Context: {context_text}
 Previous topic: {previous_topic_label}
 
 Return ONLY the improved topic label as a single string, nothing else."""
-    
+   
     try:
         client = _get_openai_client()
-        
-        # Get improved label first
-        response_label = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message_label}
-            ],
-            temperature=0.7,
-        )
-        
-        improved_label = response_label.choices[0].message.content.strip()
-        improved_label = improved_label.strip('"').strip("'")
-        
-        # Now determine question type using semantic understanding
-        prompt = f"""You are an expert assessment designer. Determine the appropriate question type for this topic using SEMANTIC MEANING.
-
-Topic: {improved_label}
-Job role/domain: {job_text}
-Selected skills: {skills_text}
-
-Assign questionType based on SEMANTIC MEANING:
-
-1. SUBJECTIVE (explanation-oriented):
-   Use for topics requiring conceptual understanding, theoretical explanation, architectural reasoning, describing principles, comparing concepts.
-
-2. PSEUDOCODE (logic/algorithm-oriented):
-   Use for topics involving designing algorithms or workflows, explaining process flow, breaking down logic or structured thinking.
-
-3. CODING (implementation/execution-oriented):
-   Use ONLY if the topic implies writing functional, executable code, implementation of features/modules/algorithms, tasks that can be executed with test cases.
-   Set canUseJudge0 = true ONLY for Coding topics.
-
-4. MCQ (factual/basic/quick-assessment):
-   Use for topics involving terminology, facts, syntax-level understanding, straightforward objective recall.
-
-CRITICAL RULES:
-- Assign questionType based on SEMANTIC MEANING, not keyword matching
-- Work for ANY domain: programming, cloud, DevOps, AI/ML, cybersecurity, databases, frameworks, etc.
-- Do NOT hardcode technology-specific rules
-
-Return ONLY a JSON object:
-{{
-  "questionType": "MCQ | Subjective | PseudoCode | Coding",
-  "difficulty": "Easy | Medium | Hard",
-  "canUseJudge0": true/false
-}}
-
-No explanations. No markdown. JSON only."""
-        
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert assessment designer. Always return valid JSON objects. Never include markdown code blocks or explanations outside the JSON."
-                },
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
             ],
             temperature=0.7,
         )
-        
-        content = response.choices[0].message.content.strip()
-        # Remove markdown code blocks if present
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        
-        topic_data = json.loads(content)
-        
-        question_type = topic_data.get("questionType", "MCQ")
-        if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding"]:
-            question_type = "MCQ"
-        
-        difficulty = topic_data.get("difficulty", "Medium")
-        if difficulty not in ["Easy", "Medium", "Hard"]:
-            difficulty = "Medium"
-        
-        can_use_judge0 = topic_data.get("canUseJudge0", False)
-        # Ensure canUseJudge0 is only True for Coding
-        if question_type != "Coding":
-            can_use_judge0 = False
-        
-        # Validate coding topic is supported by Judge0
-        if question_type == "Coding":
-            # Collect all skills for comprehensive checking
-            skills_list = []
-            if skill_context:
-                skills_list.append(skill_context)
-            if combined_skills:
-                for skill in combined_skills:
-                    # Handle both Pydantic models and dictionaries
-                    if hasattr(skill, "skill_name"):
-                        skill_name = skill.skill_name
-                    elif isinstance(skill, dict):
-                        skill_name = skill.get("skill_name", "")
-                    else:
-                        skill_name = str(skill) if skill else ""
-                    if skill_name:
-                        skills_list.append(skill_name)
-            
-            # Use comprehensive framework detection
-            is_framework, framework_name = contains_unsupported_framework(improved_label, skills_list if skills_list else None)
-            if is_framework:
-                logger.warning(f"Topic '{improved_label}' was assigned Coding but contains framework '{framework_name}'. Changing to PseudoCode.")
-                question_type = "PseudoCode"
-                can_use_judge0 = False
-        
-        return {
-            "label": improved_label,
-            "questionType": question_type,
-            "difficulty": difficulty,
-            "canUseJudge0": can_use_judge0
-        }
-        
+       
+        improved_label = response.choices[0].message.content.strip()
+        # Remove quotes if present
+        improved_label = improved_label.strip('"').strip("'")
+        return improved_label
+       
     except Exception as exc:
         logger.error(f"Error improving topic: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to improve topic: {str(exc)}") from exc
@@ -2450,12 +1743,12 @@ async def regenerate_question(
             experience_mode = "college"
         else:
             experience_mode = "corporate"
-        
+       
         if experience_mode == "corporate":
             experience_level, _ = _get_experience_level_corporate(experience_min, experience_max)
         else:
             experience_level, _ = _get_experience_level_student(experience_min, experience_max)
-        
+       
         improvement_goals = [
             "increase clarity",
             "increase assessability",
@@ -2463,15 +1756,15 @@ async def regenerate_question(
             "ensure academic structure if student",
             "maintain conceptual integrity"
         ]
-        
+       
         if feedback:
             improvement_goals.append(f"User feedback: {feedback}")
-        
+       
         if additional_requirements:
             improvement_goals.append(f"Additional requirements: {additional_requirements}")
-        
+       
         system_message = """You are an expert assessment designer. Improve the provided question so that it is clearer, deeper, more technically accurate, and more assessable. Maintain the same domain, same conceptual scope, and same purpose. DO NOT generate a different topic. DO NOT change the domain. Produce 1 improved question only."""
-        
+       
         user_message = f"""Improve the following question while keeping the same topic and difficulty. It must be a better version of the previous question without repeating the same wording. DO NOT simplify it. Maintain the same question type.
 
 Experience mode: {experience_mode}
@@ -2495,18 +1788,18 @@ For Subjective: Generate a scenario-based question (3-5 sentences minimum).
 For PseudoCode: Provide a scenario first, then ask for pseudocode.
 For Coding: Generate a coding problem with clear description, examples, and constraints.
 """
-        
+       
         if experience_mode == "college":
             user_message += "\n\nCOLLEGE MODE RULES:\n- Beginner/intermediate academic level\n- Avoid enterprise/production terminology\n- Use small academic examples\n- Focus on conceptual understanding\n- NO job-role context\n"
         else:
             user_message += "\n\nCORPORATE MODE RULES:\n- Realistic, industry-driven scenarios\n- Include production workflows, optimization, best practices\n- Use professional terminology\n- Expect deeper critical thinking\n"
-        
+       
         try:
             client = _get_openai_client()
         except ValueError as exc:
             logger.error(f"OpenAI API key not configured: {exc}")
             raise HTTPException(status_code=500, detail="OpenAI API key not configured") from exc
-        
+       
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -2515,10 +1808,10 @@ For Coding: Generate a coding problem with clear description, examples, and cons
             ],
             temperature=0.7,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         result = _parse_json_response(content, "regenerated question JSON")
-        
+       
         if question_type == "MCQ":
             if not isinstance(result, dict) or "question" not in result or "options" not in result or "correctAnswer" not in result:
                 raise HTTPException(status_code=500, detail="Invalid MCQ format returned")
@@ -2538,7 +1831,7 @@ For Coding: Generate a coding problem with clear description, examples, and cons
             return {
                 "question": result["question"],
             }
-            
+           
     except Exception as exc:
         logger.error(f"Error regenerating question: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to regenerate question: {str(exc)}") from exc
@@ -2547,7 +1840,7 @@ For Coding: Generate a coding problem with clear description, examples, and cons
 async def _generate_subjective_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Subjective questions - PRODUCTION-GRADE REWRITE.
-    
+   
     Rules:
     - ONLY scenario-based, real-world, case-study style questions
     - Minimum 2-4 sentences
@@ -2555,7 +1848,7 @@ async def _generate_subjective_questions(topic: str, difficulty: str, count: int
     - NO: MCQ-like phrasing, "which of the following", one-liners
     - Should reflect real-world usage of the topic
     - Must be context-aware (topic, category, difficulty, experience mode)
-    
+   
     Difficulty Mapping:
     - EASY → simple but meaningful real-life context
     - MEDIUM → multi-step reasoning with explanation
@@ -2581,25 +1874,20 @@ async def _generate_subjective_questions(topic: str, difficulty: str, count: int
         - Team collaboration
         - Customer-facing problems
         """
-    
+   
     # Difficulty-specific requirements
     difficulty_requirements = {
         "Easy": "Simple but meaningful real-life context. Short scenario, simple decision or explanation needed.",
         "Medium": "Multi-step scenario with constraints or trade-offs. Requires reasoning and explanation.",
         "Hard": "Complex real-world scenario with multiple stakeholders or constraints. Deep design decisions, trade-offs, and evaluation required."
     }
-    
+   
     difficulty_req = difficulty_requirements.get(difficulty, difficulty_requirements["Medium"])
-    
-    # Process requirements: if URL, fetch and summarize; if text, use directly
-    processed_requirements = None
-    if additional_requirements:
-        processed_requirements = await _process_requirements_for_subjective(additional_requirements)
-    
+   
     additional_req_text = ""
-    if processed_requirements:
-        additional_req_text = f"\n11. Additional Requirements: {processed_requirements}\n"
-    
+    if additional_requirements:
+        additional_req_text = f"\n11. Additional Requirements: {additional_requirements}\n"
+   
     prompt = f"""You are an expert technical assessment writer. Generate {count} scenario-based subjective question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -2649,10 +1937,10 @@ Return ONLY a JSON array with question text."""
             ],
             temperature=0.8,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         questions = _parse_json_response(content, "Subjective questions JSON")
-        
+       
         # Validate and transform questions
         validated_questions = []
         for q in questions:
@@ -2663,12 +1951,12 @@ Return ONLY a JSON array with question text."""
                     validated_questions.append({"question": question_text})
                 else:
                     logger.warning(f"Generated subjective question too short or invalid, skipping: {question_text[:50]}...")
-        
+       
         if len(validated_questions) < count:
             logger.warning(f"Generated only {len(validated_questions)} valid subjective questions out of {count} requested")
-        
+       
         return validated_questions[:count]
-        
+       
     except Exception as exc:
         logger.error(f"Error generating Subjective questions: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate Subjective questions: {str(exc)}") from exc
@@ -2677,7 +1965,7 @@ Return ONLY a JSON array with question text."""
 async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Pseudocode questions - PRODUCTION-GRADE REWRITE.
-    
+   
     Rules:
     - Generate a pseudocode-related question ONLY
     - Should require algorithmic thinking
@@ -2688,7 +1976,7 @@ async def _generate_pseudocode_questions(topic: str, difficulty: str, count: int
     additional_req_text = ""
     if additional_requirements:
         additional_req_text = f"\n9. Additional Requirements: {additional_requirements}\n"
-    
+   
     prompt = f"""You are an expert technical assessor. Generate {count} pseudocode question(s) for the topic: {topic}.
 
 CRITICAL REQUIREMENTS:
@@ -2741,10 +2029,10 @@ Return ONLY valid JSON. No markdown, no explanations, NO answer fields."""
             ],
             temperature=0.8,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         questions = _parse_json_response(content, "PseudoCode questions JSON")
-        
+       
         # Validate and transform questions
         validated_questions = []
         for q in questions:
@@ -2757,12 +2045,12 @@ Return ONLY valid JSON. No markdown, no explanations, NO answer fields."""
                 # Handle alternative field name
                 question_text = q["question"].strip()
                 validated_questions.append({"questionText": question_text})
-        
+       
         if len(validated_questions) < count:
             logger.warning(f"Generated only {len(validated_questions)} valid pseudocode questions out of {count} requested")
-        
+       
         return validated_questions[:count]
-        
+       
     except HTTPException:
         raise
     except Exception as exc:
@@ -2773,10 +2061,10 @@ Return ONLY valid JSON. No markdown, no explanations, NO answer fields."""
 def _get_starter_code_template(language: str) -> str:
     """
     Get starter code template for a given language.
-    
+   
     Args:
         language: Programming language (python, java, cpp, c, javascript, typescript, go, ruby)
-        
+       
     Returns:
         Starter code template string
     """
@@ -2840,10 +2128,10 @@ end""",
 def _get_judge0_language_id(language: str) -> int:
     """
     Get Judge0 language ID for a given language.
-    
+   
     Args:
         language: Programming language name
-        
+       
     Returns:
         Judge0 language ID
     """
@@ -2863,14 +2151,14 @@ def _get_judge0_language_id(language: str) -> int:
 async def _generate_coding_questions(topic: str, difficulty: str, count: int, can_use_judge0: bool, coding_language: str = "python", experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate Coding questions (Judge0-compatible) using DSA module architecture.
-    
+   
     Args:
         topic: Topic label
         difficulty: Difficulty level (Easy, Medium, Hard)
         count: Number of questions to generate
         can_use_judge0: Whether Judge0 can be used
         coding_language: Programming language for coding questions (python, java, cpp, c, javascript, typescript, go, ruby)
-    
+   
     Returns questions in DSA-compatible format with:
     - questionText (description + examples + constraints)
     - starterCode (for specified language)
@@ -2883,13 +2171,13 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
     """
     if not can_use_judge0:
         raise HTTPException(status_code=400, detail="Coding questions require canUseJudge0 to be true")
-    
+   
     # Normalize language
     coding_language = coding_language.lower()
     if coding_language not in ["python", "java", "cpp", "c", "javascript", "typescript", "go", "ruby"]:
         logger.warning(f"Unknown language '{coding_language}', defaulting to 'python'")
         coding_language = "python"
-    
+   
     # Use DSA module's AI generator if available
     if DSA_AVAILABLE and dsa_generate_question is not None:
         try:
@@ -2898,7 +2186,7 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
             for i in range(count):
                 # Map difficulty: Easy -> easy, Medium -> medium, Hard -> hard
                 dsa_difficulty = difficulty.lower()
-                
+               
                 # Generate using DSA module with the specified language
                 dsa_question = await dsa_generate_question(
                     difficulty=dsa_difficulty,
@@ -2906,14 +2194,14 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                     concepts=None,
                     languages=[coding_language]  # Use the specified language
                 )
-                
+               
                 # Transform DSA format to assessment format
                 # DSA format has: title, description, examples, constraints, public_testcases, hidden_testcases, starter_code, function_signature
                 # Assessment format needs: questionText, starterCode, visibleTestCases, hiddenTestCases, constraints, functionSignature, explanation
-                
+               
                 # Build questionText from description + examples
                 question_text = dsa_question.get("description", "")
-                
+               
                 # Add examples if available
                 examples = dsa_question.get("examples", [])
                 if examples:
@@ -2924,14 +2212,14 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                         question_text += f"Output: {ex.get('output', '')}\n"
                         if ex.get("explanation"):
                             question_text += f"Explanation: {ex.get('explanation')}\n"
-                
+               
                 # Get starter code for the specified language
                 starter_code_dict = dsa_question.get("starter_code", {})
                 starter_code = starter_code_dict.get(coding_language) if starter_code_dict else ""
                 # Fallback to template if DSA didn't provide starter code for this language
                 if not starter_code:
                     starter_code = _get_starter_code_template(coding_language)
-                
+               
                 # Transform test cases
                 visible_testcases = []
                 for tc in dsa_question.get("public_testcases", []):
@@ -2939,23 +2227,21 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                         "input": tc.get("input", ""),
                         "output": tc.get("expected_output", "")
                     })
-                
+               
                 hidden_testcases = []
                 for tc in dsa_question.get("hidden_testcases", []):
                     hidden_testcases.append({
                         "input": tc.get("input", ""),
                         "output": tc.get("expected_output", "")
                     })
-                
+               
                 # Get constraints
                 constraints_list = dsa_question.get("constraints", [])
                 constraints_text = "\n".join(f"- {c}" for c in constraints_list) if constraints_list else ""
-                
-                # Get function signature and validate/fix it
-                func_sig_raw = dsa_question.get("function_signature", {})
-                title = dsa_question.get("title", topic)
-                func_sig = _validate_and_fix_function_signature(func_sig_raw, topic=topic, title=title, context="DSA module")
-                
+               
+                # Get function signature
+                func_sig = dsa_question.get("function_signature", {})
+               
                 # Format function signature as string for frontend editing
                 func_sig_string = ""
                 if func_sig and isinstance(func_sig, dict):
@@ -2967,11 +2253,11 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                     else:
                         param_str = ""
                     func_sig_string = f"{func_name}({param_str}): {return_type}"
-                
+               
                 # Extract title and problem statement for legacy format
                 title = dsa_question.get("title", topic)
                 problem_statement = dsa_question.get("description", question_text)
-                
+               
                 # Extract input/output format and sample input/output from first example
                 input_format = ""
                 output_format = ""
@@ -2986,7 +2272,7 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                         input_format = "See sample input format below"
                     if sample_output:
                         output_format = "See sample output format below"
-                
+               
                 # Build assessment question object with both new and legacy formats
                 assessment_question = {
                     # New format (DSA-compatible)
@@ -3010,15 +2296,15 @@ async def _generate_coding_questions(topic: str, difficulty: str, count: int, ca
                     # Function signature as string for textarea editing (frontend expects string, not object)
                     "functionSignatureString": func_sig_string,
                 }
-                
+               
                 questions.append(assessment_question)
-            
+           
             return questions
-            
+           
         except Exception as dsa_exc:
             logger.warning(f"DSA module generation failed, falling back to basic generation: {dsa_exc}")
             # Fall through to basic generation
-    
+   
     # Fallback: Basic generation if DSA module not available or failed
     starter_template = _get_starter_code_template(coding_language)
     prompt = f"""Generate {count} fully Judge0-compatible coding questions for: {topic}.
@@ -3073,7 +2359,7 @@ Return ONLY a JSON array. Example format for {coding_language.upper()}:
   }}
 ]
 
-IMPORTANT: 
+IMPORTANT:
 - All starter code MUST be in {coding_language.upper()}, NOT Python (unless language=python)
 - Starter code should be incomplete - candidate must implement the logic
 - DO NOT provide the solution or answer
@@ -3093,20 +2379,20 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
             ],
             temperature=0.7,
         )
-        
+       
         content = response.choices[0].message.content.strip()
         questions = _parse_json_response(content, "Coding questions JSON")
-        
+       
         # Ensure all questions have language information and remove any solution/answer fields
         validated_questions = []
         for question in questions:
             if not isinstance(question, dict):
                 continue
-            
+           
             # Remove any solution/answer fields
-            clean_question = {k: v for k, v in question.items() 
+            clean_question = {k: v for k, v in question.items()
                             if k not in ["solution", "answer", "completeCode", "finalCode", "implementation"]}
-            
+           
             # Ensure required fields
             if not clean_question.get("language"):
                 clean_question["language"] = str(_get_judge0_language_id(coding_language))
@@ -3115,7 +2401,7 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
             # Ensure starter code is in the correct language (fallback to template if missing)
             if not clean_question.get("starterCode"):
                 clean_question["starterCode"] = _get_starter_code_template(coding_language)
-            
+           
             # Add legacy format fields for frontend compatibility
             if not clean_question.get("title"):
                 # Extract title from questionText if available, or use topic
@@ -3126,17 +2412,12 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
                     clean_question["title"] = first_line[:100] if len(first_line) > 100 else first_line or topic
                 else:
                     clean_question["title"] = topic
-            
+           
             if not clean_question.get("problemStatement"):
                 clean_question["problemStatement"] = clean_question.get("questionText", "")
-            
-            # Validate and fix function signature (same logic as DSA module)
-            func_sig_raw = clean_question.get("functionSignature")
-            title = clean_question.get("title", topic)
-            func_sig = _validate_and_fix_function_signature(func_sig_raw, topic=topic, title=title, context="fallback generation")
-            clean_question["functionSignature"] = func_sig  # Update with validated/fixed version
-            
-            # Format function signature as string for frontend editing
+           
+            # Format function signature as string
+            func_sig = clean_question.get("functionSignature")
             if func_sig and isinstance(func_sig, dict):
                 func_name = func_sig.get("name", "function")
                 params = func_sig.get("parameters", [])
@@ -3148,7 +2429,7 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
                 clean_question["functionSignatureString"] = f"{func_name}({param_str}): {return_type}"
             elif func_sig and isinstance(func_sig, str):
                 clean_question["functionSignatureString"] = func_sig
-            
+           
             # Extract sample input/output from visible test cases
             visible_tcs = clean_question.get("visibleTestCases", [])
             if visible_tcs and len(visible_tcs) > 0:
@@ -3161,18 +2442,18 @@ Return ONLY valid JSON. No markdown, no explanations, NO solution code."""
                     clean_question["inputFormat"] = "See sample input format below"
                 if not clean_question.get("outputFormat"):
                     clean_question["outputFormat"] = "See sample output format below"
-            
+           
             # Validate required fields
             if clean_question.get("questionText") and clean_question.get("starterCode"):
                 validated_questions.append(clean_question)
             else:
                 logger.warning(f"Coding question missing required fields, skipping")
-        
+       
         if len(validated_questions) < count:
             logger.warning(f"Generated only {len(validated_questions)} valid coding questions out of {count} requested")
-        
+       
         return validated_questions[:count]
-        
+       
     except Exception as exc:
         logger.error(f"Error generating Coding questions: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate Coding questions: {str(exc)}") from exc
@@ -3182,7 +2463,7 @@ async def _is_technical_topic_ai(topic: str) -> bool:
     """
     Detect if a topic is technical/programming-related using OpenAI's models.
     Uses gpt-4o-mini (same as other functionality) for consistency.
-    
+   
     Returns True if the topic appears to be technical, False otherwise.
     """
     # Ultra-concise prompt to minimize token usage
@@ -3190,9 +2471,9 @@ async def _is_technical_topic_ai(topic: str) -> bool:
 Respond ONLY in JSON:
 {{"isTechnical": true/false}}
 """
-    
+   
     models = ["gpt-4o-mini"]  # Same model as other functionality
-    
+   
     for model in models:
         try:
             client = _get_openai_client()
@@ -3209,12 +2490,12 @@ Respond ONLY in JSON:
                 top_p=0.1,
                 max_tokens=10,  # Very small for boolean response
             )
-            
+           
             logger.debug(f"Payload for model {model}: {api_params}")
             response = await client.chat.completions.create(**api_params)
-            
+           
             content = response.choices[0].message.content.strip()
-            
+           
             # Parse JSON response
             try:
                 # Remove markdown code blocks if present
@@ -3225,10 +2506,10 @@ Respond ONLY in JSON:
                         if content.startswith("json"):
                             content = content[4:]
                         content = content.strip()
-                
+               
                 result = json.loads(content)
                 return result.get("isTechnical", False)
-                    
+                   
             except json.JSONDecodeError as json_err:
                 logger.warning(f"Failed to parse JSON from {model}: {json_err}. Content: {content}")
                 # Retry with next model if JSON is malformed
@@ -3236,7 +2517,7 @@ Respond ONLY in JSON:
                     continue
                 # If retry also fails, default to False (allow topic, let backend validation catch it)
                 return False
-                
+               
         except (APIError, APIConnectionError, AuthenticationError, RateLimitError) as api_err:
             logger.warning(f"API error with {model}: {api_err}. Trying fallback...")
             # Continue to next model (fallback)
@@ -3244,14 +2525,14 @@ Respond ONLY in JSON:
                 logger.error(f"All models failed for technical topic check: {api_err}")
                 return False  # Default to False on complete failure
             continue
-            
+           
         except Exception as exc:
             logger.error(f"Unexpected error with {model}: {exc}", exc_info=True)
             # Try fallback model
             if model == models[-1]:  # Last model failed
                 return False  # Default to False on complete failure
             continue
-    
+   
     # Should not reach here, but return False if it does
     return False
 
@@ -3259,14 +2540,14 @@ Respond ONLY in JSON:
 async def ai_topic_suggestion(category: str, user_input: str) -> Dict[str, Any]:
     """
     AI-powered topic validation and suggestions.
-    
+   
     Validates if the user input is relevant to the selected category and provides suggestions.
     Uses AI to determine relevance based on meaning, not keywords.
-    
+   
     Args:
         category: The category ("aptitude" | "communication" | "logical")
         user_input: The user's typed input
-        
+       
     Returns:
         {
             "isValid": bool,
@@ -3280,7 +2561,7 @@ async def ai_topic_suggestion(category: str, user_input: str) -> Dict[str, Any]:
             "reason": "Input cannot be empty",
             "suggestions": []
         }
-    
+   
     category_lower = category.lower()
     if category_lower not in ["aptitude", "communication", "logical"]:
         return {
@@ -3288,7 +2569,7 @@ async def ai_topic_suggestion(category: str, user_input: str) -> Dict[str, Any]:
             "reason": "Invalid category",
             "suggestions": []
         }
-    
+   
     # Map category to display name
     category_map = {
         "aptitude": "aptitude (mathematical, quantitative, problem-solving)",
@@ -3296,13 +2577,13 @@ async def ai_topic_suggestion(category: str, user_input: str) -> Dict[str, Any]:
         "logical": "logical reasoning (puzzles, patterns, deduction, analytical thinking)"
     }
     category_display = category_map.get(category_lower, category_lower)
-    
+   
     prompt = f"""Analyze the topic input: "{user_input}"
 
 Category: {category_display}
 
 Tasks:
-1. Determine if this topic is relevant to {category_display}. 
+1. Determine if this topic is relevant to {category_display}.
    - REJECT if it's about programming, coding, software development, technical skills (Java, Python, SQL, React, Node, Spring, ML, DSA, APIs, databases, etc.)
    - ACCEPT if it's about {category_display} skills
 
@@ -3315,7 +2596,7 @@ Respond ONLY in JSON format:
     "suggestions": ["suggestion1", "suggestion2", ...] (max 5, empty array if invalid)
 }}
 """
-    
+   
     try:
         client = _get_openai_client()
         api_params = _build_openai_payload(
@@ -3330,10 +2611,10 @@ Respond ONLY in JSON format:
             temperature=0.3,
             max_tokens=300,
         )
-        
+       
         response = await client.chat.completions.create(**api_params)
         content = response.choices[0].message.content.strip()
-        
+       
         # Parse JSON response
         try:
             # Remove markdown code blocks if present
@@ -3344,25 +2625,25 @@ Respond ONLY in JSON format:
                     if content.startswith("json"):
                         content = content[4:]
                     content = content.strip()
-            
+           
             result = json.loads(content)
-            
+           
             # Validate and sanitize response
             is_valid = result.get("isValid", False)
             reason = result.get("reason", "")
             suggestions = result.get("suggestions", [])
-            
+           
             # Ensure suggestions is a list and limit to 5
             if not isinstance(suggestions, list):
                 suggestions = []
             suggestions = [s for s in suggestions[:5] if s and isinstance(s, str) and s.strip()]
-            
+           
             return {
                 "isValid": bool(is_valid),
                 "reason": str(reason) if reason else "",
                 "suggestions": suggestions
             }
-            
+           
         except json.JSONDecodeError as json_err:
             logger.warning(f"Failed to parse JSON from AI topic suggestion: {json_err}. Content: {content}")
             # Fallback: check if input is technical
@@ -3379,7 +2660,7 @@ Respond ONLY in JSON format:
                 "reason": "",
                 "suggestions": []
             }
-            
+           
     except Exception as exc:
         logger.error(f"Error in AI topic suggestion: {exc}", exc_info=True)
         # Fallback: check if input is technical
@@ -3393,7 +2674,7 @@ Respond ONLY in JSON format:
                 }
         except:
             pass
-        
+       
         # Default to valid on error to allow user to proceed
         return {
             "isValid": True,
@@ -3408,7 +2689,7 @@ def _is_technical_topic(topic: str) -> bool:
     This is kept for backward compatibility but should use _is_technical_topic_ai for better accuracy.
     """
     topic_lower = topic.lower()
-    
+   
     # Technical keywords that should be blocked
     technical_keywords = [
         # Programming languages
@@ -3426,30 +2707,30 @@ def _is_technical_topic(topic: str) -> bool:
         "oop", "mvc", "mvp", "mvvm", "design pattern", "refactoring", "testing", "unit test", "integration test",
         "frontend", "backend", "full stack", "web development", "mobile development"
     ]
-    
+   
     # Check if topic contains any technical keywords
     for keyword in technical_keywords:
         if keyword in topic_lower:
             return True
-    
+   
     # Check if topic is a single programming language name
     programming_languages = ["java", "python", "javascript", "typescript", "c", "cpp", "c++", "go", "rust", "ruby", "php", "swift", "kotlin", "scala", "r"]
     if topic_lower.strip() in programming_languages:
         return True
-    
+   
     return False
 
 
 async def validate_topic_category(topic: str, category: str) -> Dict[str, Any]:
     """
     Validate if a custom topic belongs to the selected non-technical category using OpenAI's models.
-    
+   
     Uses gpt-4o-mini (same as other functionality) for consistency.
-    
+   
     Args:
         topic: The custom topic entered by the user
         category: The selected category ("aptitude" | "communication" | "logical_reasoning")
-    
+   
     Returns:
         {
             "valid": bool,
@@ -3463,7 +2744,7 @@ async def validate_topic_category(topic: str, category: str) -> Dict[str, Any]:
             "valid": False,
             "error": "Invalid category. Must be one of: aptitude, communication, logical_reasoning"
         }
-    
+   
     # FIRST: Check if topic is technical - reject immediately if so (using AI)
     is_technical = await _is_technical_topic_ai(topic)
     if is_technical:
@@ -3471,7 +2752,7 @@ async def validate_topic_category(topic: str, category: str) -> Dict[str, Any]:
             "valid": False,
             "error": "This topic appears to be technical. Only soft-skill topics are allowed in this category."
         }
-    
+   
     # Map category to display name for prompt
     category_map = {
         "aptitude": "aptitude",
@@ -3479,7 +2760,7 @@ async def validate_topic_category(topic: str, category: str) -> Dict[str, Any]:
         "logical_reasoning": "logical reasoning"
     }
     category_display = category_map.get(category_lower, category_lower)
-    
+   
     # Ultra-concise prompt to minimize token usage
     prompt = f"""Check if the topic '{topic}' belongs to category '{category_display}'.
 Categories:
@@ -3490,9 +2771,9 @@ CRITICAL: Reject if topic is about programming, coding, software, or technology.
 Respond ONLY in JSON:
 {{"valid": true/false}}
 """
-    
+   
     models = ["gpt-4o-mini"]  # Same model as other functionality
-    
+   
     for model in models:
         try:
             client = _get_openai_client()
@@ -3511,12 +2792,12 @@ Respond ONLY in JSON:
                 presence_penalty=0,
                 max_tokens=20,  # Extremely small for classification
             )
-            
+           
             logger.debug(f"Payload for model {model}: {api_params}")
             response = await client.chat.completions.create(**api_params)
-            
+           
             content = response.choices[0].message.content.strip()
-            
+           
             # Parse JSON response
             try:
                 # Remove markdown code blocks if present
@@ -3527,10 +2808,10 @@ Respond ONLY in JSON:
                         if content.startswith("json"):
                             content = content[4:]
                         content = content.strip()
-                
+               
                 result = json.loads(content)
                 is_valid = result.get("valid", False)
-                
+               
                 if is_valid:
                     return {"valid": True, "error": None}
                 else:
@@ -3538,7 +2819,7 @@ Respond ONLY in JSON:
                         "valid": False,
                         "error": "❌ The entered topic does not match the selected category. Please enter a valid topic."
                     }
-                    
+                   
             except json.JSONDecodeError as json_err:
                 logger.warning(f"Failed to parse JSON from {model}: {json_err}. Content: {content}")
                 # Retry once automatically if JSON is malformed
@@ -3549,7 +2830,7 @@ Respond ONLY in JSON:
                     "valid": False,
                     "error": "Unable to validate topic. Please try again."
                 }
-                
+               
         except (APIError, APIConnectionError, AuthenticationError, RateLimitError) as api_err:
             logger.warning(f"API error with {model}: {api_err}. Trying fallback...")
             # Continue to next model (fallback)
@@ -3560,7 +2841,7 @@ Respond ONLY in JSON:
                     "error": "Unable to validate topic. Please try again."
                 }
             continue
-            
+           
         except Exception as exc:
             logger.error(f"Unexpected error with {model}: {exc}", exc_info=True)
             # Try fallback model
@@ -3570,11 +2851,9 @@ Respond ONLY in JSON:
                     "error": "Unable to validate topic. Please try again."
                 }
             continue
-    
+   
     # Should not reach here, but return invalid if it does
     return {
         "valid": False,
         "error": "Unable to validate topic. Please try again."
     }
-
-

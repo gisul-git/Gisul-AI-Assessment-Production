@@ -3,13 +3,6 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "../auth/[...nextauth]";
 import fastApiClient from "../../../lib/fastapi";
 
-interface RegenerateSingleQuestionPayload {
-  assessmentId: string;
-  topicId: string;
-  rowId: string;
-  questionIndex: number;
-}
-
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -21,17 +14,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const payload = req.body as RegenerateSingleQuestionPayload;
+  const { assessmentId } = req.query;
+  const { newTitle, keepSchedule = false, keepCandidates = false } = req.body || {};
 
-  if (!payload.assessmentId || !payload.topicId || !payload.rowId || payload.questionIndex === undefined) {
-    return res.status(400).json({ message: "Assessment ID, Topic ID, Row ID, and Question Index are required" });
+  if (!assessmentId || typeof assessmentId !== "string") {
+    return res.status(400).json({ message: "Assessment ID is required" });
+  }
+
+  if (!newTitle || typeof newTitle !== "string" || newTitle.trim().length < 3) {
+    return res.status(400).json({ message: "New assessment name is required and must be at least 3 characters" });
   }
 
   try {
     const token = (session as any)?.backendToken;
     const response = await fastApiClient.post(
-      "/api/v1/assessments/regenerate-single-question",
-      payload,
+      `/api/v1/assessments/${assessmentId}/clone`,
+      {
+        newTitle: newTitle.trim(),
+        keepSchedule: keepSchedule,
+        keepCandidates: keepCandidates,
+      },
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -40,23 +42,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     );
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
-    console.error("Error in regenerate-single-question API route:", error);
+    console.error("Error in clone API route:", error);
     const statusCode = error?.response?.status || 500;
     const errorMessage =
       error?.response?.data?.detail ||
       error?.response?.data?.message ||
       error?.message ||
-      "Failed to regenerate question";
+      "Failed to clone assessment";
     return res.status(statusCode).json({
       message: errorMessage,
     });
   }
 }
-
-
-
-
-
-
-
 

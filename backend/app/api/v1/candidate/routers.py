@@ -74,6 +74,29 @@ async def verify_candidate(
                 detail="Assessment not found"
             )
         
+        # Check if assessment is paused
+        assessment_status = assessment.get("status")
+        if assessment_status == "paused":
+            # Check if candidate has already started (has startedAt)
+            candidates = assessment.get("candidates", [])
+            candidate_entry = None
+            for candidate in candidates:
+                if (candidate.get("email", "").lower() == request.email.lower() and
+                    candidate.get("name", "").strip().lower() == request.name.strip().lower()):
+                    candidate_entry = candidate
+                    break
+            
+            # If candidate has started before pause, allow them to continue
+            if candidate_entry and candidate_entry.get("startedAt"):
+                # Allow continuation
+                pass
+            else:
+                # New entry attempt - block with user-friendly message
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail="This assessment is currently paused. Please try again later."
+                )
+        
         # Check token (basic validation - you may want to enhance this)
         # For now, we'll just check if the assessment exists and is accessible
         

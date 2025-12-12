@@ -39,6 +39,8 @@ Assessment Platform backend.
    
    # AI Services
    OPENAI_API_KEY=your-openai-api-key
+   GEMINI_API_KEY=your-gemini-api-key
+   GEMINI_MODEL_SUMMARY=gemini-1.5-flash  # Optional, defaults to gemini-1.5-flash
    
    # Email Service (AWS SES)
    AWS_ACCESS_KEY=your-aws-access-key

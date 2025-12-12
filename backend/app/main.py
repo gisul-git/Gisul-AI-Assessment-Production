@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api.v1 import assessments, auth, candidate, proctor, users
+from .api.v1 import assessments, auth, candidate, proctor, users, custom_mcq
 from .api.v1.dsa.routers import tests as dsa_tests, questions as dsa_questions, submissions as dsa_submissions, assessment as dsa_assessment, admin as dsa_admin, run as dsa_run
 from .api.v1.super_admin.router import router as super_admin_router
 from .api.v1.custom_mcq.routers import router as custom_mcq_router
@@ -57,6 +57,7 @@ app.include_router(users.router)
 app.include_router(assessments.router)
 app.include_router(candidate.router)
 app.include_router(proctor.router)
+app.include_router(custom_mcq.router)
 app.include_router(super_admin_router)
 app.include_router(custom_mcq_router)
 
