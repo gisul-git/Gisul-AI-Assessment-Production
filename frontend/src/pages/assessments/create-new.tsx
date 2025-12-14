@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+﻿import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/router";
 import { GetServerSideProps } from "next";
 import { requireAuth } from "../../lib/auth";
@@ -442,6 +442,222 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
             marginBottom: "1rem",
           }}
         />
+        
+        {/* Visible Test Cases */}
+        <div style={{ marginBottom: "1.5rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+            <label style={{ fontWeight: 600, color: "#1e293b" }}>
+              Visible Test Cases ({visibleTestCases.length || 0}):
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                const newTestCases = [...(visibleTestCases || []), { input: "", output: "", expected_output: "" }];
+                onEditChange(JSON.stringify({ ...question, visibleTestCases: newTestCases }, null, 2));
+              }}
+              style={{
+                padding: "0.25rem 0.75rem",
+                backgroundColor: "#3b82f6",
+                color: "white",
+                border: "none",
+                borderRadius: "0.375rem",
+                fontSize: "0.875rem",
+                cursor: "pointer",
+              }}
+            >
+              + Add Test Case
+            </button>
+          </div>
+          {(visibleTestCases || []).map((testCase: any, idx: number) => (
+            <div key={idx} style={{
+              padding: "1rem",
+              backgroundColor: "#f8fafc",
+              borderRadius: "0.5rem",
+              border: "1px solid #e2e8f0",
+              marginBottom: "0.75rem",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b" }}>
+                  Test Case {idx + 1}:
+                </div>
+                {(visibleTestCases || []).length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newTestCases = (visibleTestCases || []).filter((_: any, i: number) => i !== idx);
+                      onEditChange(JSON.stringify({ ...question, visibleTestCases: newTestCases }, null, 2));
+                    }}
+                    style={{
+                      padding: "0.25rem 0.5rem",
+                      backgroundColor: "#ef4444",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "0.25rem",
+                      fontSize: "0.75rem",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.75rem", fontWeight: 600, color: "#64748b", marginBottom: "0.25rem" }}>
+                    Input:
+                  </label>
+                  <textarea
+                    value={testCase.input || ""}
+                    onChange={(e) => {
+                      const newTestCases = [...(visibleTestCases || [])];
+                      newTestCases[idx] = { ...newTestCases[idx], input: e.target.value };
+                      onEditChange(JSON.stringify({ ...question, visibleTestCases: newTestCases }, null, 2));
+                    }}
+                    style={{
+                      width: "100%",
+                      minHeight: "60px",
+                      padding: "0.5rem",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.75rem", fontWeight: 600, color: "#64748b", marginBottom: "0.25rem" }}>
+                    Expected Output:
+                  </label>
+                  <textarea
+                    value={testCase.output || testCase.expected_output || ""}
+                    onChange={(e) => {
+                      const newTestCases = [...(visibleTestCases || [])];
+                      newTestCases[idx] = { ...newTestCases[idx], output: e.target.value, expected_output: e.target.value };
+                      onEditChange(JSON.stringify({ ...question, visibleTestCases: newTestCases }, null, 2));
+                    }}
+                    style={{
+                      width: "100%",
+                      minHeight: "60px",
+                      padding: "0.5rem",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        
+        {/* Hidden Test Cases */}
+        <div style={{ marginBottom: "1.5rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+            <label style={{ fontWeight: 600, color: "#1e293b" }}>
+              Hidden Test Cases ({hiddenTestCases.length || 0}):
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                const newTestCases = [...(hiddenTestCases || []), { input: "", output: "", expected_output: "" }];
+                onEditChange(JSON.stringify({ ...question, hiddenTestCases: newTestCases }, null, 2));
+              }}
+              style={{
+                padding: "0.25rem 0.75rem",
+                backgroundColor: "#3b82f6",
+                color: "white",
+                border: "none",
+                borderRadius: "0.375rem",
+                fontSize: "0.875rem",
+                cursor: "pointer",
+              }}
+            >
+              + Add Test Case
+            </button>
+          </div>
+          {(hiddenTestCases || []).map((testCase: any, idx: number) => (
+            <div key={idx} style={{
+              padding: "1rem",
+              backgroundColor: "#fef3c7",
+              borderRadius: "0.5rem",
+              border: "1px solid #fbbf24",
+              marginBottom: "0.75rem",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b" }}>
+                  Hidden Test Case {idx + 1}:
+                </div>
+                {(hiddenTestCases || []).length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newTestCases = (hiddenTestCases || []).filter((_: any, i: number) => i !== idx);
+                      onEditChange(JSON.stringify({ ...question, hiddenTestCases: newTestCases }, null, 2));
+                    }}
+                    style={{
+                      padding: "0.25rem 0.5rem",
+                      backgroundColor: "#ef4444",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "0.25rem",
+                      fontSize: "0.75rem",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.75rem", fontWeight: 600, color: "#64748b", marginBottom: "0.25rem" }}>
+                    Input:
+                  </label>
+                  <textarea
+                    value={testCase.input || ""}
+                    onChange={(e) => {
+                      const newTestCases = [...(hiddenTestCases || [])];
+                      newTestCases[idx] = { ...newTestCases[idx], input: e.target.value };
+                      onEditChange(JSON.stringify({ ...question, hiddenTestCases: newTestCases }, null, 2));
+                    }}
+                    style={{
+                      width: "100%",
+                      minHeight: "60px",
+                      padding: "0.5rem",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.75rem", fontWeight: 600, color: "#64748b", marginBottom: "0.25rem" }}>
+                    Expected Output:
+                  </label>
+                  <textarea
+                    value={testCase.output || testCase.expected_output || ""}
+                    onChange={(e) => {
+                      const newTestCases = [...(hiddenTestCases || [])];
+                      newTestCases[idx] = { ...newTestCases[idx], output: e.target.value, expected_output: e.target.value };
+                      onEditChange(JSON.stringify({ ...question, hiddenTestCases: newTestCases }, null, 2));
+                    }}
+                    style={{
+                      width: "100%",
+                      minHeight: "60px",
+                      padding: "0.5rem",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     );
   }
@@ -948,7 +1164,18 @@ export default function CreateNewAssessmentPage() {
   const [isFinalized, setIsFinalized] = useState(false); // Track if assessment is finalized
   // Edit mode is always enabled - removed isConfigureEditMode state
   
-  // CSV Upload state
+  // Requirements free text field
+  const [requirementsText, setRequirementsText] = useState<string>("");
+  const [requirementsUrl, setRequirementsUrl] = useState<string | null>(null);
+  const [requirementsSummary, setRequirementsSummary] = useState<string | null>(null);
+  const [processingUrl, setProcessingUrl] = useState(false);
+  const [urlError, setUrlError] = useState<string | null>(null);
+  // Refs to prevent infinite loops and multiple calls
+  const isProcessingUrlRef = useRef(false);
+  const lastProcessedUrlRef = useRef<string | null>(null);
+  const urlTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // CSV Upload state (kept for backward compatibility but not used in UI)
   const [activeMethod, setActiveMethod] = useState<"role" | "manual" | "csv">("role");
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvData, setCsvData] = useState<Array<{skill_name: string; skill_description: string; importance_level: string}>>([]);
@@ -1055,29 +1282,6 @@ export default function CreateNewAssessmentPage() {
   const [regenerateQuestionFeedback, setRegenerateQuestionFeedback] = useState<string>("");
   const [scheduleTimeMinutes, setScheduleTimeMinutes] = useState<number>(0);
   const [scheduleTimeWarning, setScheduleTimeWarning] = useState<string | null>(null);
-  
-  // Proctoring Settings (Station 4)
-  const [proctoringSettings, setProctoringSettings] = useState<{
-    multiFaceDetection: boolean;
-    fullscreenMonitoring: boolean;
-    copyPasteBlocking: boolean;
-    tabSwitchDetection: boolean;
-    frameMatchRecognition: boolean;
-    externalDeviceDetection: boolean;
-    concentrationTracking: boolean;
-    browserExtensionMonitoring: boolean;
-    liveCameraAndScreenMonitoring: boolean;
-  }>({
-    multiFaceDetection: false,
-    fullscreenMonitoring: false,
-    copyPasteBlocking: false,
-    tabSwitchDetection: false,
-    frameMatchRecognition: false,
-    externalDeviceDetection: false,
-    concentrationTracking: false,
-    browserExtensionMonitoring: false,
-    liveCameraAndScreenMonitoring: false,
-  });
   
   // Schedule settings (Station 4)
   const [visibilityMode, setVisibilityMode] = useState<string>("public");
@@ -1495,7 +1699,6 @@ export default function CreateNewAssessmentPage() {
     finalDescription,
     jobDesignation,
     selectedSkills,
-    proctoringSettings,
     startTime,
     endTime,
     visibilityMode,
@@ -1660,10 +1863,6 @@ export default function CreateNewAssessmentPage() {
           if (assessment.schedule.candidateRequirements) {
             setCandidateRequirements(assessment.schedule.candidateRequirements);
           }
-        }
-        
-        if (assessment.proctoringSettings) {
-          setProctoringSettings(assessment.proctoringSettings);
         }
         
         // Load Station 3 data (Review Questions)
@@ -1994,10 +2193,7 @@ export default function CreateNewAssessmentPage() {
           }
         }
         
-        // Load proctoring settings
-        if (assessment.proctoringSettings) {
-          setProctoringSettings(assessment.proctoringSettings);
-        }
+        // Load proctoring settings with migration from old schema
         
         // Load Station 5 data (candidates, URL, accessMode, invitationTemplate)
         if (assessment.candidates && assessment.candidates.length > 0) {
@@ -2292,9 +2488,215 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     }
   };
 
+  // Delete a row from CSV data
+  const handleDeleteCsvRow = (index: number) => {
+    setCsvData(prevData => prevData.filter((_, idx) => idx !== index));
+  };
+
+  // Helper function to detect URLs in text
+  const detectUrl = (text: string): string | null => {
+    const urlRegex = /(https?:\/\/[^\s]+)/gi;
+    const matches = text.match(urlRegex);
+    return matches && matches.length > 0 ? matches[0] : null;
+  };
+
+  // Fetch and summarize website content from URL
+  const fetchAndSummarizeUrl = async (url: string) => {
+    // Prevent multiple simultaneous calls for the same URL
+    if (isProcessingUrlRef.current) {
+      console.log("URL fetch already in progress, skipping duplicate call");
+      return;
+    }
+    
+    // Check if we've already processed this URL
+    if (lastProcessedUrlRef.current === url && requirementsSummary) {
+      console.log("URL already processed, skipping");
+      return;
+    }
+    
+    isProcessingUrlRef.current = true;
+    setProcessingUrl(true);
+    setUrlError(null);
+    setRequirementsUrl(url);
+    
+    try {
+      // Call backend API to fetch and summarize URL
+      const response = await axios.post("/api/assessments/fetch-and-summarize-url", {
+        url: url,
+      });
+
+      if (response.data?.success && response.data?.data?.summary) {
+        const summary = response.data.data.summary;
+        setRequirementsSummary(summary);
+        lastProcessedUrlRef.current = url;
+        
+        // Append the summary to requirements text if it's not already there
+        // Use a callback to avoid triggering the useEffect
+        setRequirementsText(prev => {
+          // Check if summary is already in the text
+          if (prev.includes(summary)) {
+            return prev;
+          }
+          const urlRemoved = prev.replace(url, "").trim();
+          return urlRemoved 
+            ? `${urlRemoved}\n\n--- Website Summary ---\n${summary}`
+            : `--- Website Summary ---\n${summary}`;
+        });
+      } else {
+        throw new Error(response.data?.message || "Failed to fetch and summarize URL");
+      }
+    } catch (err: any) {
+      console.error("Error fetching URL:", err);
+      setUrlError(err.response?.data?.message || err.message || "Failed to fetch and summarize website. Please check the URL and try again.");
+      setRequirementsUrl(null);
+      setRequirementsSummary(null);
+      lastProcessedUrlRef.current = null;
+    } finally {
+      setProcessingUrl(false);
+      isProcessingUrlRef.current = false;
+    }
+  };
+
+  // Handle requirements text change
+  const handleRequirementsChange = (value: string) => {
+    setRequirementsText(value);
+    setUrlError(null);
+  };
+
+  // Auto-detect and fetch URL when requirements text changes (debounced)
+  useEffect(() => {
+    // Clear any existing timeout
+    if (urlTimeoutRef.current) {
+      clearTimeout(urlTimeoutRef.current);
+      urlTimeoutRef.current = null;
+    }
+    
+    // Don't process if already processing or if text is empty
+    if (!requirementsText.trim() || processingUrl || isProcessingUrlRef.current) {
+      return;
+    }
+
+    // Don't process if summary is already in the text (prevents infinite loop)
+    if (requirementsSummary && requirementsText.includes(requirementsSummary)) {
+      return;
+    }
+
+    const url = detectUrl(requirementsText);
+    
+    // Only process if URL is different from last processed and different from current requirementsUrl
+    if (url && url !== requirementsUrl && url !== lastProcessedUrlRef.current) {
+      // Debounce: wait 2 seconds after user stops typing
+      urlTimeoutRef.current = setTimeout(() => {
+        // Double-check conditions before calling
+        if (!isProcessingUrlRef.current && url !== lastProcessedUrlRef.current) {
+          fetchAndSummarizeUrl(url);
+        }
+        urlTimeoutRef.current = null;
+      }, 2000);
+    }
+
+    return () => {
+      if (urlTimeoutRef.current) {
+        clearTimeout(urlTimeoutRef.current);
+        urlTimeoutRef.current = null;
+      }
+    };
+  }, [requirementsText, requirementsUrl, processingUrl, requirementsSummary]);
+
   // Unified topic generation that merges skills from all three methods
+  // Helper function to check if a skill/topic is supported by Judge0
+  const isJudge0Supported = (skillName: string): boolean => {
+    const skillLower = skillName.toLowerCase().trim();
+    
+    // List of frameworks/libraries not supported by Judge0
+    const unsupportedFrameworks = [
+      "django",
+      "flask",
+      "fastapi",
+      "react",
+      "angular",
+      "vue",
+      "next",
+      "nextjs",
+      "express",
+      "spring",
+      "hibernate",
+      "laravel",
+      "symfony",
+      "rails",
+      "ruby on rails",
+      "asp.net",
+      "dotnet",
+      ".net",
+      "tensorflow",
+      "pytorch",
+      "keras",
+      "scikit-learn",
+      "scikit",
+      "pandas",
+      "numpy",
+      "matplotlib",
+      "seaborn",
+      "jupyter",
+      "jupyter notebook",
+      "selenium",
+      "cypress",
+      "jest",
+      "mocha",
+      "junit",
+      "pytest",
+      "unittest",
+      "maven",
+      "gradle",
+      "npm",
+      "yarn",
+      "webpack",
+      "babel",
+      "gulp",
+      "grunt",
+    ];
+    
+    // Check if the skill matches any unsupported framework
+    for (const framework of unsupportedFrameworks) {
+      if (skillLower === framework || skillLower.startsWith(framework + " ")) {
+        return false;
+      }
+    }
+    
+    return true;
+  };
+
+  // Helper function to filter topics that have coding questions but are unsupported by Judge0
+  const filterTopicsWithCoding = (topics: TopicV2[]): TopicV2[] => {
+    return topics.filter(topic => {
+      // Check if topic has any coding question rows
+      const hasCodingQuestions = topic.questionRows.some(
+        row => row.questionType === "Coding"
+      );
+      
+      // If topic has coding questions, check if it's supported by Judge0
+      if (hasCodingQuestions) {
+        return isJudge0Supported(topic.label);
+      }
+      
+      // If no coding questions, keep the topic
+      return true;
+    });
+  };
+
+  // Helper function to filter skills that are unsupported by Judge0
+  const filterUnsupportedSkills = <T extends {skill_name: string}>(skills: T[]): T[] => {
+    return skills.filter(skill => isJudge0Supported(skill.skill_name));
+  };
+
   const handleGenerateTopicsUnified = async () => {
-    // Collect skills from all three sources
+    // Validation: Must have at least one source of requirements (text, URL summary, or skills)
+    if (!requirementsText.trim() && !requirementsSummary && selectedSkills.length === 0 && csvData.length === 0) {
+      setError("Please provide at least one of the following: requirements text/URL, selected skills, or CSV upload");
+      return;
+    }
+
+    // Collect skills from all sources (optional - can be used to supplement requirements)
     
     // Method A (Role-based): Skills from topic cards (auto-generated from job designation)
     const roleBasedSkills = selectedSkills
@@ -2329,7 +2731,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
 
     // Deduplicate by skill_name (case-insensitive) - keep first occurrence
     const seen = new Set<string>();
-    const combinedSkills = allSkills.filter(skill => {
+    let combinedSkills: Array<{skill_name: string; source: "role" | "manual" | "csv"; description: string | null; importance_level: string | null}> = allSkills.filter(skill => {
       const normalized = skill.skill_name.toLowerCase().trim();
       if (seen.has(normalized)) {
         return false; // Skip duplicates
@@ -2338,14 +2740,15 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       return true;
     });
 
-    // Validation: Must have at least one skill from any method
-    if (combinedSkills.length === 0) {
-      setError("Please add at least one skill from any method (Role-based, Manual, or CSV)");
-      return;
-    }
+    // Filter out unsupported frameworks from skills (since coding questions might be generated)
+    // This ensures that topics with coding questions will only use Judge0-supported technologies
+    combinedSkills = filterUnsupportedSkills(combinedSkills) as typeof combinedSkills;
 
     // Log for debugging (can be removed in production)
-    console.log("Generating topics with combined skills:", {
+    console.log("Generating topics with requirements and combined skills:", {
+      requirementsText: requirementsText.trim() ? requirementsText.trim().substring(0, 100) + "..." : "(empty)",
+      requirementsUrl: requirementsUrl || "(none)",
+      requirementsSummary: requirementsSummary ? requirementsSummary.substring(0, 100) + "..." : "(none)",
       roleBased: roleBasedSkills.length,
       manual: manualSkills.length,
       csv: csvSkills.length,
@@ -2362,14 +2765,21 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         assessmentId: assessmentId || undefined,
         assessmentTitle: finalTitle.trim() || undefined,
         jobDesignation: jobDesignation.trim() || undefined,
-        combinedSkills: combinedSkills,
+        requirementsText: requirementsText.trim() || undefined, // Optional requirements input
+        requirementsUrl: requirementsUrl || undefined, // URL if provided
+        requirementsSummary: requirementsSummary || undefined, // Summarized content from URL
+        combinedSkills: combinedSkills.length > 0 ? combinedSkills : undefined, // Optional skills list (filtered for Judge0 support)
         experienceMin: experienceMin,
         experienceMax: experienceMax,
         experienceMode: experienceMode,
       });
 
       if (response.data?.success) {
-        const generatedTopics = response.data.data.topics || [];
+        let generatedTopics = response.data.data.topics || [];
+        
+        // Filter out topics that have coding questions but are not supported by Judge0
+        generatedTopics = filterTopicsWithCoding(generatedTopics);
+        
         // Ensure all newly generated topics have status "pending"
         const topicsWithStatus = generatedTopics.map((topic: TopicV2) => ({
           ...topic,
@@ -2646,7 +3056,12 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       });
       
       if (response.data?.success) {
-        setTopicsV2(response.data.data.topics || []);
+        let generatedTopics = response.data.data.topics || [];
+        
+        // Filter out topics that have coding questions but are not supported by Judge0
+        generatedTopics = filterTopicsWithCoding(generatedTopics);
+        
+        setTopicsV2(generatedTopics);
         setFullTopicRegenLocked(false);
         setAllQuestionsGenerated(false);
         setHasVisitedConfigureStation(true);
@@ -2731,6 +3146,24 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         }
       }
       
+      // Check if topic has coding questions - if so, verify it's supported by Judge0
+      const hasCodingQuestions = topic.questionRows.some(
+        row => row.questionType === "Coding"
+      );
+      
+      if (hasCodingQuestions && !isJudge0Supported(previousTopicLabel)) {
+        setError(`Cannot regenerate topic "${previousTopicLabel}" - it contains coding questions but is not supported by Judge0. Please use a different topic or change the question type.`);
+        setGeneratingRowId(null);
+        return;
+      }
+      
+      // Filter skill metadata if it contains unsupported frameworks and topic has coding questions
+      if (hasCodingQuestions && skillMetadataProvided && !isJudge0Supported(skillMetadataProvided.skill_name)) {
+        setError(`Cannot regenerate topic "${previousTopicLabel}" - the related skill "${skillMetadataProvided.skill_name}" is not supported by Judge0 for coding questions.`);
+        setGeneratingRowId(null);
+        return;
+      }
+      
       const response = await axios.post("/api/assessments/improve-topic", {
         assessmentId: assessmentId,
         topicId: topicId,
@@ -2745,6 +3178,21 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       if (response.data?.success) {
         const responseData = response.data.data;
         const updatedTopicLabel = responseData.updatedTopicLabel || responseData.topic?.label;
+        
+        // Check if the updated topic has coding questions and is supported by Judge0
+        if (updatedTopicLabel) {
+          const updatedTopic = topicsV2.find(t => t.id === topicId);
+          const hasCodingQuestions = updatedTopic?.questionRows.some(
+            row => row.questionType === "Coding"
+          ) || false;
+          
+          // If topic has coding questions, verify the updated label is supported
+          if (hasCodingQuestions && !isJudge0Supported(updatedTopicLabel)) {
+            setError(`Cannot update topic to "${updatedTopicLabel}" - it contains coding questions but is not supported by Judge0.`);
+            setGeneratingRowId(null);
+            return;
+          }
+        }
         
         if (updatedTopicLabel) {
           // Update only the label, preserve everything else
@@ -3182,7 +3630,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       
       const allSkills = [...roleBasedSkills, ...manualSkills, ...csvSkills];
       const seen = new Set<string>();
-      const combinedSkills = allSkills.filter(skill => {
+      let combinedSkills = allSkills.filter(skill => {
         const normalized = skill.skill_name.toLowerCase().trim();
         if (seen.has(normalized)) {
           return false;
@@ -3191,9 +3639,23 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         return true;
       });
       
+      // Filter out unsupported frameworks from skills (since coding questions might be regenerated)
+      combinedSkills = filterUnsupportedSkills(combinedSkills);
+      
       // Build previousTopics array with topic info
+      // Filter out topics that have coding questions but are not supported by Judge0
       const previousTopics = topicsV2
         .filter(topic => !topic.locked) // Skip locked topics
+        .filter(topic => {
+          // If topic has coding questions, check if it's supported by Judge0
+          const hasCodingQuestions = topic.questionRows.some(
+            row => row.questionType === "Coding"
+          );
+          if (hasCodingQuestions) {
+            return isJudge0Supported(topic.label);
+          }
+          return true; // Keep topics without coding questions
+        })
         .map(topic => {
           // Try to find related skill
           let relatedSkill: string | undefined = undefined;
@@ -3246,7 +3708,11 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       });
       
       if (response.data?.success) {
-        const updatedTopics = response.data.data.topics || topicsV2;
+        let updatedTopics = response.data.data.topics || topicsV2;
+        
+        // Filter out topics that have coding questions but are not supported by Judge0
+        updatedTopics = filterTopicsWithCoding(updatedTopics);
+        
         // Update topics with improved labels, preserve everything else
         setTopicsV2(prev => prev.map(topic => {
           const updated = updatedTopics.find((ut: any) => ut.id === topic.id);
@@ -5225,6 +5691,12 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
   };
 
   const handleNextToStation2 = async () => {
+    // Validate required fields
+    if (!jobDesignation.trim()) {
+      setError("Job Designation / Domain is required");
+      return;
+    }
+    
     // If topics haven't been generated yet, generate them first
     if (topics.length === 0) {
       if (selectedSkills.length === 0) {
@@ -6192,298 +6664,403 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 )}
               </div>
 
-              {/* Three-Tab Interface for Skill Definition Methods */}
+              {/* Unified Requirements Interface */}
               <div style={{ marginBottom: "2rem" }}>
                 <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
                   Define Skill Requirements
                 </label>
                 
-                {/* Tabs */}
-                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1.5rem", borderBottom: "2px solid #e2e8f0" }}>
-                  <button
-                    type="button"
-                    onClick={() => setActiveMethod("role")}
+                {/* Job Designation (Required) */}
+                <div style={{ marginBottom: "2rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                    Job Designation / Domain
+                    <span style={{ color: "#ef4444", marginLeft: "0.25rem" }}>*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={jobDesignation}
+                    onChange={(e) => setJobDesignation(e.target.value)}
+                    placeholder="e.g., Software Engineering, Data Scientist, Frontend Developer"
+                    required
                     style={{
-                      padding: "0.75rem 1.5rem",
-                      border: "none",
-                      borderBottom: activeMethod === "role" ? "3px solid #6953a3" : "3px solid transparent",
-                      backgroundColor: "transparent",
-                      color: activeMethod === "role" ? "#6953a3" : "#64748b",
-                      fontWeight: activeMethod === "role" ? 600 : 400,
-                      cursor: "pointer",
-                      fontSize: "0.875rem",
+                      width: "100%",
+                      padding: "0.75rem",
+                      border: jobDesignation.trim() ? "1px solid #e2e8f0" : "1px solid #ef4444",
+                      borderRadius: "0.5rem",
+                      fontSize: "1rem",
                     }}
-                  >
-                    Method A: Role-Based Auto Generation
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveMethod("manual")}
-                    style={{
-                      padding: "0.75rem 1.5rem",
-                      border: "none",
-                      borderBottom: activeMethod === "manual" ? "3px solid #6953a3" : "3px solid transparent",
-                      backgroundColor: "transparent",
-                      color: activeMethod === "manual" ? "#6953a3" : "#64748b",
-                      fontWeight: activeMethod === "manual" ? 600 : 400,
-                      cursor: "pointer",
-                      fontSize: "0.875rem",
-                    }}
-                  >
-                    Method B: Manual Selection
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveMethod("csv")}
-                    style={{
-                      padding: "0.75rem 1.5rem",
-                      border: "none",
-                      borderBottom: activeMethod === "csv" ? "3px solid #6953a3" : "3px solid transparent",
-                      backgroundColor: "transparent",
-                      color: activeMethod === "csv" ? "#6953a3" : "#64748b",
-                      fontWeight: activeMethod === "csv" ? 600 : 400,
-                      cursor: "pointer",
-                      fontSize: "0.875rem",
-                    }}
-                  >
-                    Method C: Upload CSV Requirements
-                  </button>
+                  />
+                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                    Enter a job designation to get AI-suggested skills and technologies
+                  </p>
+                  {!jobDesignation.trim() && (
+                    <p style={{ fontSize: "0.875rem", color: "#ef4444", marginTop: "0.5rem" }}>
+                      Job Designation is required
+                    </p>
+                  )}
                 </div>
 
-                {/* Tab Content */}
-                {activeMethod === "role" && (
-                  <div>
-                    <div style={{ marginBottom: "2rem" }}>
-                      <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                        Job Designation / Domain *
-                      </label>
+                {/* Topic Cards Display (if job designation is provided) */}
+                {topicCards.length > 0 && jobDesignation.trim() && (isEditMode || !hasVisitedConfigureStation) && (
+                  <div style={{ marginBottom: "2rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                      Related Technologies & Skills
+                    </label>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
+                      {topicCards
+                        .filter((card) => {
+                          // Filter out frameworks that are not supported by Judge0
+                          // Judge0 only supports pure programming languages, not frameworks
+                          // that require additional setup (Django, Flask, React, Angular, Spring, etc.)
+                          const cardLower = card.toLowerCase().trim();
+                          
+                          // List of frameworks/libraries not supported by Judge0
+                          const unsupportedFrameworks = [
+                            "django",
+                            "flask",
+                            "fastapi",
+                            "react",
+                            "angular",
+                            "vue",
+                            "next",
+                            "nextjs",
+                            "express",
+                            "spring",
+                            "hibernate",
+                            "laravel",
+                            "symfony",
+                            "rails",
+                            "ruby on rails",
+                            "asp.net",
+                            "dotnet",
+                            ".net",
+                            "tensorflow",
+                            "pytorch",
+                            "keras",
+                            "scikit-learn",
+                            "scikit",
+                            "pandas",
+                            "numpy",
+                            "matplotlib",
+                            "seaborn",
+                            "jupyter",
+                            "jupyter notebook",
+                            "selenium",
+                            "cypress",
+                            "jest",
+                            "mocha",
+                            "junit",
+                            "pytest",
+                            "unittest",
+                            "maven",
+                            "gradle",
+                            "npm",
+                            "yarn",
+                            "webpack",
+                            "babel",
+                            "gulp",
+                            "grunt",
+                          ];
+                          
+                          // Check if the topic matches any unsupported framework
+                          for (const framework of unsupportedFrameworks) {
+                            if (cardLower === framework || cardLower.startsWith(framework + " ")) {
+                              return false;
+                            }
+                          }
+                          
+                          return true;
+                        })
+                        .map((card) => (
+                        <button
+                          key={card}
+                          type="button"
+                          onClick={() => handleCardClick(card)}
+                          disabled={!isEditMode && selectedSkills.includes(card)}
+                          style={{
+                            padding: "0.5rem 1rem",
+                            border: `1px solid ${selectedSkills.includes(card) ? "#6953a3" : "#e2e8f0"}`,
+                            borderRadius: "0.5rem",
+                            backgroundColor: selectedSkills.includes(card) ? "#eff6ff" : "#ffffff",
+                            color: selectedSkills.includes(card) ? "#1e40af" : "#475569",
+                            cursor: (!isEditMode && selectedSkills.includes(card)) ? "default" : "pointer",
+                            fontSize: "0.875rem",
+                            fontWeight: selectedSkills.includes(card) ? 600 : 400,
+                            opacity: (!isEditMode && selectedSkills.includes(card)) ? 0.7 : 1,
+                          }}
+                        >
+                          {card} {selectedSkills.includes(card) && "✓"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Manual Skill Input (Optional) */}
+                {(isEditMode || !hasVisitedConfigureStation) && (
+                  <div style={{ marginBottom: "2rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                      Add Specific Skills (Optional)
+                    </label>
+                    <div style={{ display: "flex", gap: "0.5rem" }}>
                       <input
                         type="text"
-                        value={jobDesignation}
-                        onChange={(e) => setJobDesignation(e.target.value)}
-                        placeholder="e.g., Software Engineering, Aptitude, Data Scientist, Frontend Developer"
+                        value={manualSkillInput}
+                        onChange={(e) => setManualSkillInput(e.target.value)}
+                        onKeyPress={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleAddManualSkill();
+                          }
+                        }}
+                        placeholder="Enter technology name (e.g., Python, React, HTML)"
                         style={{
-                          width: "100%",
+                          flex: 1,
                           padding: "0.75rem",
                           border: "1px solid #e2e8f0",
                           borderRadius: "0.5rem",
                           fontSize: "1rem",
                         }}
                       />
-                    </div>
-
-                    {/* Topic Cards Display */}
-                    {topicCards.length > 0 && (isEditMode || !hasVisitedConfigureStation) && (
-                      <div style={{ marginBottom: "2rem" }}>
-                        <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
-                          Related Technologies & Skills
-                        </label>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
-                          {topicCards.map((card) => (
-                            <button
-                              key={card}
-                              type="button"
-                              onClick={() => handleCardClick(card)}
-                              disabled={!isEditMode && selectedSkills.includes(card)}
-                              style={{
-                                padding: "0.5rem 1rem",
-                                border: `1px solid ${selectedSkills.includes(card) ? "#6953a3" : "#e2e8f0"}`,
-                                borderRadius: "0.5rem",
-                                backgroundColor: selectedSkills.includes(card) ? "#eff6ff" : "#ffffff",
-                                color: selectedSkills.includes(card) ? "#1e40af" : "#475569",
-                                cursor: (!isEditMode && selectedSkills.includes(card)) ? "default" : "pointer",
-                                fontSize: "0.875rem",
-                                fontWeight: selectedSkills.includes(card) ? 600 : 400,
-                                opacity: (!isEditMode && selectedSkills.includes(card)) ? 0.7 : 1,
-                              }}
-                            >
-                              {card} {selectedSkills.includes(card) && "✓"}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                  </div>
-                )}
-
-                {activeMethod === "manual" && (
-                  <div>
-                    <div style={{ marginBottom: "2rem" }}>
-                      <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
-                        Skills we want to assess *
-                      </label>
-                      {selectedSkills.length > 0 && (
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginBottom: "1rem" }}>
-                          {selectedSkills.map((skill) => (
-                            <div
-                              key={skill}
-                              style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: "0.5rem",
-                                backgroundColor: "#eff6ff",
-                                color: "#1e40af",
-                                padding: "0.5rem 1rem",
-                                borderRadius: "0.5rem",
-                                fontSize: "0.875rem",
-                                fontWeight: 500,
-                              }}
-                            >
-                              {skill}
-                              {(isEditMode || !hasVisitedConfigureStation) && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveSkill(skill)}
-                                  style={{
-                                    background: "none",
-                                    border: "none",
-                                    color: "#1e40af",
-                                    cursor: "pointer",
-                                    padding: 0,
-                                    fontSize: "1.125rem",
-                                    lineHeight: 1,
-                                  }}
-                                >
-                                  ×
-                                </button>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {(isEditMode || !hasVisitedConfigureStation) && (
-                        <div style={{ display: "flex", gap: "0.5rem" }}>
-                          <input
-                            type="text"
-                            value={manualSkillInput}
-                            onChange={(e) => setManualSkillInput(e.target.value)}
-                            onKeyPress={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                handleAddManualSkill();
-                              }
-                            }}
-                            placeholder="Enter technology name (e.g., Python, React, HTML)"
-                            style={{
-                              flex: 1,
-                              padding: "0.75rem",
-                              border: "1px solid #e2e8f0",
-                              borderRadius: "0.5rem",
-                              fontSize: "1rem",
-                            }}
-                          />
-                          <button
-                            type="button"
-                            onClick={handleAddManualSkill}
-                            className="btn-secondary"
-                            disabled={!manualSkillInput.trim()}
-                            style={{ marginTop: 0, whiteSpace: "nowrap", padding: "0.75rem 1.5rem" }}
-                          >
-                            Add
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                  </div>
-                )}
-
-                {activeMethod === "csv" && (
-                  <div>
-                    <div style={{ marginBottom: "1.5rem" }}>
                       <button
                         type="button"
-                        onClick={downloadCsvTemplate}
+                        onClick={handleAddManualSkill}
                         className="btn-secondary"
-                        style={{ marginBottom: "1rem" }}
+                        disabled={!manualSkillInput.trim()}
+                        style={{ marginTop: 0, whiteSpace: "nowrap", padding: "0.75rem 1.5rem" }}
                       >
-                        Download CSV Template
+                        Add
                       </button>
-                      <div style={{ 
-                        marginTop: "0.75rem", 
-                        padding: "0.75rem", 
-                        backgroundColor: "#f0f9ff", 
-                        border: "1px solid #bae6fd", 
-                        borderRadius: "0.5rem",
-                        fontSize: "0.875rem",
-                        color: "#0369a1"
-                      }}>
-                        <strong>CSV Format Instructions:</strong>
-                        <ul style={{ margin: "0.5rem 0 0 1.5rem", padding: 0 }}>
-                          <li>Only three columns allowed: <strong>skill_name</strong>, <strong>skill_description</strong>, <strong>importance_level</strong></li>
-                          <li>If you have multiple descriptions for a skill, separate them using semicolons (;) within the same cell</li>
-                          <li>Do NOT add extra columns. Keep exactly three columns</li>
-                          <li>skill_description will be automatically wrapped in quotes in the template</li>
-                          <li>importance_level must be: <strong>Low</strong>, <strong>Medium</strong>, or <strong>High</strong></li>
-                        </ul>
-                      </div>
                     </div>
-
-                    <div style={{ marginBottom: "2rem" }}>
-                      <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                        Upload Requirements File (CSV) *
-                      </label>
-                      <input
-                        type="file"
-                        accept=".csv"
-                        onChange={handleSkillRequirementsCsvUpload}
-                        style={{
-                          width: "100%",
-                          padding: "0.75rem",
-                          border: "1px solid #e2e8f0",
-                          borderRadius: "0.5rem",
-                          fontSize: "1rem",
-                        }}
-                      />
-                      {csvError && (
-                        <div style={{ marginTop: "0.5rem", color: "#dc2626", fontSize: "0.875rem" }}>
-                          {csvError}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* CSV Preview Table */}
-                    {csvData.length > 0 && (
-                      <div style={{ marginBottom: "2rem" }}>
-                        <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
-                          Preview Requirements
-                        </label>
-                        <div style={{ overflowX: "auto", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}>
-                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                            <thead>
-                              <tr style={{ backgroundColor: "#f8fafc" }}>
-                                <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
-                                  Skill Name
-                                </th>
-                                <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
-                                  Description
-                                </th>
-                                <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
-                                  Importance Level
-                                </th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {csvData.map((row, idx) => (
-                                <tr key={idx}>
-                                  <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>{row.skill_name}</td>
-                                  <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>{row.skill_description || "-"}</td>
-                                  <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>{row.importance_level}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-
                   </div>
                 )}
+
+                {/* CSV Upload Section */}
+                <div style={{ marginBottom: "2rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                    Upload CSV Requirements (Optional)
+                  </label>
+                  
+                  <div style={{ marginBottom: "1.5rem" }}>
+                    <button
+                      type="button"
+                      onClick={downloadCsvTemplate}
+                      className="btn-secondary"
+                      style={{ marginBottom: "1rem" }}
+                    >
+                      Download CSV Template
+                    </button>
+                    <div style={{ 
+                      marginTop: "0.75rem", 
+                      padding: "0.75rem", 
+                      backgroundColor: "#f0f9ff", 
+                      border: "1px solid #bae6fd", 
+                      borderRadius: "0.5rem",
+                      fontSize: "0.875rem",
+                      color: "#0369a1"
+                    }}>
+                      <strong>CSV Format Instructions:</strong>
+                      <ul style={{ margin: "0.5rem 0 0 1.5rem", padding: 0 }}>
+                        <li>Only three columns allowed: <strong>skill_name</strong>, <strong>skill_description</strong>, <strong>importance_level</strong></li>
+                        <li>If you have multiple descriptions for a skill, separate them using semicolons (;) within the same cell</li>
+                        <li>Do NOT add extra columns. Keep exactly three columns</li>
+                        <li>skill_description will be automatically wrapped in quotes in the template</li>
+                        <li>importance_level must be: <strong>Low</strong>, <strong>Medium</strong>, or <strong>High</strong></li>
+                      </ul>
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: "2rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                      Upload Requirements File (CSV)
+                    </label>
+                    <input
+                      type="file"
+                      accept=".csv"
+                      onChange={handleSkillRequirementsCsvUpload}
+                      style={{
+                        width: "100%",
+                        padding: "0.75rem",
+                        border: "1px solid #e2e8f0",
+                        borderRadius: "0.5rem",
+                        fontSize: "1rem",
+                      }}
+                    />
+                    {csvError && (
+                      <div style={{ marginTop: "0.5rem", color: "#dc2626", fontSize: "0.875rem" }}>
+                        {csvError}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* CSV Preview Table with Delete Functionality */}
+                  {csvData.length > 0 && (
+                    <div style={{ marginBottom: "2rem" }}>
+                      <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                        Preview Requirements ({csvData.length} {csvData.length === 1 ? "skill" : "skills"})
+                      </label>
+                      <div style={{ overflowX: "auto", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead>
+                            <tr style={{ backgroundColor: "#f8fafc" }}>
+                              <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
+                                Skill Name
+                              </th>
+                              <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
+                                Description
+                              </th>
+                              <th style={{ padding: "0.75rem", textAlign: "left", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b" }}>
+                                Importance Level
+                              </th>
+                              <th style={{ padding: "0.75rem", textAlign: "center", borderBottom: "1px solid #e2e8f0", fontWeight: 600, color: "#1e293b", width: "80px" }}>
+                                Action
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {csvData.map((row, idx) => (
+                              <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? "#ffffff" : "#f8fafc" }}>
+                                <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>{row.skill_name}</td>
+                                <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>{row.skill_description || "-"}</td>
+                                <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0" }}>
+                                  <span style={{
+                                    padding: "0.25rem 0.5rem",
+                                    borderRadius: "0.25rem",
+                                    fontSize: "0.75rem",
+                                    fontWeight: 600,
+                                    backgroundColor: row.importance_level === "High" ? "#fee2e2" : row.importance_level === "Medium" ? "#fef3c7" : "#d1fae5",
+                                    color: row.importance_level === "High" ? "#991b1b" : row.importance_level === "Medium" ? "#92400e" : "#065f46"
+                                  }}>
+                                    {row.importance_level}
+                                  </span>
+                                </td>
+                                <td style={{ padding: "0.75rem", borderBottom: "1px solid #e2e8f0", textAlign: "center" }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteCsvRow(idx)}
+                                    style={{
+                                      background: "none",
+                                      border: "none",
+                                      color: "#dc2626",
+                                      cursor: "pointer",
+                                      padding: "0.25rem 0.5rem",
+                                      fontSize: "0.875rem",
+                                      borderRadius: "0.25rem",
+                                      transition: "background-color 0.2s"
+                                    }}
+                                    onMouseEnter={(e) => {
+                                      e.currentTarget.style.backgroundColor = "#fee2e2";
+                                    }}
+                                    onMouseLeave={(e) => {
+                                      e.currentTarget.style.backgroundColor = "transparent";
+                                    }}
+                                    title="Delete this row"
+                                  >
+                                    × Delete
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {csvData.length > 0 && (
+                        <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                          You can delete individual rows by clicking the "Delete" button. Changes will be saved when you generate topics.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Requirements Free Text Field */}
+                <div style={{ marginBottom: "2rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                    Requirements
+                    <span style={{ color: "#64748b", fontWeight: 400, fontSize: "0.875rem", marginLeft: "0.5rem" }}>(Optional)</span>
+                  </label>
+                  <textarea
+                    value={requirementsText}
+                    onChange={(e) => handleRequirementsChange(e.target.value)}
+                    placeholder="Enter free text or website URL"
+                    style={{
+                      width: "100%",
+                      minHeight: "200px",
+                      padding: "0.75rem",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "0.5rem",
+                      fontSize: "1rem",
+                      fontFamily: "inherit",
+                      lineHeight: "1.6",
+                      resize: "vertical",
+                    }}
+                  />
+                  
+                  {/* URL Processing Status */}
+                  {processingUrl && (
+                    <div style={{ 
+                      marginTop: "0.5rem", 
+                      padding: "0.75rem", 
+                      backgroundColor: "#f0f9ff", 
+                      border: "1px solid #3b82f6", 
+                      borderRadius: "0.5rem",
+                      fontSize: "0.875rem",
+                      color: "#0369a1"
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                        <div style={{
+                          width: "16px",
+                          height: "16px",
+                          border: "2px solid #3b82f6",
+                          borderTopColor: "transparent",
+                          borderRadius: "50%",
+                          animation: "spin 1s linear infinite"
+                        }} />
+                        <span>Fetching and summarizing website content...</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* URL Error */}
+                  {urlError && (
+                    <div style={{ 
+                      marginTop: "0.5rem", 
+                      padding: "0.75rem", 
+                      backgroundColor: "#fee2e2", 
+                      border: "1px solid #fecaca", 
+                      borderRadius: "0.5rem",
+                      fontSize: "0.875rem",
+                      color: "#dc2626"
+                    }}>
+                      {urlError}
+                    </div>
+                  )}
+
+                  {/* URL Success */}
+                  {requirementsUrl && requirementsSummary && !processingUrl && (
+                    <div style={{ 
+                      marginTop: "0.5rem", 
+                      padding: "0.75rem", 
+                      backgroundColor: "#d1fae5", 
+                      border: "1px solid #86efac", 
+                      borderRadius: "0.5rem",
+                      fontSize: "0.875rem",
+                      color: "#065f46"
+                    }}>
+                      <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>✓ Website content fetched and summarized</div>
+                      <div style={{ fontSize: "0.8125rem", opacity: 0.8 }}>
+                        URL: <a href={requirementsUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#059669", textDecoration: "underline" }}>
+                          {requirementsUrl}
+                        </a>
+                      </div>
+                    </div>
+                  )}
+
+                </div>
               </div>
 
-              {/* Skills Display (for Role-Based and Manual methods) */}
-              {(activeMethod === "role" || activeMethod === "manual") && selectedSkills.length > 0 && (
+              {/* Selected Skills Display */}
+              {selectedSkills.length > 0 && (
                 <div style={{ marginBottom: "2rem" }}>
                   <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
                     Selected Skills *
@@ -6528,7 +7105,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 </div>
               )}
 
-              <div style={{ display: "flex", gap: "1rem", marginTop: "2rem" }}>
+              <div style={{ display: "flex", justifyContent: "center", gap: "1rem", marginTop: "2rem" }}>
                 {/* Check if topics have been generated (either in edit mode or after generating topics) */}
                 {(() => {
                   // If topicsV2 has any topics, it means topics have been generated
@@ -6545,7 +7122,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                           setCurrentStation(2);
                         }}
                         className="btn-primary"
-                        style={{ flex: 1 }}
+                        style={{ minWidth: "200px" }}
                       >
                         Next
                       </button>
@@ -6559,16 +7136,14 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                         disabled={
                           loading || 
                           generatingFromCsv ||
-                          // Must have at least one skill from any method (role-based, manual, or CSV)
-                          (selectedSkills.length === 0 && csvData.length === 0) ||
-                          // If role-based method has skills selected, job designation is required for context
-                          (selectedSkills.length > 0 && topicCards.length > 0 && !jobDesignation.trim())
+                          // Must have at least one source: requirements text/URL, selected skills, or CSV
+                          (!requirementsText.trim() && !requirementsSummary && selectedSkills.length === 0 && csvData.length === 0)
                         }
-                        style={{ flex: 1 }}
+                        style={{ minWidth: "200px" }}
                       >
                         {(loading || generatingFromCsv) ? "Generating Topics..." : "Generate Topics"}
                       </button>
-                      {(selectedSkills.length === 0 && csvData.length === 0) && (
+                      {!requirementsText.trim() && !requirementsSummary && selectedSkills.length === 0 && csvData.length === 0 && (
                         <div style={{ 
                           fontSize: "0.875rem", 
                           color: "#dc2626", 
@@ -6576,18 +7151,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                           textAlign: "center",
                           width: "100%"
                         }}>
-                          Please add at least one skill from any method (Role-based, Manual, or CSV)
-                        </div>
-                      )}
-                      {selectedSkills.length > 0 && topicCards.length > 0 && !jobDesignation.trim() && (
-                        <div style={{ 
-                          fontSize: "0.875rem", 
-                          color: "#dc2626", 
-                          marginTop: "0.5rem",
-                          textAlign: "center",
-                          width: "100%"
-                        }}>
-                          Job designation is required when using role-based skills
+                          Please provide at least one of the following: requirements text/URL, selected skills, or CSV upload
                         </div>
                       )}
                       {(selectedSkills.length > 0 || csvData.length > 0) && (
@@ -8679,267 +9243,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 );
               })()}
 
-              {/* Proctoring Settings Section */}
-              <div style={{ 
-                marginTop: "2rem", 
-                padding: "1.5rem", 
-                backgroundColor: "#f8fafc", 
-                borderRadius: "0.75rem", 
-                border: "2px solid #e2e8f0" 
-              }}>
-                <h3 style={{ marginBottom: "1rem", fontSize: "1.25rem", color: "#1a1625", fontWeight: 700 }}>
-                  Proctoring Settings
-                </h3>
-                <p style={{ marginBottom: "1.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                  Enable the proctoring features you want to use during the exam. Only enabled modules will run and generate logs.
-                </p>
-                
-                <div style={{ display: "grid", gap: "1rem" }}>
-                  {/* Multiple Face Detection */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="multiFaceDetection"
-                      checked={proctoringSettings.multiFaceDetection}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, multiFaceDetection: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="multiFaceDetection" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Multiple Face Detection
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Detects if multiple faces appear in the camera feed, indicating potential cheating or unauthorized assistance.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Full-Screen Monitoring */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="fullscreenMonitoring"
-                      checked={proctoringSettings.fullscreenMonitoring}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, fullscreenMonitoring: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="fullscreenMonitoring" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Full-Screen Monitoring
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Monitors when candidates exit fullscreen mode, which may indicate they are switching to other applications.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Copy–Paste Blocking */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="copyPasteBlocking"
-                      checked={proctoringSettings.copyPasteBlocking}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, copyPasteBlocking: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="copyPasteBlocking" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Copy–Paste Blocking
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Blocks copy and paste operations during the exam to prevent candidates from copying answers or external content.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Tab Switching Detection */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="tabSwitchDetection"
-                      checked={proctoringSettings.tabSwitchDetection}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, tabSwitchDetection: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="tabSwitchDetection" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Tab Switching Detection
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Detects when candidates switch browser tabs or windows, which may indicate they are accessing unauthorized resources.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Frame Capture + Face Matching */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="frameMatchRecognition"
-                      checked={proctoringSettings.frameMatchRecognition}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, frameMatchRecognition: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="frameMatchRecognition" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Frame Capture + Face Matching
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Captures frames periodically and matches faces to detect if the same person is taking the exam throughout the session.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* External Device Detection */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="externalDeviceDetection"
-                      checked={proctoringSettings.externalDeviceDetection}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, externalDeviceDetection: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="externalDeviceDetection" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        External Device Detection
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Detects the presence of external devices (phones, tablets) in the camera feed that may be used for cheating.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* User Concentration Tracking */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="concentrationTracking"
-                      checked={proctoringSettings.concentrationTracking}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, concentrationTracking: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="concentrationTracking" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        User Concentration Tracking
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Tracks gaze direction, head movement, and blinking patterns to detect if the candidate is focused on the exam or distracted.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Browser Extension Usage Monitoring */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="browserExtensionMonitoring"
-                      checked={proctoringSettings.browserExtensionMonitoring}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, browserExtensionMonitoring: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="browserExtensionMonitoring" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Browser Extension Usage Monitoring
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Monitors for forbidden browser extensions that may be used to cheat, such as answer lookup tools or screen sharing extensions.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Live Human Camera + Screen Monitoring */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="liveCameraAndScreenMonitoring"
-                      checked={proctoringSettings.liveCameraAndScreenMonitoring}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, liveCameraAndScreenMonitoring: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="liveCameraAndScreenMonitoring" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Live Human Camera + Screen Monitoring
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Enables real-time WebRTC streaming of candidate's camera and screen to a human proctor for live monitoring and intervention.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
               {/* Candidate Requirements */}
               <div style={{ 
                 marginTop: "2rem", 
@@ -9031,7 +9334,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                       }
                     }
                     
-                    // Save proctoring settings and schedule to draft
+                    // Save schedule to draft
                     try {
                       if (assessmentId) {
                         await axios.put("/api/assessments/update-draft", {
@@ -9043,12 +9346,11 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                             visibilityMode,
                             candidateRequirements,
                           },
-                          proctoringSettings,
                         });
                       }
                     } catch (err: any) {
-                      console.error("Error saving proctoring settings:", err);
-                      setError(err.response?.data?.message || "Failed to save proctoring settings");
+                      console.error("Error saving schedule:", err);
+                      setError(err.response?.data?.message || "Failed to save schedule");
                       return;
                     }
                     

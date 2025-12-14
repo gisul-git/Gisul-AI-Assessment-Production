@@ -135,10 +135,11 @@ CRITICAL REQUIREMENTS:
    - Testcases support: Read stdin, Write to stdout, Static text comparison, Run code in many languages
    - Input/output must be exact strings that Judge0 can compare directly
    - For example: input="5\n1 2 3 4 5", expected_output="15" (for sum of array)
-6. "function_signature" MUST be included with:
-   - "name": appropriate function name (e.g., "twoSum", "isPrime", "reverseString")
-   - "parameters": array of {{"name": "paramName", "type": "int|string|boolean|int[]|string[]"}}
-   - "return_type": appropriate return type (e.g., "int", "string", "boolean", "int[]", "string[]")
+6. "function_signature" MUST be included as a JSON object with EXACTLY these three fields (no other fields):
+   - "name": string - appropriate function name (e.g., "twoSum", "isPrime", "reverseString")
+   - "parameters": array - array of objects, each with "name" and "type" fields (e.g., [{{"name": "nums", "type": "int[]"}}, {{"name": "target", "type": "int"}}])
+   - "return_type": string - appropriate return type (e.g., "int", "string", "boolean", "int[]", "string[]")
+   CRITICAL: The function_signature object MUST have all three fields: "name", "parameters", and "return_type". Do not omit any of these fields.
 7. Starter code MUST be generated for ALL languages in the languages list
 8. Starter code should use the function name, parameters, and return type from function_signature
 9. Hidden testcases should cover edge cases
@@ -206,17 +207,68 @@ IMPORTANT: Return ONLY valid JSON. No markdown code blocks, no explanations, jus
         required_fields = ["title", "description", "difficulty", "languages", "public_testcases", "hidden_testcases", "starter_code", "function_signature"]
         for field in required_fields:
             if field not in question_data:
-                raise ValueError(f"Generated question missing required field: {field}")
+                # For function_signature, try to create a default one
+                if field == "function_signature":
+                    logger.warning("function_signature missing, creating default...")
+                    title = question_data.get("title", "solve")
+                    func_name = title.lower().replace(" ", "").replace("-", "")[:20] or "solve"
+                    question_data["function_signature"] = {
+                        "name": func_name,
+                        "parameters": [],
+                        "return_type": "int"
+                    }
+                    logger.info(f"Created default function_signature: {question_data['function_signature']}")
+                else:
+                    raise ValueError(f"Generated question missing required field: {field}")
         
-        # Validate function_signature structure
+        # Validate and fix function_signature structure
         if "function_signature" in question_data:
             func_sig = question_data["function_signature"]
             if not isinstance(func_sig, dict):
                 raise ValueError("function_signature must be an object")
-            if "name" not in func_sig or "parameters" not in func_sig or "return_type" not in func_sig:
-                raise ValueError("function_signature must have 'name', 'parameters', and 'return_type'")
-            if not isinstance(func_sig["parameters"], list):
-                raise ValueError("function_signature.parameters must be an array")
+            
+            # Try to fix missing fields before validation
+            fixed = False
+            if "name" not in func_sig:
+                # Try to infer from title or use default
+                title = question_data.get("title", "solve")
+                func_sig["name"] = title.lower().replace(" ", "").replace("-", "")[:20] or "solve"
+                fixed = True
+                logger.warning(f"function_signature missing 'name', inferred: {func_sig['name']}")
+            
+            if "parameters" not in func_sig:
+                func_sig["parameters"] = []
+                fixed = True
+                logger.warning("function_signature missing 'parameters', using empty array")
+            elif not isinstance(func_sig["parameters"], list):
+                logger.warning(f"function_signature.parameters is not an array, converting...")
+                func_sig["parameters"] = []
+                fixed = True
+            
+            if "return_type" not in func_sig:
+                # Try to infer from description or use default
+                func_sig["return_type"] = "int"  # Default return type
+                fixed = True
+                logger.warning("function_signature missing 'return_type', using default: 'int'")
+            
+            if fixed:
+                logger.info(f"Fixed function_signature: {func_sig}")
+            
+            # Validate parameters structure if present
+            if func_sig["parameters"]:
+                for i, param in enumerate(func_sig["parameters"]):
+                    if not isinstance(param, dict):
+                        logger.warning(f"Parameter {i} is not an object, converting to object...")
+                        func_sig["parameters"][i] = {"name": f"param{i+1}", "type": "int"}
+                        continue
+                    
+                    # Fix missing name or type in parameter
+                    if "name" not in param:
+                        param["name"] = f"param{i+1}"
+                        logger.warning(f"Parameter {i} missing 'name', using: {param['name']}")
+                    if "type" not in param:
+                        param["type"] = "int"  # Default type
+                        logger.warning(f"Parameter {i} missing 'type', using: {param['type']}")
         
         # Ensure examples exist
         if "examples" not in question_data:

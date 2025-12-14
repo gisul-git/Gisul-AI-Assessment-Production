@@ -7,12 +7,8 @@ import {
 import { useRouter } from "next/router";
 import dynamic from "next/dynamic";
 import axios from "axios";
-import { useProctor, type ProctorViolation } from "@/hooks/useProctor";
-import { useCameraProctor, type CameraProctorViolation } from "@/hooks/useCameraProctor";
-import { ProctorToast, FullscreenWarningBanner } from "@/components/proctor";
 import { EditorContainer } from "@/components/dsa/test/EditorContainer";
 import { JUDGE0_ID_TO_LANG_NAME } from "@/lib/dsa/judge0";
-import { normalizeProctorConfig, useProctorEngine } from "@/proctoring";
 
 // Lazy load Monaco Editor
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
@@ -147,7 +143,6 @@ export default function CandidateAssessmentPage() {
   const [attemptId, setAttemptId] = useState<string>("");
   const [candidateEmail, setCandidateEmail] = useState<string>("");
   const [candidateName, setCandidateName] = useState<string>("");
-  const [proctoringSettings, setProctoringSettings] = useState<any>({});
   const [error, setError] = useState<string | null>(null);
 
   // Refs for debouncing and cleanup
@@ -835,8 +830,6 @@ export default function CandidateAssessmentPage() {
           estimatedTotalTime: assessmentResponse.data.data?.estimatedTotalTime || 60,
           sectionTimes: assessmentResponse.data.data?.questionTypeTimes || {},
         };
-        const fetchedProctoring = assessmentResponse.data.data?.proctoring || {};
-
         console.log("[take.tsx] Topics_v2 structure:", topics_v2);
 
         // Transform topics_v2 into sections
@@ -855,7 +848,6 @@ export default function CandidateAssessmentPage() {
 
         setQuestions(transformed.allQuestions);
         setExamSettings(fetchedSettings);
-        setProctoringSettings(fetchedProctoring);
         setAttemptId(""); // Will be set when attempt is created
 
         setSections(transformed.sections);
@@ -946,69 +938,6 @@ export default function CandidateAssessmentPage() {
       }
     };
   }, [appState, timerRemaining, submitAssessment]);
-
-  // ============================================================================
-  // PROCTORING INTEGRATION
-  // ============================================================================
-
-  const handleProctorViolation = useCallback((violation: ProctorViolation) => {
-    logAnalyticsEvent("TAB_SWITCH", { violation: violation.eventType });
-  }, [logAnalyticsEvent]);
-
-  const handleCameraViolation = useCallback((violation: CameraProctorViolation) => {
-    logAnalyticsEvent("TAB_SWITCH", { violation: violation.eventType });
-  }, [logAnalyticsEvent]);
-
-  // Initialize proctoring hooks (legacy)
-  const proctorEnabled = proctoringSettings.enabled || false;
-  const { lastViolation: proctorViolation } = useProctor({
-    userId: candidateEmail,
-    assessmentId: id as string,
-    onViolation: handleProctorViolation,
-    enableFullscreenDetection: proctoringSettings.fullscreenMonitoring || false,
-    enableDevToolsDetection: proctoringSettings.browserExtensionMonitoring || false,
-  });
-
-  const { lastViolation: cameraViolation } = useCameraProctor({
-    userId: candidateEmail,
-    assessmentId: id as string,
-    onViolation: handleCameraViolation,
-    enabled: proctoringSettings.multiFaceDetection || false,
-  });
-
-  // Unified Proctoring Engine
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const proctorConfig = normalizeProctorConfig(proctoringSettings);
-  const referenceImageUrl = typeof window !== "undefined" 
-    ? sessionStorage.getItem(`referenceFace_${id}`) || undefined
-    : undefined;
-  
-  const handleUnifiedViolation = useCallback((violationType: string, metadata?: Record<string, unknown>) => {
-    console.log("[UnifiedProctor] Violation:", violationType, metadata);
-    // Violations are already logged to backend via the proctor engine
-  }, []);
-
-  const unifiedProctor = useProctorEngine({
-    assessmentId: id as string,
-    candidateEmail: candidateEmail,
-    config: proctorConfig,
-    referenceImageUrl: referenceImageUrl || undefined,
-    onViolation: handleUnifiedViolation,
-    videoElement: videoRef.current,
-    canvasElement: canvasRef.current,
-  });
-
-  // Start unified proctor when assessment is ready
-  useEffect(() => {
-    if (appState === "ready" && proctorEnabled && candidateEmail) {
-      unifiedProctor.start();
-    }
-    
-    return () => {
-      unifiedProctor.stop();
-    };
-  }, [appState, proctorEnabled, candidateEmail, unifiedProctor]);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -1181,14 +1110,6 @@ export default function CandidateAssessmentPage() {
 
   return (
     <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", padding: "2rem" }}>
-      {/* Proctoring Overlays */}
-      {proctorEnabled && (
-        <>
-          <ProctorToast violation={proctorViolation} />
-          <FullscreenWarningBanner isVisible={isFullscreen} />
-        </>
-      )}
-
       <div className="container">
         <div style={{ display: "flex", gap: "1.5rem" }}>
           {/* Left Sidebar - Sections */}

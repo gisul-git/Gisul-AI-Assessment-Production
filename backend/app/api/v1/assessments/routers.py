@@ -3,10 +3,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import copy
+import os
+import re
+import ipaddress
+import json
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Body
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ....core.dependencies import require_editor
@@ -78,8 +86,10 @@ from .topic_service_v2 import (
     validate_topic_category,
     _is_technical_topic_ai,
     ai_topic_suggestion,
+    _get_openai_client,
 )
 from ....utils.mongo import convert_object_ids, serialize_document, to_object_id
+from bson import ObjectId
 from ....utils.responses import success_response
 from ....models.aptitude_topics import (
     APTITUDE_MAIN_TOPICS,
@@ -89,6 +99,9 @@ from ....models.aptitude_topics import (
 )
 
 logger = logging.getLogger(__name__)
+
+# In-memory lock to prevent concurrent requests for the same URL
+_website_fetch_locks: Dict[str, asyncio.Lock] = {}
 
 router = APIRouter(prefix="/api/v1/assessments", tags=["assessments"])
 
@@ -1798,7 +1811,36 @@ async def update_assessment_draft(
         # Find existing draft
         assessment = await _find_or_get_existing_draft(db, current_user)
         if not assessment:
-            raise HTTPException(status_code=404, detail="No draft found. Please create an assessment first.")
+            # Create a new minimal draft if none exists
+            user_id = to_object_id(current_user.get("id"))
+            user_org = current_user.get("organization")
+            
+            new_assessment = {
+                "_id": ObjectId(),
+                "title": payload.title or "New Assessment",
+                "description": payload.description or "",
+                "status": "draft",
+                "createdBy": user_id,
+                "createdAt": _now_utc(),
+                "updatedAt": _now_utc(),
+                "jobDesignation": payload.jobDesignation or "",
+                "selectedSkills": payload.selectedSkills or [],
+                "experienceMin": payload.experienceMin if payload.experienceMin is not None else 0,
+                "experienceMax": payload.experienceMax if payload.experienceMax is not None else 10,
+                "experienceMode": payload.experienceMode or "corporate",
+                "topics": [],
+                "topics_v2": [],
+                "questions": [],
+                "auditLogs": [],
+                "companyContext": payload.companyContext or "",
+                "contextSummary": payload.contextSummary if payload.contextSummary else None,
+            }
+            
+            if user_org:
+                new_assessment["organization"] = to_object_id(user_org)
+            
+            await db.assessments.insert_one(new_assessment)
+            assessment = new_assessment
     
     # Update title and description (even if empty/placeholder)
     if payload.title is not None:
@@ -1928,6 +1970,18 @@ async def update_assessment_draft(
     # Update schedule if provided
     if payload.schedule is not None:
         assessment["schedule"] = payload.schedule
+    
+    # Update additionalRequirements if provided
+    if payload.additionalRequirements is not None:
+        assessment["additionalRequirements"] = sanitize_text_field(payload.additionalRequirements) if payload.additionalRequirements else ""
+    
+    # Update companyContext if provided (new unified field)
+    if payload.companyContext is not None:
+        assessment["companyContext"] = sanitize_text_field(payload.companyContext) if payload.companyContext else ""
+    
+    # Update contextSummary if provided (processed context from URL or text)
+    if payload.contextSummary is not None:
+        assessment["contextSummary"] = payload.contextSummary
     
     # Update candidates if provided
     if payload.candidates is not None:
@@ -2578,15 +2632,6 @@ async def update_assessment_schedule(
         "duration": payload.duration,
         "durationUnit": payload.durationUnit or "hours",
         "attemptCount": payload.attemptCount or 1,
-        "proctoringOptions": payload.proctoringOptions.model_dump(exclude_unset=True)
-        if payload.proctoringOptions
-        else {
-            "enabled": False,
-            "webcamRequired": False,
-            "screenRecording": False,
-            "browserLock": False,
-            "fullScreenMode": False,
-        },
         "vpnRequired": payload.vpnRequired or False,
         "linkSharingEnabled": payload.linkSharingEnabled or False,
         "mailFeedbackReport": payload.mailFeedbackReport or False,
@@ -2852,31 +2897,53 @@ async def get_candidate_results(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """Get candidate results for an assessment."""
-    assessment = await _get_assessment(db, assessment_id)
-    _check_assessment_access(assessment, current_user)
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(assessment, current_user)
 
-    candidate_responses = assessment.get("candidateResponses", {})
-    results = []
-    
-    for key, response in candidate_responses.items():
-        results.append({
-            "email": response.get("email"),
-            "name": response.get("name"),
-            "score": response.get("score", 0),
-            "maxScore": response.get("maxScore", 0),
-            "attempted": response.get("attempted", 0),
-            "notAttempted": response.get("notAttempted", 0),
-            "correctAnswers": response.get("correctAnswers", 0),
-            "submittedAt": response.get("submittedAt"),
-            "startedAt": response.get("startedAt"),  # Candidate's actual start time
-            # AI evaluation data
-            "aiScore": response.get("aiScore", 0),
-            "percentageScored": response.get("percentageScored", 0),
-            "passPercentage": response.get("passPercentage"),
-            "passed": response.get("passed", False),
-        })
-    
-    return success_response("Candidate results fetched successfully", results)
+        # Handle candidateResponses - it might be None, empty dict, or not exist
+        candidate_responses = assessment.get("candidateResponses")
+        if candidate_responses is None:
+            candidate_responses = {}
+        elif not isinstance(candidate_responses, dict):
+            candidate_responses = {}
+        
+        results = []
+        
+        # Safely iterate over candidate responses
+        if candidate_responses:
+            for key, response in candidate_responses.items():
+                if not isinstance(response, dict):
+                    continue
+                    
+                # Safely extract all fields with defaults
+                result_item = {
+                    "email": response.get("email", ""),
+                    "name": response.get("name", ""),
+                    "score": response.get("score", 0),
+                    "maxScore": response.get("maxScore", 0),
+                    "attempted": response.get("attempted", 0),
+                    "notAttempted": response.get("notAttempted", 0),
+                    "correctAnswers": response.get("correctAnswers", 0),
+                    "submittedAt": response.get("submittedAt"),
+                    "startedAt": response.get("startedAt"),
+                    # AI evaluation data
+                    "aiScore": response.get("aiScore", 0),
+                    "percentageScored": response.get("percentageScored", 0),
+                    "passPercentage": response.get("passPercentage"),
+                    "passed": response.get("passed", False),
+                }
+                results.append(result_item)
+        
+        return success_response("Candidate results fetched successfully", results)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error getting candidate results for assessment {assessment_id}: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get candidate results: {str(exc)}"
+        ) from exc
 
 
 @router.get("/{assessment_id}/questions", response_model=None)
@@ -3435,6 +3502,21 @@ async def generate_question_endpoint_v2(
         # Get experience mode from payload or assessment
         experience_mode = payload.experienceMode or assessment.get("experienceMode", "corporate")
         
+        # Get company context (new unified field) or websiteSummary (legacy)
+        company_context = assessment.get("contextSummary")  # New field
+        website_summary = None
+        if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
+            website_summary = assessment["websiteSummary"]  # Legacy fallback
+        
+        # Priority order for additional requirements/context:
+        # 1. Topic/row-level (payload.additionalRequirements) - highest priority
+        # 2. Assessment-level (assessment.additionalRequirements) - fallback
+        # 3. Company context - new unified field
+        # 4. Website summary - legacy fallback
+        additional_requirements = payload.additionalRequirements  # Topic/row-level (highest priority)
+        if not additional_requirements:
+            additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
             question_type=payload.questionType,
@@ -3442,8 +3524,10 @@ async def generate_question_endpoint_v2(
             questions_count=payload.questionsCount,
             can_use_judge0=payload.canUseJudge0,
             coding_language=coding_language,
-            additional_requirements=payload.additionalRequirements,
-            experience_mode=experience_mode
+            additional_requirements=additional_requirements,
+            experience_mode=experience_mode,
+            website_summary=website_summary,  # Legacy
+            company_context=company_context  # New unified field
         )
         
         if not questions or len(questions) == 0:
@@ -3514,13 +3598,28 @@ async def generate_all_questions_endpoint_v2(
             for row in question_rows:
                 if row.get("status") == "pending" and not row.get("questions") and not row.get("locked"):
                     try:
+                        # Get company context (new) or websiteSummary (legacy)
+                        company_context = assessment.get("contextSummary")
+                        website_summary = None
+                        if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
+                            website_summary = assessment["websiteSummary"]
+                        
+                        # Priority: row-level > assessment-level > company context > website summary
+                        additional_requirements = row.get("additionalRequirements")  # Topic/row-level (highest priority)
+                        if not additional_requirements:
+                            additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
+                        
                         questions = await generate_questions_for_row_v2(
                             topic_label=topic["label"],
                             question_type=row["questionType"],
                             difficulty=row["difficulty"],
                             questions_count=row["questionsCount"],
                             can_use_judge0=row.get("canUseJudge0", False),
-                            coding_language=coding_language
+                            coding_language=coding_language,
+                            additional_requirements=additional_requirements,
+                            experience_mode=assessment.get("experienceMode", "corporate"),
+                            website_summary=website_summary,
+                            company_context=company_context
                         )
                         
                         row["questions"] = questions
@@ -3713,12 +3812,27 @@ async def regenerate_single_question_endpoint(
             raise HTTPException(status_code=400, detail="Question index out of range")
         
         # Regenerate single question
+        # Get company context (new) or websiteSummary (legacy)
+        company_context = assessment.get("contextSummary")
+        website_summary = None
+        if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
+            website_summary = assessment["websiteSummary"]
+        
+        # Priority: row-level > assessment-level > company context > website summary
+        additional_requirements = row.get("additionalRequirements")  # Topic/row-level (highest priority)
+        if not additional_requirements:
+            additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
+        
         new_questions = await generate_questions_for_row_v2(
             topic_label=topic["label"],
             question_type=row["questionType"],
             difficulty=row["difficulty"],
             questions_count=1,
-            can_use_judge0=row.get("canUseJudge0", False)
+            can_use_judge0=row.get("canUseJudge0", False),
+            additional_requirements=additional_requirements,
+            experience_mode=assessment.get("experienceMode", "corporate"),
+            website_summary=website_summary,
+            company_context=company_context
         )
         
         if new_questions:
@@ -4044,31 +4158,53 @@ async def get_candidate_results(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """Get candidate results for an assessment."""
-    assessment = await _get_assessment(db, assessment_id)
-    _check_assessment_access(assessment, current_user)
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(assessment, current_user)
 
-    candidate_responses = assessment.get("candidateResponses", {})
-    results = []
-    
-    for key, response in candidate_responses.items():
-        results.append({
-            "email": response.get("email"),
-            "name": response.get("name"),
-            "score": response.get("score", 0),
-            "maxScore": response.get("maxScore", 0),
-            "attempted": response.get("attempted", 0),
-            "notAttempted": response.get("notAttempted", 0),
-            "correctAnswers": response.get("correctAnswers", 0),
-            "submittedAt": response.get("submittedAt"),
-            "startedAt": response.get("startedAt"),  # Candidate's actual start time
-            # AI evaluation data
-            "aiScore": response.get("aiScore", 0),
-            "percentageScored": response.get("percentageScored", 0),
-            "passPercentage": response.get("passPercentage"),
-            "passed": response.get("passed", False),
-        })
-    
-    return success_response("Candidate results fetched successfully", results)
+        # Handle candidateResponses - it might be None, empty dict, or not exist
+        candidate_responses = assessment.get("candidateResponses")
+        if candidate_responses is None:
+            candidate_responses = {}
+        elif not isinstance(candidate_responses, dict):
+            candidate_responses = {}
+        
+        results = []
+        
+        # Safely iterate over candidate responses
+        if candidate_responses:
+            for key, response in candidate_responses.items():
+                if not isinstance(response, dict):
+                    continue
+                    
+                # Safely extract all fields with defaults
+                result_item = {
+                    "email": response.get("email", ""),
+                    "name": response.get("name", ""),
+                    "score": response.get("score", 0),
+                    "maxScore": response.get("maxScore", 0),
+                    "attempted": response.get("attempted", 0),
+                    "notAttempted": response.get("notAttempted", 0),
+                    "correctAnswers": response.get("correctAnswers", 0),
+                    "submittedAt": response.get("submittedAt"),
+                    "startedAt": response.get("startedAt"),
+                    # AI evaluation data
+                    "aiScore": response.get("aiScore", 0),
+                    "percentageScored": response.get("percentageScored", 0),
+                    "passPercentage": response.get("passPercentage"),
+                    "passed": response.get("passed", False),
+                }
+                results.append(result_item)
+        
+        return success_response("Candidate results fetched successfully", results)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error getting candidate results for assessment {assessment_id}: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get candidate results: {str(exc)}"
+        ) from exc
 
 
 @router.get("/{assessment_id}/questions", response_model=None)
@@ -4627,6 +4763,21 @@ async def generate_question_endpoint_v2(
         # Get experience mode from payload or assessment
         experience_mode = payload.experienceMode or assessment.get("experienceMode", "corporate")
         
+        # Get company context (new unified field) or websiteSummary (legacy)
+        company_context = assessment.get("contextSummary")  # New field
+        website_summary = None
+        if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
+            website_summary = assessment["websiteSummary"]  # Legacy fallback
+        
+        # Priority order for additional requirements/context:
+        # 1. Topic/row-level (payload.additionalRequirements) - highest priority
+        # 2. Assessment-level (assessment.additionalRequirements) - fallback
+        # 3. Company context - new unified field
+        # 4. Website summary - legacy fallback
+        additional_requirements = payload.additionalRequirements  # Topic/row-level (highest priority)
+        if not additional_requirements:
+            additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
             question_type=payload.questionType,
@@ -4634,8 +4785,10 @@ async def generate_question_endpoint_v2(
             questions_count=payload.questionsCount,
             can_use_judge0=payload.canUseJudge0,
             coding_language=coding_language,
-            additional_requirements=payload.additionalRequirements,
-            experience_mode=experience_mode
+            additional_requirements=additional_requirements,
+            experience_mode=experience_mode,
+            website_summary=website_summary,  # Legacy
+            company_context=company_context  # New unified field
         )
         
         if not questions or len(questions) == 0:
@@ -4706,13 +4859,28 @@ async def generate_all_questions_endpoint_v2(
             for row in question_rows:
                 if row.get("status") == "pending" and not row.get("questions") and not row.get("locked"):
                     try:
+                        # Get company context (new) or websiteSummary (legacy)
+                        company_context = assessment.get("contextSummary")
+                        website_summary = None
+                        if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
+                            website_summary = assessment["websiteSummary"]
+                        
+                        # Priority: row-level > assessment-level > company context > website summary
+                        additional_requirements = row.get("additionalRequirements")  # Topic/row-level (highest priority)
+                        if not additional_requirements:
+                            additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
+                        
                         questions = await generate_questions_for_row_v2(
                             topic_label=topic["label"],
                             question_type=row["questionType"],
                             difficulty=row["difficulty"],
                             questions_count=row["questionsCount"],
                             can_use_judge0=row.get("canUseJudge0", False),
-                            coding_language=coding_language
+                            coding_language=coding_language,
+                            additional_requirements=additional_requirements,
+                            experience_mode=assessment.get("experienceMode", "corporate"),
+                            website_summary=website_summary,
+                            company_context=company_context
                         )
                         
                         row["questions"] = questions
@@ -4905,12 +5073,27 @@ async def regenerate_single_question_endpoint(
             raise HTTPException(status_code=400, detail="Question index out of range")
         
         # Regenerate single question
+        # Get company context (new) or websiteSummary (legacy)
+        company_context = assessment.get("contextSummary")
+        website_summary = None
+        if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
+            website_summary = assessment["websiteSummary"]
+        
+        # Priority: row-level > assessment-level > company context > website summary
+        additional_requirements = row.get("additionalRequirements")  # Topic/row-level (highest priority)
+        if not additional_requirements:
+            additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
+        
         new_questions = await generate_questions_for_row_v2(
             topic_label=topic["label"],
             question_type=row["questionType"],
             difficulty=row["difficulty"],
             questions_count=1,
-            can_use_judge0=row.get("canUseJudge0", False)
+            can_use_judge0=row.get("canUseJudge0", False),
+            additional_requirements=additional_requirements,
+            experience_mode=assessment.get("experienceMode", "corporate"),
+            website_summary=website_summary,
+            company_context=company_context
         )
         
         if new_questions:
@@ -5235,29 +5418,68 @@ async def improve_topic_endpoint(
             skill_description = payload.skillMetadataProvided.get("description")
             importance_level = payload.skillMetadataProvided.get("importance_level")
         
-        # Improve the topic
-        improved_label = await improve_topic(
+        # Get assessment context for topic improvement
+        job_designation = assessment.get("jobDesignation") or assessment.get("jobRole")
+        assessment_title = assessment.get("title")
+        
+        # Build combined_skills if available from assessment
+        combined_skills = None
+        # Try to get from assessment's combinedSkills or reconstruct from selectedSkills
+        if assessment.get("combinedSkills"):
+            combined_skills = assessment.get("combinedSkills")
+        elif assessment.get("selectedSkills"):
+            # Reconstruct combined_skills format
+            selected_skills = assessment.get("selectedSkills", [])
+            combined_skills = [{"skill_name": skill, "source": "manual", "description": None, "importance_level": None} for skill in selected_skills]
+        
+        # Improve the topic (now returns label, questionType, difficulty, canUseJudge0)
+        improved_result = await improve_topic(
             previous_topic_label=payload.previousTopicLabel,
             skill_context=skill_context,
             skill_description=skill_description,
             importance_level=importance_level,
             experience_mode=payload.experienceMode,
             experience_min=payload.experienceMin,
-            experience_max=payload.experienceMax
+            experience_max=payload.experienceMax,
+            combined_skills=combined_skills,
+            job_designation=job_designation,
+            assessment_title=assessment_title
         )
         
-        # Update topic with improved label
+        # Update topic with improved data
         # Preserve previous version in history
         previous_versions = current_topic.get("previousVersion", [])
         if payload.previousTopicLabel not in previous_versions:
             previous_versions.append(payload.previousTopicLabel)
         
-        current_topic["label"] = improved_label
+        current_topic["label"] = improved_result["label"]
         current_topic["regenerated"] = True
         current_topic["previousVersion"] = previous_versions
         
-        # Preserve questionRows and question state (do NOT reset)
-        # Only update the label
+        # Update questionRows with new question type
+        question_rows = current_topic.get("questionRows", [])
+        if question_rows and len(question_rows) > 0:
+            # Update the first question row with new question type
+            first_row = question_rows[0]
+            first_row["questionType"] = improved_result["questionType"]
+            first_row["difficulty"] = improved_result["difficulty"]
+            first_row["canUseJudge0"] = improved_result["canUseJudge0"]
+            # Reset status to pending so questions will regenerate
+            first_row["status"] = "pending"
+            first_row["questions"] = []
+        else:
+            # If no questionRows exist, create one with the new question type
+            if "questionRows" not in current_topic:
+                current_topic["questionRows"] = []
+            new_row = {
+                "rowId": str(uuid.uuid4()),
+                "questionType": improved_result["questionType"],
+                "difficulty": improved_result["difficulty"],
+                "canUseJudge0": improved_result["canUseJudge0"],
+                "status": "pending",
+                "questions": []
+            }
+            current_topic["questionRows"].append(new_row)
         
         # Update assessment
         assessment["topics_v2"] = topics_v2
@@ -5271,7 +5493,10 @@ async def improve_topic_endpoint(
             "Topic improved successfully",
             {
                 "topic": current_topic,
-                "updatedTopicLabel": improved_label
+                "updatedTopicLabel": improved_result["label"],
+                "questionType": improved_result["questionType"],
+                "difficulty": improved_result["difficulty"],
+                "canUseJudge0": improved_result["canUseJudge0"]
             }
         )
         
@@ -5347,25 +5572,57 @@ async def improve_all_topics_endpoint(
                         importance_level = skill.importance_level
                         break
             
-            # Improve the topic
-            improved_label = await improve_topic(
+            # Get assessment context for topic improvement
+            job_designation = assessment.get("jobDesignation") or assessment.get("jobRole")
+            assessment_title = assessment.get("title")
+            
+            # Improve the topic (now returns label, questionType, difficulty, canUseJudge0)
+            improved_result = await improve_topic(
                 previous_topic_label=previous_label,
                 skill_context=skill_context,
                 skill_description=skill_description,
                 importance_level=importance_level,
                 experience_mode=payload.experienceMode,
                 experience_min=payload.experienceMin,
-                experience_max=payload.experienceMax
+                experience_max=payload.experienceMax,
+                combined_skills=payload.combinedSkills,
+                job_designation=job_designation,
+                assessment_title=assessment_title
             )
             
-            # Update topic with improved label
+            # Update topic with improved data
             previous_versions = current_topic.get("previousVersion", [])
             if previous_label not in previous_versions:
                 previous_versions.append(previous_label)
             
-            current_topic["label"] = improved_label
+            current_topic["label"] = improved_result["label"]
             current_topic["regenerated"] = True
             current_topic["previousVersion"] = previous_versions
+            
+            # Update questionRows with new question type
+            question_rows = current_topic.get("questionRows", [])
+            if question_rows and len(question_rows) > 0:
+                # Update the first question row with new question type
+                first_row = question_rows[0]
+                first_row["questionType"] = improved_result["questionType"]
+                first_row["difficulty"] = improved_result["difficulty"]
+                first_row["canUseJudge0"] = improved_result["canUseJudge0"]
+                # Reset status to pending so questions will regenerate
+                first_row["status"] = "pending"
+                first_row["questions"] = []
+            else:
+                # If no questionRows exist, create one with the new question type
+                if "questionRows" not in current_topic:
+                    current_topic["questionRows"] = []
+                new_row = {
+                    "rowId": str(uuid.uuid4()),
+                    "questionType": improved_result["questionType"],
+                    "difficulty": improved_result["difficulty"],
+                    "canUseJudge0": improved_result["canUseJudge0"],
+                    "status": "pending",
+                    "questions": []
+                }
+                current_topic["questionRows"].append(new_row)
             
             improved_count += 1
         
@@ -5477,5 +5734,737 @@ async def regenerate_question_endpoint(
     except Exception as exc:
         logger.error(f"Error regenerating question: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to regenerate question: {str(exc)}") from exc
+
+
+@router.post("/{assessment_id}/pause")
+async def pause_assessment(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Pause an active assessment.
+    Sets status to "paused" and records pausedAt timestamp.
+    Does not affect candidates who have already started.
+    """
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(assessment, current_user)
+        
+        current_status = assessment.get("status")
+        if current_status == "paused":
+            # Idempotent: already paused
+            return success_response(
+                "Assessment is already paused",
+                {"assessment": serialize_document(assessment)}
+            )
+        
+        if current_status not in ["active", "scheduled"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot pause assessment with status '{current_status}'. Only 'active' or 'scheduled' assessments can be paused."
+            )
+        
+        now = _now_utc()
+        
+        # Store previous status for resume
+        status_before_pause = current_status
+        
+        # Atomic update
+        result = await db.assessments.update_one(
+            {"_id": to_object_id(assessment_id)},
+            {
+                "$set": {
+                    "status": "paused",
+                    "statusBeforePause": status_before_pause,
+                    "pausedAt": now,
+                    "updatedAt": now,
+                },
+                "$push": {
+                    "auditLogs": {
+                        "action": "paused",
+                        "userId": str(current_user.get("id", "")),
+                        "timestamp": now,
+                        "meta": {"previousStatus": current_status}
+                    }
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Assessment not found or not modified")
+        
+        # Fetch updated assessment
+        updated_assessment = await db.assessments.find_one({"_id": to_object_id(assessment_id)})
+        
+        return success_response(
+            "Assessment paused successfully",
+            {"assessment": serialize_document(updated_assessment)}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error pausing assessment: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to pause assessment: {str(exc)}") from exc
+
+
+@router.post("/{assessment_id}/resume")
+async def resume_assessment(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Resume a paused assessment.
+    Sets status back to previous status (usually "active") and records resumeAt timestamp.
+    """
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(assessment, current_user)
+        
+        current_status = assessment.get("status")
+        if current_status != "paused":
+            if current_status == "active":
+                # Idempotent: already active
+                return success_response(
+                    "Assessment is already active",
+                    {"assessment": serialize_document(assessment)}
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot resume assessment with status '{current_status}'. Only 'paused' assessments can be resumed."
+            )
+        
+        now = _now_utc()
+        previous_status = assessment.get("statusBeforePause", "active")  # Default to active if not set
+        
+        # Atomic update
+        result = await db.assessments.update_one(
+            {"_id": to_object_id(assessment_id)},
+            {
+                "$set": {
+                    "status": previous_status,
+                    "resumeAt": now,
+                    "updatedAt": now,
+                },
+                "$unset": {
+                    "pausedAt": "",
+                    "statusBeforePause": "",
+                },
+                "$push": {
+                    "auditLogs": {
+                        "action": "resumed",
+                        "userId": str(current_user.get("id", "")),
+                        "timestamp": now,
+                        "meta": {"resumedToStatus": previous_status}
+                    }
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Assessment not found or not modified")
+        
+        # Fetch updated assessment
+        updated_assessment = await db.assessments.find_one({"_id": to_object_id(assessment_id)})
+        
+        return success_response(
+            "Assessment resumed successfully",
+            {"assessment": serialize_document(updated_assessment)}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error resuming assessment: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to resume assessment: {str(exc)}") from exc
+
+
+@router.post("/{assessment_id}/clone")
+async def clone_assessment(
+    assessment_id: str,
+    request: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Clone an assessment with deep copy of topics, questions, and configuration.
+    Does NOT copy schedule, candidates, or invitation settings by default.
+    
+    Request body:
+    - newTitle: str (required, min 3 chars)
+    - keepSchedule: bool (default False)
+    - keepCandidates: bool (default False)
+    """
+    try:
+        import uuid
+        
+        new_title = request.get("newTitle", "").strip()
+        keep_schedule = request.get("keepSchedule", False)
+        keep_candidates = request.get("keepCandidates", False)
+        
+        # Validate newTitle
+        if not new_title or len(new_title) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="New assessment name is required and must be at least 3 characters"
+            )
+        
+        original_assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(original_assessment, current_user)
+        
+        now = _now_utc()
+        
+        # Deep copy the assessment document
+        cloned_assessment = copy.deepcopy(original_assessment)
+        
+        # Remove MongoDB-specific fields
+        cloned_assessment.pop("_id", None)
+        cloned_assessment.pop("createdAt", None)
+        cloned_assessment.pop("updatedAt", None)
+        
+        # Set new fields
+        cloned_assessment["title"] = new_title
+        cloned_assessment["status"] = "draft"
+        cloned_assessment["clonedFrom"] = str(original_assessment.get("_id"))
+        cloned_assessment["createdAt"] = now
+        cloned_assessment["updatedAt"] = now
+        # Set createdBy as ObjectId to match other assessments (required for filtering)
+        cloned_assessment["createdBy"] = to_object_id(current_user.get("id"))
+        # Preserve organization from original or set from current user
+        if current_user.get("organization"):
+            cloned_assessment["organization"] = to_object_id(current_user.get("organization"))
+        elif original_assessment.get("organization"):
+            cloned_assessment["organization"] = original_assessment.get("organization")
+        
+        # Remove schedule-related fields unless keep_schedule is True
+        if not keep_schedule:
+            cloned_assessment.pop("schedule", None)
+            cloned_assessment.pop("scheduleStatus", None)
+            cloned_assessment.pop("startTime", None)
+            cloned_assessment.pop("endTime", None)
+            cloned_assessment.pop("duration", None)
+        
+        # Remove candidate-related fields unless keep_candidates is True
+        if not keep_candidates:
+            cloned_assessment.pop("candidates", None)
+            cloned_assessment.pop("invitationTemplate", None)
+            cloned_assessment.pop("sentAt", None)
+            cloned_assessment.pop("accessTokens", None)
+            cloned_assessment.pop("invitations", None)
+        
+        # Deep copy topics_v2 (includes all question rows and questions)
+        if "topics_v2" in cloned_assessment:
+            cloned_assessment["topics_v2"] = copy.deepcopy(cloned_assessment["topics_v2"])
+            # Regenerate IDs and reset statuses for topics
+            for topic in cloned_assessment["topics_v2"]:
+                # Regenerate topic ID
+                topic["id"] = str(uuid.uuid4())
+                topic["locked"] = False
+                topic.pop("regenerated", None)
+                
+                # Regenerate question row IDs and reset statuses
+                for row in topic.get("questionRows", []):
+                    row["rowId"] = str(uuid.uuid4())
+                    row["locked"] = False
+                    
+                    # Regenerate question IDs if they exist
+                    has_questions = False
+                    if "questions" in row and row.get("questions"):
+                        has_questions = len(row.get("questions", [])) > 0
+                        for question in row.get("questions", []):
+                            if "_id" in question:
+                                question["_id"] = str(uuid.uuid4())
+                            if "id" in question:
+                                question["id"] = str(uuid.uuid4())
+                            # Reset question status to generated if applicable
+                            if "status" in question:
+                                question["status"] = "generated"
+                    
+                    # Set row status based on whether it has questions
+                    # If questions exist, status should be "generated", otherwise "pending"
+                    row["status"] = "generated" if has_questions else "pending"
+        
+        # Regenerate IDs for questions array if it exists at assessment level
+        if "questions" in cloned_assessment:
+            for question in cloned_assessment["questions"]:
+                if "_id" in question:
+                    question["_id"] = str(uuid.uuid4())
+                if "id" in question:
+                    question["id"] = str(uuid.uuid4())
+                if "status" in question:
+                    question["status"] = "generated"
+        
+        # Deep copy other assessment-specific data
+        # Keep: topics, topics_v2, questionRows, questions, marks, timers, section configuration
+        # Keep: additionalRequirements, codingLanguage, experienceMode
+        
+        # Reset assessment-level locks
+        cloned_assessment.pop("fullTopicRegenLocked", None)
+        cloned_assessment.pop("locked", None)
+        
+        # Preserve allQuestionsGenerated flag if all questions are actually generated
+        # Check if all question rows have questions
+        all_questions_generated = True
+        if "topics_v2" in cloned_assessment:
+            for topic in cloned_assessment["topics_v2"]:
+                for row in topic.get("questionRows", []):
+                    if not row.get("questions") or len(row.get("questions", [])) == 0:
+                        all_questions_generated = False
+                        break
+                if not all_questions_generated:
+                    break
+        
+        cloned_assessment["allQuestionsGenerated"] = all_questions_generated
+        
+        # Initialize audit logs
+        cloned_assessment["auditLogs"] = [{
+            "action": "cloned",
+            "userId": str(current_user.get("id", "")),
+            "timestamp": now,
+            "meta": {
+                "clonedFrom": str(original_assessment.get("_id")),
+                "originalTitle": original_assessment.get("title", "")
+            }
+        }]
+        
+        # Insert the cloned assessment
+        result = await db.assessments.insert_one(cloned_assessment)
+        new_assessment_id = result.inserted_id
+        
+        # Also add audit log to original assessment
+        await db.assessments.update_one(
+            {"_id": to_object_id(assessment_id)},
+            {
+                "$push": {
+                    "auditLogs": {
+                        "action": "cloned_by",
+                        "userId": str(current_user.get("id", "")),
+                        "timestamp": now,
+                        "meta": {
+                            "clonedTo": str(new_assessment_id),
+                            "newTitle": cloned_assessment.get("title", "")
+                        }
+                    }
+                }
+            }
+        )
+        
+        # Fetch the newly created assessment
+        new_assessment = await db.assessments.find_one({"_id": new_assessment_id})
+        
+        # Convert datetime objects to ISO format strings
+        created_at = new_assessment.get("createdAt", now)
+        updated_at = new_assessment.get("updatedAt", now)
+        
+        if isinstance(created_at, datetime):
+            created_at = created_at.isoformat()
+        elif created_at is None:
+            created_at = now.isoformat()
+        
+        if isinstance(updated_at, datetime):
+            updated_at = updated_at.isoformat()
+        elif updated_at is None:
+            updated_at = now.isoformat()
+        
+        # Return minimal assessment object for frontend
+        assessment_response = {
+            "id": str(new_assessment_id),
+            "_id": str(new_assessment_id),
+            "title": new_assessment.get("title", new_title),
+            "status": new_assessment.get("status", "draft"),
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+            "clonedFrom": str(new_assessment.get("clonedFrom")) if new_assessment.get("clonedFrom") else None,
+        }
+        
+        return success_response(
+            "Assessment cloned successfully",
+            {
+                "assessment": assessment_response,
+                "assessmentId": str(new_assessment_id)
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error cloning assessment: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to clone assessment: {str(exc)}") from exc
+
+
+def _is_private_ip(ip: str) -> bool:
+    """Check if an IP address is in a private range."""
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        return ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local
+    except ValueError:
+        return False
+
+
+def _validate_url_safety(url: str) -> tuple[bool, str]:
+    """Validate URL for SSRF safety. Returns (is_safe, error_message)."""
+    try:
+        parsed = urlparse(url)
+        
+        # Only allow http and https
+        if parsed.scheme not in ("http", "https"):
+            return False, "Only http and https URLs are allowed"
+        
+        # Check for private IP ranges in hostname
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "Invalid hostname"
+        
+        # Block localhost variations
+        if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            return False, "Localhost URLs are not allowed"
+        
+        # Try to resolve and check IP
+        try:
+            import socket
+            ip = socket.gethostbyname(hostname)
+            if _is_private_ip(ip):
+                return False, "Private IP addresses are not allowed"
+        except socket.gaierror:
+            # DNS resolution failed, but we'll still try to fetch
+            pass
+        
+        # Block common private hostname patterns
+        private_patterns = [
+            r"^10\.", r"^172\.(1[6-9]|2[0-9]|3[01])\.", r"^192\.168\.", r"^127\.", r"^169\.254\."
+        ]
+        for pattern in private_patterns:
+            if re.match(pattern, hostname):
+                return False, "Private network URLs are not allowed"
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Invalid URL format: {str(e)}"
+
+
+def _extract_text_from_html(html: str) -> str:
+    """Extract main textual content from HTML."""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Remove script and style elements
+        for script in soup(["script", "style", "meta", "link"]):
+            script.decompose()
+        
+        # Try to find main content areas
+        main_content = soup.find("main") or soup.find("article") or soup.find("body")
+        if main_content:
+            text = main_content.get_text(separator=" ", strip=True)
+        else:
+            text = soup.get_text(separator=" ", strip=True)
+        
+        # Clean up whitespace
+        text = re.sub(r"\s+", " ", text)
+        return text[:50000]  # Limit to 50k chars
+    except ImportError:
+        # Fallback: simple regex extraction
+        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text[:50000]
+
+
+@router.post("/{assessment_id}/fetch-website-summary")
+async def fetch_website_summary(
+    assessment_id: str,
+    request: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Fetch and summarize a website using OpenAI. Assessment ID is optional - if not provided or empty, summary is returned without saving."""
+    url = request.get("url", "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+    
+    # Validate URL safety
+    is_safe, error_msg = _validate_url_safety(url)
+    if not is_safe:
+        raise HTTPException(status_code=400, detail=error_msg)
+    
+    # Assessment ID is optional - if provided, save to assessment; if not, just return summary
+    # "temp" is a special value that means don't save to any assessment
+    assessment = None
+    save_to_assessment = False
+    if assessment_id and assessment_id.strip() and assessment_id != "null" and assessment_id != "undefined" and assessment_id != "temp":
+        try:
+            assessment = await _get_assessment(db, assessment_id)
+            _check_assessment_access(assessment, current_user)
+            save_to_assessment = True
+            
+            # Check if website summary already exists for this URL
+            existing_summary = assessment.get("websiteSummary")
+            if existing_summary and existing_summary.get("url") == url:
+                # Return existing summary instead of fetching again
+                logger.info(f"Website summary already exists for URL {url} in assessment {assessment_id}, returning existing summary")
+                return success_response(
+                    "Website summary already exists. Using existing summary.",
+                    existing_summary
+                )
+        except HTTPException:
+            # If assessment not found, just continue without saving
+            save_to_assessment = False
+    
+    # Prevent concurrent requests for the same URL
+    if url not in _website_fetch_locks:
+        _website_fetch_locks[url] = asyncio.Lock()
+    
+    url_lock = _website_fetch_locks[url]
+    
+    # Check if another request is already processing this URL
+    if url_lock.locked():
+        logger.warning(f"Another request is already processing URL {url}, returning error to prevent duplicate")
+        raise HTTPException(
+            status_code=429,
+            detail="A request for this URL is already in progress. Please wait and try again."
+        )
+    
+    # Acquire lock for this URL
+    async with url_lock:
+        try:
+            # Get OpenAI client
+            try:
+                openai_client = _get_openai_client()
+            except ValueError as exc:
+                logger.error(f"OpenAI API key not configured: {exc}")
+                raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured. Please set OPENAI_API_KEY in your .env file.")
+            
+            # Fetch website content
+            try:
+                async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, max_redirects=5) as client:
+                    response = await client.get(url, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    })
+                    response.raise_for_status()
+                    
+                    # Limit response size
+                    if len(response.content) > 1.5 * 1024 * 1024:  # 1.5MB
+                        raise HTTPException(status_code=400, detail="Response too large (max 1.5MB)")
+                    
+                    raw_html = response.text
+                    raw_text = _extract_text_from_html(raw_html)
+                    
+                    if not raw_text or len(raw_text.strip()) < 100:
+                        raise HTTPException(status_code=400, detail="Unable to extract meaningful content from the website")
+            
+            except httpx.HTTPError as e:
+                logger.error(f"Error fetching website {url}: {e}")
+                raise HTTPException(status_code=400, detail=f"Unable to fetch website: {str(e)}")
+            
+            # Call OpenAI API
+            try:
+                # Limit content to fit within token limits (approximately 30k chars = ~7500 tokens)
+                content_text = raw_text[:30000]
+                
+                openai_prompt = f"""Extract and summarize the following website content. Return ONLY a valid JSON object with these exact fields:
+{{
+  "company_name": "string or null - the official name of the company/organization",
+  "company_type": "one of: edtech, fintech, healthcare, ecommerce, manufacturing, services, consulting, government, unknown, other",
+  "short_summary": "A comprehensive 3-5 sentence summary that MUST include: (1) Company name and what they do (their core business/industry), (2) What services/products they provide (be specific - list actual services, products, or solutions), (3) Key value propositions or unique features. This summary will be used to generate contextual assessment questions, so make it detailed and informative with specific service names.",
+  "key_topics": ["topic1", "topic2", "topic3", "topic4", "topic5"],
+  "confidence": 0-100
+}}
+
+CRITICAL REQUIREMENTS FOR short_summary:
+1. MUST start with the company name (if available) and clearly state what they do (their core business/industry)
+2. MUST explicitly list the services/products they provide (e.g., "They provide employee training solutions, onboarding programs, learning management systems, etc.")
+3. MUST include key value propositions or unique features
+4. Be specific about service names and offerings - avoid generic descriptions
+5. Structure: "Company Name is a [industry] company that [what they do]. They provide [list specific services/products]. [Additional details about value propositions or unique features]."
+
+Example format:
+"[Company Name] is a [industry type] company specializing in [core business]. They provide [Service 1], [Service 2], [Service 3], and [Service 4]. Their solutions focus on [key value proposition]. [Additional unique features or approach]."
+
+Website content:
+{content_text}
+"""
+                
+                response = await openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert at extracting and summarizing company information from website content. Your summaries will be used to generate contextual assessment questions, so they must be comprehensive and structured. ALWAYS include: (1) Company name and what they do (core business/industry), (2) Specific services/products they provide (list actual service names, not generic descriptions), (3) Key value propositions or unique features. Be specific about service offerings. Always return valid JSON objects. Never include markdown code blocks or explanations outside the JSON."
+                        },
+                        {"role": "user", "content": openai_prompt}
+                    ],
+                    temperature=0.3,
+                )
+                
+                response_text = response.choices[0].message.content.strip()
+                
+                # Remove markdown code blocks if present
+                if response_text.startswith("```"):
+                    response_text = response_text.split("```")[1]
+                    if response_text.startswith("json"):
+                        response_text = response_text[4:]
+                    response_text = response_text.strip()
+                
+                # Try to extract JSON from response
+                json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
+                if json_match:
+                    summary_data = json.loads(json_match.group())
+                else:
+                    # Fallback: try to parse the whole response
+                    summary_data = json.loads(response_text)
+            
+            except json.JSONDecodeError as e:
+                logger.error(f"Error parsing OpenAI response: {e}")
+                # Retry with shorter content
+                try:
+                    shorter_content = raw_text[:10000]
+                    shorter_prompt = f"""Extract company information from this website content. Return JSON:
+{{
+  "company_name": "string or null - the official name of the company/organization",
+  "company_type": "edtech|fintech|healthcare|ecommerce|manufacturing|services|consulting|government|unknown|other",
+  "short_summary": "A comprehensive 3-5 sentence summary that MUST include: (1) Company name and what they do (their core business/industry), (2) What services/products they provide (be specific - list actual services, products, or solutions), (3) Key value propositions or unique features. Make it detailed and informative with specific service names.",
+  "key_topics": ["topic1", "topic2", "topic3", "topic4", "topic5"],
+  "confidence": 50
+}}
+
+CRITICAL REQUIREMENTS FOR short_summary:
+1. MUST start with the company name (if available) and clearly state what they do (their core business/industry)
+2. MUST explicitly list the services/products they provide (e.g., "They provide employee training solutions, onboarding programs, learning management systems, etc.")
+3. MUST include key value propositions or unique features
+4. Be specific about service names and offerings - avoid generic descriptions
+5. Structure: "Company Name is a [industry] company that [what they do]. They provide [list specific services/products]. [Additional details about value propositions or unique features]."
+
+Content: {shorter_content}
+"""
+                    response = await openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are an expert at extracting company information from website content. Your summaries will be used to generate contextual assessment questions, so they must be comprehensive and structured. ALWAYS include: (1) Company name and what they do (core business/industry), (2) Specific services/products they provide (list actual service names, not generic descriptions), (3) Key value propositions or unique features. Be specific about service offerings. Always return valid JSON objects. Never include markdown code blocks."
+                            },
+                            {"role": "user", "content": shorter_prompt}
+                        ],
+                        temperature=0.3,
+                    )
+                    
+                    response_text = response.choices[0].message.content.strip()
+                    
+                    # Remove markdown code blocks if present
+                    if response_text.startswith("```"):
+                        response_text = response_text.split("```")[1]
+                        if response_text.startswith("json"):
+                            response_text = response_text[4:]
+                        response_text = response_text.strip()
+                    
+                    json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
+                    if json_match:
+                        summary_data = json.loads(json_match.group())
+                    else:
+                        raise HTTPException(status_code=500, detail="Unable to parse OpenAI response")
+                except Exception as retry_e:
+                    logger.error(f"Retry failed: {retry_e}")
+                    raise HTTPException(status_code=500, detail="Unable to extract website summary")
+            except Exception as e:
+                logger.error(f"Error calling OpenAI API: {e}")
+                raise HTTPException(status_code=500, detail=f"Error calling OpenAI API: {str(e)}")
+            
+            # Prepare website summary object
+            website_summary = {
+                "url": url,
+                "fetchedAt": _now_utc().isoformat(),
+                "rawHtml": raw_html[:100000],  # Store first 100k chars
+                "rawText": raw_text[:50000],  # Store first 50k chars
+                "openaiResponseRaw": {
+                    "model": "gpt-4o-mini",
+                    "usage": response.usage.model_dump() if hasattr(response, 'usage') and hasattr(response.usage, 'model_dump') else {},
+                },
+                "company_name": summary_data.get("company_name"),
+                "company_type": summary_data.get("company_type", "unknown"),
+                "short_summary": summary_data.get("short_summary", ""),
+                "key_topics": summary_data.get("key_topics", [])[:5],  # Ensure max 5
+                "confidence": summary_data.get("confidence", 50),
+                "useForQuestions": True,
+                "lastEditedBy": str(current_user["id"]),
+                "lastEditedAt": _now_utc().isoformat(),
+            }
+            
+            # Save to assessment only if assessment ID was provided and valid
+            if save_to_assessment and assessment:
+                update_result = await db.assessments.update_one(
+                    {"_id": to_object_id(assessment_id)},
+                    {
+                        "$set": {
+                            "websiteSummary": website_summary,
+                            "updatedAt": _now_utc(),
+                        },
+                        "$push": {
+                            "auditLogs": {
+                                "action": "fetchWebsiteSummary",
+                                "userId": str(current_user["id"]),
+                                "timestamp": _now_utc().isoformat(),
+                                "meta": {"url": url},
+                            }
+                        }
+                    }
+                )
+                
+                if update_result.modified_count == 0:
+                    logger.warning(f"Failed to save website summary to assessment {assessment_id}, but returning summary anyway")
+            
+            return success_response(
+                "Website summary extracted. Review and save or edit before generating questions.",
+                website_summary
+            )
+        finally:
+            # Lock is automatically released when exiting the async with block
+            pass
+
+
+@router.patch("/{assessment_id}/website-summary")
+async def update_website_summary(
+    assessment_id: str,
+    request: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Update website summary fields."""
+    assessment = await _get_assessment(db, assessment_id)
+    _check_assessment_access(assessment, current_user)
+    
+    if "websiteSummary" not in assessment:
+        raise HTTPException(status_code=404, detail="Website summary not found. Please fetch it first.")
+    
+    # Build update object
+    update_fields = {}
+    if "company_name" in request:
+        update_fields["websiteSummary.company_name"] = request["company_name"]
+    if "company_type" in request:
+        update_fields["websiteSummary.company_type"] = request["company_type"]
+    if "short_summary" in request:
+        update_fields["websiteSummary.short_summary"] = request["short_summary"]
+    if "key_topics" in request:
+        update_fields["websiteSummary.key_topics"] = request["key_topics"][:5]  # Max 5
+    if "useForQuestions" in request:
+        update_fields["websiteSummary.useForQuestions"] = request["useForQuestions"]
+    
+    update_fields["websiteSummary.lastEditedBy"] = str(current_user["id"])
+    update_fields["websiteSummary.lastEditedAt"] = _now_utc().isoformat()
+    update_fields["updatedAt"] = _now_utc()
+    
+    update_result = await db.assessments.update_one(
+        {"_id": to_object_id(assessment_id)},
+        {"$set": update_fields}
+    )
+    
+    if update_result.modified_count == 0:
+        raise HTTPException(status_code=500, detail="Failed to update website summary")
+    
+    # Fetch updated assessment
+    updated_assessment = await _get_assessment(db, assessment_id)
+    return success_response("Website summary updated successfully", updated_assessment.get("websiteSummary"))
 
 
