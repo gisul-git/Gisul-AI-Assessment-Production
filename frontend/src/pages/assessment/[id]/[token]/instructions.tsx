@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/router";
-import { FullscreenPrompt, CameraProctorModal } from "@/components/proctor";
-import { useCameraProctor } from "@/hooks/useCameraProctor";
+import { ProctoringConsentModal } from "@/components/proctor";
+import axios from "axios";
 
 export default function AssessmentInstructionsPage() {
   const router = useRouter();
@@ -10,27 +10,54 @@ export default function AssessmentInstructionsPage() {
   const [email, setEmail] = useState<string | null>(null);
   const [name, setName] = useState<string | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
-  const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false);
-  const [showCameraPrompt, setShowCameraPrompt] = useState(false);
+  const [showConsentModal, setShowConsentModal] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
-  const [fullscreenError, setFullscreenError] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [proctoringSettings, setProctoringSettings] = useState<{
+    ai_proctoring: boolean;
+    live_proctoring: boolean;
+  }>({
+    ai_proctoring: false,
+    live_proctoring: false,
+  });
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const hasCheckedPrecheckRef = useRef(false); // Prevent multiple redirects
 
-  // Camera proctoring hook
-  const {
-    startCamera,
-    stopCamera,
-    errors: cameraErrors,
-  } = useCameraProctor({
-    userId: email || "",
-    assessmentId: (id as string) || "",
-    enabled: true,
-  });
+  // Fetch assessment proctoring settings
+  useEffect(() => {
+    if (!id || !token || typeof id !== "string") return;
+
+    const fetchProctoringSettings = async () => {
+      try {
+        const response = await axios.get(
+          `/api/assessment/get-assessment-full?assessmentId=${id}&token=${token}`
+        );
+
+        if (response.data?.success && response.data.data) {
+          const assessment = response.data.data;
+          const proctoring = assessment.proctoringSettings || assessment.proctoring || {};
+          
+          // Normalize to new format
+          const aiProctoring = !!(proctoring.ai_proctoring || proctoring.multiFaceDetection || proctoring.tabSwitchDetection);
+          const liveProctoring = !!(proctoring.live_proctoring || proctoring.liveCameraAndScreenMonitoring);
+
+          setProctoringSettings({
+            ai_proctoring: aiProctoring,
+            live_proctoring: liveProctoring,
+          });
+        }
+      } catch (error) {
+        console.error("[Instructions] Error fetching proctoring settings:", error);
+      }
+    };
+
+    fetchProctoringSettings();
+  }, [id, token]);
 
   useEffect(() => {
     // Prevent multiple redirects
     if (hasCheckedPrecheckRef.current) return;
+    if (typeof window === "undefined") return;
     
     const storedEmail = sessionStorage.getItem("candidateEmail");
     const storedName = sessionStorage.getItem("candidateName");
@@ -148,13 +175,7 @@ export default function AssessmentInstructionsPage() {
     }
   }, []);
 
-  // Handle "Start Assessment" click - go directly to camera modal
-  // Fullscreen is now Step 3 inside the Camera Modal
-  const handleStartClick = () => {
-    if (!acknowledged || !id || !token) return;
-    setFullscreenError(false);
-    setShowCameraPrompt(true); // Skip fullscreen prompt - it's now in camera modal
-  };
+  // handleStartClick is now defined above (camera-first flow)
 
   // Handle "Enter Fullscreen" in the prompt (kept for backwards compatibility)
   const handleEnterFullscreen = async () => {
@@ -209,51 +230,114 @@ export default function AssessmentInstructionsPage() {
     upload();
   }, [id, email]);
 
-  // Handle camera consent accepted with reference photo, screen stream, and webcam stream
-  const handleCameraAccept = async (
-    referencePhoto: string, 
-    screenStream: MediaStream,
-    webcamStream: MediaStream
-  ): Promise<boolean> => {
-    setIsStarting(true);
-    setCameraError(null);
+  // Check for existing streams (candidate may have shared before clicking Start)
+  const checkForExistingStreams = useCallback((): { webcam: MediaStream | null; screen: MediaStream | null } => {
+    const existingWebcam = typeof window !== "undefined" ? (window as any).__webcamStream : null;
+    const existingScreen = typeof window !== "undefined" ? (window as any).__screenStream : null;
     
-    // Store camera consent and reference photo in session FIRST (instant)
-    sessionStorage.setItem("cameraProctorEnabled", "true");
-    sessionStorage.setItem("candidateReferencePhoto", referencePhoto);
-    sessionStorage.setItem("screenShareGranted", "true");
+    // Verify streams are still active
+    const webcam = existingWebcam && existingWebcam.active && existingWebcam.getTracks().some(t => t.readyState === 'live') 
+      ? existingWebcam 
+      : null;
+    const screen = existingScreen && existingScreen.active && existingScreen.getTracks().some(t => t.readyState === 'live')
+      ? existingScreen
+      : null;
     
-    // Store streams in global variables so take.tsx can access them
-    // (streams can't be stored in sessionStorage)
-    if (typeof window !== "undefined") {
-      (window as any).__screenStream = screenStream;
-      (window as any).__webcamStream = webcamStream;
-      console.log("[Instructions] Streams stored for live proctoring", {
-        hasScreenStream: !!screenStream,
-        hasWebcamStream: !!webcamStream,
-      });
+    return { webcam, screen };
+  }, []);
+
+  // Helper for timeout
+  const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+    new Promise<T>((res, rej) => {
+      const t = setTimeout(() => rej(new Error('timeout')), ms);
+      p.then(v => { clearTimeout(t); res(v); }).catch(e => { clearTimeout(t); rej(e); });
+    });
+
+  // Acquire webcam stream (camera-first)
+  const acquireCamera = async (): Promise<MediaStream> => {
+    if (typeof window === "undefined") {
+      throw new Error("Window not available");
     }
-    
-    // Start background upload immediately (fire-and-forget)
-    uploadReferencePhotoBackground(referencePhoto);
-    
-    // Start camera (loads TensorFlow models) - this is the slow part
-    const cameraStarted = await startCamera();
-    
-    if (cameraStarted) {
-      // Start candidate session in background (don't block navigation)
-      startSession().catch((err) => {
-        console.warn("[Session] Failed to record session start:", err);
+
+    // Check for existing stream first
+    const existing = (window as any).__webcamStream;
+    if (existing && existing.active && existing.getVideoTracks().some((t: MediaStreamTrack) => t.readyState === 'live')) {
+      console.log("[Instructions] reusing existing webcam stream");
+      return existing;
+    }
+
+    // Request new stream with timeout
+    try {
+      const stream = await withTimeout(
+        navigator.mediaDevices.getUserMedia({ video: true }),
+        10000
+      );
+      (window as any).__webcamStream = stream;
+      console.log("[Instructions] acquired webcam (active=true)");
+      return stream;
+    } catch (err: any) {
+      if (err.name === 'NotAllowedError') {
+        throw new Error("Camera permission denied. Please allow camera access in your browser settings.");
+      } else if (err.name === 'NotFoundError') {
+        throw new Error("No camera found. Please connect a camera and try again.");
+      } else if (err.message === 'timeout') {
+        throw new Error("Camera access timed out. Please check permissions and try again.");
+      }
+      throw new Error(`Camera access failed: ${err.message || 'Unknown error'}`);
+    }
+  };
+
+  // Handle Start Assessment click - camera-first flow
+  const handleStartClick = async () => {
+    if (!acknowledged || !id || !token || !email) return;
+    if (isStarting) return;
+    if (typeof window === "undefined") return;
+
+    setIsStarting(true);
+    setError(null);
+    console.log("[Instructions] Start clicked");
+
+    try {
+      // 1. Acquire webcam stream first (camera-first)
+      const webcamStream = await acquireCamera();
+
+      // 2. Attach stream to preview video element
+      const previewVideo = document.getElementById("camera-preview-instructions") as HTMLVideoElement;
+      if (previewVideo) {
+        previewVideo.srcObject = webcamStream;
+        previewVideo.style.display = "block";
+      }
+
+      // 3. Create proctoring session
+      const sessionResponse = await axios.post('/api/proctor/create-session', {
+        assessmentId: id,
+        candidateEmail: email,
       });
-      
-      // Navigate to assessment immediately
-      setShowCameraPrompt(false);
-      router.push(`/assessment/${id}/${token}/take`);
-      return true;
-    } else {
-      setCameraError(cameraErrors[cameraErrors.length - 1] || "Failed to start camera");
+
+      const sessionId = sessionResponse.data?.sessionId || sessionResponse.data?.data?.sessionId;
+      if (!sessionId || sessionResponse.data?.status !== 'ok') {
+        throw new Error('Failed to create proctoring session');
+      }
+      console.log("[Instructions] start-session returned:", sessionId);
+
+      // 4. Store sessionId safely before navigation
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem('__proctorSessionId', sessionId);
+        (window as any).__proctoringSessionId = sessionId;
+        
+        // Verify stored
+        const stored = sessionStorage.getItem('__proctorSessionId');
+        if (stored !== sessionId) {
+          throw new Error('Failed to store sessionId');
+        }
+      }
+
+      // 5. Navigate to take page only after camera active and sessionId saved
+      await router.push(`/assessment/${id}/${token}/take`);
+    } catch (err: any) {
+      console.error('[Instructions] start error', err);
+      setError(err.message || "Failed to start assessment. Please try again.");
       setIsStarting(false);
-      return false;
     }
   };
 
@@ -326,21 +410,28 @@ export default function AssessmentInstructionsPage() {
                 Proctoring Requirements (Mandatory)
               </h2>
               <ul style={{ margin: 0, paddingLeft: "1.25rem", color: "#991b1b", lineHeight: 1.6 }}>
-                <li style={{ marginBottom: "0.5rem" }}>
-                  <strong>Fullscreen Mode (Required):</strong> You must enter fullscreen mode to start the exam. The assessment will not begin without it.
-                </li>
-                <li style={{ marginBottom: "0.5rem" }}>
-                  <strong>Camera Proctoring:</strong> Your camera will be used to monitor face presence, gaze direction, and multiple faces. Snapshots are captured only on violations.
-                </li>
-                <li style={{ marginBottom: "0.5rem" }}>
-                  <strong>Tab Switching:</strong> Switching to other browser tabs will be detected and recorded.
-                </li>
-                <li style={{ marginBottom: "0.5rem" }}>
-                  <strong>Window Focus:</strong> Clicking outside the browser window will be monitored.
-                </li>
-                <li style={{ marginBottom: "0.5rem" }}>
-                  <strong>Copy/Paste:</strong> Copy and paste actions are restricted and will be logged.
-                </li>
+                {(proctoringSettings.ai_proctoring || proctoringSettings.live_proctoring) && (
+                  <>
+                    {proctoringSettings.ai_proctoring && (
+                      <li style={{ marginBottom: "0.5rem" }}>
+                        <strong>AI Proctoring:</strong> Browser-based AI detection including multiple-face detection, gaze-away detection, and tab switching tracking. Snapshots will be captured when violations occur.
+                      </li>
+                    )}
+                    {proctoringSettings.live_proctoring && (
+                      <li style={{ marginBottom: "0.5rem" }}>
+                        <strong>Live Proctoring:</strong> Continuous webcam and full-screen streaming to the Admin Live Proctoring panel.
+                      </li>
+                    )}
+                    <li style={{ marginBottom: "0.5rem" }}>
+                      <strong>Camera & Screen Access:</strong> You will be asked to grant camera {proctoringSettings.live_proctoring ? "and screen sharing" : ""} permissions before starting the assessment.
+                    </li>
+                  </>
+                )}
+                {!proctoringSettings.ai_proctoring && !proctoringSettings.live_proctoring && (
+                  <li style={{ marginBottom: "0.5rem" }}>
+                    No proctoring is enabled for this assessment.
+                  </li>
+                )}
               </ul>
             </div>
             <InstructionCard
@@ -353,6 +444,67 @@ export default function AssessmentInstructionsPage() {
             />
           </div>
 
+          {error && (
+            <div
+              style={{
+                padding: "0.75rem",
+                backgroundColor: "#fef2f2",
+                borderRadius: "0.5rem",
+                border: "1px solid #fecaca",
+                marginBottom: "1rem",
+              }}
+            >
+              <p style={{ color: "#dc2626", margin: 0, marginBottom: error.includes("Retry") ? "0.75rem" : 0, fontSize: "0.875rem" }}>{error}</p>
+              {error.includes("Retry") && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setIsStarting(false);
+                    // Retry by showing consent modal again
+                    if (proctoringSettings.ai_proctoring || proctoringSettings.live_proctoring) {
+                      setShowConsentModal(true);
+                    }
+                  }}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    backgroundColor: "#dc2626",
+                    color: "#ffffff",
+                    border: "none",
+                    borderRadius: "0.375rem",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                    fontSize: "0.875rem",
+                  }}
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Camera Preview (shown when camera is active) */}
+          <div style={{ marginBottom: "1.5rem", textAlign: "center" }}>
+            <video
+              id="camera-preview-instructions"
+              autoPlay
+              playsInline
+              muted
+              style={{
+                width: "320px",
+                height: "240px",
+                borderRadius: "0.5rem",
+                border: "2px solid #10b981",
+                backgroundColor: "#000000",
+                objectFit: "cover",
+                display: "none", // Hidden until camera is active
+              }}
+            />
+            <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+              Camera Preview
+            </p>
+          </div>
+
           <div style={{ marginBottom: "1.5rem" }}>
             <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
               <input
@@ -362,7 +514,7 @@ export default function AssessmentInstructionsPage() {
                 style={{ width: "1.25rem", height: "1.25rem" }}
               />
               <span style={{ fontSize: "0.95rem", color: "#1f2937" }}>
-                I have read and understood the instructions, and I agree to follow the assessment rules including mandatory fullscreen mode.
+                I have read and understood the instructions, and I agree to follow the assessment rules.
               </span>
             </label>
           </div>
@@ -371,36 +523,32 @@ export default function AssessmentInstructionsPage() {
             type="button"
             className="btn-primary"
             onClick={handleStartClick}
-            disabled={!acknowledged}
+            disabled={!acknowledged || isStarting || !email}
             style={{
               width: "100%",
               padding: "0.85rem",
               fontSize: "1rem",
-              opacity: acknowledged ? 1 : 0.6,
-              cursor: acknowledged ? "pointer" : "not-allowed",
+              opacity: (acknowledged && !isStarting && email) ? 1 : 0.6,
+              cursor: (acknowledged && !isStarting && email) ? "pointer" : "not-allowed",
             }}
           >
-            Start Assessment
+            {isStarting ? "Starting..." : "Start Assessment"}
           </button>
         </div>
       </div>
 
-      {/* Mandatory Fullscreen Prompt Modal */}
-      <FullscreenPrompt
-        isOpen={showFullscreenPrompt}
-        onEnterFullscreen={handleEnterFullscreen}
-        onFullscreenFailed={handleFullscreenFailed}
+      {/* Proctoring Consent Modal */}
+      <ProctoringConsentModal
+        isOpen={showConsentModal}
+        onAccept={handleConsentAccept}
+        onCancel={() => {
+          setShowConsentModal(false);
+          setError(null);
+        }}
+        aiProctoring={proctoringSettings.ai_proctoring}
+        liveProctoring={proctoringSettings.live_proctoring}
         candidateName={name || undefined}
         isLoading={isStarting}
-      />
-
-      {/* Camera Proctoring Consent Modal */}
-      <CameraProctorModal
-        isOpen={showCameraPrompt}
-        onAccept={handleCameraAccept}
-        candidateName={name || undefined}
-        isLoading={isStarting}
-        cameraError={cameraError}
       />
     </div>
   );

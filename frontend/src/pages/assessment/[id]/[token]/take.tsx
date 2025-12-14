@@ -7,12 +7,14 @@ import {
 import { useRouter } from "next/router";
 import dynamic from "next/dynamic";
 import axios from "axios";
-import { useProctor, type ProctorViolation } from "@/hooks/useProctor";
-import { useCameraProctor, type CameraProctorViolation } from "@/hooks/useCameraProctor";
 import { ProctorToast, FullscreenWarningBanner } from "@/components/proctor";
 import { EditorContainer } from "@/components/dsa/test/EditorContainer";
 import { JUDGE0_ID_TO_LANG_NAME } from "@/lib/dsa/judge0";
-import { normalizeProctorConfig, useProctorEngine } from "@/proctoring";
+import { useProctor, type ProctorViolation } from "@/hooks/useProctor";
+import WebcamPreview from "@/components/WebcamPreview";
+import { useFaceMesh, type FaceDetectionResult } from "@/hooks/useFaceMesh";
+import { useProctorUpload } from "@/hooks/useProctorUpload";
+import { showViolationToast } from "@/components/ViolationToast";
 
 // Lazy load Monaco Editor
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
@@ -572,6 +574,35 @@ export default function CandidateAssessmentPage() {
 
     setAppState("submitting");
 
+    // Stop proctoring session if enabled
+    if (proctorEnabled && candidateEmail) {
+      try {
+        await axios.post("/api/session/stop-session", {
+          assessmentId: id,
+          userId: candidateEmail,
+          reason: "assessment_submitted",
+        });
+        console.log("[Take] Proctoring session stopped");
+      } catch (err) {
+        console.warn("[Take] Failed to stop proctoring session:", err);
+      }
+
+      // Stop all media streams
+      if (typeof window !== "undefined") {
+        const webcamStream = (window as any).__webcamStream as MediaStream | null;
+        const screenStream = (window as any).__screenStream as MediaStream | null;
+        
+        if (webcamStream) {
+          webcamStream.getTracks().forEach(track => track.stop());
+          delete (window as any).__webcamStream;
+        }
+        if (screenStream) {
+          screenStream.getTracks().forEach(track => track.stop());
+          delete (window as any).__screenStream;
+        }
+      }
+    }
+
     try {
       // Step 1: Save all answers (force immediate save, clear debounce)
       if (saveTimeoutRef.current) {
@@ -814,11 +845,14 @@ export default function CandidateAssessmentPage() {
       try {
         setAppState("loading");
 
-        // Load candidate info from session
-        const email = sessionStorage.getItem("candidateEmail") || "";
-        const name = sessionStorage.getItem("candidateName") || "";
-        setCandidateEmail(email);
-        setCandidateName(name);
+        // Load candidate info from session (client-side only)
+        const isClient = typeof window !== "undefined";
+        if (isClient) {
+          const email = sessionStorage.getItem("candidateEmail") || "";
+          const name = sessionStorage.getItem("candidateName") || "";
+          setCandidateEmail(email);
+          setCandidateName(name);
+        }
 
         // Fetch full assessment with topics_v2 structure
         const assessmentResponse = await axios.get(`/api/assessment/get-assessment-full?assessmentId=${id}&token=${token}`);
@@ -835,7 +869,13 @@ export default function CandidateAssessmentPage() {
           estimatedTotalTime: assessmentResponse.data.data?.estimatedTotalTime || 60,
           sectionTimes: assessmentResponse.data.data?.questionTypeTimes || {},
         };
-        const fetchedProctoring = assessmentResponse.data.data?.proctoring || {};
+        const fetchedProctoringRaw = assessmentResponse.data.data?.proctoringSettings || assessmentResponse.data.data?.proctoring || {};
+        
+        // Normalize proctoring settings to new format
+        const fetchedProctoring = {
+          ai_proctoring: !!(fetchedProctoringRaw.ai_proctoring || fetchedProctoringRaw.multiFaceDetection || fetchedProctoringRaw.tabSwitchDetection),
+          live_proctoring: !!(fetchedProctoringRaw.live_proctoring || fetchedProctoringRaw.liveCameraAndScreenMonitoring),
+        };
 
         console.log("[take.tsx] Topics_v2 structure:", topics_v2);
 
@@ -955,60 +995,435 @@ export default function CandidateAssessmentPage() {
     logAnalyticsEvent("TAB_SWITCH", { violation: violation.eventType });
   }, [logAnalyticsEvent]);
 
-  const handleCameraViolation = useCallback((violation: CameraProctorViolation) => {
-    logAnalyticsEvent("TAB_SWITCH", { violation: violation.eventType });
-  }, [logAnalyticsEvent]);
 
-  // Initialize proctoring hooks (legacy)
-  const proctorEnabled = proctoringSettings.enabled || false;
+  // Normalize proctoring settings
+  const aiProctoring = proctoringSettings.ai_proctoring || false;
+  // Temporarily disable live proctoring
+  const liveProctoring = false; // proctoringSettings.live_proctoring || false;
+  const proctorEnabled = aiProctoring || liveProctoring;
+
+  // Initialize proctoring hooks (legacy - for tab switching)
   const { lastViolation: proctorViolation } = useProctor({
     userId: candidateEmail,
     assessmentId: id as string,
     onViolation: handleProctorViolation,
-    enableFullscreenDetection: proctoringSettings.fullscreenMonitoring || false,
-    enableDevToolsDetection: proctoringSettings.browserExtensionMonitoring || false,
+    enableFullscreenDetection: false,
+    enableDevToolsDetection: false,
   });
 
-  const { lastViolation: cameraViolation } = useCameraProctor({
-    userId: candidateEmail,
-    assessmentId: id as string,
-    onViolation: handleCameraViolation,
-    enabled: proctoringSettings.multiFaceDetection || false,
-  });
-
-  // Unified Proctoring Engine
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const proctorConfig = normalizeProctorConfig(proctoringSettings);
-  const referenceImageUrl = typeof window !== "undefined" 
-    ? sessionStorage.getItem(`referenceFace_${id}`) || undefined
-    : undefined;
+  // Video refs (client-only)
+  const mainVideoRef = useRef<HTMLVideoElement | null>(null);
+  const thumbVideoRef = useRef<HTMLVideoElement | null>(null);
+  const webcamStreamRef = useRef<MediaStream | null>(null);
   
-  const handleUnifiedViolation = useCallback((violationType: string, metadata?: Record<string, unknown>) => {
-    console.log("[UnifiedProctor] Violation:", violationType, metadata);
-    // Violations are already logged to backend via the proctor engine
-  }, []);
-
-  const unifiedProctor = useProctorEngine({
-    assessmentId: id as string,
-    candidateEmail: candidateEmail,
-    config: proctorConfig,
-    referenceImageUrl: referenceImageUrl || undefined,
-    onViolation: handleUnifiedViolation,
-    videoElement: videoRef.current,
-    canvasElement: canvasRef.current,
-  });
-
-  // Start unified proctor when assessment is ready
-  useEffect(() => {
-    if (appState === "ready" && proctorEnabled && candidateEmail) {
-      unifiedProctor.start();
+  // Proctoring state
+  const [webcamLive, setWebcamLive] = useState(false);
+  const [webcamError, setWebcamError] = useState<string | null>(null);
+  const [detectionStatus, setDetectionStatus] = useState<FaceDetectionResult | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [candidateEmailForProctor, setCandidateEmailForProctor] = useState<string>('');
+  
+  // Proctoring hooks
+  const { uploadSnapshot, recordViolation: recordViolationToBackend } = useProctorUpload();
+  const noFaceCheckCountRef = useRef<number>(0);
+  
+  // Cooldown tracking for MULTIPLE_FACES_DETECTED only to prevent spam
+  const lastMultipleFacesTimeRef = useRef<number>(0);
+  const MULTIPLE_FACES_COOLDOWN_MS = 15000; // 15 seconds between multiple face events
+  
+  // Capture snapshot helper - returns JPEG Blob
+  const captureSnapshot = useCallback(async (): Promise<Blob | null> => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return null;
+    
+    const video = thumbVideoRef.current || mainVideoRef.current;
+    if (!video || video.readyState < 2) {
+      console.warn('[Proctor] Video not ready for snapshot (readyState:', video?.readyState, ')');
+      return null;
     }
     
-    return () => {
-      unifiedProctor.stop();
+    let retries = 2;
+    while (retries > 0) {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640; // Match media stream resolution
+        canvas.height = 480;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          retries--;
+          if (retries > 0) await new Promise(resolve => setTimeout(resolve, 100));
+          continue;
+        }
+        
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        // Convert to JPEG Blob
+        return new Promise<Blob | null>((resolve) => {
+          canvas.toBlob((blob) => {
+            resolve(blob);
+          }, 'image/jpeg', 0.7);
+        });
+      } catch (err) {
+        console.warn('[Proctor] Failed to capture snapshot (retries left:', retries - 1, '):', err);
+        retries--;
+        if (retries > 0) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+    }
+    return null;
+  }, []);
+  
+  // Handle violation: capture, upload, record, show toast
+  const handleViolation = useCallback(async (eventType: string, metadata: any = {}) => {
+    if (typeof window === 'undefined') return;
+    
+    // Apply cooldown ONLY for MULTIPLE_FACES_DETECTED to prevent spam
+    if (eventType === 'MULTIPLE_FACES_DETECTED') {
+      const now = Date.now();
+      const lastTime = lastMultipleFacesTimeRef.current;
+      
+      if (now - lastTime < MULTIPLE_FACES_COOLDOWN_MS) {
+        const timeRemaining = Math.ceil((MULTIPLE_FACES_COOLDOWN_MS - (now - lastTime)) / 1000);
+        console.log(`[Proctor] ⏳ MULTIPLE_FACES_DETECTED event throttled (cooldown: ${timeRemaining}s remaining)`);
+        return; // Skip this violation - still in cooldown
+      }
+      
+      // Update last violation time
+      lastMultipleFacesTimeRef.current = now;
+    }
+    
+    const timestamp = new Date().toISOString();
+    
+    // Only capture and upload snapshots for specific events
+    const snapshotEvents = ['GAZE_AWAY', 'MULTIPLE_FACES_DETECTED', 'NO_FACE_DETECTED'];
+    let snapshotId: string | undefined;
+    let snapshotUrl: string | undefined;
+    
+    // Upload snapshot and wait for result before recording violation (for snapshot events)
+    if (snapshotEvents.includes(eventType)) {
+      try {
+        const blob = await captureSnapshot();
+        if (blob) {
+          const uploadResult = await uploadSnapshot({
+            assessmentId: id as string,
+            candidateId: candidateEmailForProctor,
+            eventType,
+            timestamp,
+            snapshotBlob: blob,
+            metadata,
+          });
+          
+          if (uploadResult.success && uploadResult.id) {
+            snapshotId = uploadResult.id;
+            console.log(`[Proctor] Snapshot uploaded for ${eventType}:`, snapshotId);
+          } else {
+            console.warn(`[Proctor] Snapshot upload returned no ID for ${eventType}`);
+          }
+        }
+      } catch (err) {
+        console.error(`[Proctor] Snapshot capture/upload failed for ${eventType}:`, err);
+        // Continue with violation recording even if snapshot fails
+      }
+    }
+    
+    // Record violation to backend (now includes snapshotId if upload was successful)
+    await recordViolationToBackend({
+      assessmentId: id as string,
+      candidateId: candidateEmailForProctor,
+      eventType,
+      timestamp,
+      snapshotId,
+      metadata,
+    });
+    
+    // Show toast (use dataURL for preview if available)
+    showViolationToast({
+      eventType,
+      snapshotUrl,
+      timestamp,
+      candidateId: candidateEmailForProctor,
+    });
+  }, [captureSnapshot, uploadSnapshot, recordViolationToBackend, id, candidateEmailForProctor]);
+  
+  // Face detection callback
+  const handleFaceDetection = useCallback((result: FaceDetectionResult) => {
+    setDetectionStatus(result);
+    
+    // Handle violations with cooldown to prevent spam
+    if (result.multiFace) {
+      // Cooldown is handled inside handleViolation, but log for debugging
+      handleViolation('MULTIPLE_FACES_DETECTED', { facesCount: result.facesCount });
+    }
+    
+    // Increased debouncing to 5 frames to reduce false positives
+    // Only trigger if facesCount is 0 for 5 consecutive frames
+    if (result.facesCount === 0) {
+      noFaceCheckCountRef.current++;
+      if (noFaceCheckCountRef.current >= 5) {
+        // Map IN_FRAME_LOST to NO_FACE_DETECTED for snapshot upload
+        console.log(`[Take] 🚨 NO_FACE_DETECTED triggered after ${noFaceCheckCountRef.current} consecutive frames`);
+        handleViolation('NO_FACE_DETECTED', { facesCount: 0 });
+        noFaceCheckCountRef.current = 0;
+      } else {
+        if (noFaceCheckCountRef.current % 2 === 0) {
+          console.log(`[Take] No face detected (count: ${noFaceCheckCountRef.current}/5)`);
+        }
+      }
+    } else {
+      if (noFaceCheckCountRef.current > 0) {
+        console.log(`[Take] Face detected again, resetting no-face counter (was: ${noFaceCheckCountRef.current})`);
+      }
+      noFaceCheckCountRef.current = 0;
+    }
+    
+    // DEBUG: Log when gazeAway is received
+    if (result.gazeAway) {
+      console.log('[Take] ✅ Received gazeAway=true from useFaceMesh, calling handleViolation');
+    }
+    
+    // Gaze-away is now triggered directly from useFaceMesh after duration check
+    // No need for 3-frame debouncing - trigger immediately when gazeAway is true
+    if (result.gazeAway) {
+      console.log('[Take] 🚨 Calling handleViolation for GAZE_AWAY');
+      handleViolation('GAZE_AWAY', { facesCount: result.facesCount });
+    }
+  }, [handleViolation]);
+  
+  // Use FaceMesh hook - initialize asynchronously after camera starts
+  const { isModelLoaded: modelLoaded } = useFaceMesh({
+    videoRef: thumbVideoRef,
+    onDetection: handleFaceDetection,
+    enabled: webcamLive, // Only enable when camera is live (ensures async init after camera)
+  });
+  
+  // Start webcam function (can be called from Start Assessment button)
+  const startWebcam = useCallback(async (): Promise<void> => {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined' || !navigator.mediaDevices) {
+      console.warn('[Proctor] navigator.mediaDevices not available');
+      return;
+    }
+    
+    // Reuse existing stream if available and active
+    if (webcamStreamRef.current && webcamStreamRef.current.active) {
+      const tracks = webcamStreamRef.current.getVideoTracks();
+      if (tracks.length > 0 && tracks[0].readyState === 'live') {
+        console.log('[Proctor] webcam already started, reusing stream');
+        // Ensure video element has the stream
+        if (thumbVideoRef.current && !thumbVideoRef.current.srcObject) {
+          thumbVideoRef.current.srcObject = webcamStreamRef.current;
+          thumbVideoRef.current.play().catch(() => {});
+        }
+        setWebcamLive(true);
+        return;
+      }
+    }
+    
+    try {
+      // Use smaller resolution (640x480) for faster processing
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        } 
+      });
+      webcamStreamRef.current = stream;
+      console.log('[Webcam] started');
+      
+      // Wait for video element to exist (retry up to 10 times with 100ms delay)
+      let retries = 0;
+      while (!thumbVideoRef.current && retries < 10) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        retries++;
+      }
+      
+      // Attach to video elements and wait for playing event
+      const attachStream = async (videoElement: HTMLVideoElement | null) => {
+        if (!videoElement) return;
+        videoElement.srcObject = stream;
+        // Wait for video to be ready AND playing
+        return new Promise<void>((resolve) => {
+          const onPlaying = () => {
+            console.log('[Webcam] playing');
+            videoElement.removeEventListener('playing', onPlaying);
+            resolve();
+          };
+          
+          if (videoElement.readyState >= 2 && !videoElement.paused && videoElement.currentTime > 0) {
+            console.log('[Webcam] playing (already ready)');
+            resolve();
+            return;
+          }
+          
+          videoElement.addEventListener('playing', onPlaying, { once: true });
+          videoElement.play().catch((err) => {
+            console.warn('[Proctor] video play failed:', err);
+            // Still resolve to continue
+            resolve();
+          });
+        });
+      };
+      
+      await attachStream(thumbVideoRef.current);
+      await attachStream(mainVideoRef.current);
+      
+      setWebcamLive(true);
+      setWebcamError(null);
+      console.log('[Proctor] webcam started');
+      
+      // Diagnostics: Log on Start Assessment
+      const assetUrls = (window as any).__faceMeshAssetUrls || [];
+      const asset404s = assetUrls.filter((url: string) => {
+        // Check if URL failed (this is a best-effort check; actual 404s will be in network panel)
+        return false; // We can't reliably detect 404s here, but network panel will show them
+      });
+      
+      console.log('[Proctor Diagnostics] Start Assessment:', {
+        cameraStarted: true,
+        faceMeshInit: 'pending',
+        PROCTOR_UPLOAD_URL: '/api/proctor/upload',
+        assetUrlsAttempted: assetUrls.length > 0 ? assetUrls : 'none yet',
+      });
+      
+      // Update diagnostics when FaceMesh finishes initializing (after a delay)
+      setTimeout(() => {
+        const faceMeshStatus = modelLoaded 
+          ? 'success' 
+          : ((window as any).__faceMeshInitFailed ? 'failed' : 'loading');
+        const finalAssetUrls = (window as any).__faceMeshAssetUrls || [];
+        const diagnostics = {
+          cameraStarted: true,
+          faceMeshInit: faceMeshStatus,
+          PROCTOR_UPLOAD_URL: '/api/proctor/upload',
+          assetUrlsAttempted: finalAssetUrls,
+          note: 'Check network panel for 404s on /mediapipe/face_mesh/* assets if FaceMesh init failed',
+        };
+        console.log('[Proctor Diagnostics] Updated:', JSON.stringify(diagnostics, null, 2));
+      }, 2000);
+    } catch (err: any) {
+      console.error('[Proctor] Failed to start webcam:', err);
+      setWebcamLive(false);
+      if (err.name === 'NotAllowedError') {
+        setWebcamError('Camera permission is required. Please allow camera access and refresh the page.');
+      } else if (err.name === 'NotFoundError') {
+        setWebcamError('No camera found. Please connect a camera and refresh the page.');
+      } else {
+        setWebcamError('Failed to start camera. Please check your camera settings.');
+      }
+    }
+  }, []);
+  
+  // Restore sessionId and candidateEmail on mount (client-only)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    console.log('[Take] mount, candidateEmail=', candidateEmail);
+    
+    const isClient = typeof window !== 'undefined';
+    if (!isClient) return;
+    
+    // Restore sessionId
+    const sid = sessionStorage.getItem('__proctorSessionId') || (window as any).__proctoringSessionId || null;
+    setSessionId(sid);
+    if (sid) console.log('[Take] restored sessionId:', sid);
+    
+    // Restore candidate email
+    const email = sessionStorage.getItem('proctoringCandidateEmail') || candidateEmail || '';
+    setCandidateEmailForProctor(email);
+  }, [candidateEmail]);
+  
+  // Start webcam on mount (after component is mounted and video ref exists)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    // Small delay to ensure video element is rendered
+    const timer = setTimeout(() => {
+      startWebcam();
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [startWebcam]);
+  
+  // Ensure stream is attached to video element when it becomes available
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!webcamStreamRef.current || !thumbVideoRef.current) return;
+    
+    const video = thumbVideoRef.current;
+    const stream = webcamStreamRef.current;
+    
+    // If video doesn't have the stream, attach it
+    if (video.srcObject !== stream && stream.active) {
+      video.srcObject = stream;
+      if (video.readyState >= 2) {
+        video.play().catch(() => {});
+      } else {
+        const handleLoaded = () => {
+          video.play().catch(() => {});
+        };
+        video.addEventListener('loadeddata', handleLoaded, { once: true });
+        video.addEventListener('canplay', handleLoaded, { once: true });
+      }
+    }
+  }, [webcamLive]);
+  
+  // Event listeners for tab switch, focus, fullscreen (client-only)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    
+    let tabSwitchDebounce: NodeJS.Timeout | null = null;
+    let focusLostDebounce: NodeJS.Timeout | null = null;
+    let fullscreenExitDebounce: NodeJS.Timeout | null = null;
+    
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        if (tabSwitchDebounce) clearTimeout(tabSwitchDebounce);
+        tabSwitchDebounce = setTimeout(() => {
+          handleViolation('TAB_SWITCH', {
+            pageHidden: true,
+          });
+        }, 100);
+      }
     };
-  }, [appState, proctorEnabled, candidateEmail, unifiedProctor]);
+    
+    const handleBlur = () => {
+      if (focusLostDebounce) clearTimeout(focusLostDebounce);
+      focusLostDebounce = setTimeout(() => {
+        handleViolation('FOCUS_LOST', {
+          windowFocused: false,
+        });
+      }, 100);
+    };
+    
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        if (fullscreenExitDebounce) clearTimeout(fullscreenExitDebounce);
+        fullscreenExitDebounce = setTimeout(() => {
+          handleViolation('FULLSCREEN_EXIT', {
+            fullscreenActive: false,
+          });
+        }, 100);
+      }
+    };
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    
+    return () => {
+      if (tabSwitchDebounce) clearTimeout(tabSwitchDebounce);
+      if (focusLostDebounce) clearTimeout(focusLostDebounce);
+      if (fullscreenExitDebounce) clearTimeout(fullscreenExitDebounce);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, [handleViolation]);
+  
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (typeof window !== 'undefined' && webcamStreamRef.current) {
+        webcamStreamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+      }
+    };
+  }, []);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -1180,7 +1595,71 @@ export default function CandidateAssessmentPage() {
                          currentQuestionIndex >= 0;
 
   return (
-    <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", padding: "2rem" }}>
+    <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", padding: "2rem", position: "relative" }}>
+      {/* Proctoring Active Indicator */}
+      {proctorEnabled && (
+        <div
+          style={{
+            position: "fixed",
+            top: "1rem",
+            right: "1rem",
+            backgroundColor: "#10b981",
+            color: "#ffffff",
+            padding: "0.5rem 1rem",
+            borderRadius: "0.5rem",
+            fontSize: "0.875rem",
+            fontWeight: 600,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
+          }}
+        >
+          <div
+            style={{
+              width: "8px",
+              height: "8px",
+              backgroundColor: "#ffffff",
+              borderRadius: "50%",
+              animation: "pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+            }}
+          />
+          Proctoring Active – Recording
+        </div>
+      )}
+
+      {/* Webcam Preview - bottom right */}
+      {typeof window !== 'undefined' && (
+        <WebcamPreview
+          videoRef={thumbVideoRef}
+          modelLoaded={modelLoaded}
+          facesCount={detectionStatus?.facesCount}
+        />
+      )}
+
+      {/* Non-blocking FaceMesh failure message */}
+      {typeof window !== 'undefined' && (window as any).__faceMeshInitFailed && (
+        <div
+          style={{
+            position: "fixed",
+            top: "60px",
+            right: "1rem",
+            backgroundColor: "#f59e0b",
+            color: "#ffffff",
+            padding: "0.5rem 1rem",
+            borderRadius: "0.5rem",
+            fontSize: "0.75rem",
+            fontWeight: 500,
+            zIndex: 1001,
+            maxWidth: "300px",
+            boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
+          }}
+        >
+          FaceMesh initialization failed — proctoring degraded
+        </div>
+      )}
+
       {/* Proctoring Overlays */}
       {proctorEnabled && (
         <>

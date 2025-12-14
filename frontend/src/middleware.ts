@@ -3,6 +3,13 @@ import { NextResponse } from "next/server";
 
 export default withAuth(
   function middleware(req) {
+    const { pathname } = req.nextUrl;
+    
+    // Explicitly allow MediaPipe static assets to pass through without auth
+    if (pathname.startsWith('/mediapipe/')) {
+      return NextResponse.next();
+    }
+    
     // Middleware logic can be added here if needed
     return NextResponse.next();
   },
@@ -21,7 +28,13 @@ export default withAuth(
           "/api/auth",
           "/api/assessment",
           "/api/proctor",  // Proctoring API routes (validated server-side)
+          "/mediapipe",  // MediaPipe static assets (JS, WASM, data files)
         ];
+        
+        // MediaPipe static assets should always be public
+        if (pathname.startsWith('/mediapipe/')) {
+          return true;
+        }
         
         // Check if route is public
         const isPublicRoute = publicRoutes.some(route => 
@@ -79,9 +92,10 @@ export const config = {
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
-     * - public files (public folder)
+     * - mediapipe/ (MediaPipe assets - static files) - MUST be excluded
+     * - public files (public folder) - files with extensions are auto-excluded
      */
-    "/((?!api/auth|api/assessment|api/proctor|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api/auth|api/assessment|api/proctor|_next/static|_next/image|favicon.ico|mediapipe/).*)",
   ],
 };
 

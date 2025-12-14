@@ -899,6 +899,42 @@ interface Topic {
   coding_supported?: boolean; // Whether this topic supports coding questions
 }
 
+// Helper function to convert old proctoring settings to new format
+function normalizeProctoringSettings(oldSettings: any): { ai_proctoring: boolean; live_proctoring: boolean } {
+  if (!oldSettings) {
+    return { ai_proctoring: false, live_proctoring: false };
+  }
+  
+  // If already in new format, return as is
+  if (typeof oldSettings.ai_proctoring === 'boolean' || typeof oldSettings.live_proctoring === 'boolean') {
+    return {
+      ai_proctoring: oldSettings.ai_proctoring || false,
+      live_proctoring: oldSettings.live_proctoring || false,
+    };
+  }
+  
+  // Convert old format to new format
+  // AI Proctoring: enabled if any of these are true: multiFaceDetection, tabSwitchDetection, frameMatchRecognition, concentrationTracking
+  const aiProctoring = !!(
+    oldSettings.multiFaceDetection ||
+    oldSettings.tabSwitchDetection ||
+    oldSettings.frameMatchRecognition ||
+    oldSettings.concentrationTracking ||
+    oldSettings.externalDeviceDetection ||
+    oldSettings.browserExtensionMonitoring ||
+    oldSettings.fullscreenMonitoring ||
+    oldSettings.copyPasteBlocking
+  );
+  
+  // Live Proctoring: enabled if liveCameraAndScreenMonitoring is true
+  const liveProctoring = !!(oldSettings.liveCameraAndScreenMonitoring);
+  
+  return {
+    ai_proctoring: aiProctoring,
+    live_proctoring: liveProctoring,
+  };
+}
+
 export default function CreateNewAssessmentPage() {
   const router = useRouter();
   const { id } = router.query; // Get assessment ID from URL query params if editing
@@ -1056,27 +1092,13 @@ export default function CreateNewAssessmentPage() {
   const [scheduleTimeMinutes, setScheduleTimeMinutes] = useState<number>(0);
   const [scheduleTimeWarning, setScheduleTimeWarning] = useState<string | null>(null);
   
-  // Proctoring Settings (Station 4)
+  // Proctoring Settings (Station 4) - Simplified to two options
   const [proctoringSettings, setProctoringSettings] = useState<{
-    multiFaceDetection: boolean;
-    fullscreenMonitoring: boolean;
-    copyPasteBlocking: boolean;
-    tabSwitchDetection: boolean;
-    frameMatchRecognition: boolean;
-    externalDeviceDetection: boolean;
-    concentrationTracking: boolean;
-    browserExtensionMonitoring: boolean;
-    liveCameraAndScreenMonitoring: boolean;
+    ai_proctoring: boolean;
+    live_proctoring: boolean;
   }>({
-    multiFaceDetection: false,
-    fullscreenMonitoring: false,
-    copyPasteBlocking: false,
-    tabSwitchDetection: false,
-    frameMatchRecognition: false,
-    externalDeviceDetection: false,
-    concentrationTracking: false,
-    browserExtensionMonitoring: false,
-    liveCameraAndScreenMonitoring: false,
+    ai_proctoring: false,
+    live_proctoring: false,
   });
   
   // Schedule settings (Station 4)
@@ -1663,7 +1685,7 @@ export default function CreateNewAssessmentPage() {
         }
         
         if (assessment.proctoringSettings) {
-          setProctoringSettings(assessment.proctoringSettings);
+          setProctoringSettings(normalizeProctoringSettings(assessment.proctoringSettings));
         }
         
         // Load Station 3 data (Review Questions)
@@ -1996,7 +2018,7 @@ export default function CreateNewAssessmentPage() {
         
         // Load proctoring settings
         if (assessment.proctoringSettings) {
-          setProctoringSettings(assessment.proctoringSettings);
+          setProctoringSettings(normalizeProctoringSettings(assessment.proctoringSettings));
         }
         
         // Load Station 5 data (candidates, URL, accessMode, invitationTemplate)
@@ -8691,249 +8713,62 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   Proctoring Settings
                 </h3>
                 <p style={{ marginBottom: "1.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                  Enable the proctoring features you want to use during the exam. Only enabled modules will run and generate logs.
+                  Select the proctoring method(s) you want to use during the assessment. You can enable both options simultaneously.
                 </p>
                 
                 <div style={{ display: "grid", gap: "1rem" }}>
-                  {/* Multiple Face Detection */}
+                  {/* AI Proctoring */}
                   <div style={{ 
                     display: "flex", 
                     alignItems: "flex-start", 
                     gap: "0.75rem",
-                    padding: "1rem",
+                    padding: "1.5rem",
                     backgroundColor: "#ffffff",
                     borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
+                    border: "2px solid #e2e8f0",
+                    transition: "all 0.2s"
                   }}>
                     <input
                       type="checkbox"
-                      id="multiFaceDetection"
-                      checked={proctoringSettings.multiFaceDetection}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, multiFaceDetection: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
+                      id="ai_proctoring"
+                      checked={proctoringSettings.ai_proctoring}
+                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, ai_proctoring: e.target.checked }))}
+                      style={{ marginTop: "0.25rem", width: "20px", height: "20px", cursor: "pointer" }}
                     />
                     <div style={{ flex: 1 }}>
-                      <label htmlFor="multiFaceDetection" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Multiple Face Detection
+                      <label htmlFor="ai_proctoring" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.5rem", cursor: "pointer", fontSize: "1rem" }}>
+                        AI Proctoring
                       </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Detects if multiple faces appear in the camera feed, indicating potential cheating or unauthorized assistance.
+                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0, lineHeight: 1.6 }}>
+                        Browser-based AI detection including multiple-face detection, gaze-away detection, and tab switching tracking. Snapshots must be captured and stored whenever a violation occurs.
                       </p>
                     </div>
                   </div>
 
-                  {/* Full-Screen Monitoring */}
+                  {/* Live Proctoring */}
                   <div style={{ 
                     display: "flex", 
                     alignItems: "flex-start", 
                     gap: "0.75rem",
-                    padding: "1rem",
+                    padding: "1.5rem",
                     backgroundColor: "#ffffff",
                     borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
+                    border: "2px solid #e2e8f0",
+                    transition: "all 0.2s"
                   }}>
                     <input
                       type="checkbox"
-                      id="fullscreenMonitoring"
-                      checked={proctoringSettings.fullscreenMonitoring}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, fullscreenMonitoring: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
+                      id="live_proctoring"
+                      checked={proctoringSettings.live_proctoring}
+                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, live_proctoring: e.target.checked }))}
+                      style={{ marginTop: "0.25rem", width: "20px", height: "20px", cursor: "pointer" }}
                     />
                     <div style={{ flex: 1 }}>
-                      <label htmlFor="fullscreenMonitoring" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Full-Screen Monitoring
+                      <label htmlFor="live_proctoring" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.5rem", cursor: "pointer", fontSize: "1rem" }}>
+                        Live Proctoring
                       </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Monitors when candidates exit fullscreen mode, which may indicate they are switching to other applications.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Copy–Paste Blocking */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="copyPasteBlocking"
-                      checked={proctoringSettings.copyPasteBlocking}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, copyPasteBlocking: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="copyPasteBlocking" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Copy–Paste Blocking
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Blocks copy and paste operations during the exam to prevent candidates from copying answers or external content.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Tab Switching Detection */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="tabSwitchDetection"
-                      checked={proctoringSettings.tabSwitchDetection}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, tabSwitchDetection: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="tabSwitchDetection" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Tab Switching Detection
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Detects when candidates switch browser tabs or windows, which may indicate they are accessing unauthorized resources.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Frame Capture + Face Matching */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="frameMatchRecognition"
-                      checked={proctoringSettings.frameMatchRecognition}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, frameMatchRecognition: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="frameMatchRecognition" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Frame Capture + Face Matching
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Captures frames periodically and matches faces to detect if the same person is taking the exam throughout the session.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* External Device Detection */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="externalDeviceDetection"
-                      checked={proctoringSettings.externalDeviceDetection}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, externalDeviceDetection: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="externalDeviceDetection" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        External Device Detection
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Detects the presence of external devices (phones, tablets) in the camera feed that may be used for cheating.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* User Concentration Tracking */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="concentrationTracking"
-                      checked={proctoringSettings.concentrationTracking}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, concentrationTracking: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="concentrationTracking" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        User Concentration Tracking
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Tracks gaze direction, head movement, and blinking patterns to detect if the candidate is focused on the exam or distracted.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Browser Extension Usage Monitoring */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="browserExtensionMonitoring"
-                      checked={proctoringSettings.browserExtensionMonitoring}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, browserExtensionMonitoring: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="browserExtensionMonitoring" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Browser Extension Usage Monitoring
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Monitors for forbidden browser extensions that may be used to cheat, such as answer lookup tools or screen sharing extensions.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Live Human Camera + Screen Monitoring */}
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "flex-start", 
-                    gap: "0.75rem",
-                    padding: "1rem",
-                    backgroundColor: "#ffffff",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #e2e8f0"
-                  }}>
-                    <input
-                      type="checkbox"
-                      id="liveCameraAndScreenMonitoring"
-                      checked={proctoringSettings.liveCameraAndScreenMonitoring}
-                      onChange={(e) => setProctoringSettings(prev => ({ ...prev, liveCameraAndScreenMonitoring: e.target.checked }))}
-                      style={{ marginTop: "0.25rem", width: "18px", height: "18px", cursor: "pointer" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <label htmlFor="liveCameraAndScreenMonitoring" style={{ display: "block", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem", cursor: "pointer" }}>
-                        Live Human Camera + Screen Monitoring
-                      </label>
-                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                        Enables real-time WebRTC streaming of candidate's camera and screen to a human proctor for live monitoring and intervention.
+                      <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0, lineHeight: 1.6 }}>
+                        Continuous webcam and full-screen streaming to the Admin Live Proctoring panel. Admin can watch but cannot stop or interrupt the session.
                       </p>
                     </div>
                   </div>

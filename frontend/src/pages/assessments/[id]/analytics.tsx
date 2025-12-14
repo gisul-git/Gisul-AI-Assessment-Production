@@ -75,6 +75,57 @@ export default function AnalyticsPage() {
   const [addingCandidate, setAddingCandidate] = useState(false)
   const [assessmentCandidates, setAssessmentCandidates] = useState<Candidate[]>([])
   
+  // Component to fetch and display snapshot by ID
+  const SnapshotImage = ({ snapshotId }: { snapshotId: string }) => {
+    const [snapshotBase64, setSnapshotBase64] = useState<string | null>(null)
+    const [loading, setLoading] = useState(true)
+    const [error, setError] = useState(false)
+    
+    useEffect(() => {
+      const fetchSnapshot = async () => {
+        try {
+          const response = await axios.get(`/api/proctor/snapshot/${snapshotId}`)
+          if (response.data?.status === 'ok' && response.data?.snapshotBase64) {
+            const base64 = response.data.snapshotBase64
+            const contentType = response.data.contentType || 'image/jpeg'
+            setSnapshotBase64(`data:${contentType};base64,${base64}`)
+          } else {
+            setError(true)
+          }
+        } catch (err) {
+          console.error('Error fetching snapshot:', err)
+          setError(true)
+        } finally {
+          setLoading(false)
+        }
+      }
+      
+      if (snapshotId) {
+        fetchSnapshot()
+      }
+    }, [snapshotId])
+    
+    if (loading) {
+      return <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Loading snapshot...</div>
+    }
+    
+    if (error || !snapshotBase64) {
+      return <div style={{ fontSize: "0.75rem", color: "#ef4444" }}>Failed to load snapshot</div>
+    }
+    
+    return (
+      <img
+        src={snapshotBase64}
+        alt="Violation snapshot"
+        style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #e2e8f0", maxHeight: "200px" }}
+        onError={(e) => {
+          console.error("Error loading snapshot image:", e);
+          (e.target as HTMLImageElement).style.display = "none";
+        }}
+      />
+    )
+  }
+  
   // Multi-proctor hook for viewing all candidates
   const {
     candidateStreams,
@@ -191,7 +242,19 @@ export default function AnalyticsPage() {
       
       if (data.success && data.data) {
         setProctorLogs(data.data.logs || [])
-        setEventTypeLabels(data.data.eventTypeLabels || {})
+        // Add labels for new violation types
+        const labels = data.data.eventTypeLabels || {}
+        // Ensure new violation types have labels
+        if (!labels['GAZE_AWAY_DETECTED']) {
+          labels['GAZE_AWAY_DETECTED'] = 'Gaze Away Detected'
+        }
+        if (!labels['MULTIPLE_FACE_DETECTED']) {
+          labels['MULTIPLE_FACE_DETECTED'] = 'Multiple Face Detected'
+        }
+        if (!labels['MULTIPLE_FACES_DETECTED']) {
+          labels['MULTIPLE_FACES_DETECTED'] = 'Multiple Face Detected'
+        }
+        setEventTypeLabels(labels)
       } else {
         setProctorLogs([])
         setEventTypeLabels({})
@@ -1164,18 +1227,22 @@ export default function AnalyticsPage() {
                             </div>
                           )}
 
-                          {log.snapshotBase64 && (
+                          {(log.snapshotBase64 || log.snapshotId) && (
                             <div style={{ marginTop: "0.75rem" }}>
                               <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.5rem" }}>Evidence Snapshot:</div>
-                              <img
-                                src={log.snapshotBase64.startsWith("data:") ? log.snapshotBase64 : `data:image/png;base64,${log.snapshotBase64}`}
-                                alt="Violation snapshot"
-                                style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #e2e8f0", maxHeight: "200px" }}
-                                onError={(e) => {
-                                  console.error("Error loading snapshot image:", e);
-                                  (e.target as HTMLImageElement).style.display = "none";
-                                }}
-                              />
+                              {log.snapshotBase64 ? (
+                                <img
+                                  src={log.snapshotBase64.startsWith("data:") ? log.snapshotBase64 : `data:image/png;base64,${log.snapshotBase64}`}
+                                  alt="Violation snapshot"
+                                  style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #e2e8f0", maxHeight: "200px" }}
+                                  onError={(e) => {
+                                    console.error("Error loading snapshot image:", e);
+                                    (e.target as HTMLImageElement).style.display = "none";
+                                  }}
+                                />
+                              ) : log.snapshotId ? (
+                                <SnapshotImage snapshotId={log.snapshotId} />
+                              ) : null}
                             </div>
                           )}
                         </div>
