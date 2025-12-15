@@ -14,7 +14,11 @@ const VALID_EVENT_TYPES = new Set([
   "RIGHT_CLICK",
   "IDLE",
   "GAZE_AWAY",
+  "GAZE_AWAY_DETECTED",
   "MULTI_FACE",
+  "MULTIPLE_FACE_DETECTED",
+  "MULTIPLE_FACE",
+  "IN_FRAME_LOST",
   "SPOOF_DETECTED",
   "FACE_MISMATCH",
   "CAMERA_DENIED",
@@ -37,8 +41,10 @@ interface ViolationPayload {
   timestamp: string;
   assessmentId: string;
   userId: string;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
   snapshotBase64?: string;
+  snapshotId?: string;
 }
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -53,7 +59,7 @@ export default async function handler(
   }
 
   try {
-    const { eventType, timestamp, assessmentId, userId, metadata, snapshotBase64 } = req.body as ViolationPayload;
+    const { eventType, timestamp, assessmentId, userId, sessionId, metadata, snapshotBase64, snapshotId } = req.body as ViolationPayload;
 
     // Log received data for debugging
     console.log("[Proctor API] Record request received:", {
@@ -93,7 +99,10 @@ export default async function handler(
       assessmentId,
       userId,
       hasMetadata: !!metadata,
-      hasSnapshot: !!snapshotBase64,
+      hasSnapshot: !!(snapshotBase64 || snapshotId),
+      hasSnapshotBase64: !!snapshotBase64,
+      hasSnapshotId: !!snapshotId,
+      snapshotId: snapshotId || null,
     }, null, 2));
     
     // Validate that userId and assessmentId are not empty
@@ -122,8 +131,10 @@ export default async function handler(
           timestamp,
           assessmentId,
           userId,
+          sessionId: sessionId || null,
           metadata: metadata || null,
           snapshotBase64: snapshotBase64 || null,
+          snapshotId: snapshotId || null,
         },
         {
           headers: {

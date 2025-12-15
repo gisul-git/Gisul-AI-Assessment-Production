@@ -16,6 +16,7 @@ import {
   createViolation, 
   logViolation, 
   captureScreenshot,
+  setSessionIdForViolations,
   type ViolationType 
 } from "./violationHandler";
 
@@ -173,6 +174,11 @@ export function createProctorEngine(options: ProctorEngineOptions): ProctorEngin
         if (consecutiveNoFace >= NO_FACE_CONSECUTIVE_THRESHOLD) {
           if (shouldLogViolation("NO_FACE_DETECTED")) {
             const screenshot = captureScreenshot(currentVideoRef, getCanvasRef() || undefined);
+            // Get sessionId from sessionStorage
+            const sessionId = typeof window !== "undefined" 
+              ? sessionStorage.getItem("proctoringSessionId") 
+              : null;
+            
             const violation = createViolation(
               "NO_FACE_DETECTED",
               assessmentId,
@@ -180,6 +186,7 @@ export function createProctorEngine(options: ProctorEngineOptions): ProctorEngin
               { consecutiveChecks: consecutiveNoFace },
               screenshot || undefined
             );
+            violation.sessionId = sessionId || undefined;
 
             await logViolation(violation);
             state.violations.push({
@@ -198,28 +205,53 @@ export function createProctorEngine(options: ProctorEngineOptions): ProctorEngin
       }
 
       if (detectionResult.state === "MULTIPLE_FACES") {
-        if (shouldLogViolation("MULTIPLE_FACES_DETECTED")) {
+        if (shouldLogViolation("MULTIPLE_FACE_DETECTED")) {
           const screenshot = captureScreenshot(currentVideoRef, getCanvasRef() || undefined);
+          // Get sessionId from sessionStorage
+          const sessionId = typeof window !== "undefined" 
+            ? sessionStorage.getItem("proctoringSessionId") 
+            : null;
+          
           const violation = createViolation(
-            "MULTIPLE_FACES_DETECTED",
+            "MULTIPLE_FACE_DETECTED",
             assessmentId,
             candidateEmail,
             { faceCount: detectionResult.faceCount },
             screenshot || undefined
           );
+          violation.sessionId = sessionId || undefined;
 
           await logViolation(violation);
           state.violations.push({
-            type: "MULTIPLE_FACES_DETECTED",
+            type: "MULTIPLE_FACE_DETECTED",
             timestamp: violation.timestamp,
             metadata: violation.metadata,
           });
 
           if (onViolation) {
-            onViolation("MULTIPLE_FACES_DETECTED", violation.metadata);
+            onViolation("MULTIPLE_FACE_DETECTED", violation.metadata);
           }
         }
       }
+
+      // Gaze-away detection (placeholder - detection logic to be implemented)
+      // This will be called when gaze-away is detected
+      // For now, this is a placeholder structure
+      const detectGazeAway = () => {
+        // TODO: Implement gaze-away detection logic
+        // When detected, log with snapshot:
+        // if (shouldLogViolation("GAZE_AWAY_DETECTED")) {
+        //   const screenshot = captureScreenshot(currentVideoRef, getCanvasRef() || undefined);
+        //   const violation = createViolation(
+        //     "GAZE_AWAY_DETECTED",
+        //     assessmentId,
+        //     candidateEmail,
+        //     { /* gaze metadata */ },
+        //     screenshot || undefined
+        //   );
+        //   await logViolation(violation);
+        // }
+      };
 
       // Face matching (works for both centered and off-center single faces)
       if (
@@ -240,6 +272,11 @@ export function createProctorEngine(options: ProctorEngineOptions): ProctorEngin
           if (consecutiveMismatches >= FACE_MISMATCH_CONSECUTIVE_THRESHOLD) {
             if (shouldLogViolation("FACE_MISMATCH")) {
               const screenshot = captureScreenshot(currentVideoRef, getCanvasRef() || undefined);
+              // Get sessionId from sessionStorage
+              const sessionId = typeof window !== "undefined" 
+                ? sessionStorage.getItem("proctoringSessionId") 
+                : null;
+              
               const violation = createViolation(
                 "FACE_MISMATCH",
                 assessmentId,
@@ -250,6 +287,7 @@ export function createProctorEngine(options: ProctorEngineOptions): ProctorEngin
                 },
                 screenshot || undefined
               );
+              violation.sessionId = sessionId || undefined;
 
               await logViolation(violation);
               state.violations.push({

@@ -8,6 +8,7 @@ import axios from "axios";
 import Lenis from "lenis";
 
 import "@/styles/globals.css";
+import ViolationToast from "@/components/ViolationToast";
 
 function SmoothScroll() {
   useEffect(() => {
@@ -173,6 +174,7 @@ export default function App({ Component, pageProps }: AppProps) {
       </Head>
       <SmoothScroll />
       <SessionRefreshListener />
+      <ViolationToast />
       <Component {...rest} />
     </SessionProvider>
   );
