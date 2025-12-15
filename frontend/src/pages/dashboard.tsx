@@ -170,6 +170,24 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         console.error("Error fetching regular assessments:", assessmentsResponse.reason);
       }
       
+      // Process custom MCQ tests
+      if (customMcqResponse.status === 'fulfilled' && customMcqResponse.value.data?.success && Array.isArray(customMcqResponse.value.data.data)) {
+        const customMcqTests = customMcqResponse.value.data.data.map((test: any) => ({
+          id: test.id,
+          title: test.title || 'Untitled Custom MCQ Test',
+          status: test.isDraft ? 'draft' : (test.status || 'published'),
+          isDraft: test.isDraft || false,
+          hasSchedule: false, // Custom MCQ tests have schedule in schedule object
+          createdAt: test.createdAt,
+          updatedAt: test.createdAt,
+          type: 'custom_mcq' as const,
+        }));
+        allAssessments.push(...customMcqTests);
+        console.log(`[Dashboard] Loaded ${customMcqTests.length} custom MCQ tests`);
+      } else if (customMcqResponse.status === 'rejected') {
+        console.error("Error fetching custom MCQ tests:", customMcqResponse.reason);
+      }
+      
       // Process DSA tests
       if (dsaTestsResponse.status === 'fulfilled' && Array.isArray(dsaTestsResponse.value.data)) {
         const rawDsaTests = dsaTestsResponse.value.data;
@@ -376,7 +394,16 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
     
     try {
       setError(null);
-      const response = await axios.post(`/api/assessments/pause?assessmentId=${assessmentId}`);
+      // Find the assessment to determine its type
+      const assessment = assessments.find(a => a.id === assessmentId);
+      const assessmentType = assessment?.type || 'assessment';
+      
+      // Use different endpoint for custom MCQ
+      const endpoint = assessmentType === 'custom_mcq'
+        ? `/api/custom-mcq/pause?assessmentId=${assessmentId}`
+        : `/api/assessments/pause?assessmentId=${assessmentId}`;
+      
+      const response = await axios.post(endpoint);
       
       // Handle both response formats (with or without success wrapper)
       const updatedAssessment = response.data?.data?.assessment || response.data?.data || response.data?.assessment || response.data;
@@ -410,7 +437,16 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
     
     try {
       setError(null);
-      const response = await axios.post(`/api/assessments/resume?assessmentId=${assessmentId}`);
+      // Find the assessment to determine its type
+      const assessment = assessments.find(a => a.id === assessmentId);
+      const assessmentType = assessment?.type || 'assessment';
+      
+      // Use different endpoint for custom MCQ
+      const endpoint = assessmentType === 'custom_mcq'
+        ? `/api/custom-mcq/resume?assessmentId=${assessmentId}`
+        : `/api/assessments/resume?assessmentId=${assessmentId}`;
+      
+      const response = await axios.post(endpoint);
       
       // Handle both response formats (with or without success wrapper)
       const updatedAssessment = response.data?.data?.assessment || response.data?.data || response.data?.assessment || response.data;
@@ -454,7 +490,12 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       const originalAssessment = assessments.find(a => a.id === assessmentId);
       const assessmentType = originalAssessment?.type || 'assessment';
       
-      const response = await axios.post(`/api/assessments/clone?assessmentId=${assessmentId}`, {
+      // Use different endpoint for custom MCQ
+      const endpoint = assessmentType === 'custom_mcq' 
+        ? `/api/custom-mcq/clone?assessmentId=${assessmentId}`
+        : `/api/assessments/clone?assessmentId=${assessmentId}`;
+      
+      const response = await axios.post(endpoint, {
         newTitle: newTitle.trim(),
         keepSchedule: false,
         keepCandidates: false,
@@ -921,17 +962,22 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       if (assessment.type === 'dsa') {
                         router.push(`/dsa/tests`);
                       } else if (assessment.type === 'custom_mcq') {
-                        // For draft custom_mcq, go to edit/create page, otherwise details page
-                        if (assessment.status === 'draft') {
-                          router.push(`/custom-mcq/create?id=${assessment.id}`);
-                        } else {
-                          router.push(`/custom-mcq/${assessment.id}`);
-                        }
+                        // Route to create page with testId for editing (works for both draft and published)
+                        router.push(`/custom-mcq/create?testId=${assessment.id}`);
                       } else if (assessment.status === 'draft') {
-                        router.push(`/assessments/create-new?id=${assessment.id}`);
+                        if (assessment.type === 'custom_mcq') {
+                          router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                        } else {
+                          router.push(`/assessments/create-new?id=${assessment.id}`);
+                        }
                       } else {
-                        // For active/completed assessments, go to Analytics (NO EDIT)
-                        router.push(`/assessments/${assessment.id}/analytics`);
+                        // For active/paused/completed assessments, go to View/Analytics (NO EDIT)
+                        // Edit should only be accessed via Edit button, not card click
+                        if (assessment.type === 'custom_mcq') {
+                          router.push(`/custom-mcq/${assessment.id}`);
+                        } else {
+                          router.push(`/assessments/${assessment.id}/analytics`);
+                        }
                       }
                     }}
                   >
@@ -956,6 +1002,177 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                         {assessment.title}
                       </h3>
                       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                        {/* Overflow Menu */}
+                        <div style={{ position: "relative" }} data-menu-id={assessment.id}>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenMenuId(openMenuId === assessment.id ? null : assessment.id);
+                            }}
+                            style={{
+                              background: openMenuId === assessment.id ? "#f1f5f9" : "transparent",
+                              border: "none",
+                              cursor: "pointer",
+                              padding: "0.375rem",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              color: "#64748b",
+                              borderRadius: "0.375rem",
+                              transition: "all 0.2s ease",
+                              width: "28px",
+                              height: "28px",
+                            }}
+                            onMouseEnter={(e) => {
+                              if (openMenuId !== assessment.id) {
+                                e.currentTarget.style.backgroundColor = "#f8fafc";
+                                e.currentTarget.style.color = "#475569";
+                              }
+                            }}
+                            onMouseLeave={(e) => {
+                              if (openMenuId !== assessment.id) {
+                                e.currentTarget.style.backgroundColor = "transparent";
+                                e.currentTarget.style.color = "#64748b";
+                              }
+                            }}
+                            title="More options"
+                          >
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <circle cx="12" cy="5" r="1.5" />
+                              <circle cx="12" cy="12" r="1.5" />
+                              <circle cx="12" cy="19" r="1.5" />
+                            </svg>
+                          </button>
+                          {openMenuId === assessment.id && (
+                            <div
+                              style={{
+                                position: "absolute",
+                                top: "calc(100% + 0.5rem)",
+                                right: 0,
+                                backgroundColor: "#ffffff",
+                                border: "1px solid #e2e8f0",
+                                borderRadius: "0.75rem",
+                                boxShadow: "0 10px 25px rgba(0, 0, 0, 0.1), 0 4px 6px rgba(0, 0, 0, 0.05)",
+                                minWidth: "200px",
+                                zIndex: 1000,
+                                padding: "0.5rem",
+                                animation: "fadeIn 0.15s ease-out",
+                              }}
+                            >
+                              <style dangerouslySetInnerHTML={{__html: `
+                                @keyframes fadeIn {
+                                  from {
+                                    opacity: 0;
+                                    transform: translateY(-4px);
+                                  }
+                                  to {
+                                    opacity: 1;
+                                    transform: translateY(0);
+                                  }
+                                }
+                              `}} />
+                              {/* Pause/Resume Menu Item */}
+                              {(assessment.status === "active" || assessment.status === "scheduled" || assessment.status === "paused") && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    if (assessment.status === "paused") {
+                                      handleResumeAssessment(assessment.id, e);
+                                    } else {
+                                      handlePauseAssessment(assessment.id, e);
+                                    }
+                                  }}
+                                  style={{
+                                    width: "100%",
+                                    textAlign: "left",
+                                    padding: "0.625rem 0.875rem",
+                                    background: "none",
+                                    border: "none",
+                                    cursor: "pointer",
+                                    fontSize: "0.875rem",
+                                    color: assessment.status === "paused" ? "#059669" : "#1e293b",
+                                    fontWeight: 500,
+                                    borderRadius: "0.5rem",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: "0.625rem",
+                                    transition: "all 0.15s ease",
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    e.currentTarget.style.backgroundColor = assessment.status === "paused" ? "#ecfdf5" : "#f8fafc";
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    e.currentTarget.style.backgroundColor = "transparent";
+                                  }}
+                                >
+                                  {assessment.status === "paused" ? (
+                                    <>
+                                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <polygon points="5 3 19 12 5 21 5 3" />
+                                      </svg>
+                                      Resume Assessment
+                                    </>
+                                  ) : (
+                                    <>
+                                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <rect x="6" y="4" width="4" height="16" />
+                                        <rect x="14" y="4" width="4" height="16" />
+                                      </svg>
+                                      Pause Assessment
+                                    </>
+                                  )}
+                                </button>
+                              )}
+                              {/* Divider */}
+                              {(assessment.status === "active" || assessment.status === "scheduled" || assessment.status === "paused") && (
+                                <div style={{ height: "1px", backgroundColor: "#e2e8f0", margin: "0.375rem 0" }} />
+                              )}
+                              {/* Clone Menu Item */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setCloneModal({
+                                    show: true,
+                                    assessmentId: assessment.id,
+                                    assessmentTitle: assessment.title,
+                                    newTitle: `${assessment.title} (Copy)`,
+                                  });
+                                  setOpenMenuId(null);
+                                }}
+                                style={{
+                                  width: "100%",
+                                  textAlign: "left",
+                                  padding: "0.625rem 0.875rem",
+                                  background: "none",
+                                  border: "none",
+                                  cursor: "pointer",
+                                  fontSize: "0.875rem",
+                                  color: "#1e293b",
+                                  fontWeight: 500,
+                                  borderRadius: "0.5rem",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "0.625rem",
+                                  transition: "all 0.15s ease",
+                                }}
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.backgroundColor = "#f8fafc";
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.backgroundColor = "transparent";
+                                }}
+                              >
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                </svg>
+                                Clone Assessment
+                              </button>
+                            </div>
+                          )}
+                        </div>
                         {assessment.type === 'custom_mcq' && (
                           <>
                             <span
@@ -1079,7 +1296,11 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           }}
                           onClick={(e) => {
                             e.stopPropagation();
+                            if (assessment.type === 'custom_mcq') {
+                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                            } else {
                               router.push(`/assessments/create-new?id=${assessment.id}`);
+                            }
                           }}
                         >
                           Edit
@@ -1147,6 +1368,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               // DSA assessments use different analytics route
                               if (assessment.type === 'dsa') {
                                 router.push(`/dsa/tests/${assessment.id}/analytics`);
+                              } else if (assessment.type === 'custom_mcq') {
+                                router.push(`/custom-mcq/${assessment.id}`);
                               } else {
                                 router.push(`/assessments/${assessment.id}/analytics`);
                               }
@@ -1297,8 +1520,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                         </>
                       )}
                       
-                      {/* CASE C: Completed - Show Analytics and Delete, HIDE Edit */}
-                      {assessment.status === 'completed' && (
+                      {/* Custom MCQ - Show Edit and Delete */}
+                      {assessment.type === 'custom_mcq' && (
                         <>
                           <button
                             type="button"
@@ -1308,48 +1531,74 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               padding: "0.625rem 1rem",
                               marginTop: 0,
                               width: "100%",
+                              fontWeight: 600,
+                              transition: "all 0.15s ease",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              gap: "0.5rem",
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              // DSA assessments use different analytics route
-                              if (assessment.type === 'dsa') {
-                                router.push(`/dsa/tests/${assessment.id}/analytics`);
-                              } else {
-                                router.push(`/assessments/${assessment.id}/analytics`);
-                              }
+                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.transform = "translateY(-1px)";
+                              e.currentTarget.style.boxShadow = "0 2px 4px rgba(0, 0, 0, 0.1)";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.transform = "translateY(0)";
+                              e.currentTarget.style.boxShadow = "none";
                             }}
                           >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                            </svg>
                             Edit
                           </button>
                           <button
                             type="button"
                             style={{
                               fontSize: "0.875rem",
-                              padding: "0.5rem 1rem",
+                              padding: "0.625rem 1rem",
                               backgroundColor: "#ef4444",
                               color: "#ffffff",
                               border: "none",
-                              borderRadius: "0.375rem",
+                              borderRadius: "0.5rem",
                               cursor: "pointer",
-                              transition: "background-color 0.2s",
-                              width: "100%",
+                              transition: "all 0.15s ease",
+                              flex: 1,
+                              fontWeight: 600,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              gap: "0.5rem",
                             }}
                             onMouseEnter={(e) => {
                               e.currentTarget.style.backgroundColor = "#dc2626";
+                              e.currentTarget.style.transform = "translateY(-1px)";
+                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(239, 68, 68, 0.3)";
                             }}
                             onMouseLeave={(e) => {
                               e.currentTarget.style.backgroundColor = "#ef4444";
+                              e.currentTarget.style.transform = "translateY(0)";
+                              e.currentTarget.style.boxShadow = "none";
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
                               handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
                             }}
                           >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
                             Delete
                           </button>
                         </>
                       )}
-                                          </div>
+                    </div>
                   </div>
                 );
               })}

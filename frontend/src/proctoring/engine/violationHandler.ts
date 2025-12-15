@@ -7,9 +7,12 @@
 export type ViolationType =
   | "NO_FACE_DETECTED"
   | "MULTIPLE_FACES_DETECTED"
+  | "MULTIPLE_FACE_DETECTED" // Alias for consistency
+  | "GAZE_AWAY_DETECTED"
   | "FACE_MISMATCH"
   | "FACE_OBSTRUCTED"
   | "TAB_SWITCH"
+  | "FOCUS_LOST"
   | "FULLSCREEN_EXIT"
   | "COPY_PASTE_ATTEMPT"
   | "SCREENSHOT_ATTEMPT"
@@ -22,6 +25,7 @@ export interface Violation {
   timestamp: string;
   assessmentId: string;
   candidateEmail: string;
+  sessionId?: string; // Proctoring session ID
   metadata?: Record<string, unknown>;
   screenshot?: string; // Base64 encoded image
 }
@@ -60,6 +64,28 @@ export function captureScreenshot(
   }
 }
 
+// Queue for violations that occur before sessionId is available
+const violationQueue: Violation[] = [];
+let sessionIdAvailable: string | null = null;
+
+/**
+ * Set sessionId when it becomes available and flush queued violations
+ */
+export function setSessionIdForViolations(sessionId: string) {
+  sessionIdAvailable = sessionId;
+  // Flush queued violations
+  if (violationQueue.length > 0) {
+    console.log(`[ViolationHandler] Flushing ${violationQueue.length} queued violations with sessionId`);
+    violationQueue.forEach(violation => {
+      violation.sessionId = sessionId;
+      logViolation(violation).catch(err => {
+        console.error("[ViolationHandler] Error flushing queued violation:", err);
+      });
+    });
+    violationQueue.length = 0;
+  }
+}
+
 /**
  * Log violation to backend
  */
@@ -68,6 +94,17 @@ export async function logViolation(
   apiEndpoint: string = "/api/proctor/record"
 ): Promise<boolean> {
   try {
+    // Get sessionId from violation or global
+    const sessionId = violation.sessionId || sessionIdAvailable || 
+      (typeof window !== "undefined" ? sessionStorage.getItem("proctoringSessionId") : null);
+
+    // If no sessionId yet, queue the violation
+    if (!sessionId) {
+      console.warn(`[ViolationHandler] No sessionId available, queueing violation: ${violation.type}`);
+      violationQueue.push(violation);
+      return true; // Return true to avoid blocking, violation will be logged later
+    }
+
     const response = await fetch(apiEndpoint, {
       method: "POST",
       headers: {
@@ -76,6 +113,7 @@ export async function logViolation(
       body: JSON.stringify({
         userId: violation.candidateEmail,
         assessmentId: violation.assessmentId,
+        sessionId: sessionId,
         eventType: violation.type,
         timestamp: violation.timestamp,
         metadata: violation.metadata || {},
@@ -88,7 +126,7 @@ export async function logViolation(
       return false;
     }
 
-    console.log(`[ViolationHandler] Violation logged: ${violation.type}`);
+    console.log(`[ViolationHandler] Violation logged: ${violation.type} (sessionId: ${sessionId})`);
     return true;
   } catch (error) {
     console.error("[ViolationHandler] Error logging violation:", error);

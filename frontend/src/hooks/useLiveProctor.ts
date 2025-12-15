@@ -2,12 +2,15 @@
  * useLiveProctor Hook
  * 
  * Handles WebRTC streaming from candidate to admin for human proctoring.
- * Manages webcam + screen capture and signalling via backend API.
+ * Requires sessionId to be provided (created by consent flow).
+ * Waits for streams and sessionId before starting publishing.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const POLL_INTERVAL_MS = 2500; // 2.5 seconds
+const STREAM_TIMEOUT_MS = 20000; // 20 seconds
 
 interface LiveProctorSession {
   sessionId: string;
@@ -24,48 +27,73 @@ interface LiveProctorSession {
 interface UseLiveProctorOptions {
   assessmentId: string;
   candidateId: string;
+  sessionId?: string | null; // REQUIRED: Must be provided from consent flow
   screenStream?: MediaStream | null; // Pre-captured screen stream
   webcamStream?: MediaStream | null; // Pre-captured webcam stream
   onSessionStart?: () => void;
   onSessionEnd?: () => void;
   onError?: (error: string) => void;
+  onStreamsTimeout?: () => void; // Called when streams timeout
   debugMode?: boolean;
 }
 
+// TODO: restore live proctoring
+// Temporary noop export to avoid breaking imports
+export function useLiveProctor(_options: UseLiveProctorOptions) {
+  // Return minimal shape expected by callers so old code won't crash
+  return {
+    isStreaming: false,
+    sessionId: null,
+    connectionState: "disconnected" as const,
+    streamError: null,
+    stopStreaming: () => {},
+  };
+}
+
+/* TODO: restore live proctoring - original implementation below
 export function useLiveProctor({
   assessmentId,
   candidateId,
+  sessionId: providedSessionId,
   screenStream: preScreenStream,
   webcamStream: preWebcamStream,
   onSessionStart,
   onSessionEnd,
   onError,
+  onStreamsTimeout,
   debugMode = false,
 }: UseLiveProctorOptions) {
   const [isStreaming, setIsStreaming] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<string>("disconnected");
+  const [streamError, setStreamError] = useState<string | null>(null);
   
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const icePollIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const pendingSessionRef = useRef<LiveProctorSession | null>(null);
-  const isStreamingRef = useRef(false); // Use ref to avoid stale closure
-  const processedSessionsRef = useRef<Set<string>>(new Set()); // Track processed sessions to avoid loops
-  const isConnectingRef = useRef(false); // Prevent multiple connection attempts
+  const streamPollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const streamTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isStreamingRef = useRef(false);
+  const isConnectingRef = useRef(false);
+  const publisherCreatedRef = useRef(false); // Prevent duplicate publishers
+  const lastPollLogRef = useRef<string>(""); // Prevent duplicate log spam
+  const hasLoggedMissingParamsRef = useRef(false);
 
   const log = useCallback(
     (message: string, data?: unknown) => {
-      // Always log for debugging
-      console.log(`[LiveProctor] ${message}`, data || "");
+      if (debugMode) {
+        console.log(`[LiveProctor] ${message}`, data || "");
+      }
     },
-    []
+    [debugMode]
   );
 
-  // Record proctoring event
+  // Record proctoring event with sessionId
   const recordProctorEvent = useCallback(async (eventType: string, sessId: string) => {
+    if (!sessId) {
+      log("Cannot record event without sessionId");
+      return;
+    }
     try {
       await fetch(`${API_URL}/api/v1/proctor/record`, {
         method: "POST",
@@ -74,6 +102,7 @@ export function useLiveProctor({
           eventType,
           assessmentId,
           userId: candidateId,
+          sessionId: sessId,
           timestamp: new Date().toISOString(),
           metadata: { sessionId: sessId },
         }),
@@ -83,7 +112,34 @@ export function useLiveProctor({
     }
   }, [assessmentId, candidateId, log]);
 
-  // Poll for answer from admin
+  // Check if streams are available (from props or window globals as fallback)
+  const getAvailableStreams = useCallback((): { webcam: MediaStream | null; screen: MediaStream | null } => {
+    // Prefer explicit props
+    let webcam = preWebcamStream && preWebcamStream.active && preWebcamStream.getVideoTracks().some(t => t.readyState === 'live')
+      ? preWebcamStream
+      : null;
+    let screen = preScreenStream && preScreenStream.active && preScreenStream.getVideoTracks().some(t => t.readyState === 'live')
+      ? preScreenStream
+      : null;
+
+    // Fallback to window globals if props not available
+    if (!webcam && typeof window !== "undefined") {
+      const globalWebcam = (window as any).__webcamStream;
+      if (globalWebcam && globalWebcam.active && globalWebcam.getVideoTracks().some((t: MediaStreamTrack) => t.readyState === 'live')) {
+        webcam = globalWebcam;
+      }
+    }
+    if (!screen && typeof window !== "undefined") {
+      const globalScreen = (window as any).__screenStream;
+      if (globalScreen && globalScreen.active && globalScreen.getVideoTracks().some((t: MediaStreamTrack) => t.readyState === 'live')) {
+        screen = globalScreen;
+      }
+    }
+
+    return { webcam, screen };
+  }, [preWebcamStream, preScreenStream]);
+
+  // Poll for answer from admin (only after publisher is created)
   const startPollingForAnswer = useCallback(
     async (sessId: string, pc: RTCPeerConnection) => {
       let answerReceived = false;
@@ -111,7 +167,7 @@ export function useLiveProctor({
           }
           
           // Process new ICE candidates from admin
-          if (session.adminICE.length > lastAdminICEIndex) {
+          if (session.adminICE && session.adminICE.length > lastAdminICEIndex) {
             const newCandidates = session.adminICE.slice(lastAdminICEIndex);
             for (const ice of newCandidates) {
               log("Adding admin ICE candidate");
@@ -134,20 +190,28 @@ export function useLiveProctor({
         } catch (err) {
           log("Error polling for answer", err);
         }
-      }, 1000);
+      }, POLL_INTERVAL_MS);
     },
     [log]
   );
 
-  // Cleanup streaming - ONLY closes peer connection, NOT media streams
-  // Streams persist until component unmount (test submission/exit)
+  // Cleanup streaming
   const cleanupStreaming = useCallback((sessId?: string) => {
-    log("Closing peer connection (streams stay alive)...");
+    // Store publisher state before resetting (to avoid spam on early exits)
+    const hadPublisher = publisherCreatedRef.current;
     
-    // Clear ICE polling
+    // Clear intervals
     if (icePollIntervalRef.current) {
       clearInterval(icePollIntervalRef.current);
       icePollIntervalRef.current = null;
+    }
+    if (streamPollIntervalRef.current) {
+      clearInterval(streamPollIntervalRef.current);
+      streamPollIntervalRef.current = null;
+    }
+    if (streamTimeoutRef.current) {
+      clearTimeout(streamTimeoutRef.current);
+      streamTimeoutRef.current = null;
     }
     
     // Close peer connection only - DO NOT stop media streams
@@ -156,84 +220,57 @@ export function useLiveProctor({
       peerConnectionRef.current = null;
     }
     
-    // NOTE: We intentionally DO NOT stop webcamStreamRef or screenStreamRef here!
-    // Streams should persist so admin can reconnect without asking candidate again
-    
-    // Log session ended event
-    if (sessId) {
-      recordProctorEvent("PROCTOR_SESSION_ENDED", sessId);
-      fetch(`${API_URL}/api/v1/proctor/live/end-session/${sessId}`, {
-        method: "POST",
-      }).catch(() => {});
+    // Only log cleanup if we actually had a publisher (avoid spam on early exits)
+    if (hadPublisher) {
+      if (sessId) {
+        console.log(`[LiveProctor] Publisher stopped for session ${sessId}`);
+        log(`Publisher stopped for session ${sessId}`);
+        recordProctorEvent("PROCTOR_SESSION_ENDED", sessId).catch(() => {});
+        fetch(`${API_URL}/api/v1/proctor/live/end-session/${sessId}`, {
+          method: "POST",
+        }).catch(() => {});
+      } else {
+        console.log("[LiveProctor] Cleaning up streaming...");
+        log("Cleaning up streaming...");
+      }
+      onSessionEnd?.();
     }
+    // If publisher was never created, don't log cleanup (prevents spam)
     
     setIsStreaming(false);
     isStreamingRef.current = false;
     isConnectingRef.current = false;
-    setSessionId(null);
+    publisherCreatedRef.current = false;
     setConnectionState("disconnected");
-    pendingSessionRef.current = null;
-    
-    onSessionEnd?.();
   }, [log, onSessionEnd, recordProctorEvent]);
 
-  // Start streaming with a session - MUST be defined before checkForPendingSession
-  const startStreamingWithSession = useCallback(async (session: LiveProctorSession) => {
-    if (isStreamingRef.current) {
-      log("Already streaming, skipping...");
+  // Create publisher once when sessionId and streams are available
+  const createPublisher = useCallback(async (sessId: string, webcamStream: MediaStream, screenStream: MediaStream) => {
+    if (publisherCreatedRef.current || isConnectingRef.current) {
+      log("Publisher already created or connecting, skipping");
       return;
     }
-    
+
     try {
-      log("Starting streams...");
+      // Always log publisher creation (not just in debug mode)
+      console.log(`[LiveProctor] Publisher created for session ${sessId}`);
+      log(`Publisher created for session ${sessId}`);
+      isConnectingRef.current = true;
+      publisherCreatedRef.current = true;
       isStreamingRef.current = true;
       setIsStreaming(true);
-      
-      // Use pre-captured streams from props (captured in instructions page)
-      // This avoids asking for permissions again!
-      
-      // Check webcam stream
-      let webcamStream: MediaStream;
-      if (preWebcamStream && preWebcamStream.active && preWebcamStream.getVideoTracks().length > 0) {
-        log("Using pre-captured webcam stream (no permission dialog!)");
-        webcamStream = preWebcamStream;
-      } else {
-        // Fallback: request new webcam (will show permission dialog)
-        log("Pre-captured webcam not available, requesting new one...");
-        webcamStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 640, height: 480 },
-          audio: true,
-        });
-        log("Webcam stream acquired (fallback)");
-      }
+      setStreamError(null);
+
+      // Store streams
       webcamStreamRef.current = webcamStream;
-      
-      // Check screen stream
-      let screenStream: MediaStream;
-      if (preScreenStream && preScreenStream.active && preScreenStream.getVideoTracks().length > 0) {
-        log("Using pre-captured screen stream (no permission dialog!)");
-        screenStream = preScreenStream;
-      } else {
-        // Fallback: request new screen share (will show permission dialog)
-        log("Pre-captured screen not available, requesting new one...");
-        screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { 
-            displaySurface: "monitor",
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-          audio: false,
-        });
-        log("Screen stream acquired (fallback)");
-      }
       screenStreamRef.current = screenStream;
-      
+
       // Handle screen share stop
       screenStream.getVideoTracks()[0].onended = () => {
         log("Screen share stopped by user");
-        cleanupStreaming(session.sessionId);
+        cleanupStreaming(sessId);
       };
-      
+
       // Create peer connection
       const pc = new RTCPeerConnection({
         iceServers: [
@@ -242,18 +279,18 @@ export function useLiveProctor({
         ],
       });
       peerConnectionRef.current = pc;
-      
+
       // Add tracks to peer connection
       webcamStream.getTracks().forEach((track) => {
         pc.addTrack(track, webcamStream);
         log(`Added webcam track: ${track.kind}`);
       });
-      
+
       screenStream.getTracks().forEach((track) => {
         pc.addTrack(track, screenStream);
         log(`Added screen track: ${track.kind}`);
       });
-      
+
       // Handle ICE candidates
       pc.onicecandidate = async (event) => {
         if (event.candidate) {
@@ -262,7 +299,7 @@ export function useLiveProctor({
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              sessionId: session.sessionId,
+              sessionId: sessId,
               candidate: event.candidate.candidate,
               sdpMid: event.candidate.sdpMid,
               sdpMLineIndex: event.candidate.sdpMLineIndex,
@@ -271,7 +308,7 @@ export function useLiveProctor({
           });
         }
       };
-      
+
       // Handle connection state changes
       pc.onconnectionstatechange = () => {
         log("Connection state:", pc.connectionState);
@@ -279,250 +316,189 @@ export function useLiveProctor({
         
         if (pc.connectionState === "connected") {
           onSessionStart?.();
-          recordProctorEvent("PROCTOR_SESSION_STARTED", session.sessionId);
+          recordProctorEvent("PROCTOR_SESSION_STARTED", sessId).catch(() => {});
         } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
-          cleanupStreaming(session.sessionId);
+          cleanupStreaming(sessId);
         }
       };
-      
+
       // Create and send offer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      
+
       await fetch(`${API_URL}/api/v1/proctor/live/offer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sessionId: session.sessionId,
+          sessionId: sessId,
           sdp: offer.sdp,
           sdpType: "offer",
           sender: "candidate",
         }),
       });
-      
+
       log("Offer sent, waiting for answer...");
-      setSessionId(session.sessionId);
       setConnectionState("connecting");
-      
-      // Poll for answer and ICE candidates from admin
-      startPollingForAnswer(session.sessionId, pc);
-      
+
+      // Start polling for answer and ICE candidates from admin
+      startPollingForAnswer(sessId, pc);
+
     } catch (err) {
-      log("Error starting stream", err);
+      log("Error creating publisher", err);
       onError?.(err instanceof Error ? err.message : "Failed to start streaming");
       isStreamingRef.current = false;
       isConnectingRef.current = false;
+      publisherCreatedRef.current = false;
       setIsStreaming(false);
-      // Don't call cleanupStreaming here to avoid loop
     }
-  }, [log, onError, onSessionStart, cleanupStreaming, startPollingForAnswer, recordProctorEvent, preWebcamStream, preScreenStream]);
+  }, [log, onError, onSessionStart, cleanupStreaming, startPollingForAnswer, recordProctorEvent]);
 
-  // Poll for pending sessions from admin - now startStreamingWithSession is defined
-  const checkForPendingSession = useCallback(async () => {
-    // Skip if connecting or missing params
-    if (isConnectingRef.current || !assessmentId || !candidateId) {
-      return;
-    }
-    
-    try {
-      const res = await fetch(
-        `${API_URL}/api/v1/proctor/live/pending/${assessmentId}/${encodeURIComponent(candidateId)}`
-      );
-      const data = await res.json();
-      
-      if (data.success && data.data.hasSession) {
-        const session = data.data.session as LiveProctorSession;
-        
-        // Skip if we already processed this session
-        if (processedSessionsRef.current.has(session.sessionId)) {
-          return;
-        }
-        
-        // Process sessions that need streaming (pending or offer_sent from previous attempt)
-        if (session.status === "pending" || session.status === "offer_sent") {
-          log("New session found!", { sessionId: session.sessionId, status: session.status });
-          
-          // If already streaming to a DIFFERENT session, cleanup first
-          // This handles when admin uses "Live Proctoring" which creates new sessions
-          if (isStreamingRef.current && pendingSessionRef.current?.sessionId !== session.sessionId) {
-            log("New session detected, cleaning up old connection...");
-            // Cleanup old connection without ending the session (admin might have ended it)
-            if (peerConnectionRef.current) {
-              peerConnectionRef.current.close();
-              peerConnectionRef.current = null;
-            }
-            if (icePollIntervalRef.current) {
-              clearInterval(icePollIntervalRef.current);
-              icePollIntervalRef.current = null;
-            }
-            isStreamingRef.current = false;
-            setIsStreaming(false);
-          }
-          
-          // Now start streaming to new session
-          processedSessionsRef.current.add(session.sessionId);
-          pendingSessionRef.current = session;
-          
-          // Set connecting flag BEFORE async operation
-          isConnectingRef.current = true;
-          
-          // Auto-start streaming immediately without asking - mandatory feature
-          try {
-            await startStreamingWithSession(session);
-          } catch (err) {
-            log("Error in startStreamingWithSession", err);
-            isConnectingRef.current = false;
-          }
-        }
+  // Poll for streams with timeout - GATE: Only start if ALL required params are provided
+  useEffect(() => {
+    // Early guard: check if all required params exist
+    if (!providedSessionId || !assessmentId || !candidateId || !preWebcamStream) {
+      if (!hasLoggedMissingParamsRef.current) {
+        console.info("[LiveProctor] Not starting — missing params", {
+          hasSessionId: !!providedSessionId,
+          hasAssessmentId: !!assessmentId,
+          hasCandidateId: !!candidateId,
+          hasWebcamStream: !!preWebcamStream
+        });
+        hasLoggedMissingParamsRef.current = true;
       }
-    } catch (err) {
-      log("Error checking for pending session", err);
+      return;
     }
-  }, [assessmentId, candidateId, log, startStreamingWithSession]);
+    
+    // Check if webcam stream is live
+    const webcamLive = preWebcamStream.active && preWebcamStream.getVideoTracks()?.[0]?.readyState === 'live';
+    if (!webcamLive) {
+      if (!hasLoggedMissingParamsRef.current) {
+        console.info("[LiveProctor] Not starting — webcam stream not live", {
+          hasSessionId: !!providedSessionId,
+          hasAssessmentId: !!assessmentId,
+          hasCandidateId: !!candidateId,
+          webcamActive: preWebcamStream.active,
+          webcamLive: false
+        });
+        hasLoggedMissingParamsRef.current = true;
+      }
+      return;
+    }
+    
+    // reset missing params log because now we're proceeding
+    hasLoggedMissingParamsRef.current = false;
+    
+    // create publisher only once
+    if (publisherCreatedRef.current) {
+      return; // Already created, skip
+    }
 
-  // Create session immediately when assessment starts (if one doesn't exist)
-  const createInitialSession = useCallback(async () => {
-    if (!assessmentId || !candidateId || isStreamingRef.current || isConnectingRef.current) {
-      return;
+    // Clear any existing timeout/polling
+    if (streamTimeoutRef.current) {
+      clearTimeout(streamTimeoutRef.current);
     }
-    
-    // Wait for streams to be available (either pre-captured or we'll request them)
-    // Check if we have streams or can get them
-    const hasWebcam = (preWebcamStream && preWebcamStream.active) || 
-                      (webcamStreamRef.current && webcamStreamRef.current.active);
-    const hasScreen = (preScreenStream && preScreenStream.active) || 
-                     (screenStreamRef.current && screenStreamRef.current.active);
-    
-    if (!hasWebcam || !hasScreen) {
-      log("Waiting for streams to be available before creating session...", { hasWebcam, hasScreen });
-      // Don't create session yet - will be created when streams are available via checkForPendingSession
-      return;
+    if (streamPollIntervalRef.current) {
+      clearInterval(streamPollIntervalRef.current);
     }
-    
-    try {
-      log("Checking for existing session before creating initial session...");
+
+    const sessId = providedSessionId!;
+    let startTime = Date.now();
+    let lastPollMessage = "";
+
+    const checkStreams = () => {
+      const streams = getAvailableStreams();
+      const hasWebcam = !!streams.webcam;
+      const hasScreen = !!streams.screen;
+      const elapsed = Date.now() - startTime;
+
+      // GATE: Check if we have required streams AND they are active
+      const webcamActive = streams.webcam && 
+                          streams.webcam.active && 
+                          streams.webcam.getVideoTracks().some((t: MediaStreamTrack) => t.readyState === 'live');
+      const screenActive = streams.screen && 
+                          streams.screen.active && 
+                          streams.screen.getVideoTracks().some((t: MediaStreamTrack) => t.readyState === 'live');
       
-      // First check if a session already exists (maybe admin created it first)
-      const pendingRes = await fetch(
-        `${API_URL}/api/v1/proctor/live/pending/${assessmentId}/${encodeURIComponent(candidateId)}`
-      );
-      const pendingData = await pendingRes.json();
-      
-      if (pendingData.success && pendingData.data.hasSession) {
-        const existingSession = pendingData.data.session as LiveProctorSession;
-        log("Found existing session, will use it instead of creating new one", existingSession.sessionId);
-        
-        // Don't create a new session - the polling will pick up the existing one
+      if (webcamActive && screenActive) {
+        // Clear polling immediately
+        if (streamPollIntervalRef.current) {
+          clearInterval(streamPollIntervalRef.current);
+          streamPollIntervalRef.current = null;
+        }
+        if (streamTimeoutRef.current) {
+          clearTimeout(streamTimeoutRef.current);
+          streamTimeoutRef.current = null;
+        }
+
+        // Create publisher immediately
+        createPublisher(sessId, streams.webcam!, streams.screen!);
         return;
       }
-      
-      // No existing session, create one
-      log("No existing session found, creating initial session for assessment start...");
-      
-      // Create session with a placeholder adminId (will be updated when admin connects)
-      const res = await fetch(`${API_URL}/api/v1/proctor/live/create-session`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          assessmentId,
-          candidateId,
-          adminId: "system", // Placeholder - will be updated when admin connects
-        }),
-      });
-      
-      const data = await res.json();
-      
-      if (data.success) {
-        const sessionId = data.data.sessionId;
-        log("Initial session created", sessionId);
-        
-        // Start streaming immediately to this session
-        const session: LiveProctorSession = {
-          sessionId,
-          assessmentId,
-          candidateId,
-          adminId: "system",
-          status: "pending",
-          candidateICE: [],
-          adminICE: [],
-        };
-        
-        processedSessionsRef.current.add(sessionId);
-        pendingSessionRef.current = session;
-        isConnectingRef.current = true;
-        
-        await startStreamingWithSession(session);
-      }
-    } catch (err) {
-      log("Error creating initial session", err);
-      isConnectingRef.current = false;
-    }
-  }, [assessmentId, candidateId, log, startStreamingWithSession, preWebcamStream, preScreenStream]);
 
-  // Start polling for admin sessions - use ref to avoid re-creating interval
-  const checkForPendingSessionRef = useRef(checkForPendingSession);
-  checkForPendingSessionRef.current = checkForPendingSession;
-  
-  useEffect(() => {
-    if (!assessmentId || !candidateId) {
-      return;
-    }
-    
-    log("Assessment started - creating initial session and starting to poll...", { 
-      assessmentId, 
-      candidateId,
-      hasWebcam: !!(preWebcamStream && preWebcamStream.active),
-      hasScreen: !!(preScreenStream && preScreenStream.active),
-    });
-    
-    // Create session immediately when assessment starts (will wait for streams if needed)
-    createInitialSession();
-    
-    // Use ref to always call latest version without changing interval
-    const poll = () => checkForPendingSessionRef.current();
-    
-    // Poll every 3 seconds for new admin connections
-    pollIntervalRef.current = setInterval(poll, 3000);
-    poll(); // Initial check
-    
-    return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
+      // Log only once per interval to avoid spam
+      const pollMessage = `Waiting for streams... (${Math.floor(elapsed / 1000)}s) - Webcam: ${hasWebcam ? '✓' : '✗'}, Screen: ${hasScreen ? '✓' : '✗'}`;
+      if (pollMessage !== lastPollMessage) {
+        log(pollMessage);
+        lastPollMessage = pollMessage;
+      }
+
+      // Check timeout
+      if (elapsed >= STREAM_TIMEOUT_MS) {
+        log("Stream timeout reached");
+        
+        // Clear polling
+        if (streamPollIntervalRef.current) {
+          clearInterval(streamPollIntervalRef.current);
+          streamPollIntervalRef.current = null;
+        }
+        if (streamTimeoutRef.current) {
+          clearTimeout(streamTimeoutRef.current);
+          streamTimeoutRef.current = null;
+        }
+
+        // Show error
+        const errorMsg = "Camera or screen not detected. Please allow camera/screen permissions or re-share screen.";
+        setStreamError(errorMsg);
+        onError?.(errorMsg);
+        onStreamsTimeout?.();
       }
     };
-  }, [assessmentId, candidateId, log, createInitialSession, preWebcamStream, preScreenStream]); // Add streams to deps to retry when they become available
 
-  // Public stop function
-  const stopStreaming = useCallback(() => {
-    cleanupStreaming(sessionId || undefined);
-  }, [cleanupStreaming, sessionId]);
+    // Start polling
+    streamPollIntervalRef.current = setInterval(checkStreams, POLL_INTERVAL_MS);
+    checkStreams(); // Initial check
 
-  // Public start function (if needed)
-  const startStreaming = useCallback(async () => {
-    const session = pendingSessionRef.current;
-    if (!session) {
-      onError?.("No pending session found");
-      return;
-    }
-    await startStreamingWithSession(session);
-  }, [startStreamingWithSession, onError]);
+    // Set timeout
+    streamTimeoutRef.current = setTimeout(() => {
+      checkStreams(); // Final check
+    }, STREAM_TIMEOUT_MS);
 
-  // Cleanup on unmount - use empty deps to only run once
+    return () => {
+      if (streamPollIntervalRef.current) {
+        clearInterval(streamPollIntervalRef.current);
+        streamPollIntervalRef.current = null;
+      }
+      if (streamTimeoutRef.current) {
+        clearTimeout(streamTimeoutRef.current);
+        streamTimeoutRef.current = null;
+      }
+    };
+  }, [providedSessionId, assessmentId, candidateId, preWebcamStream, getAvailableStreams, createPublisher, log, onError, onStreamsTimeout, setStreamError]);
+
+  // Cleanup effect - only log if publisher existed
   useEffect(() => {
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
+      if (publisherCreatedRef.current) {
+        console.log(`[LiveProctor] Publisher stopped for session ${providedSessionId || 'unknown'}`);
+        cleanupStreaming(providedSessionId || undefined);
       }
-      if (icePollIntervalRef.current) {
-        clearInterval(icePollIntervalRef.current);
-        icePollIntervalRef.current = null;
-      }
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
-      }
+    };
+  }, [providedSessionId, cleanupStreaming]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      cleanupStreaming();
       if (webcamStreamRef.current) {
         webcamStreamRef.current.getTracks().forEach(t => t.stop());
         webcamStreamRef.current = null;
@@ -532,13 +508,14 @@ export function useLiveProctor({
         screenStreamRef.current = null;
       }
     };
-  }, []);
+  }, [cleanupStreaming]);
 
   return {
     isStreaming,
-    sessionId,
+    sessionId: providedSessionId,
     connectionState,
-    startStreaming,
-    stopStreaming,
+    streamError,
+    stopStreaming: () => cleanupStreaming(providedSessionId || undefined),
   };
 }
+*/

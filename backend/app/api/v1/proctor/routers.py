@@ -5,12 +5,19 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel
+import base64
 
 from ....db.mongo import get_db
-from .schemas import ProctorEventIn, ProctorSummaryOut, EVENT_TYPE_LABELS
+from .schemas import (
+    ProctorEventIn, 
+    ProctorSummaryOut, 
+    EVENT_TYPE_LABELS,
+    StartSessionRequest,
+    StopSessionRequest
+)
 from ....utils.responses import success_response
 from ....utils.mongo import to_object_id
 
@@ -537,6 +544,85 @@ async def get_all_sessions(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+# Session Lifecycle Endpoints
+# ============================================================================
+
+@router.post("/start-session")
+async def start_proctoring_session(
+    payload: StartSessionRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Start a new proctoring session for a candidate.
+    Creates a session record with timestamps and mode flags.
+    """
+    try:
+        if not payload.consent:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User consent is required to start proctoring session"
+            )
+        
+        # Check if there's an existing active session
+        existing_session = await db.proctoring_sessions.find_one({
+            "assessmentId": payload.assessmentId.strip(),
+            "userId": payload.userId.strip(),
+            "status": "active",
+        })
+        
+        if existing_session:
+            # Update existing session instead of creating new one
+            await db.proctoring_sessions.update_one(
+                {"_id": existing_session["_id"]},
+                {
+                    "$set": {
+                        "ai_proctoring": payload.ai_proctoring,
+                        "live_proctoring": payload.live_proctoring,
+                        "updatedAt": datetime.now(timezone.utc).isoformat(),
+                    }
+                }
+            )
+            session_id = str(existing_session["_id"])
+        else:
+            # Create new session
+            session = {
+                "assessmentId": payload.assessmentId.strip(),
+                "userId": payload.userId.strip(),
+                "ai_proctoring": payload.ai_proctoring,
+                "live_proctoring": payload.live_proctoring,
+                "status": "active",
+                "startedAt": datetime.now(timezone.utc).isoformat(),
+                "endedAt": None,
+                "metadata": payload.metadata or {},
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+            }
+            
+            result = await db.proctoring_sessions.insert_one(session)
+            session_id = str(result.inserted_id)
+        
+        logger.info(
+            f"[Proctor Session] Session started: {session_id} for user {payload.userId} "
+            f"in assessment {payload.assessmentId} (AI: {payload.ai_proctoring}, Live: {payload.live_proctoring})"
+        )
+        
+        return success_response(
+            "Proctoring session started",
+            {
+                "sessionId": session_id,
+                "ai_proctoring": payload.ai_proctoring,
+                "live_proctoring": payload.live_proctoring,
+            }
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[Proctor Session] Error starting session: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start proctoring session: {str(exc)}"
+        ) from exc
 @router.post("/record")
 async def record_proctor_event(
     payload: ProctorEventIn,
@@ -549,14 +635,27 @@ async def record_proctor_event(
     and stores them in MongoDB for later review by admins.
     """
     try:
-        # Create the document to store
+        # If snapshotId is provided, fetch the snapshot and include base64 for backward compatibility
+        snapshot_base64 = payload.snapshotBase64
+        if payload.snapshotId and not snapshot_base64:
+            try:
+                from bson import ObjectId
+                snapshot = await db.proctor_snapshots.find_one({"_id": ObjectId(payload.snapshotId)})
+                if snapshot:
+                    snapshot_base64 = snapshot.get("snapshotBase64")
+                    logger.info(f"[Proctor API] Fetched snapshot {payload.snapshotId} for event")
+            except Exception as e:
+                logger.warning(f"[Proctor API] Failed to fetch snapshot {payload.snapshotId}: {e}")
+        
+        # Create the document to storea
         proctor_event = {
             "userId": payload.userId.strip(),
             "assessmentId": payload.assessmentId.strip(),
             "eventType": payload.eventType.strip(),
             "timestamp": payload.timestamp,
             "metadata": payload.metadata,
-            "snapshotBase64": payload.snapshotBase64,
+            "snapshotBase64": snapshot_base64,  # Include for backward compatibility
+            "snapshotId": payload.snapshotId,  # Store snapshotId for reference
             "receivedAt": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -580,6 +679,120 @@ async def record_proctor_event(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to record proctoring event: {str(exc)}"
+        ) from exc
+
+
+@router.post("/upload")
+async def upload_proctor_snapshot(
+    file: UploadFile = File(...),
+    metadata: str = Form(...),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Upload a proctoring snapshot (image file).
+    
+    This endpoint receives snapshot images from the frontend and stores them in MongoDB.
+    Returns the snapshot ID which can be linked to violation records.
+    """
+    try:
+        import json
+        
+        # Parse metadata JSON
+        try:
+            metadata_dict = json.loads(metadata)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid metadata JSON format"
+            )
+        
+        # Validate required metadata fields
+        required_fields = ["eventType", "timestamp", "assessmentId", "userId"]
+        for field in required_fields:
+            if field not in metadata_dict:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Missing required metadata field: {field}"
+                )
+        
+        # Read file content
+        file_content = await file.read()
+        
+        # Convert to base64 for storage
+        snapshot_base64 = base64.b64encode(file_content).decode('utf-8')
+        
+        # Create snapshot document
+        snapshot_doc = {
+            "assessmentId": metadata_dict["assessmentId"].strip(),
+            "userId": metadata_dict["userId"].strip(),
+            "eventType": metadata_dict["eventType"].strip(),
+            "timestamp": metadata_dict["timestamp"],
+            "snapshotBase64": snapshot_base64,
+            "contentType": file.content_type or "image/jpeg",
+            "size": len(file_content),
+            "metadata": {k: v for k, v in metadata_dict.items() if k not in ["assessmentId", "userId", "eventType", "timestamp"]},
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        # Insert into proctor_snapshots collection
+        result = await db.proctor_snapshots.insert_one(snapshot_doc)
+        snapshot_id = str(result.inserted_id)
+        
+        logger.info(
+            f"[Proctor Upload] Snapshot saved: {snapshot_id} for user {metadata_dict['userId']} "
+            f"in assessment {metadata_dict['assessmentId']} (event: {metadata_dict['eventType']}, size: {len(file_content)} bytes)"
+        )
+        
+        return {
+            "status": "ok",
+            "id": snapshot_id,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[Proctor Upload] Error uploading snapshot: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload snapshot: {str(exc)}"
+        ) from exc
+
+
+@router.get("/snapshot/{snapshotId}")
+async def get_proctor_snapshot(
+    snapshotId: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Retrieve a proctoring snapshot by ID.
+    """
+    try:
+        from bson import ObjectId
+        
+        snapshot = await db.proctor_snapshots.find_one({"_id": ObjectId(snapshotId)})
+        
+        if not snapshot:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Snapshot not found"
+            )
+        
+        return {
+            "status": "ok",
+            "id": str(snapshot["_id"]),
+            "snapshotBase64": snapshot.get("snapshotBase64"),
+            "contentType": snapshot.get("contentType", "image/jpeg"),
+            "eventType": snapshot.get("eventType"),
+            "timestamp": snapshot.get("timestamp"),
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[Proctor] Error fetching snapshot: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch snapshot: {str(exc)}"
         ) from exc
 
 
@@ -653,16 +866,25 @@ async def get_proctor_logs(
     Get full proctoring logs for a specific candidate in an assessment.
     Returns all violation documents with metadata and snapshotBase64 for evidence gallery.
     
+    If userId is "*", returns all logs for the assessment (for admin view).
+    
     Returns:
     - logs: List of all violation documents sorted by timestamp (newest first)
     - totalCount: Total number of logs
     """
     try:
         # Query all events for this user and assessment, sorted newest first
-        query = {
-            "assessmentId": assessmentId.strip(),
-            "userId": userId.strip(),
-        }
+        # If userId is "*", return all logs for the assessment
+        if userId.strip() == "*":
+            query = {
+                "assessmentId": assessmentId.strip(),
+            }
+            logger.info(f"[Proctor API] Fetching ALL logs for assessment {assessmentId}")
+        else:
+            query = {
+                "assessmentId": assessmentId.strip(),
+                "userId": userId.strip(),
+            }
         
         # Use to_list with a reasonable limit to avoid timeout
         # Limit to 1000 most recent logs to prevent timeout issues

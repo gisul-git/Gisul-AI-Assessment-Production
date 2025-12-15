@@ -20,7 +20,9 @@ PROCTOR_EVENT_TYPES = {
     "RIGHT_CLICK",
     "IDLE",
     "GAZE_AWAY",
+    "GAZE_AWAY_DETECTED",
     "MULTI_FACE",
+    "MULTIPLE_FACE_DETECTED",
     "SPOOF_DETECTED",
     "FACE_MISMATCH",
     "CAMERA_DENIED",
@@ -59,7 +61,9 @@ EVENT_TYPE_LABELS: Dict[str, str] = {
     "RIGHT_CLICK": "Right click blocked",
     "IDLE": "Idle timeout detected",
     "GAZE_AWAY": "Gaze away detected",
+    "GAZE_AWAY_DETECTED": "Gaze away from screen detected",
     "MULTI_FACE": "Multiple faces detected",
+    "MULTIPLE_FACE_DETECTED": "Multiple faces detected in camera",
     "SPOOF_DETECTED": "Spoof attempt detected",
     "FACE_MISMATCH": "Face doesn't match verified identity",
     "CAMERA_DENIED": "Camera access was denied",
@@ -93,6 +97,7 @@ class ProctorEventIn(BaseModel):
     timestamp: str = Field(..., description="ISO8601 timestamp when event occurred")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional event metadata")
     snapshotBase64: Optional[str] = Field(default=None, description="Base64 encoded screenshot/snapshot")
+    snapshotId: Optional[str] = Field(default=None, description="ID of uploaded snapshot (from /upload endpoint)")
 
 
 class ProctorEventOut(BaseModel):
@@ -120,3 +125,20 @@ class ProctorSummaryOut(BaseModel):
         description="Human-readable labels for event types"
     )
 
+
+# Session lifecycle models
+class StartSessionRequest(BaseModel):
+    """Request to start a proctoring session."""
+    assessmentId: str = Field(..., description="Assessment ID")
+    userId: str = Field(..., description="Candidate user ID (email)")
+    ai_proctoring: bool = Field(..., description="AI proctoring enabled")
+    live_proctoring: bool = Field(..., description="Live proctoring enabled")
+    consent: bool = Field(..., description="User consent given")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional session metadata")
+
+
+class StopSessionRequest(BaseModel):
+    """Request to stop a proctoring session."""
+    assessmentId: str = Field(..., description="Assessment ID")
+    userId: str = Field(..., description="Candidate user ID (email)")
+    reason: Optional[str] = Field(default=None, description="Reason for stopping session")

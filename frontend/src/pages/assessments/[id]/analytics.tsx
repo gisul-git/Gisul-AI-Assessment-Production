@@ -186,15 +186,44 @@ export default function AnalyticsPage() {
     
     setLoadingProctorLogs(true)
     try {
-      const response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(email)}`)
-      const data = await response.json()
+      // First try with email
+      let response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(email)}`)
+      let data = await response.json()
       
-      if (data.success && data.data) {
-        setProctorLogs(data.data.logs || [])
+      if (data.success && data.data && data.data.logs && data.data.logs.length > 0) {
+        setProctorLogs(data.data.logs)
         setEventTypeLabels(data.data.eventTypeLabels || {})
       } else {
-        setProctorLogs([])
-        setEventTypeLabels({})
+        // If no logs found with email, try fetching all logs for this assessment
+        // and filter by candidate name or email pattern
+        console.log('[Analytics] No logs found with email, trying assessment-wide search...')
+        
+        // Try to get all logs for this assessment (backend may need update for this)
+        response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=*`)
+        data = await response.json()
+        
+        if (data.success && data.data && data.data.logs) {
+          // Filter logs that might belong to this candidate
+          const allLogs = data.data.logs || []
+          const candidateLogs = allLogs.filter((log: any) => {
+            const userId = log.userId || ''
+            return userId === email || 
+                   userId.includes(email.split('@')[0]) ||
+                   userId.startsWith('candidate-')
+          })
+          
+          if (candidateLogs.length > 0) {
+            console.log(`[Analytics] Found ${candidateLogs.length} logs via pattern matching`)
+            setProctorLogs(candidateLogs)
+            setEventTypeLabels(data.data.eventTypeLabels || {})
+          } else {
+            setProctorLogs([])
+            setEventTypeLabels({})
+          }
+        } else {
+          setProctorLogs([])
+          setEventTypeLabels({})
+        }
       }
     } catch (error) {
       console.error('Error fetching proctor logs:', error)

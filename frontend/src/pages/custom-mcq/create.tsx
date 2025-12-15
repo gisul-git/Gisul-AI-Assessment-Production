@@ -16,343 +16,697 @@ interface CreateCustomMCQPageProps {
   session: any;
 }
 
-export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProps) {
-  const router = useRouter();
-  const [currentStation, setCurrentStation] = useState(1);
-  const [assessmentData, setAssessmentData] = useState<Partial<CustomMCQAssessment>>({
-    title: "",
-    description: "",
-    questions: [],
-    candidates: [],
-    accessMode: "private",
-    examMode: "strict",
-    passPercentage: 50,
-  });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [assessmentId, setAssessmentId] = useState<string | null>(null);
-  const [createdAssessmentUrl, setCreatedAssessmentUrl] = useState<string | null>(null);
-  const [assessmentToken, setAssessmentToken] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isInitialLoadRef = useRef(true);
+export default function CreateCustomMCQTest({ session: serverSession }: DashboardPageProps) {
+  const { data: session } = useSession()
+  const router = useRouter()
+  const activeSession = serverSession || session
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const stations = [
-    { id: 1, name: "Assessment Information", icon: "📋" },
-    { id: 2, name: "Upload CSV", icon: "📤" },
-    { id: 3, name: "Review & Edit", icon: "✏️" },
-    { id: 4, name: "Add Candidates", icon: "👥" },
-    { id: 5, name: "Schedule", icon: "📅" },
-  ];
+  const [currentStep, setCurrentStep] = useState(1)
+  const [csvContent, setCsvContent] = useState<string>('')
+  const [csvFile, setCsvFile] = useState<File | null>(null)
+  const [validatedQuestions, setValidatedQuestions] = useState<MCQQuestion[]>([])
+  const [sections, setSections] = useState<Section[]>([])
+  const [validationErrors, setValidationErrors] = useState<string[]>([])
+  const [isValidating, setIsValidating] = useState(false)
+  const [isDownloadingTemplate, setIsDownloadingTemplate] = useState(false)
 
-  // Load draft from backend if assessmentId is in URL, otherwise check localStorage
+  // Assessment Information (Step 1)
+  const [assessmentInfo, setAssessmentInfo] = useState({
+    title: '',
+    description: '',
+    instructions: '',
+  })
+
+  // Test Settings
+  const [testSettings, setTestSettings] = useState({
+    passingPercentage: 50,
+    shuffleQuestions: false,
+    shuffleOptions: false,
+    allowNegativeMarking: false,
+    attemptLimit: 1,
+  })
+
+  // Timer Settings
+  const [timerMode, setTimerMode] = useState<'per-section' | 'single-exam'>('single-exam')
+  const [examDuration, setExamDuration] = useState<number>(60)
+  const [sectionTimes, setSectionTimes] = useState<Record<string, number>>({})
+
+  // Proctoring Settings
+  const [proctoringSettings, setProctoringSettings] = useState({
+    enabled: false,
+    multiFaceDetection: false,
+    fullscreenMonitoring: false,
+    copyPasteBlocking: false,
+    tabSwitchDetection: false,
+    frameMatchRecognition: false,
+    externalDeviceDetection: false,
+    browserExtensionMonitoring: false,
+    concentrationTracking: false,
+    liveCameraAndScreenMonitoring: false,
+  })
+
+  // Schedule Settings
+  const [schedule, setSchedule] = useState({
+    startTime: '',
+    endTime: '',
+  })
+
+  // Access Mode
+  const [accessMode, setAccessMode] = useState<'private' | 'public'>('private')
+  const [candidates, setCandidates] = useState<Array<{ name: string; email: string; phone?: string }>>([])
+  
+  // Candidate input fields (for adding new candidate)
+  const [newCandidateName, setNewCandidateName] = useState('')
+  const [newCandidateEmail, setNewCandidateEmail] = useState('')
+  
+  // Test URL display state
+  const [testUrl, setTestUrl] = useState<string | null>(null)
+  const [showTestUrl, setShowTestUrl] = useState(false)
+  
+  // Edit mode state
+  const [testId, setTestId] = useState<string | null>(null)
+  const [draftId, setDraftId] = useState<string | null>(null)
+  const [isLoadingTest, setIsLoadingTest] = useState(false)
+  const [isDraft, setIsDraft] = useState(false)
+  const [savingDraft, setSavingDraft] = useState(false)
+  const [draftSaved, setDraftSaved] = useState(false)
+  const autosaveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Create draft on mount if not editing
   useEffect(() => {
-    const loadDraft = async () => {
-      try {
-        const { id } = router.query;
-        
-        if (id && typeof id === "string") {
-          // Load existing draft from backend
-          try {
-            const assessment = await customMCQApi.getAssessment(id);
-            setAssessmentId(id);
-            setAssessmentData({
-              title: assessment.title || "",
-              description: assessment.description || "",
-              questions: assessment.questions || [],
-              candidates: assessment.candidates || [],
-              accessMode: assessment.accessMode || "private",
-              examMode: assessment.examMode || "strict",
-              startTime: assessment.startTime,
-              endTime: assessment.endTime,
-              duration: assessment.duration,
-              passPercentage: assessment.passPercentage || 50,
-            });
-            
-            // Set current station from backend or default to 1
-            const station = (assessment as any).currentStation || 1;
-            setCurrentStation(station);
-            isInitialLoadRef.current = false;
-          } catch (err) {
-            console.error("Error loading draft from backend:", err);
-            // Fallback to localStorage if backend load fails
-            const draft = localStorage.getItem("custom_mcq_draft");
-            if (draft) {
-              const parsed = JSON.parse(draft);
-              setAssessmentData(parsed);
-              if (parsed.currentStation) {
-                setCurrentStation(parsed.currentStation);
-              }
-            }
-          }
-        } else {
-          // No ID in URL, check localStorage
-          const draft = localStorage.getItem("custom_mcq_draft");
-          if (draft) {
-            const parsed = JSON.parse(draft);
-            setAssessmentData(parsed);
-            if (parsed.currentStation) {
-              setCurrentStation(parsed.currentStation);
-            }
-          }
-        }
-      } catch (err) {
-        console.error("Error loading draft:", err);
-      } finally {
-        isInitialLoadRef.current = false;
-      }
-    };
-
-    if (router.isReady) {
-      loadDraft();
+    const { testId: queryTestId } = router.query
+    if (!queryTestId && !draftId) {
+      createDraft()
     }
-  }, [router.isReady, router.query]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  // Auto-save draft to backend on every change (debounced)
-  const saveDraftToBackend = useCallback(async () => {
-    // Skip save on initial load
-    if (isInitialLoadRef.current) {
-      return;
-    }
-
-    // Clear existing timeout
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
-    }
-
-    // Debounce: wait 1 second after last change before saving
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        setIsSaving(true);
-        
-        const draftData: any = {
-          title: assessmentData.title || "",
-          description: assessmentData.description || "",
-          questions: assessmentData.questions || [],
-          candidates: assessmentData.candidates || [],
-          accessMode: assessmentData.accessMode || "private",
-          examMode: assessmentData.examMode || "strict",
-          startTime: assessmentData.startTime,
-          endTime: assessmentData.endTime,
-          duration: assessmentData.duration,
-          passPercentage: assessmentData.passPercentage || 50,
-          status: "draft",
-          currentStation: currentStation,
-        };
-
-        if (assessmentId) {
-          // Update existing draft
-          await customMCQApi.updateAssessment(assessmentId, {
-            ...draftData,
-            status: "draft",
-            currentStation: currentStation,
-          });
-        } else {
-          // Create new draft
-          const result = await customMCQApi.createAssessment({
-            ...draftData,
-            status: "draft",
-            currentStation: currentStation,
-          } as any);
-          setAssessmentId(result.assessmentId);
-        }
-      } catch (err) {
-        console.error("Error auto-saving draft:", err);
-        // Don't show error to user for auto-save failures
-      } finally {
-        setIsSaving(false);
-      }
-    }, 1000); // 1 second debounce
-  }, [assessmentData, currentStation, assessmentId]);
-
-  // Auto-save when data changes
+  // Load existing test/draft data when testId is in query params
   useEffect(() => {
-    saveDraftToBackend();
-    
-    // Cleanup timeout on unmount
-    return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-    };
-  }, [saveDraftToBackend]);
-
-  // Save draft before page unload
-  useEffect(() => {
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      // Save synchronously before leaving
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-      
-      // Use sendBeacon for reliable save on page unload
-      if (assessmentId || assessmentData.title || (assessmentData.questions && assessmentData.questions.length > 0)) {
-        const draftData = {
-          title: assessmentData.title || "",
-          description: assessmentData.description || "",
-          questions: assessmentData.questions || [],
-          candidates: assessmentData.candidates || [],
-          accessMode: assessmentData.accessMode || "private",
-          examMode: assessmentData.examMode || "strict",
-          startTime: assessmentData.startTime,
-          endTime: assessmentData.endTime,
-          duration: assessmentData.duration,
-          passPercentage: assessmentData.passPercentage || 50,
-          status: "draft",
-          currentStation: currentStation,
-        };
-
-        // Note: We rely on the debounced auto-save mechanism
-        // sendBeacon doesn't support custom headers needed for authentication
-        // The debounced save will handle the save before navigation
-      }
-    };
-
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    
-    return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-    };
-  }, [assessmentData, currentStation, assessmentId]);
-
-  const updateAssessmentData = (updates: Partial<CustomMCQAssessment>) => {
-    setAssessmentData((prev) => ({ ...prev, ...updates }));
-    setError(null);
-  };
-
-  const handleNext = () => {
-    if (currentStation < 5) {
-      setCurrentStation(currentStation + 1);
-      setError(null);
+    const { testId: queryTestId } = router.query
+    if (queryTestId && typeof queryTestId === 'string' && !testId) {
+      setTestId(queryTestId)
+      loadExistingTest(queryTestId)
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.query])
 
-  const handlePrevious = () => {
-    if (currentStation > 1) {
-      setCurrentStation(currentStation - 1);
-      setError(null);
-    }
-  };
-
-  const handleCreateAssessment = async () => {
+  const createDraft = async () => {
     try {
-      setLoading(true);
-      setError(null);
-
-      // Validate required fields
-      if (!assessmentData.title?.trim()) {
-        setError("Title is required");
-        setLoading(false);
-        return;
+      const response = await axios.post('/api/custom-mcq/create-draft', {
+        title: assessmentInfo.title || null,
+      })
+      if (response.data?.success && response.data?.data?.draftId) {
+        setDraftId(response.data.data.draftId)
+        setIsDraft(true)
       }
+    } catch (error: any) {
+      console.error('Error creating draft:', error)
+    }
+  }
 
-      if (!assessmentData.questions || assessmentData.questions.length === 0) {
-        setError("At least one question is required");
-        setLoading(false);
-        return;
+  const loadExistingTest = async (id: string) => {
+    setIsLoadingTest(true)
+    try {
+      // First try to load as draft
+      let response
+      try {
+        response = await axios.get(`/api/custom-mcq/get-draft?testId=${id}`)
+        if (response.data?.success && response.data?.data) {
+          const draft = response.data.data
+          setIsDraft(draft.isDraft || false)
+          setDraftId(id)
+          
+          // Load from draftData
+          const draftData = draft.draftData || {}
+          
+          // Load assessment info
+          if (draftData.settings) {
+            setAssessmentInfo({
+              title: draftData.settings.title || draft.title || '',
+              description: draftData.settings.description || '',
+              instructions: draftData.settings.instructions || '',
+            })
+            
+            setTestSettings({
+              passingPercentage: draftData.settings.passingPercentage || 50,
+              shuffleQuestions: draftData.settings.shuffleQuestions || false,
+              shuffleOptions: draftData.settings.shuffleOptions || false,
+              allowNegativeMarking: draftData.settings.allowNegativeMarking || false,
+              attemptLimit: draftData.settings.attemptLimit || 1,
+            })
+          } else {
+            setAssessmentInfo({
+              title: draft.title || '',
+              description: draft.description || '',
+              instructions: draft.instructions || '',
+            })
+          }
+          
+          // Load CSV raw data
+          if (draftData.csvRawData) {
+            setCsvContent(draftData.csvRawData)
+          }
+          
+          // Load parsed questions
+          if (draftData.parsedQuestions && draftData.parsedQuestions.length > 0) {
+            setValidatedQuestions(draftData.parsedQuestions)
+          }
+          
+          // Load sections
+          if (draftData.sections && draftData.sections.length > 0) {
+            setSections(draftData.sections)
+          }
+          
+          // Load scheduling
+          if (draftData.scheduling) {
+            const startTime = draftData.scheduling.startTime ? new Date(draftData.scheduling.startTime).toISOString().slice(0, 16) : ''
+            const endTime = draftData.scheduling.endTime ? new Date(draftData.scheduling.endTime).toISOString().slice(0, 16) : ''
+            setSchedule({ startTime, endTime })
+          }
+          
+          // Load candidates
+          if (draftData.candidates && Array.isArray(draftData.candidates)) {
+            setCandidates(draftData.candidates)
+          }
+          
+          // Load proctoring settings
+          if (draftData.proctoringSettings) {
+            setProctoringSettings(draftData.proctoringSettings)
+          }
+          
+          // Load timer settings
+          if (draftData.settings?.timerMode) {
+            setTimerMode(draftData.settings.timerMode)
+            setExamDuration(draftData.settings.examDuration || 60)
+            setSectionTimes(draftData.settings.sectionTimes || {})
+          }
+          
+          // Navigate to correct step
+          if (draft.progressStep) {
+            setCurrentStep(draft.progressStep)
+          }
+          
+          setIsLoadingTest(false)
+          return
+        }
+      } catch (draftError) {
+        // If draft load fails, try loading as regular test
+        console.log('Not a draft, loading as regular test')
       }
-
-      // Validate schedule based on exam mode
-      if (assessmentData.examMode === "strict") {
-        if (!assessmentData.startTime || !assessmentData.endTime) {
-          setError("Start time and end time are required for strict window mode");
-          setLoading(false);
-          return;
-        }
-      } else if (assessmentData.examMode === "flexible") {
-        if (!assessmentData.duration) {
-          setError("Duration is required for flexible window mode");
-          setLoading(false);
-          return;
-        }
-        if (!assessmentData.startTime || !assessmentData.endTime) {
-          setError("Start time and end time are required for flexible window mode");
-          setLoading(false);
-          return;
-        }
-      }
-
-      // Prepare data for API - change status from draft to scheduled
-      const createData: any = {
-        title: assessmentData.title!,
-        description: assessmentData.description || "",
-        questions: assessmentData.questions!,
-        candidates: assessmentData.candidates || [],
-        accessMode: assessmentData.accessMode || "private",
-        examMode: assessmentData.examMode || "strict",
-        startTime: assessmentData.startTime,
-        endTime: assessmentData.endTime,
-        duration: assessmentData.duration,
-        passPercentage: assessmentData.passPercentage || 50,
-        status: "scheduled", // Change from draft to scheduled
-        currentStation: currentStation,
-      };
-
-      let result: any;
-      if (assessmentId) {
-        // Update existing draft to scheduled
-        const updateResponse = await customMCQApi.updateAssessment(assessmentId, createData);
-        result = await customMCQApi.getAssessment(assessmentId);
-        // Get the token and URL from the update response if available
-        if (updateResponse && (updateResponse as any).assessmentToken) {
-          result.assessmentToken = (updateResponse as any).assessmentToken;
-          result.assessmentUrl = (updateResponse as any).assessmentUrl;
-        }
-      } else {
-        // Create new as scheduled
-        result = await customMCQApi.createAssessment(createData);
-        setAssessmentId(result.assessmentId);
-      }
-
-      // Clear localStorage draft
-      localStorage.removeItem("custom_mcq_draft");
-
-      // Store the assessment URL for display - always construct full URL
-      const token = result.assessmentToken || (result as any).assessmentToken;
-      const id = result.assessmentId || assessmentId;
-      let assessmentUrl = result.assessmentUrl || `/custom-mcq/entry/${id}?token=${token}`;
       
-      // If URL doesn't start with http, prepend the origin
-      if (!assessmentUrl.startsWith('http://') && !assessmentUrl.startsWith('https://')) {
-        assessmentUrl = `${window.location.origin}${assessmentUrl.startsWith('/') ? '' : '/'}${assessmentUrl}`;
-      }
-      
-      setCreatedAssessmentUrl(assessmentUrl);
-      setAssessmentToken(result.assessmentToken || (result as any).assessmentToken);
-      setAssessmentId(result.assessmentId || assessmentId);
-      
-      // Scroll to the URL section
-      setTimeout(() => {
-        const urlSection = document.getElementById('assessment-url-section');
-        if (urlSection) {
-          urlSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      // Load as regular test
+      response = await axios.get(`/api/custom-mcq/${id}`)
+      if (response.data?.success && response.data?.data) {
+        const test = response.data.data
+        setIsDraft(test.isDraft || false)
+        if (test.isDraft) {
+          setDraftId(id)
+        } else {
+          setTestId(id)
         }
-      }, 100);
-    } catch (err: any) {
-      console.error("Error creating assessment:", err);
-      setError(err.message || "Failed to create assessment");
+        
+        // Load assessment info
+        setAssessmentInfo({
+          title: test.title || '',
+          description: test.description || '',
+          instructions: test.instructions || '',
+        })
+        
+        // Load test settings
+        setTestSettings({
+          passingPercentage: test.passingPercentage || 50,
+          shuffleQuestions: test.shuffleQuestions || false,
+          shuffleOptions: test.shuffleOptions || false,
+          allowNegativeMarking: test.allowNegativeMarking || false,
+          attemptLimit: test.attemptLimit || 1,
+        })
+        
+        // Load timer settings
+        setTimerMode(test.timerMode || 'single-exam')
+        setExamDuration(test.examDuration || 60)
+        setSectionTimes(test.sectionTimes || {})
+        
+        // Load proctoring settings
+        if (test.proctoring) {
+          setProctoringSettings({
+            enabled: test.proctoring.enabled || false,
+            multiFaceDetection: test.proctoring.multiFaceDetection || false,
+            fullscreenMonitoring: test.proctoring.fullscreenMonitoring || false,
+            copyPasteBlocking: test.proctoring.copyPasteBlocking || false,
+            tabSwitchDetection: test.proctoring.tabSwitchDetection || false,
+            frameMatchRecognition: test.proctoring.frameMatchRecognition || false,
+            externalDeviceDetection: test.proctoring.externalDeviceDetection || false,
+            browserExtensionMonitoring: test.proctoring.browserExtensionMonitoring || false,
+            concentrationTracking: test.proctoring.concentrationTracking || false,
+            liveCameraAndScreenMonitoring: test.proctoring.liveCameraAndScreenMonitoring || false,
+          })
+        }
+        
+        // Load schedule
+        if (test.schedule) {
+          const startTime = test.schedule.startTime ? new Date(test.schedule.startTime).toISOString().slice(0, 16) : ''
+          const endTime = test.schedule.endTime ? new Date(test.schedule.endTime).toISOString().slice(0, 16) : ''
+          setSchedule({ startTime, endTime })
+        }
+        
+        // Load access mode and candidates
+        setAccessMode(test.accessMode || 'private')
+        if (test.candidates && Array.isArray(test.candidates)) {
+          setCandidates(test.candidates.map((c: any) => ({
+            name: c.name || '',
+            email: c.email || '',
+            phone: c.phone || '',
+          })))
+        }
+        
+        // Load sections and questions
+        if (test.sections && Array.isArray(test.sections)) {
+          const loadedSections: Section[] = test.sections.map((section: any) => ({
+            name: section.name || '',
+            timeLimit: section.timeLimit,
+            questions: section.questions.map((q: any) => ({
+              section: section.name || '',
+              question: q.question || '',
+              optionA: q.options?.A || '',
+              optionB: q.options?.B || '',
+              optionC: q.options?.C || '',
+              optionD: q.options?.D || '',
+              correctAnswer: q.correctAnswer || 'A',
+              marks: q.marks || 1,
+            })),
+          }))
+          
+          setSections(loadedSections)
+          
+          // Flatten questions for validatedQuestions
+          const allQuestions: MCQQuestion[] = []
+          loadedSections.forEach(section => {
+            section.questions.forEach(q => {
+              allQuestions.push(q)
+            })
+          })
+          setValidatedQuestions(allQuestions)
+          
+          // Determine which step to show based on what's configured
+          if (loadedSections.length > 0) {
+            setCurrentStep(3) // Show preview/edit step
+          } else if (assessmentInfo.title) {
+            setCurrentStep(2) // Show CSV upload step
+          }
+        }
+      }
+    } catch (error: any) {
+      console.error('Error loading test:', error)
+      alert(error.response?.data?.message || 'Failed to load test')
     } finally {
-      setLoading(false);
+      setIsLoadingTest(false)
     }
-  };
+  }
 
-  const canProceedToNext = () => {
-    switch (currentStation) {
-      case 1:
-        return !!(assessmentData.title?.trim());
-      case 2:
-        return !!(assessmentData.questions && assessmentData.questions.length > 0);
-      case 3:
-        return !!(assessmentData.questions && assessmentData.questions.length > 0);
-      case 4:
-        // Always allow proceeding - candidates are optional (public mode doesn't need candidates)
-        return true;
-      case 5:
-        return true; // Can always proceed from schedule to create
-      default:
-        return false;
+  // Autosave draft function
+  const saveDraft = async () => {
+    const currentDraftId = draftId || testId
+    if (!currentDraftId || !isDraft) return
+
+    setSavingDraft(true)
+    setDraftSaved(false)
+
+    try {
+      const draftData = {
+        csvRawData: csvContent,
+        parsedQuestions: validatedQuestions,
+        sections: sections,
+        settings: {
+          ...assessmentInfo,
+          ...testSettings,
+          timerMode,
+          examDuration,
+          sectionTimes,
+        },
+        scheduling: schedule,
+        candidates: candidates,
+        proctoringSettings: proctoringSettings,
+      }
+
+      await axios.post(`/api/custom-mcq/update-draft?draftId=${currentDraftId}`, {
+        draftData,
+        progressStep: currentStep,
+        timestamp: new Date().toISOString(),
+      })
+
+      setDraftSaved(true)
+      setTimeout(() => setDraftSaved(false), 2000)
+    } catch (error: any) {
+      console.error('Error saving draft:', error)
+    } finally {
+      setSavingDraft(false)
     }
-  };
+  }
+
+  // Debounced autosave
+  const debouncedSaveDraft = () => {
+    if (autosaveTimeoutRef.current) {
+      clearTimeout(autosaveTimeoutRef.current)
+    }
+    autosaveTimeoutRef.current = setTimeout(() => {
+      saveDraft()
+    }, 800)
+  }
+
+  // Autosave on any change
+  useEffect(() => {
+    if (draftId || (testId && isDraft)) {
+      debouncedSaveDraft()
+    }
+    return () => {
+      if (autosaveTimeoutRef.current) {
+        clearTimeout(autosaveTimeoutRef.current)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    csvContent,
+    validatedQuestions,
+    sections,
+    assessmentInfo,
+    testSettings,
+    timerMode,
+    examDuration,
+    sectionTimes,
+    schedule,
+    candidates,
+    proctoringSettings,
+    currentStep,
+  ])
+
+  const handleDownloadTemplate = async () => {
+    setIsDownloadingTemplate(true)
+    try {
+      const response = await axios.get('/api/custom-mcq/csv-template')
+      if (response.data?.success && response.data?.data?.template) {
+        const template = response.data.data.template
+        const blob = new Blob([template], { type: 'text/csv' })
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'custom_mcq_template.csv'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        window.URL.revokeObjectURL(url)
+      }
+    } catch (error: any) {
+      console.error('Error downloading template:', error)
+      alert('Failed to download template')
+    } finally {
+      setIsDownloadingTemplate(false)
+    }
+  }
+
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (!file.name.endsWith('.csv')) {
+      alert('Please select a CSV file')
+      return
+    }
+
+    setCsvFile(file)
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const content = e.target?.result as string
+      setCsvContent(content)
+    }
+    reader.readAsText(file)
+  }
+
+  const handleValidateCSV = async () => {
+    if (!csvContent.trim()) {
+      alert('Please upload a CSV file first')
+      return
+    }
+
+    setIsValidating(true)
+    setValidationErrors([])
+    setValidatedQuestions([])
+
+    try {
+      const response = await axios.post('/api/custom-mcq/validate-csv', {
+        csvContent,
+      })
+
+      if (response.data?.success) {
+        const data = response.data.data
+        if (data.valid) {
+          // Group questions by section
+          const sectionsMap: Record<string, MCQQuestion[]> = {}
+          data.questions.forEach((q: any) => {
+            if (!sectionsMap[q.section]) {
+              sectionsMap[q.section] = []
+            }
+            sectionsMap[q.section].push(q)
+          })
+
+          const sectionsList: Section[] = Object.entries(sectionsMap).map(([name, questions]) => ({
+            name,
+            questions,
+          }))
+
+          setSections(sectionsList)
+          setValidatedQuestions(data.questions)
+          setCurrentStep(3) // Move to preview/edit step
+        } else {
+          setValidationErrors(data.errors || ['Validation failed'])
+        }
+      }
+    } catch (error: any) {
+      console.error('Error validating CSV:', error)
+      setValidationErrors([error.response?.data?.message || 'Failed to validate CSV'])
+    } finally {
+      setIsValidating(false)
+    }
+  }
+
+  const handleEditQuestion = (index: number, field: string, value: any) => {
+    const updated = [...validatedQuestions]
+    updated[index] = { ...updated[index], [field]: value }
+    setValidatedQuestions(updated)
+
+    // Update sections
+    const sectionsMap: Record<string, MCQQuestion[]> = {}
+    updated.forEach((q) => {
+      if (!sectionsMap[q.section]) {
+        sectionsMap[q.section] = []
+      }
+      sectionsMap[q.section].push(q)
+    })
+
+    const sectionsList: Section[] = Object.entries(sectionsMap).map(([name, questions]) => ({
+      name,
+      questions,
+    }))
+
+    setSections(sectionsList)
+  }
+
+  const handleDeleteQuestion = (index: number) => {
+    const updated = validatedQuestions.filter((_, i) => i !== index)
+    setValidatedQuestions(updated)
+
+    // Update sections
+    const sectionsMap: Record<string, MCQQuestion[]> = {}
+    updated.forEach((q) => {
+      if (!sectionsMap[q.section]) {
+        sectionsMap[q.section] = []
+      }
+      sectionsMap[q.section].push(q)
+    })
+
+    const sectionsList: Section[] = Object.entries(sectionsMap).map(([name, questions]) => ({
+      name,
+      questions,
+    }))
+
+    setSections(sectionsList)
+  }
+
+  const handleAddQuestion = () => {
+    const newQuestion: MCQQuestion = {
+      section: sections[0]?.name || 'section1',
+      question: '',
+      optionA: '',
+      optionB: '',
+      optionC: '',
+      optionD: '',
+      correctAnswer: 'A',
+      marks: 1,
+    }
+    setValidatedQuestions([...validatedQuestions, newQuestion])
+  }
+
+  const handleAddCandidate = () => {
+    if (!newCandidateName.trim() || !newCandidateEmail.trim()) {
+      return
+    }
+
+    // Check for duplicate email
+    const emailExists = candidates.some(
+      c => c.email.toLowerCase().trim() === newCandidateEmail.toLowerCase().trim()
+    )
+    
+    if (emailExists) {
+      alert('A candidate with this email already exists')
+      return
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    if (!emailRegex.test(newCandidateEmail.trim())) {
+      alert('Please enter a valid email address')
+      return
+    }
+
+    setCandidates([
+      ...candidates,
+      {
+        name: newCandidateName.trim(),
+        email: newCandidateEmail.trim().toLowerCase(),
+      }
+    ])
+
+    // Clear input fields
+    setNewCandidateName('')
+    setNewCandidateEmail('')
+  }
+
+  const handleCreateTest = async () => {
+    // Validate all required fields
+    if (!assessmentInfo.title.trim()) {
+      alert('Please enter a test title')
+      return
+    }
+
+    if (sections.length === 0 || validatedQuestions.length === 0) {
+      alert('Please add at least one question')
+      return
+    }
+
+    if (!schedule.startTime || !schedule.endTime) {
+      alert('Please set the test schedule')
+      return
+    }
+
+    if (accessMode === 'private' && candidates.length === 0) {
+      alert('Please add at least one candidate for private mode')
+      return
+    }
+
+    try {
+      const payload = {
+        settings: {
+          title: assessmentInfo.title,
+          description: assessmentInfo.description,
+          instructions: assessmentInfo.instructions,
+          ...testSettings,
+        },
+        sections: sections.map((section) => ({
+          name: section.name,
+          timeLimit: timerMode === 'per-section' ? sectionTimes[section.name] : undefined,
+          questions: section.questions.map((q) => ({
+            question: q.question,
+            optionA: q.optionA,
+            optionB: q.optionB,
+            optionC: q.optionC,
+            optionD: q.optionD,
+            correctAnswer: q.correctAnswer,
+            marks: q.marks,
+          })),
+        })),
+        timerSettings: {
+          timerMode,
+          examDuration: timerMode === 'single-exam' ? examDuration : undefined,
+          sectionTimes: timerMode === 'per-section' ? sectionTimes : undefined,
+        },
+        proctoringSettings,
+        schedule: {
+          startTime: new Date(schedule.startTime).toISOString(),
+          endTime: new Date(schedule.endTime).toISOString(),
+          candidateRequirements: {},
+        },
+        accessMode,
+        candidates: accessMode === 'private' ? candidates : undefined,
+      }
+
+      let response
+      if (testId) {
+        // Update existing test
+        response = await axios.put(`/api/custom-mcq/${testId}`, payload)
+      } else {
+        // Create new test
+        response = await axios.post('/api/custom-mcq/create-test', payload)
+      }
+
+      if (response.data?.success) {
+        const url = response.data.data.testUrl || response.data.data.test?.examAccessUrl
+        const createdTestId = response.data.data.testId || testId
+        
+        if (url) {
+          setTestUrl(url)
+          setShowTestUrl(true)
+          
+          // Copy URL to clipboard
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(url).catch(console.error)
+          }
+        }
+        
+        // Show success message (without URL in alert)
+        const message = testId 
+          ? 'Custom MCQ Test updated successfully!'
+          : 'Custom MCQ Test created successfully!'
+        alert(message)
+        
+        // Don't redirect immediately - let user see the URL
+        // router.push('/dashboard')
+      }
+    } catch (error: any) {
+      console.error('Error creating test:', error)
+      alert(error.response?.data?.message || 'Failed to create test')
+    }
+  }
+
+  const totalSteps = 7
+  const stepTitles = [
+    'Assessment Information',
+    'Upload CSV',
+    'Preview & Edit Questions',
+    'Test Settings',
+    'Proctoring Settings',
+    'Add Candidates',
+    'Schedule Test',
+  ]
+
+  if (isLoadingTest) {
+    return (
+      <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', padding: '2rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ 
+            width: '48px', 
+            height: '48px', 
+            border: '4px solid #e2e8f0',
+            borderTopColor: '#6953a3',
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite',
+            margin: '0 auto 1rem'
+          }} />
+          <p style={{ color: '#64748b' }}>Loading test data...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div style={{ backgroundColor: "#ffffff", minHeight: "100vh", padding: "2rem" }}>
@@ -546,51 +900,27 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
             ← Previous
           </button>
 
-          {/* Back to Dashboard Button - Always Visible */}
-          <button
-            type="button"
-            onClick={async () => {
-              // Save draft before navigating away
-              if (saveTimeoutRef.current) {
-                clearTimeout(saveTimeoutRef.current);
-              }
-              try {
-                const draftData: any = {
-                  title: assessmentData.title || "",
-                  description: assessmentData.description || "",
-                  questions: assessmentData.questions || [],
-                  candidates: assessmentData.candidates || [],
-                  accessMode: assessmentData.accessMode || "private",
-                  examMode: assessmentData.examMode || "strict",
-                  startTime: assessmentData.startTime,
-                  endTime: assessmentData.endTime,
-                  duration: assessmentData.duration,
-                  passPercentage: assessmentData.passPercentage || 50,
-                  status: "draft",
-                  currentStation: currentStation,
-                };
-
-                if (assessmentId) {
-                  await customMCQApi.updateAssessment(assessmentId, draftData);
-                } else if (assessmentData.title || (assessmentData.questions && assessmentData.questions.length > 0)) {
-                  const result = await customMCQApi.createAssessment(draftData);
-                  setAssessmentId(result.assessmentId);
+          {currentStep === 1 && (
+            <button
+              onClick={() => {
+                if (!assessmentInfo.title.trim()) {
+                  alert('Please enter an assessment title')
+                  return
                 }
-              } catch (err) {
-                console.error("Error saving draft before navigation:", err);
-              }
-              router.push("/dashboard");
-            }}
-            className="btn-secondary"
-            style={{
-              padding: "0.75rem 1.5rem",
-              backgroundColor: "#ffffff",
-              color: "#2D7A52",
-              border: "1px solid #A8E8BC",
-            }}
-          >
-            ← Back to Dashboard
-          </button>
+                setCurrentStep(2)
+              }}
+              style={{
+                padding: '0.75rem 1.5rem',
+                backgroundColor: '#6953a3',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '0.5rem',
+                cursor: 'pointer',
+              }}
+            >
+              Next
+            </button>
+          )}
 
           {currentStation < 5 ? (
             <button

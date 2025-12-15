@@ -3,14 +3,12 @@ Custom MCQ Assessment API endpoints.
 """
 from __future__ import annotations
 
-import csv
-import io
 import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import ValidationError
 
@@ -19,15 +17,21 @@ from ....db.mongo import get_db
 from ....utils.mongo import serialize_document, to_object_id
 from ....utils.responses import success_response, error_response
 from .schemas import (
-    CreateCustomMCQAssessmentRequest,
-    UpdateCustomMCQAssessmentRequest,
-    ValidateCSVRequest,
-    SubmitCustomMCQRequest,
-    VerifyCustomMCQCandidateRequest,
-    SendCustomMCQInvitationRequest,
-    MCQQuestion,
-    Candidate,
-    CandidateSubmission,
+    CreateCustomMCQTestRequest,
+    CSVUploadRequest,
+    CSVValidationResponse,
+    ProctoringSettings,
+    ScheduleSettings,
+    TimerSettings,
+    CreateDraftRequest,
+    UpdateDraftRequest,
+    PublishDraftRequest,
+    DraftData,
+)
+from .services import (
+    generate_csv_template,
+    group_questions_by_section,
+    parse_csv_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -580,8 +584,8 @@ async def verify_custom_mcq_candidate(
 ) -> Dict[str, Any]:
     """Verify candidate access to custom MCQ assessment"""
     try:
-        assessment_oid = to_object_id(request.assessmentId)
-        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        oid = to_object_id(test_id)
+        test = await db.custom_mcq_tests.find_one({"_id": oid, "testToken": token})
         
         if not assessment:
             return error_response("Assessment not found", status_code=404)
@@ -678,358 +682,286 @@ async def get_custom_mcq_assessment_for_taking(
 ) -> Dict[str, Any]:
     """Get assessment details for taking (candidate view)"""
     try:
-        assessment_oid = to_object_id(assessment_id)
-        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
-        
-        if not assessment:
-            return error_response("Assessment not found", status_code=404)
-        
-        # Check token
-        if assessment.get("assessmentToken") != token:
-            return error_response("Invalid token", status_code=403)
-        
-        # Mark session as started if email and name are provided
-        if email and name:
-            submissions = assessment.get("submissions", {})
-            candidate_key = f"{email.lower().strip()}_{name.strip().lower()}"
-            
-            # If no submission record exists yet, create an "in_progress" record
-            if candidate_key not in submissions:
-                submissions[candidate_key] = {
-                    "candidateInfo": {
-                        "name": name.strip(),
-                        "email": email.lower().strip(),
-                    },
-                    "status": "in_progress",
-                    "startedAt": _now_utc().isoformat(),
-                }
-                await db.custom_mcq_assessments.update_one(
-                    {"_id": assessment_oid},
-                    {"$set": {"submissions": submissions}}
-                )
-            else:
-                # Update startedAt if not set (in case of race condition)
-                existing = submissions[candidate_key]
-                if not existing.get("startedAt") and not existing.get("submittedAt"):
-                    existing["status"] = "in_progress"
-                    existing["startedAt"] = _now_utc().isoformat()
-                    await db.custom_mcq_assessments.update_one(
-                        {"_id": assessment_oid},
-                        {"$set": {"submissions": submissions}}
-                    )
-        
-        assessment_serialized = serialize_document(assessment)
-        
-        # Remove sensitive information
-        assessment_serialized.pop("assessmentToken", None)
-        assessment_serialized.pop("submissions", None)
-        assessment_serialized.pop("created_by", None)
-        
-        # For questions, remove correct answers
-        questions = assessment_serialized.get("questions", [])
-        for q in questions:
-            q.pop("correctAn", None)
-            q.pop("answerType", None)
-            q.pop("marks", None)
-        
-        assessment_serialized["questions"] = questions
-        
-        return success_response(
-            "Assessment fetched successfully",
-            assessment_serialized
-        )
-        
-    except Exception as e:
-        logger.exception(f"Error getting assessment for taking: {e}")
-        return error_response(f"Failed to get assessment: {str(e)}", status_code=500)
-
-
-def _calculate_score(submissions: List[CandidateSubmission], questions: List[Dict[str, Any]]) -> tuple[int, int, float]:
-    """Calculate score, total marks, and percentage"""
-    total_marks = sum(q.get("marks", 0) for q in questions)
-    scored_marks = 0
-    
-    # Create a map of question ID to question data
-    questions_map = {q["id"]: q for q in questions}
-    
-    for submission in submissions:
-        question_id = submission.questionId
-        selected_answers = submission.selectedAnswers
-        
-        if question_id not in questions_map:
-            continue
-        
-        question = questions_map[question_id]
-        correct_answers_str = question.get("correctAn", "")
-        answer_type = question.get("answerType", "single")
-        marks = question.get("marks", 0)
-        
-        # Parse correct answers
-        correct_answers = [a.strip().upper() for a in correct_answers_str.split(",")]
-        
-        # Check if answer is correct based on answer type
-        is_correct = False
-        
-        if answer_type == "single":
-            # Single choice: must match exactly
-            if len(selected_answers) == 1 and selected_answers[0].upper() in correct_answers:
-                is_correct = True
-        elif answer_type == "multiple_all":
-            # Multiple choice all: must select all correct answers and no incorrect ones
-            selected_set = set(a.upper() for a in selected_answers)
-            correct_set = set(correct_answers)
-            if selected_set == correct_set and len(selected_set) == len(correct_set):
-                is_correct = True
-        elif answer_type == "multiple_any":
-            # Multiple choice any: selecting any one correct answer is enough
-            selected_set = set(a.upper() for a in selected_answers)
-            correct_set = set(correct_answers)
-            if selected_set.intersection(correct_set):
-                is_correct = True
-        
-        if is_correct:
-            scored_marks += marks
-    
-    percentage = (scored_marks / total_marks * 100) if total_marks > 0 else 0
-    
-    return scored_marks, total_marks, round(percentage, 2)
-
-
-@router.post("/submit")
-async def submit_custom_mcq(
-    request: SubmitCustomMCQRequest,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-) -> Dict[str, Any]:
-    """Submit custom MCQ answers"""
-    try:
-        assessment_oid = to_object_id(request.assessmentId)
-        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
-        
-        if not assessment:
-            return error_response("Assessment not found", status_code=404)
-        
-        # Check token
-        if assessment.get("assessmentToken") != request.token:
-            return error_response("Invalid token", status_code=403)
-        
-        # Check if already submitted
-        submissions = assessment.get("submissions", {})
-        candidate_key = f"{request.email.lower().strip()}_{request.name.strip().lower()}"
-        
-        if candidate_key in submissions and submissions[candidate_key].get("status") == "completed":
-            return error_response("You have already submitted this assessment", status_code=400)
-        
-        # Get questions with correct answers for scoring
-        questions = assessment.get("questions", [])
-        
-        # Calculate score
-        scored_marks, total_marks, percentage = _calculate_score(request.submissions, questions)
-        
-        # Check pass/fail
-        pass_percentage = assessment.get("passPercentage", 50)
-        passed = percentage >= pass_percentage
-        
-        # Store submission
-        submission_data = {
-            "candidateInfo": {
-                "name": request.name.strip(),
-                "email": request.email.lower().strip(),
+        draft_doc = {
+            "type": "custom_mcq",
+            "isDraft": True,
+            "title": payload.title or "Untitled Test",
+            "status": "draft",
+            "draftData": {
+                "csvRawData": None,
+                "parsedQuestions": [],
+                "sections": [],
+                "settings": None,
+                "scheduling": None,
+                "candidates": [],
+                "proctoringSettings": None,
             },
-            "submissions": [s.model_dump() for s in request.submissions],
-            "score": scored_marks,
-            "totalMarks": total_marks,
-            "percentage": percentage,
-            "passed": passed,
-            "status": "completed",
-            "startedAt": request.startedAt.isoformat() if request.startedAt else None,
-            "submittedAt": request.submittedAt.isoformat() if request.submittedAt else _now_utc().isoformat(),
+            "progressStep": 1,
+            "createdBy": to_object_id(current_user["id"]),
+            "organization": current_user.get("organization"),
+            "createdAt": _now_utc().isoformat(),
+            "updatedAt": _now_utc().isoformat(),
         }
         
-        submissions[candidate_key] = submission_data
+        result = await db.custom_mcq_tests.insert_one(draft_doc)
+        draft_id = str(result.inserted_id)
         
-        await db.custom_mcq_assessments.update_one(
-            {"_id": assessment_oid},
-            {"$set": {"submissions": submissions}}
-        )
+        logger.info(f"Custom MCQ draft created: {draft_id} by user {current_user['id']}")
         
         return success_response(
-            "Assessment submitted successfully",
+            "Draft created successfully",
             {
-                "score": scored_marks,
-                "totalMarks": total_marks,
-                "percentage": percentage,
-                "passed": passed,
-                "passPercentage": pass_percentage,
+                "draftId": draft_id,
             }
         )
-        
-    except Exception as e:
-        logger.exception(f"Error submitting custom MCQ: {e}")
-        return error_response(f"Failed to submit assessment: {str(e)}", status_code=500)
+    except Exception as exc:
+        logger.exception(f"Error creating draft: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create draft: {str(exc)}"
+        ) from exc
 
 
-@router.post("/send-invitations")
-async def send_custom_mcq_invitations(
-    request: SendCustomMCQInvitationRequest,
+@router.post("/update-draft/{draft_id}")
+async def update_draft(
+    draft_id: str,
+    payload: UpdateDraftRequest,
     current_user: Dict[str, Any] = Depends(require_editor),
     db: AsyncIOMotorDatabase = Depends(get_db),
-) -> Dict[str, Any]:
-    """Send invitation emails to candidates for custom MCQ assessment"""
+):
+    """Update a draft with current progress."""
     try:
-        from ....utils.email import get_email_service
-        from ....config.settings import get_settings
+        oid = to_object_id(draft_id)
+        draft = await db.custom_mcq_tests.find_one({"_id": oid})
         
-        user_id = current_user.get("id") or current_user.get("_id")
-        if not user_id:
-            return error_response("User ID not found", status_code=401)
-        user_id = str(user_id)
+        if not draft:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
         
-        assessment_oid = to_object_id(request.assessmentId)
-        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        _check_test_access(draft, current_user)
         
-        if not assessment:
-            return error_response("Assessment not found", status_code=404)
+        # Update only draftData and progressStep, keep isDraft = True
+        update_doc = {
+            "draftData": payload.draftData.dict(),
+            "progressStep": payload.progressStep,
+            "updatedAt": _now_utc().isoformat(),
+        }
         
-        # Check ownership
-        if str(assessment["created_by"]) != user_id:
-            return error_response("Access denied", status_code=403)
+        # If title is provided in draftData.settings, update it
+        if payload.draftData.settings and payload.draftData.settings.get("title"):
+            update_doc["title"] = payload.draftData.settings.get("title")
         
-        # Get email service and verify it's configured
-        settings = get_settings()
-        
-        # Check email configuration based on provider
-        email_configured = False
-        if settings.email_provider.lower() == "sendgrid":
-            email_configured = bool(settings.sendgrid_api_key and settings.sendgrid_from_email)
-        elif settings.email_provider.lower() == "azure":
-            email_configured = bool(settings.azure_comm_connection_string and settings.azure_comm_sender_address)
-        elif settings.email_provider.lower() == "aws":
-            email_configured = bool(settings.aws_access_key and settings.aws_secret_key and settings.aws_email_source)
-        
-        if not email_configured:
-            return error_response(
-                f"Email service ({settings.email_provider}) is not configured. Please set email provider credentials.",
-                status_code=500
-            )
-        
-        email_service = get_email_service()
-        
-        # Get template values or use defaults
-        template = request.template or {}
-        subject_template = template.get("subject", "Assessment Invitation - {{assessment_title}}")
-        message_template = template.get("message", "Dear {{candidate_name}},\n\nYou have been invited to take the assessment: {{assessment_title}}.\n\nPlease click the button below to start the assessment.")
-        footer = template.get("footer", "")
-        sent_by = template.get("sentBy", "AI Assessment Platform")
-        
-        assessment_title = assessment.get("title", "Assessment")
-        
-        # Replace assessment title in subject
-        subject = subject_template.replace("{{assessment_title}}", assessment_title)
-        
-        sent_count = 0
-        failed_emails = []
-        error_messages = []
-        
-        for candidate in request.candidates:
-            email = candidate.email.strip().lower()
-            name = candidate.name.strip()
-            
-            if not email or not name:
-                failed_emails.append(email or "unknown")
-                error_messages.append(f"Invalid candidate data: email={email}, name={name}")
-                continue
-            
-            # Build assessment URL with token
-            assessment_url = request.assessmentUrl
-            assessment_token = assessment.get("assessmentToken")
-            if assessment_token:
-                # Ensure URL has token parameter
-                if "token=" not in assessment_url:
-                    separator = "&" if "?" in assessment_url else "?"
-                    assessment_url = f"{assessment_url}{separator}token={assessment_token}"
-            
-            # Replace placeholders in message
-            email_body = message_template
-            email_body = email_body.replace("{{candidate_name}}", name)
-            email_body = email_body.replace("{{candidate_email}}", email)
-            email_body = email_body.replace("{{assessment_title}}", assessment_title)
-            email_body = email_body.replace("\n", "<br>")  # Convert newlines to HTML breaks
-            
-            # Build HTML email
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ text-align: center; margin-bottom: 30px; }}
-                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
-                    .button {{ display: inline-block; padding: 12px 24px; background-color: #2D7A52; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; font-weight: 600; }}
-                    .button:hover {{ background-color: #1E5A3B; }}
-                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
-                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #2D7A52; }}
-                    .candidate-info p {{ margin: 5px 0; }}
-                    .candidate-info strong {{ color: #1e293b; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="content">
-                        <p>{email_body}</p>
-                        
-                        <div class="candidate-info">
-                            <p><strong>Your Details:</strong></p>
-                            <p><strong>Name:</strong> {name}</p>
-                            <p><strong>Email:</strong> {email}</p>
-                        </div>
-                        
-                        <div style="text-align: center;">
-                            <a href="{assessment_url}" class="button">Start Assessment</a>
-                        </div>
-                    </div>
-                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
-                    <div class="footer">
-                        <p>Sent by {sent_by}</p>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            try:
-                logger.info(f"Attempting to send invitation email to {email} via {settings.email_provider}")
-                await email_service.send_email(email, subject, html_content)
-                logger.info(f"Email sent successfully to {email}")
-                sent_count += 1
-            except Exception as exc:
-                error_msg = f"Failed to send invitation to {email}: {str(exc)}"
-                logger.error(error_msg, exc_info=True)
-                failed_emails.append(email)
-                error_messages.append(error_msg)
-        
-        if sent_count == 0 and len(failed_emails) > 0:
-            return error_response(
-                f"Failed to send all invitations. Errors: {', '.join(error_messages[:3])}",
-                status_code=500
-            )
-        
-        message = f"Invitations sent to {sent_count} candidate(s)"
-        if len(failed_emails) > 0:
-            message += f". {len(failed_emails)} failed: {', '.join(failed_emails[:5])}"
-        
-        return success_response(
-            message,
-            {
-                "sentCount": sent_count,
-                "failedCount": len(failed_emails),
-                "failedEmails": failed_emails,
-                "errorMessages": error_messages,
-            }
+        await db.custom_mcq_tests.update_one(
+            {"_id": oid},
+            {"$set": update_doc}
         )
         
-    except Exception as e:
-        logger.exception(f"Error sending invitation emails: {e}")
-        return error_response(f"Failed to send invitations: {str(e)}", status_code=500)
+        logger.info(f"Draft updated: {draft_id} at step {payload.progressStep}")
+        
+        return success_response("Draft updated successfully", {"draftId": draft_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error updating draft: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update draft: {str(exc)}"
+        ) from exc
+
+
+@router.get("/draft/{draft_id}")
+async def get_draft(
+    draft_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Get a draft with full draftData for editing."""
+    try:
+        oid = to_object_id(draft_id)
+        draft = await db.custom_mcq_tests.find_one({"_id": oid})
+        
+        if not draft:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        
+        _check_test_access(draft, current_user)
+        
+        # Convert ObjectId to string
+        draft["_id"] = str(draft["_id"])
+        
+        return success_response("Draft fetched successfully", draft)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error fetching draft: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch draft: {str(exc)}"
+        ) from exc
+
+
+@router.post("/publish/{draft_id}")
+async def publish_draft(
+    draft_id: str,
+    payload: PublishDraftRequest,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Convert draft into finalized CustomTest."""
+    try:
+        oid = to_object_id(draft_id)
+        draft = await db.custom_mcq_tests.find_one({"_id": oid})
+        
+        if not draft:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        
+        _check_test_access(draft, current_user)
+        
+        # Calculate total marks
+        total_marks = 0
+        for section in payload.sections:
+            for question in section.questions:
+                total_marks += question.marks
+        
+        # Generate test token
+        test_token = secrets.token_urlsafe(32)
+        
+        # Build finalized test document
+        test_doc = {
+            "type": "custom_mcq",
+            "isDraft": False,
+            "title": payload.settings.title,
+            "description": payload.settings.description,
+            "instructions": payload.settings.instructions if hasattr(payload.settings, 'instructions') else None,
+            "passingPercentage": payload.settings.passingPercentage,
+            "shuffleQuestions": payload.settings.shuffleQuestions,
+            "shuffleOptions": payload.settings.shuffleOptions,
+            "allowNegativeMarking": payload.settings.allowNegativeMarking,
+            "attemptLimit": payload.settings.attemptLimit,
+            "sections": [
+                {
+                    "name": section.name,
+                    "timeLimit": section.timeLimit,
+                    "questions": [
+                        {
+                            "question": q.question,
+                            "options": {
+                                "A": q.optionA,
+                                "B": q.optionB,
+                                "C": q.optionC,
+                                "D": q.optionD,
+                            },
+                            "correctAnswer": q.correctAnswer,
+                            "marks": q.marks,
+                        }
+                        for q in section.questions
+                    ],
+                }
+                for section in payload.sections
+            ],
+            "totalMarks": total_marks,
+            "timerMode": payload.timerSettings.timerMode,
+            "examDuration": payload.timerSettings.examDuration,
+            "sectionTimes": payload.timerSettings.sectionTimes or {},
+            "proctoring": payload.proctoringSettings.dict(),
+            "schedule": {
+                "startTime": payload.schedule.startTime.isoformat(),
+                "endTime": payload.schedule.endTime.isoformat(),
+                "candidateRequirements": payload.schedule.candidateRequirements or {},
+            },
+            "accessMode": payload.accessMode,
+            "testToken": test_token,
+            "candidates": [
+                {
+                    "name": c.name,
+                    "email": c.email.lower().strip(),
+                    "phone": c.phone,
+                    "invited": False,
+                    "inviteSentAt": None,
+                    "status": "pending",
+                }
+                for c in (payload.candidates or [])
+            ],
+            "candidateResponses": {},
+            "answerLogs": {},
+            "createdBy": to_object_id(current_user["id"]),
+            "organization": current_user.get("organization"),
+            "createdAt": draft.get("createdAt", _now_utc().isoformat()),
+            "updatedAt": _now_utc().isoformat(),
+            "status": "published",
+            # Keep draftData for history (optional - can be removed)
+            # "draftData": draft.get("draftData"),
+        }
+        
+        # Generate test access URL
+        from ....config.settings import get_settings
+        settings = get_settings()
+        base_url = getattr(settings, 'frontend_url', 'http://localhost:3000')
+        test_url = f"{base_url}/custom-mcq/test/{draft_id}/{test_token}"
+        
+        test_doc["examAccessUrl"] = test_url
+        
+        # Update the draft to finalized test
+        await db.custom_mcq_tests.update_one(
+            {"_id": oid},
+            {"$set": test_doc}
+        )
+        
+        logger.info(f"Draft published: {draft_id} by user {current_user['id']}")
+        
+        return success_response(
+            "Draft published successfully",
+            {
+                "testId": draft_id,
+                "testToken": test_token,
+                "testUrl": test_url,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error publishing draft: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to publish draft: {str(exc)}"
+        ) from exc
+
+
+@router.delete("/{test_id}")
+async def delete_custom_mcq_test(
+    test_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Delete a custom MCQ test. Only users with access to the test can delete it."""
+    try:
+        oid = to_object_id(test_id)
+        test = await db.custom_mcq_tests.find_one({"_id": oid})
+        
+        if not test:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Test not found"
+            )
+        
+        _check_test_access(test, current_user)
+        
+        # Delete the test
+        result = await db.custom_mcq_tests.delete_one({"_id": oid})
+        
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Test not found or already deleted",
+            )
+        
+        logger.info(f"Custom MCQ test deleted: {test_id} by user {current_user['id']}")
+        
+        return success_response("Custom MCQ test deleted successfully", {"testId": test_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error deleting custom MCQ test: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete test: {str(exc)}",
+        ) from exc
 

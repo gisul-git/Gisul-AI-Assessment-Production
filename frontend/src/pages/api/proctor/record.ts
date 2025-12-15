@@ -14,7 +14,11 @@ const VALID_EVENT_TYPES = new Set([
   "RIGHT_CLICK",
   "IDLE",
   "GAZE_AWAY",
+  "GAZE_AWAY_DETECTED",
   "MULTI_FACE",
+  "MULTIPLE_FACE_DETECTED",
+  "MULTIPLE_FACE",
+  "IN_FRAME_LOST",
   "SPOOF_DETECTED",
   "FACE_MISMATCH",
   "CAMERA_DENIED",
@@ -37,8 +41,10 @@ interface ViolationPayload {
   timestamp: string;
   assessmentId: string;
   userId: string;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
   snapshotBase64?: string;
+  snapshotId?: string;
 }
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -53,13 +59,31 @@ export default async function handler(
   }
 
   try {
-    const { eventType, timestamp, assessmentId, userId, metadata, snapshotBase64 } = req.body as ViolationPayload;
+    const { eventType, timestamp, assessmentId, userId, sessionId, metadata, snapshotBase64, snapshotId } = req.body as ViolationPayload;
+
+    // Log received data for debugging
+    console.log("[Proctor API] Record request received:", {
+      eventType,
+      timestamp: !!timestamp,
+      assessmentId,
+      userId,
+      hasMetadata: !!metadata,
+      hasSnapshot: !!snapshotBase64,
+      snapshotSize: snapshotBase64 ? Math.round(snapshotBase64.length / 1024) + 'KB' : 'none',
+    });
 
     // Validate required fields
     if (!eventType || !timestamp || !assessmentId || !userId) {
+      console.error("[Proctor API] Missing required fields:", {
+        hasEventType: !!eventType,
+        hasTimestamp: !!timestamp,
+        hasAssessmentId: !!assessmentId,
+        hasUserId: !!userId,
+      });
       return res.status(400).json({
         status: "error",
         message: "Missing required fields: eventType, timestamp, assessmentId, userId",
+        received: { eventType, timestamp: !!timestamp, assessmentId, userId },
       });
     }
 
@@ -75,7 +99,10 @@ export default async function handler(
       assessmentId,
       userId,
       hasMetadata: !!metadata,
-      hasSnapshot: !!snapshotBase64,
+      hasSnapshot: !!(snapshotBase64 || snapshotId),
+      hasSnapshotBase64: !!snapshotBase64,
+      hasSnapshotId: !!snapshotId,
+      snapshotId: snapshotId || null,
     }, null, 2));
     
     // Validate that userId and assessmentId are not empty
@@ -104,8 +131,10 @@ export default async function handler(
           timestamp,
           assessmentId,
           userId,
+          sessionId: sessionId || null,
           metadata: metadata || null,
           snapshotBase64: snapshotBase64 || null,
+          snapshotId: snapshotId || null,
         },
         {
           headers: {

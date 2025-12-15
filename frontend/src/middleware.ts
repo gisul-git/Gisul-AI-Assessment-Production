@@ -3,6 +3,13 @@ import { NextResponse } from "next/server";
 
 export default withAuth(
   function middleware(req) {
+    const { pathname } = req.nextUrl;
+    
+    // Skip middleware for MediaPipe assets (static files)
+    if (pathname.startsWith('/mediapipe/')) {
+      return NextResponse.next();
+    }
+    
     // Middleware logic can be added here if needed
     return NextResponse.next();
   },
@@ -11,6 +18,11 @@ export default withAuth(
       authorized: ({ token, req }) => {
         // Protect all routes except public ones
         const { pathname } = req.nextUrl;
+        
+        // Skip auth for MediaPipe assets
+        if (pathname.startsWith('/mediapipe/')) {
+          return true;
+        }
         
         // Public routes that don't require authentication
         const publicRoutes = [
@@ -71,6 +83,26 @@ export default withAuth(
         if (pathname.startsWith("/api/proctor/")) {
           return true;
         }
+
+  // Custom MCQ assessment routes (use token from URL, not session)
+        if (pathname.startsWith("/custom-mcq/entry/") ||
+            pathname.startsWith("/custom-mcq/take/") ||
+            pathname.startsWith("/custom-mcq/result/")) {
+          return true; // These routes have their own token-based auth
+        }
+ 
+        // Candidate-facing API routes should remain public (token validated server-side)
+        if (pathname.startsWith("/api/assessment/")) {
+          return true;
+        }
+       
+        // Custom MCQ API routes - public (candidates aren't logged in via NextAuth, token validated server-side)
+        if (pathname.startsWith("/api/v1/custom-mcq/verify-candidate") ||
+            pathname.startsWith("/api/v1/custom-mcq/take/") ||
+            pathname.startsWith("/api/v1/custom-mcq/submit")) {
+          return true;
+        }
+ 
         
         // All other routes require authentication
         return !!token;
@@ -90,12 +122,13 @@ export const config = {
      * - api/auth (NextAuth routes)
      * - api/assessment (Candidate assessment API)
      * - api/proctor (Proctoring API - candidates aren't logged in)
+     * - mediapipe (MediaPipe assets)
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
      * - public files (public folder)
      */
-    "/((?!api/auth|api/assessment|api/proctor|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api/auth|api/assessment|api/proctor|mediapipe|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|js|wasm|data|binarypb)$).*)",
   ],
 };
 

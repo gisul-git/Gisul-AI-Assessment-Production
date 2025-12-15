@@ -10,6 +10,12 @@ import axios from "axios";
 import { EditorContainer } from "@/components/dsa/test/EditorContainer";
 import { JUDGE0_ID_TO_LANG_NAME } from "@/lib/dsa/judge0";
 
+// Proctoring imports
+import { useFaceMesh, type DetectionResult } from "@/hooks/useFaceMesh";
+import { useProctorUpload } from "@/hooks/useProctorUpload";
+import WebcamPreview from "@/components/WebcamPreview";
+import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
+
 // Lazy load Monaco Editor
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
@@ -149,6 +155,442 @@ export default function CandidateAssessmentPage() {
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastSavedAnswerRef = useRef<Map<string, string>>(new Map());
+
+  // ============================================================================
+  // PROCTORING STATE & REFS
+  // ============================================================================
+
+  const [webcamLive, setWebcamLive] = useState(false);
+  const [faceMeshStatus, setFaceMeshStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
+  const [displayedFacesCount, setDisplayedFacesCount] = useState(0);
+  const [proctoringEnabled, setProctoringEnabled] = useState(false);
+
+  // Proctoring refs
+  const thumbVideoRef = useRef<HTMLVideoElement>(null);
+  const webcamStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const noFaceCountRef = useRef(0);
+  const multipleFacesCooldownRef = useRef(0);
+
+  // Cooldown constants
+  const NO_FACE_FRAMES_THRESHOLD = 5;
+  const MULTIPLE_FACES_COOLDOWN_MS = 15000; // 15 seconds
+
+  // Get client-side values safely
+  const isClient = typeof window !== 'undefined';
+  const assessmentIdStr = typeof id === 'string' ? id : '';
+  const tokenStr = typeof token === 'string' ? token : '';
+  
+  // Try multiple sources for candidateId
+  // Priority: state > sessionStorage email > sessionStorage name > token-based > anonymous
+  const getCandidateId = (): string => {
+    if (candidateEmail && candidateEmail.trim() !== '') {
+      return candidateEmail.trim();
+    }
+    if (isClient) {
+      const sessionEmail = sessionStorage.getItem('candidateEmail');
+      if (sessionEmail && sessionEmail.trim() !== '') {
+        return sessionEmail.trim();
+      }
+      const sessionName = sessionStorage.getItem('candidateName');
+      if (sessionName && sessionName.trim() !== '') {
+        return sessionName.trim();
+      }
+    }
+    if (tokenStr) {
+      return `candidate-${tokenStr}`;
+    }
+    return 'anonymous';
+  };
+  
+  const candidateIdStr = getCandidateId();
+  
+  // Log the candidateId being used for debugging
+  useEffect(() => {
+    if (isClient && appState === 'ready') {
+      console.log('[Proctor] Using candidateId:', candidateIdStr, {
+        fromState: candidateEmail,
+        fromSessionEmail: sessionStorage.getItem('candidateEmail'),
+        fromSessionName: sessionStorage.getItem('candidateName'),
+        token: tokenStr,
+      });
+    }
+  }, [isClient, appState, candidateIdStr, candidateEmail, tokenStr]);
+
+  // Proctor upload hook
+  const { uploadSnapshot, recordViolation } = useProctorUpload({
+    assessmentId: assessmentIdStr,
+    candidateId: candidateIdStr,
+  });
+
+  // ============================================================================
+  // PROCTORING FUNCTIONS
+  // ============================================================================
+
+  // Handle violation events
+  const handleViolation = useCallback(async (eventType: string) => {
+    const now = Date.now();
+    const timestamp = new Date().toISOString();
+
+    // Cooldown for multiple faces
+    if (eventType === 'MULTIPLE_FACES_DETECTED') {
+      if (now - multipleFacesCooldownRef.current < MULTIPLE_FACES_COOLDOWN_MS) {
+        console.log('[Proctor] Multiple faces cooldown active, skipping');
+        return;
+      }
+      multipleFacesCooldownRef.current = now;
+    }
+
+    // Get candidateId - try multiple sources
+    const currentCandidateId = candidateIdStr || 
+      candidateEmail || 
+      (typeof window !== 'undefined' ? sessionStorage.getItem('candidateEmail') : null) || 
+      '';
+    
+    const currentAssessmentId = assessmentIdStr || (typeof id === 'string' ? id : '');
+
+    console.log('[Proctor] Handling violation:', {
+      eventType,
+      assessmentId: currentAssessmentId,
+      candidateId: currentCandidateId,
+      webcamLive,
+      hasVideoRef: !!thumbVideoRef.current,
+    });
+
+    // Warn if missing data but still try to send
+    if (!currentCandidateId || !currentAssessmentId) {
+      console.warn('[Proctor] Warning: Missing data but still sending:', { 
+        candidateId: currentCandidateId, 
+        assessmentId: currentAssessmentId 
+      });
+    }
+
+    // Determine which video element to use for snapshot
+    // Snapshots disabled for TAB_SWITCH and FOCUS_LOST per request
+    const isScreenEvent = false;
+    let videoForSnapshot: HTMLVideoElement | null = null;
+    
+    if (isScreenEvent) {
+      console.log('[Proctor] Screen capture requested for', eventType);
+      videoForSnapshot = await getScreenVideoForSnapshot();
+      if (videoForSnapshot) {
+        console.log('[Proctor] ✓ Using SCREEN capture for', eventType, `(${videoForSnapshot.videoWidth}x${videoForSnapshot.videoHeight})`);
+      } else if (webcamLive && thumbVideoRef.current) {
+        console.log('[Proctor] ✗ Screen not ready; falling back to webcam for', eventType);
+        videoForSnapshot = thumbVideoRef.current;
+      }
+    } else if (webcamLive && thumbVideoRef.current) {
+      videoForSnapshot = thumbVideoRef.current;
+    }
+
+    // Record violation with snapshot (snapshot captured inside recordViolation)
+    const success = await recordViolation(
+      {
+        eventType,
+        timestamp,
+        assessmentId: currentAssessmentId,
+        candidateId: currentCandidateId,
+      },
+      videoForSnapshot
+    );
+
+    console.log('[Proctor] Violation recorded:', { eventType, success });
+
+    // Show toast
+    pushViolationToast({
+      id: `${eventType}-${now}`,
+      eventType,
+      message: getViolationMessage(eventType),
+      timestamp,
+    });
+  }, [webcamLive, recordViolation, assessmentIdStr, candidateIdStr, candidateEmail, id]);
+
+  // Get violation message
+  const getViolationMessage = (eventType: string): string => {
+    const messages: Record<string, string> = {
+      GAZE_AWAY: 'Please keep your eyes on the screen',
+      MULTIPLE_FACES_DETECTED: 'Multiple faces detected in frame',
+      NO_FACE_DETECTED: 'Please stay in front of the camera',
+      TAB_SWITCH: 'Tab switch detected',
+      FOCUS_LOST: 'Window focus lost',
+      FULLSCREEN_EXIT: 'Exited fullscreen mode',
+    };
+    return messages[eventType] || 'Violation detected';
+  };
+
+  // Face detection callback
+  const handleDetection = useCallback((result: DetectionResult) => {
+    setDisplayedFacesCount(result.facesCount);
+
+    // No face detection
+    if (result.facesCount === 0) {
+      noFaceCountRef.current++;
+      if (noFaceCountRef.current >= NO_FACE_FRAMES_THRESHOLD) {
+        handleViolation('NO_FACE_DETECTED');
+        noFaceCountRef.current = 0; // Reset after triggering
+      }
+    } else {
+      noFaceCountRef.current = 0;
+    }
+
+    // Multiple faces
+    if (result.multiFace) {
+      handleViolation('MULTIPLE_FACES_DETECTED');
+    }
+
+    // Gaze away
+    if (result.gazeAway) {
+      handleViolation('GAZE_AWAY');
+    }
+  }, [handleViolation]);
+
+  // FaceMesh hook
+  const { isModelLoaded, modelError, facesCount } = useFaceMesh({
+    videoRef: thumbVideoRef,
+    onDetection: handleDetection,
+    enabled: proctoringEnabled && webcamLive,
+  });
+
+  // Update FaceMesh status
+  useEffect(() => {
+    if (modelError) {
+      setFaceMeshStatus('error');
+    } else if (isModelLoaded) {
+      setFaceMeshStatus('loaded');
+    } else {
+      setFaceMeshStatus('loading');
+    }
+  }, [isModelLoaded, modelError]);
+
+  // Start webcam
+  const startWebcam = useCallback(async () => {
+    if (!isClient) return;
+
+    console.log('[Webcam] Starting webcam...');
+
+    try {
+      // Reuse existing stream if available
+      if (webcamStreamRef.current && webcamStreamRef.current.active) {
+        console.log('[Webcam] Reusing existing stream');
+        if (thumbVideoRef.current) {
+          thumbVideoRef.current.srcObject = webcamStreamRef.current;
+          await thumbVideoRef.current.play();
+        }
+        setWebcamLive(true);
+        return;
+      }
+
+      // Request camera access
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+        audio: false,
+      });
+
+      webcamStreamRef.current = stream;
+      console.log('[Webcam] Stream acquired');
+
+      // Wait for video element
+      let retries = 10;
+      while (!thumbVideoRef.current && retries > 0) {
+        await new Promise((r) => setTimeout(r, 100));
+        retries--;
+      }
+
+      if (thumbVideoRef.current) {
+        thumbVideoRef.current.srcObject = stream;
+
+        // Wait for video to be ready
+        await new Promise<void>((resolve) => {
+          const video = thumbVideoRef.current!;
+          if (video.readyState >= 2) {
+            resolve();
+          } else {
+            video.onloadeddata = () => resolve();
+          }
+        });
+
+        await thumbVideoRef.current.play();
+        console.log('[Webcam] Video playing');
+        setWebcamLive(true);
+      }
+    } catch (err) {
+      console.error('[Webcam] Error starting webcam:', err);
+      setWebcamLive(false);
+    }
+  }, [isClient]);
+
+  // Stop webcam
+  const stopWebcam = useCallback(() => {
+    if (webcamStreamRef.current) {
+      webcamStreamRef.current.getTracks().forEach((track) => track.stop());
+      webcamStreamRef.current = null;
+    }
+    setWebcamLive(false);
+    console.log('[Webcam] Stopped');
+  }, []);
+
+  // Helper: wait for screen video to be ready with valid dimensions
+  const getScreenVideoForSnapshot = useCallback(async (): Promise<HTMLVideoElement | null> => {
+    const screenVideo = screenVideoRef.current;
+    const screenStream = screenStreamRef.current;
+
+    if (!screenVideo || !screenStream || !screenStream.active) {
+      console.warn('[Proctor] Screen video not available/active');
+      return null;
+    }
+
+    // Ensure video is playing
+    if (screenVideo.paused) {
+      try {
+        await screenVideo.play();
+      } catch (err) {
+        console.warn('[Proctor] Failed to play screen video before snapshot:', err);
+      }
+    }
+
+    // Wait up to ~1s for valid dimensions
+    const maxChecks = 5;
+    for (let i = 0; i < maxChecks; i++) {
+      if (screenVideo.readyState >= 2 && screenVideo.videoWidth > 0 && screenVideo.videoHeight > 0) {
+        return screenVideo;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    console.warn('[Proctor] Screen video not ready after waits; skipping screen snapshot');
+    return null;
+  }, []);
+
+  // Retrieve screen stream from global (set by identity-verify.tsx) for screen snapshots
+  useEffect(() => {
+    if (!isClient) return;
+    
+    const globalScreenStream = (window as any).__screenStream as MediaStream | undefined;
+    if (globalScreenStream && globalScreenStream.active) {
+      console.log('[Screen] Retrieved global screen stream for snapshots');
+      screenStreamRef.current = globalScreenStream;
+      
+      // Create a hidden video element to capture from
+      const video = document.createElement('video');
+      video.srcObject = globalScreenStream;
+      video.muted = true;
+      video.playsInline = true;
+      video.autoplay = true;
+      // Use small but visible size to ensure browser renders it
+      video.style.position = 'fixed';
+      video.style.left = '-9999px';
+      video.style.top = '-9999px';
+      video.style.width = '320px';
+      video.style.height = '240px';
+      video.style.opacity = '0.01';
+      video.style.pointerEvents = 'none';
+      document.body.appendChild(video);
+      
+      // Wait for video to be ready with valid dimensions
+      const waitForReady = () => {
+        return new Promise<void>((resolve) => {
+          const checkReady = () => {
+            if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+              console.log('[Screen] Video ready:', video.videoWidth, 'x', video.videoHeight);
+              resolve();
+            } else {
+              setTimeout(checkReady, 100);
+            }
+          };
+          
+          video.onloadeddata = () => {
+            console.log('[Screen] Video loadeddata event');
+            checkReady();
+          };
+          
+          // Also check immediately in case already loaded
+          checkReady();
+        });
+      };
+      
+      video.play()
+        .then(() => {
+          console.log('[Screen] Video playing');
+          return waitForReady();
+        })
+        .then(() => {
+          screenVideoRef.current = video;
+          console.log('[Screen] ✓ Screen video ready for capture:', video.videoWidth, 'x', video.videoHeight);
+        })
+        .catch(err => {
+          console.warn('[Screen] Failed to play screen video:', err);
+        });
+      
+      // Listen for stream end
+      globalScreenStream.getVideoTracks()[0]?.addEventListener('ended', () => {
+        console.log('[Screen] Screen share ended');
+        screenStreamRef.current = null;
+        if (screenVideoRef.current) {
+          screenVideoRef.current.remove();
+          screenVideoRef.current = null;
+        }
+      });
+    } else {
+      console.log('[Screen] No global screen stream available');
+    }
+    
+    return () => {
+      // Cleanup hidden video element on unmount
+      if (screenVideoRef.current) {
+        screenVideoRef.current.remove();
+        screenVideoRef.current = null;
+      }
+      // Stop screen stream on unmount
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach(t => t.stop());
+        screenStreamRef.current = null;
+      }
+      // Clear global reference
+      if ((window as any).__screenStream) {
+        delete (window as any).__screenStream;
+      }
+    };
+  }, [isClient]);
+
+  // Start proctoring when assessment is ready
+  useEffect(() => {
+    if (appState === 'ready' && !proctoringEnabled && isClient) {
+      console.log('[Proctor] Starting proctoring...');
+      setProctoringEnabled(true);
+      startWebcam();
+    }
+  }, [appState, proctoringEnabled, isClient, startWebcam]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopWebcam();
+    };
+  }, [stopWebcam]);
+
+  // Tab visibility detection
+  useEffect(() => {
+    if (!isClient || !proctoringEnabled) return;
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        handleViolation('TAB_SWITCH');
+      }
+    };
+
+    const handleBlur = () => {
+      handleViolation('FOCUS_LOST');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleBlur);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [isClient, proctoringEnabled, handleViolation]);
 
   // ============================================================================
   // TRANSFORM topics_v2 TO SECTIONS
@@ -1460,6 +1902,15 @@ export default function CandidateAssessmentPage() {
           </div>
         </div>
       </div>
+
+      {/* Proctoring Components */}
+      <WebcamPreview
+        ref={thumbVideoRef}
+        cameraOn={webcamLive}
+        faceMeshStatus={faceMeshStatus}
+        facesCount={displayedFacesCount}
+      />
+      <ViolationToast />
 
       <style jsx>{`
         @keyframes spin {
