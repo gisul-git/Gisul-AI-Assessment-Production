@@ -7,7 +7,7 @@ import Link from "next/link";
 import Image from "next/image";
 import axios from "axios";
 import dsaApi from "../lib/dsa/api";
-import { customMCQApi } from "../lib/custom-mcq/api";
+import aimlApi from "../lib/aiml/api";
 
 interface Assessment {
   id: string;
@@ -22,10 +22,8 @@ interface Assessment {
   } | null;
   createdAt?: string;
   updatedAt?: string;
-  type?: 'assessment' | 'dsa' | 'custom_mcq'; // Add type to distinguish
+  type?: 'assessment' | 'dsa' | 'custom_mcq' | 'aiml'; // Add type to distinguish
   isDraft?: boolean; // Add isDraft to interface
-  submissionsCount?: number;
-  totalQuestions?: number;
 }
 
 interface DashboardPageProps {
@@ -149,12 +147,13 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         console.error("[Dashboard] CRITICAL: No user ID found in session - cannot filter DSA tests securely");
       }
       
-      // Fetch regular assessments, DSA tests, and custom MCQ assessments in parallel
-      // CRITICAL: DSA tests endpoint filters by created_by automatically via authentication
-      const [assessmentsResponse, dsaTestsResponse, customMCQResponse] = await Promise.allSettled([
+      // Fetch regular assessments, DSA tests, AIML tests, and custom MCQ tests in parallel
+      // CRITICAL: DSA/AIML tests endpoint filters by created_by automatically via authentication
+      const [assessmentsResponse, dsaTestsResponse, aimlTestsResponse, customMcqResponse] = await Promise.allSettled([
         axios.get("/api/assessments/list"),
         dsaApi.get("/tests/", { params: { active_only: false } }),  // Explicit trailing slash and params
-        customMCQApi.listAssessments().catch(() => []),  // Fetch custom MCQ assessments
+        aimlApi.get("/tests/"),  // Fetch AIML tests
+        axios.get("/api/custom-mcq/list")
       ]);
       
       const allAssessments: Assessment[] = [];
@@ -171,21 +170,43 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       }
       
       // Process custom MCQ tests
-      if (customMcqResponse.status === 'fulfilled' && customMcqResponse.value.data?.success && Array.isArray(customMcqResponse.value.data.data)) {
-        const customMcqTests = customMcqResponse.value.data.data.map((test: any) => ({
-          id: test.id,
-          title: test.title || 'Untitled Custom MCQ Test',
-          status: test.isDraft ? 'draft' : (test.status || 'published'),
-          isDraft: test.isDraft || false,
-          hasSchedule: false, // Custom MCQ tests have schedule in schedule object
-          createdAt: test.createdAt,
-          updatedAt: test.createdAt,
-          type: 'custom_mcq' as const,
-        }));
+      if (customMcqResponse.status === 'fulfilled' && customMcqResponse.value.data?.success && customMcqResponse.value.data.data?.assessments) {
+        const assessmentsList = Array.isArray(customMcqResponse.value.data.data.assessments) 
+          ? customMcqResponse.value.data.data.assessments 
+          : [];
+        const customMcqTests = assessmentsList.map((test: any) => {
+          // Backend returns status field, not isDraft, so check status === 'draft'
+          const testStatus = test.status || 'draft';
+          const isDraft = testStatus === 'draft';
+          
+          // Check if schedule exists (startTime and endTime in schedule object or direct fields)
+          const schedule = test.schedule || {};
+          const hasSchedule = !!(schedule.startTime || schedule.endTime || test.startTime || test.endTime);
+          const scheduleStatus = hasSchedule ? {
+            startTime: schedule.startTime || test.startTime,
+            endTime: schedule.endTime || test.endTime,
+            duration: schedule.duration || test.duration,
+            isActive: testStatus === 'active', // Active if status is active
+          } : null;
+          
+          return {
+            id: test.id,
+            title: test.title || 'Untitled Custom MCQ Test',
+            status: testStatus,
+            isDraft: isDraft,
+            hasSchedule: hasSchedule,
+            scheduleStatus: scheduleStatus,
+            createdAt: test.createdAt,
+            updatedAt: test.updatedAt || test.createdAt,
+            type: 'custom_mcq' as const,
+          };
+        });
         allAssessments.push(...customMcqTests);
-        console.log(`[Dashboard] Loaded ${customMcqTests.length} custom MCQ tests`);
+        console.log(`[Dashboard] Loaded ${customMcqTests.length} custom MCQ tests`, customMcqTests);
       } else if (customMcqResponse.status === 'rejected') {
         console.error("Error fetching custom MCQ tests:", customMcqResponse.reason);
+      } else {
+        console.warn("[Dashboard] Custom MCQ response structure unexpected:", customMcqResponse.status === 'fulfilled' ? customMcqResponse.value.data : 'rejected');
       }
       
       // Process DSA tests
@@ -224,21 +245,31 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
               
               return matches;
             })
-            .map((test: any) => ({
-              id: test.id || test._id,
-              title: test.title || 'Untitled DSA Test',
-              status: test.is_published ? 'published' : 'draft',
-              hasSchedule: !!(test.start_time && test.end_time),
-              scheduleStatus: test.start_time && test.end_time ? {
-                startTime: test.start_time,
-                endTime: test.end_time,
-                duration: test.duration_minutes || 0,
-                isActive: test.is_active || false
-              } : null,
-              createdAt: test.created_at || null,
-              updatedAt: test.updated_at || null,
-              type: 'dsa' as const
-            }));
+            .map((test: any) => {
+              // Determine status: paused > published > draft
+              let status = 'draft';
+              if (test.pausedAt) {
+                status = 'paused';
+              } else if (test.is_published) {
+                status = 'active'; // Use 'active' instead of 'published' to match AI assessment pattern
+              }
+              
+              return {
+                id: test.id || test._id,
+                title: test.title || 'Untitled DSA Test',
+                status: status as 'draft' | 'active' | 'paused',
+                hasSchedule: !!(test.start_time && test.end_time),
+                scheduleStatus: test.start_time && test.end_time ? {
+                  startTime: test.start_time,
+                  endTime: test.end_time,
+                  duration: test.duration_minutes || 0,
+                  isActive: test.is_active || false
+                } : null,
+                createdAt: test.created_at || null,
+                updatedAt: test.updated_at || null,
+                type: 'dsa' as const
+              };
+            });
           allAssessments.push(...dsaTests);
           console.log(`[Dashboard] Loaded ${dsaTests.length} DSA tests for current user (filtered from ${rawDsaTests.length} total from backend)`);
         }
@@ -247,29 +278,61 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         console.error("DSA tests response error details:", dsaTestsResponse.reason?.response?.data);
       }
       
-      // Process custom MCQ assessments
-      if (customMCQResponse.status === 'fulfilled' && Array.isArray(customMCQResponse.value)) {
-        const customMCQAssessments = customMCQResponse.value.map((a: any) => ({
-          id: a.id,
-          title: a.title || 'Untitled Custom MCQ',
-          status: a.status || 'draft',
-          hasSchedule: !!(a.startTime && a.endTime),
-          scheduleStatus: a.startTime && a.endTime ? {
-            startTime: a.startTime,
-            endTime: a.endTime,
-            duration: a.duration || 0,
-            isActive: new Date(a.endTime) > new Date() && new Date(a.startTime) <= new Date(),
-          } : null,
-          createdAt: a.createdAt || null,
-          updatedAt: a.updatedAt || null,
-          type: 'custom_mcq' as const,
-          submissionsCount: a.submissionsCount || 0,
-          totalQuestions: a.totalQuestions || 0,
-        }));
-        allAssessments.push(...customMCQAssessments);
-        console.log(`[Dashboard] Loaded ${customMCQAssessments.length} custom MCQ assessments`);
-      } else if (customMCQResponse.status === 'rejected') {
-        console.error("Error fetching custom MCQ assessments:", customMCQResponse.reason);
+      // Process AIML tests
+      if (aimlTestsResponse.status === 'fulfilled' && Array.isArray(aimlTestsResponse.value.data)) {
+        const rawAimlTests = aimlTestsResponse.value.data;
+        console.log(`[Dashboard] Received ${rawAimlTests.length} AIML tests from backend`);
+        
+        // CRITICAL SECURITY: Client-side filter to ensure we only show tests that belong to current user
+        if (!currentUserId) {
+          console.error("[Dashboard] SECURITY: No user ID available - NOT showing any AIML tests (fail secure)");
+        } else {
+          const aimlTests = rawAimlTests
+            .filter((test: any) => {
+              const testCreatedBy = test.created_by;
+              if (!testCreatedBy) {
+                console.warn(`[Dashboard] SECURITY: AIML Test ${test.id || test._id} has no created_by field - hiding it`);
+                return false;
+              }
+              
+              const testCreatedByStr = String(testCreatedBy).trim();
+              const currentUserIdStr = String(currentUserId).trim();
+              const matches = testCreatedByStr === currentUserIdStr;
+              
+              if (!matches) {
+                console.error(`[Dashboard] SECURITY: Filtered out AIML test ${test.id || test._id} (${test.title}) - created_by='${testCreatedByStr}' != user_id='${currentUserIdStr}'`);
+              } else {
+                console.log(`[Dashboard] AIML Test ${test.id || test._id} (${test.title}) belongs to current user - showing it`);
+              }
+              
+              return matches;
+            })
+            .map((test: any) => {
+              // Determine status: paused > published > draft
+              let status = 'draft';
+              if (test.pausedAt) {
+                status = 'paused';
+              } else if (test.is_published) {
+                status = 'active'; // Use 'active' instead of 'published' to match AI assessment pattern
+              }
+              
+              return {
+                id: test.id || test._id,
+                title: test.title || 'Untitled AIML Test',
+                status: status as 'draft' | 'active' | 'paused',
+                hasSchedule: false, // AIML tests don't have schedule yet
+                scheduleStatus: null,
+                createdAt: test.created_at || null,
+                updatedAt: test.updated_at || null,
+                type: 'aiml' as const
+              };
+            });
+          allAssessments.push(...aimlTests);
+          console.log(`[Dashboard] Loaded ${aimlTests.length} AIML tests for current user (filtered from ${rawAimlTests.length} total from backend)`);
+        }
+      } else if (aimlTestsResponse.status === 'rejected') {
+        console.error("Error fetching AIML tests:", aimlTestsResponse.reason);
+        console.error("AIML tests response error details:", aimlTestsResponse.reason?.response?.data);
       }
       
       // Sort by creation date (newest first)
@@ -357,7 +420,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
     }
   };
 
-  const handleDeleteAssessment = async (assessmentId: string, assessmentTitle: string, assessmentType?: 'assessment' | 'dsa' | 'custom_mcq') => {
+  const handleDeleteAssessment = async (assessmentId: string, assessmentTitle: string, assessmentType?: 'assessment' | 'dsa' | 'custom_mcq' | 'aiml') => {
     if (!confirm(`Are you sure you want to delete "${assessmentTitle}"? This action cannot be undone.`)) {
       return;
     }
@@ -369,10 +432,18 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         // Delete DSA test
         await dsaApi.delete(`/tests/${assessmentId}`);
         setAssessments(assessments.filter((a) => a.id !== assessmentId));
-      } else if (assessmentType === 'custom_mcq') {
-        // Delete custom MCQ test - use the customMCQApi
-        await customMCQApi.deleteAssessment(assessmentId);
+      } else if (assessmentType === 'aiml') {
+        // Delete AIML test
+        await aimlApi.delete(`/tests/${assessmentId}`);
         setAssessments(assessments.filter((a) => a.id !== assessmentId));
+      } else if (assessmentType === 'custom_mcq') {
+        // Delete custom MCQ test
+        const response = await axios.delete(`/api/custom-mcq/${assessmentId}`);
+        if (response.data?.success) {
+        setAssessments(assessments.filter((a) => a.id !== assessmentId));
+        } else {
+          setError(response.data?.message || "Failed to delete custom MCQ test");
+        }
       } else {
         // Delete regular assessment
       const response = await axios.delete(`/api/assessments/delete-assessment?assessmentId=${assessmentId}`);
@@ -398,23 +469,42 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       const assessment = assessments.find(a => a.id === assessmentId);
       const assessmentType = assessment?.type || 'assessment';
       
-      // Use different endpoint for custom MCQ
-      const endpoint = assessmentType === 'custom_mcq'
-        ? `/api/custom-mcq/pause?assessmentId=${assessmentId}`
-        : `/api/assessments/pause?assessmentId=${assessmentId}`;
+      let response: any;
       
-      const response = await axios.post(endpoint);
+      // Use different endpoints based on assessment type
+      if (assessmentType === 'custom_mcq') {
+        response = await axios.post(`/api/custom-mcq/pause?assessmentId=${assessmentId}`);
+      } else if (assessmentType === 'aiml') {
+        // Use AIML API client directly
+        response = await aimlApi.post(`/tests/${assessmentId}/pause`);
+        response = { data: response.data }; // Normalize response format
+      } else if (assessmentType === 'dsa') {
+        // Use DSA API client directly
+        response = await dsaApi.post(`/tests/${assessmentId}/pause`);
+        response = { data: response.data }; // Normalize response format
+      } else {
+        // Regular assessment
+        response = await axios.post(`/api/assessments/pause?assessmentId=${assessmentId}`);
+      }
       
       // Handle both response formats (with or without success wrapper)
       const updatedAssessment = response.data?.data?.assessment || response.data?.data || response.data?.assessment || response.data;
       
       if (updatedAssessment || response.data?.success !== false) {
+        // For AIML and DSA, paused status is determined by pausedAt field
+        // For other assessments, use the status from response
+        let finalStatus: "active" | "scheduled" | "draft" | "paused" = updatedAssessment?.status || 'paused' as const;
+        if (assessmentType === 'aiml' || assessmentType === 'dsa') {
+          // For AIML/DSA tests, if paused, status should be 'paused'
+          finalStatus = 'paused';
+        }
+        
         // Update the assessment in the list immediately
         setAssessments(prev => prev.map(a => 
           a.id === assessmentId 
             ? { 
                 ...a, 
-                status: updatedAssessment?.status || 'paused' as const,
+                status: finalStatus,
                 pausedAt: updatedAssessment?.pausedAt || new Date().toISOString()
               }
             : a
@@ -427,7 +517,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       }
     } catch (err: any) {
       console.error("Error pausing assessment:", err);
-      setError(err.response?.data?.message || err.message || "Failed to pause assessment");
+      setError(err.response?.data?.detail || err.response?.data?.message || err.message || "Failed to pause assessment");
     }
   };
 
@@ -441,24 +531,43 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       const assessment = assessments.find(a => a.id === assessmentId);
       const assessmentType = assessment?.type || 'assessment';
       
-      // Use different endpoint for custom MCQ
-      const endpoint = assessmentType === 'custom_mcq'
-        ? `/api/custom-mcq/resume?assessmentId=${assessmentId}`
-        : `/api/assessments/resume?assessmentId=${assessmentId}`;
+      let response: any;
       
-      const response = await axios.post(endpoint);
+      // Use different endpoints based on assessment type
+      if (assessmentType === 'custom_mcq') {
+        response = await axios.post(`/api/custom-mcq/resume?assessmentId=${assessmentId}`);
+      } else if (assessmentType === 'aiml') {
+        // Use AIML API client directly
+        response = await aimlApi.post(`/tests/${assessmentId}/resume`);
+        response = { data: response.data }; // Normalize response format
+      } else if (assessmentType === 'dsa') {
+        // Use DSA API client directly
+        response = await dsaApi.post(`/tests/${assessmentId}/resume`);
+        response = { data: response.data }; // Normalize response format
+      } else {
+        // Regular assessment
+        response = await axios.post(`/api/assessments/resume?assessmentId=${assessmentId}`);
+      }
       
       // Handle both response formats (with or without success wrapper)
       const updatedAssessment = response.data?.data?.assessment || response.data?.data || response.data?.assessment || response.data;
       const newStatus = updatedAssessment?.status || 'active';
       
       if (updatedAssessment || response.data?.success !== false) {
+        // Determine the correct status after resume
+        // For AIML and DSA, if is_published is true, status should be 'active'
+        let finalStatus: "active" | "scheduled" | "draft" | "paused" = newStatus as "active" | "scheduled";
+        if (assessmentType === 'aiml' || assessmentType === 'dsa') {
+          // For AIML/DSA tests, resumed means active (is_published = true)
+          finalStatus = 'active';
+        }
+        
         // Update the assessment in the list immediately
         setAssessments(prev => prev.map(a => 
           a.id === assessmentId 
             ? { 
                 ...a, 
-                status: newStatus as "active" | "scheduled",
+                status: finalStatus,
                 resumeAt: updatedAssessment?.resumeAt || new Date().toISOString(),
                 pausedAt: undefined
               }
@@ -472,7 +581,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       }
     } catch (err: any) {
       console.error("Error resuming assessment:", err);
-      setError(err.response?.data?.message || err.message || "Failed to resume assessment");
+      setError(err.response?.data?.detail || err.response?.data?.message || err.message || "Failed to resume assessment");
     }
   };
 
@@ -787,63 +896,390 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       </header>
 
       <div className="container">
-        <div className="card" style={{ marginBottom: "2rem" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-            <div>
-              <h1 style={{ margin: 0, marginBottom: "0.5rem", fontSize: "clamp(1.5rem, 4vw, 2rem)", color: "#1a1625", fontWeight: 700 }}>
-                Assessments Dashboard
-              </h1>
-              <p style={{ color: "#2D7A52", margin: 0, fontSize: "0.875rem" }}>
-                Signed in as <strong>{activeSession?.user?.name || activeSession?.user?.email || "User"}</strong>
-              </p>
+        <div className="card" style={{ 
+          marginBottom: "2rem",
+          background: "linear-gradient(135deg, #ffffff 0%, #f0fdf4 100%)",
+          border: "1.5px solid #A8E8BC",
+          borderRadius: "1rem",
+          boxShadow: "0 4px 12px rgba(168, 232, 188, 0.15)",
+        }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+            {/* Header Section */}
+            <div style={{ 
+              paddingBottom: "1.5rem",
+              borderBottom: "2px solid #E8FAF0",
+            }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: "250px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
+                    <div style={{
+                      width: "48px",
+                      height: "48px",
+                      borderRadius: "0.75rem",
+                      backgroundColor: "#2D7A52",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      boxShadow: "0 2px 8px rgba(45, 122, 82, 0.2)",
+                    }}>
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="16" y1="13" x2="8" y2="13" />
+                        <line x1="16" y1="17" x2="8" y2="17" />
+                        <polyline points="10 9 9 9 8 9" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h1 style={{ 
+                        margin: 0, 
+                        fontSize: "clamp(1.5rem, 4vw, 2rem)", 
+                        color: "#1a1625", 
+                        fontWeight: 700,
+                        lineHeight: 1.2,
+                      }}>
+                        Assessments Dashboard
+                      </h1>
+                    </div>
+                  </div>
+                </div>
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  padding: "0.625rem 1rem",
+                  backgroundColor: "#E8FAF0",
+                  borderRadius: "0.75rem",
+                  border: "1px solid #A8E8BC",
+                }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2D7A52" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                  <span style={{ 
+                    color: "#2D7A52", 
+                    fontSize: "0.875rem",
+                    fontWeight: 500,
+                  }}>
+                    {activeSession?.user?.name || activeSession?.user?.email || "User"}
+                  </span>
+                </div>
+              </div>
             </div>
-            <div style={{ display: "flex", gap: "1rem", width: "100%" }}>
-              <Link 
-                href="/assessments/create-new" 
-                style={{ flex: 1 }}
-                onClick={() => {
-                  // Clear any draft from localStorage to ensure a fresh start
-                  try {
-                    localStorage.removeItem('currentDraftAssessmentId');
-                  } catch (err) {
-                    console.error("Error clearing draft ID:", err);
-                  }
-                }}
-              >
-                <button type="button" className="btn-primary" style={{ marginTop: 0, width: "100%" }}>
-                  + Create New Assessment (AI)
-                </button>
-              </Link>
-              <button
-                type="button"
-                onClick={() => router.push("/custom-mcq/create")}
-                style={{
-                  flex: 1,
-                  marginTop: 0,
-                  padding: "0.75rem 1.5rem",
-                  backgroundColor: "#10b981",
-                  color: "#ffffff",
-                  border: "none",
-                  borderRadius: "0.5rem",
-                  fontSize: "0.875rem",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  transition: "all 0.2s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = "#059669";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = "#10b981";
-                }}
-              >
-                + Create Custom MCQ Test (CSV)
-              </button>
-              <Link href="/dsa" style={{ flex: 1 }}>
-                <button type="button" className="btn-primary" style={{ marginTop: 0, width: "100%" }}>
-                  Create DSA Competency
-                </button>
-              </Link>
+
+            {/* Action Buttons Section */}
+            <div>
+              <h3 style={{
+                margin: 0,
+                marginBottom: "1rem",
+                fontSize: "0.875rem",
+                color: "#64748b",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}>
+                Quick Actions
+              </h3>
+              <div style={{ display: "flex", gap: "1rem", width: "100%", flexWrap: "wrap" }}>
+                <Link 
+                  href="/assessments/create-new" 
+                  style={{ flex: 1, minWidth: "200px" }}
+                  onClick={() => {
+                    // Clear any draft from localStorage to ensure a fresh start
+                    try {
+                      localStorage.removeItem('currentDraftAssessmentId');
+                    } catch (err) {
+                      console.error("Error clearing draft ID:", err);
+                    }
+                  }}
+                >
+                  <div style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.5rem",
+                    padding: "1.25rem",
+                    backgroundColor: "#ffffff",
+                    border: "1.5px solid #A8E8BC",
+                    borderRadius: "0.75rem",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease",
+                    boxShadow: "0 2px 6px rgba(168, 232, 188, 0.1)",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = "translateY(-2px)";
+                    e.currentTarget.style.boxShadow = "0 4px 12px rgba(16, 185, 129, 0.2)";
+                    e.currentTarget.style.borderColor = "#10b981";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = "translateY(0)";
+                    e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.1)";
+                    e.currentTarget.style.borderColor = "#A8E8BC";
+                  }}
+                  >
+                    <button 
+                      type="button" 
+                      style={{ 
+                        marginTop: 0, 
+                        width: "100%",
+                        padding: "0.875rem 1.5rem",
+                        backgroundColor: "#10b981",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: "0.625rem",
+                        fontSize: "0.9375rem",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        transition: "all 0.2s ease",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "0.625rem",
+                        boxShadow: "0 2px 8px rgba(16, 185, 129, 0.2)",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#059669";
+                        e.currentTarget.style.boxShadow = "0 4px 12px rgba(16, 185, 129, 0.3)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#10b981";
+                        e.currentTarget.style.boxShadow = "0 2px 8px rgba(16, 185, 129, 0.2)";
+                      }}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                        <path d="M2 17l10 5 10-5" />
+                        <path d="M2 12l10 5 10-5" />
+                      </svg>
+                      Create New Assessment (AI)
+                    </button>
+                    <p style={{
+                      margin: 0,
+                      fontSize: "0.8125rem",
+                      color: "#64748b",
+                      lineHeight: 1.4,
+                      textAlign: "center",
+                    }}>
+                      AI-powered assessment creation with automated question generation
+                    </p>
+                  </div>
+                </Link>
+                <div
+                  style={{
+                    flex: 1,
+                    minWidth: "200px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.5rem",
+                    padding: "1.25rem",
+                    backgroundColor: "#ffffff",
+                    border: "1.5px solid #A8E8BC",
+                    borderRadius: "0.75rem",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease",
+                    boxShadow: "0 2px 6px rgba(168, 232, 188, 0.1)",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = "translateY(-2px)";
+                    e.currentTarget.style.boxShadow = "0 4px 12px rgba(16, 185, 129, 0.2)";
+                    e.currentTarget.style.borderColor = "#10b981";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = "translateY(0)";
+                    e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.1)";
+                    e.currentTarget.style.borderColor = "#A8E8BC";
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => router.push("/custom-mcq/create")}
+                    style={{
+                      marginTop: 0,
+                      width: "100%",
+                      padding: "0.875rem 1.5rem",
+                      backgroundColor: "#10b981",
+                      color: "#ffffff",
+                      border: "none",
+                      borderRadius: "0.625rem",
+                      fontSize: "0.9375rem",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      transition: "all 0.2s ease",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: "0.625rem",
+                      boxShadow: "0 2px 8px rgba(16, 185, 129, 0.2)",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = "#059669";
+                      e.currentTarget.style.boxShadow = "0 4px 12px rgba(16, 185, 129, 0.3)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = "#10b981";
+                      e.currentTarget.style.boxShadow = "0 2px 8px rgba(16, 185, 129, 0.2)";
+                    }}
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="16" y1="13" x2="8" y2="13" />
+                      <line x1="16" y1="17" x2="8" y2="17" />
+                      <polyline points="10 9 9 9 8 9" />
+                    </svg>
+                    Create Custom MCQ Test (CSV)
+                  </button>
+                  <p style={{
+                    margin: 0,
+                    fontSize: "0.8125rem",
+                    color: "#64748b",
+                    lineHeight: 1.4,
+                    textAlign: "center",
+                  }}>
+                      Upload CSV file to create custom multiple-choice questions
+                    </p>
+                </div>
+                <Link href="/dsa" style={{ flex: 1, minWidth: "200px" }}>
+                  <div style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.5rem",
+                    padding: "1.25rem",
+                    backgroundColor: "#ffffff",
+                    border: "1.5px solid #A8E8BC",
+                    borderRadius: "0.75rem",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease",
+                    boxShadow: "0 2px 6px rgba(168, 232, 188, 0.1)",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = "translateY(-2px)";
+                    e.currentTarget.style.boxShadow = "0 4px 12px rgba(16, 185, 129, 0.2)";
+                    e.currentTarget.style.borderColor = "#10b981";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = "translateY(0)";
+                    e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.1)";
+                    e.currentTarget.style.borderColor = "#A8E8BC";
+                  }}
+                  >
+                    <button 
+                      type="button" 
+                      style={{ 
+                        marginTop: 0, 
+                        width: "100%",
+                        padding: "0.875rem 1.5rem",
+                        backgroundColor: "#10b981",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: "0.625rem",
+                        fontSize: "0.9375rem",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        transition: "all 0.2s ease",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "0.625rem",
+                        boxShadow: "0 2px 8px rgba(16, 185, 129, 0.2)",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#059669";
+                        e.currentTarget.style.boxShadow = "0 4px 12px rgba(16, 185, 129, 0.3)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#10b981";
+                        e.currentTarget.style.boxShadow = "0 2px 8px rgba(16, 185, 129, 0.2)";
+                      }}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="16 18 22 12 16 6" />
+                        <polyline points="8 6 2 12 8 18" />
+                      </svg>
+                      Create DSA Competency
+                    </button>
+                    <p style={{
+                      margin: 0,
+                      fontSize: "0.8125rem",
+                      color: "#64748b",
+                      lineHeight: 1.4,
+                      textAlign: "center",
+                    }}>
+                      Data structures and algorithms coding assessments
+                    </p>
+                  </div>
+                </Link>
+                <Link href="/aiml" style={{ flex: 1, minWidth: "200px" }}>
+                  <div style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.5rem",
+                    padding: "1.25rem",
+                    backgroundColor: "#ffffff",
+                    border: "1.5px solid #A8E8BC",
+                    borderRadius: "0.75rem",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease",
+                    boxShadow: "0 2px 6px rgba(168, 232, 188, 0.1)",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = "translateY(-2px)";
+                    e.currentTarget.style.boxShadow = "0 4px 12px rgba(16, 185, 129, 0.2)";
+                    e.currentTarget.style.borderColor = "#10b981";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = "translateY(0)";
+                    e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.1)";
+                    e.currentTarget.style.borderColor = "#A8E8BC";
+                  }}
+                  >
+                    <button 
+                      type="button" 
+                      style={{ 
+                        marginTop: 0, 
+                        width: "100%",
+                        padding: "0.875rem 1.5rem",
+                        backgroundColor: "#10b981",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: "0.625rem",
+                        fontSize: "0.9375rem",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        transition: "all 0.2s ease",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "0.625rem",
+                        boxShadow: "0 2px 8px rgba(16, 185, 129, 0.2)",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#059669";
+                        e.currentTarget.style.boxShadow = "0 4px 12px rgba(16, 185, 129, 0.3)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#10b981";
+                        e.currentTarget.style.boxShadow = "0 2px 8px rgba(16, 185, 129, 0.2)";
+                      }}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                        <path d="M2 17l10 5 10-5" />
+                        <path d="M2 12l10 5 10-5" />
+                      </svg>
+                      Create AIML Competency
+                    </button>
+                    <p style={{
+                      margin: 0,
+                      fontSize: "0.8125rem",
+                      color: "#64748b",
+                      lineHeight: 1.4,
+                      textAlign: "center",
+                    }}>
+                      AI/ML libraries (numpy, matplotlib, pandas) coding assessments
+                    </p>
+                  </div>
+                </Link>
+              </div>
             </div>
           </div>
         </div>
@@ -959,11 +1395,11 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                         : "0 2px 6px rgba(168, 232, 188, 0.15), 0 0 0 1px rgba(168, 232, 188, 0.1)";
                     }}
                     onClick={() => {
+                      // Direct navigation by type, avoiding intermediate list pages
                       if (assessment.type === 'dsa') {
-                        router.push(`/dsa/tests`);
-                      } else if (assessment.type === 'custom_mcq') {
-                        // Route to create page with testId for editing (works for both draft and published)
-                        router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                        router.push(`/dsa/tests/${assessment.id}/edit`);
+                      } else if (assessment.type === 'aiml') {
+                        router.push(`/aiml/tests/${assessment.id}/edit`);
                       } else if (assessment.status === 'draft') {
                         if (assessment.type === 'custom_mcq') {
                           router.push(`/custom-mcq/create?testId=${assessment.id}`);
@@ -971,8 +1407,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           router.push(`/assessments/create-new?id=${assessment.id}`);
                         }
                       } else {
-                        // For active/paused/completed assessments, go to View/Analytics (NO EDIT)
-                        // Edit should only be accessed via Edit button, not card click
+                        // For active/paused/completed assessments of other types, go to analytics
                         if (assessment.type === 'custom_mcq') {
                           router.push(`/custom-mcq/${assessment.id}`);
                         } else {
@@ -1173,36 +1608,6 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             </div>
                           )}
                         </div>
-                        {assessment.type === 'custom_mcq' && (
-                          <>
-                            <span
-                              className="badge"
-                              style={{
-                                backgroundColor: "#10b981",
-                                color: "#ffffff",
-                                fontSize: "0.75rem",
-                                padding: "0.25rem 0.5rem",
-                                borderRadius: "0.25rem",
-                              }}
-                            >
-                              Custom MCQ
-                            </span>
-                            {assessment.isDraft && (
-                              <span
-                                className="badge"
-                                style={{
-                                  backgroundColor: "#fbbf24",
-                                  color: "#ffffff",
-                                  fontSize: "0.75rem",
-                                  padding: "0.25rem 0.5rem",
-                                  borderRadius: "0.25rem",
-                                }}
-                              >
-                                Draft
-                              </span>
-                            )}
-                          </>
-                        )}
                         {assessment.type === 'dsa' && (
                           <span
                             className="badge"
@@ -1212,6 +1617,36 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               border: "1px solid #A8E8BC",
                               fontSize: "0.75rem",
                               padding: "0.25rem 0.5rem",
+                            }}
+                          >
+                            DSA
+                          </span>
+                        )}
+                        {assessment.type === 'aiml' && (
+                          <span
+                            className="badge"
+                            style={{
+                              backgroundColor: "#C9F4D4",
+                              color: "#1E5A3B",
+                              border: "1px solid #A8E8BC",
+                              fontSize: "0.75rem",
+                              padding: "0.25rem 0.5rem",
+                              fontWeight: 600,
+                            }}
+                          >
+                            AIML
+                          </span>
+                        )}
+                        {assessment.type === 'custom_mcq' && (
+                          <span
+                            className="badge"
+                            style={{
+                              backgroundColor: "#EDE9FE",
+                              color: "#7C3AED",
+                              border: "1px solid #C4B5FD",
+                              fontSize: "0.75rem",
+                              padding: "0.25rem 0.5rem",
+                              fontWeight: 600,
                             }}
                           >
                             Custom MCQ
@@ -1276,12 +1711,34 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               <span style={{ color: "#10b981", fontWeight: 500 }}>Active</span>
                             </>
                           ) : (
-                            <span style={{ color: "#f59e0b" }}>⏸️ Scheduled</span>
+                            <>
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <circle cx="12" cy="12" r="10" />
+                                <polyline points="12 6 12 12 16 14" />
+                              </svg>
+                              <span style={{ color: "#f59e0b", fontWeight: 500 }}>Scheduled</span>
+                            </>
                           )
-                        ) : null}
+                        ) : (
+                          <>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <circle cx="12" cy="12" r="10" />
+                              <line x1="12" y1="8" x2="12" y2="12" />
+                              <line x1="12" y1="16" x2="12.01" y2="16" />
+                            </svg>
+                            <span style={{ color: "#94a3b8", fontWeight: 500 }}>Not Scheduled</span>
+                          </>
+                        )}
                       </div>
                     </div>
-                    <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem", paddingTop: "1rem", borderTop: "1px solid #E8FAF0" }}>
+                    <div style={{ 
+                      marginTop: "1rem", 
+                      display: "flex", 
+                      flexDirection: "row", 
+                      gap: "0.5rem", 
+                      paddingTop: "1rem", 
+                      borderTop: "1px solid #E8FAF0" 
+                    }}>
                       {/* CASE A: Draft - Show Edit and Delete, HIDE Analytics */}
                       {assessment.status === 'draft' && assessment.type !== 'dsa' && (
                         <>
@@ -1290,19 +1747,46 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           className="btn-secondary"
                           style={{
                             fontSize: "0.875rem",
-                            padding: "0.5rem 1rem",
+                            padding: "0.625rem 1rem",
                             marginTop: 0,
-                            width: "100%",
+                            flex: 1,
+                            fontWeight: 600,
+                            transition: "all 0.15s ease",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: "0.5rem",
+                            borderRadius: "0.5rem",
+                            border: "1px solid #A8E8BC",
+                            backgroundColor: "#ffffff",
+                            color: "#2D7A52",
                           }}
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (assessment.type === 'custom_mcq') {
+                            if (assessment.type === 'aiml' || assessment.type === 'dsa') {
+                              // Direct to unified test edit resolver
+                              router.push(`/tests/${assessment.id}/edit`);
+                            } else if (assessment.type === 'custom_mcq') {
                               router.push(`/custom-mcq/create?testId=${assessment.id}`);
                             } else {
                               router.push(`/assessments/create-new?id=${assessment.id}`);
                             }
                           }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.transform = "translateY(-1px)";
+                            e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.3)";
+                            e.currentTarget.style.backgroundColor = "#f0fdf4";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.transform = "translateY(0)";
+                            e.currentTarget.style.boxShadow = "none";
+                            e.currentTarget.style.backgroundColor = "#ffffff";
+                          }}
                         >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
                           Edit
                         </button>
                           <button
@@ -1348,6 +1832,97 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       )}
                       
                       {/* CASE B: Active/Published - Show Analytics and Delete, HIDE Edit */}
+                      {/* CASE B1: Paused - Show Edit instead of Analytics */}
+                      {assessment.status === 'paused' && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.625rem 1rem",
+                              marginTop: 0,
+                              flex: 1,
+                              fontWeight: 600,
+                              transition: "all 0.15s ease",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              gap: "0.5rem",
+                              borderRadius: "0.5rem",
+                              border: "1px solid #A8E8BC",
+                              backgroundColor: "#ffffff",
+                              color: "#2D7A52",
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (assessment.type === 'aiml' || assessment.type === 'dsa') {
+                                router.push(`/tests/${assessment.id}/edit`);
+                              } else if (assessment.type === 'custom_mcq') {
+                                router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                              } else {
+                                router.push(`/assessments/create-new?id=${assessment.id}`);
+                              }
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.transform = "translateY(-1px)";
+                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.3)";
+                              e.currentTarget.style.backgroundColor = "#f0fdf4";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.transform = "translateY(0)";
+                              e.currentTarget.style.boxShadow = "none";
+                              e.currentTarget.style.backgroundColor = "#ffffff";
+                            }}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                            </svg>
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            style={{
+                              fontSize: "0.875rem",
+                              padding: "0.625rem 1rem",
+                              backgroundColor: "#ef4444",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.5rem",
+                              cursor: "pointer",
+                              transition: "all 0.15s ease",
+                              flex: 1,
+                              fontWeight: 600,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              gap: "0.5rem",
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = "#dc2626";
+                              e.currentTarget.style.transform = "translateY(-1px)";
+                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(239, 68, 68, 0.3)";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = "#ef4444";
+                              e.currentTarget.style.transform = "translateY(0)";
+                              e.currentTarget.style.boxShadow = "none";
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
+                            }}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                            Delete
+                          </button>
+                        </>
+                      )}
+                      {/* CASE B2: Active/Published - Show Analytics and Delete, HIDE Edit */}
                       {(assessment.status === 'active' || assessment.status === 'published') && (
                         <>
                           <button
@@ -1355,24 +1930,42 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             className="btn-secondary"
                             style={{
                               fontSize: "0.875rem",
-                              padding: "0.5rem 1rem",
+                              padding: "0.625rem 1rem",
                               marginTop: 0,
-                              width: "100%",
+                              flex: 1,
                               display: "flex",
                               alignItems: "center",
                               justifyContent: "center",
                               gap: "0.5rem",
+                              fontWeight: 600,
+                              transition: "all 0.15s ease",
+                              borderRadius: "0.5rem",
+                              border: "1px solid #A8E8BC",
+                              backgroundColor: "#ffffff",
+                              color: "#2D7A52",
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              // DSA assessments use different analytics route
+                              // DSA/AIML assessments use different analytics route
                               if (assessment.type === 'dsa') {
                                 router.push(`/dsa/tests/${assessment.id}/analytics`);
+                              } else if (assessment.type === 'aiml') {
+                                router.push(`/aiml/tests/${assessment.id}/analytics`);
                               } else if (assessment.type === 'custom_mcq') {
                                 router.push(`/custom-mcq/${assessment.id}`);
                               } else {
                                 router.push(`/assessments/${assessment.id}/analytics`);
                               }
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.transform = "translateY(-1px)";
+                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.3)";
+                              e.currentTarget.style.backgroundColor = "#f0fdf4";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.transform = "translateY(0)";
+                              e.currentTarget.style.boxShadow = "none";
+                              e.currentTarget.style.backgroundColor = "#ffffff";
                             }}
                           >
                             <svg 
@@ -1433,8 +2026,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                         </>
                       )}
                       
-                      {/* CASE B: Active/Published - Show Analytics and Delete, HIDE Edit */}
-                      {(assessment.status === 'active' || assessment.status === 'published') && (
+                      {/* CASE C: Completed - Show Analytics and Delete, HIDE Edit */}
+                      {assessment.status === 'completed' && (
                         <>
                           <button
                             type="button"
@@ -1457,9 +2050,11 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              // DSA assessments use different analytics route
+                              // DSA/AIML assessments use different analytics route
                               if (assessment.type === 'dsa') {
                                 router.push(`/dsa/tests/${assessment.id}/analytics`);
+                              } else if (assessment.type === 'aiml') {
+                                router.push(`/aiml/tests/${assessment.id}/analytics`);
                               } else {
                                 router.push(`/assessments/${assessment.id}/analytics`);
                               }
@@ -1490,72 +2085,6 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               <line x1="6" y1="20" x2="6" y2="14" />
                             </svg>
                             Analytics
-                          </button>
-                      <button
-                        type="button"
-                        style={{
-                          fontSize: "0.875rem",
-                          padding: "0.5rem 1rem",
-                          backgroundColor: "#ef4444",
-                          color: "#ffffff",
-                          border: "none",
-                          borderRadius: "0.375rem",
-                          cursor: "pointer",
-                          transition: "background-color 0.2s",
-                          width: "100%",
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.backgroundColor = "#dc2626";
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.backgroundColor = "#ef4444";
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                        }}
-                      >
-                        Delete
-                      </button>
-                        </>
-                      )}
-                      
-                      {/* Custom MCQ - Show Edit and Delete */}
-                      {assessment.type === 'custom_mcq' && (
-                        <>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              marginTop: 0,
-                              width: "100%",
-                              fontWeight: 600,
-                              transition: "all 0.15s ease",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 4px rgba(0, 0, 0, 0.1)";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                            }}
-                          >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                            </svg>
-                            Edit
                           </button>
                           <button
                             type="button"

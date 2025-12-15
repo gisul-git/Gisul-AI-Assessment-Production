@@ -119,6 +119,7 @@ async def create_test(
     test_dict["is_published"] = False  # Tests start as unpublished
     test_dict["invited_users"] = []  # Will be populated via add candidate
     test_dict["created_at"] = datetime.utcnow()  # Set creation timestamp
+    test_dict["test_type"] = "dsa"  # Mark as DSA test to isolate from AIML tests
     
     logger.info(f"[create_test] Creating test with created_by='{user_id}' (type: {type(user_id).__name__}), title={test_dict.get('title')}")
     logger.info(f"[create_test] Current user data: id={current_user.get('id')}, _id={current_user.get('_id')}, email={current_user.get('email')}")
@@ -222,7 +223,13 @@ async def get_tests(
                 {"created_by": {"$exists": True}},
                 {"created_by": {"$ne": None}},
                 {"created_by": {"$ne": ""}},
-                {"created_by": {"$in": user_id_normalized_list}}  # Match any super_admin ID
+                {"created_by": {"$in": user_id_normalized_list}},  # Match any super_admin ID
+                # CRITICAL: Filter to only get DSA tests (exclude AIML tests)
+                {"$or": [
+                    {"test_type": {"$exists": False}},
+                    {"test_type": None},
+                    {"test_type": "dsa"}
+                ]}
             ]
         else:
             # No super_admins found - return empty result
@@ -263,6 +270,16 @@ async def get_tests(
             {"created_by": {"$ne": ""}},
             {"created_by": user_id_normalized}  # Exact string match
         ]
+    
+    # CRITICAL: Filter to only get DSA tests (exclude AIML tests)
+    # This handles both legacy tests (no test_type) and new tests (test_type: "dsa")
+    base_conditions.append({
+        "$or": [
+            {"test_type": {"$exists": False}},  # Legacy DSA tests without test_type
+            {"test_type": None},                 # Tests with null test_type
+            {"test_type": "dsa"}                 # Explicitly marked DSA tests
+        ]
+    })
     
     if active_only:
         base_conditions.append({"is_active": True})
@@ -324,6 +341,12 @@ async def get_tests(
         # Use the already normalized user_id from above
         if test_created_by_str != user_id_normalized:
             logger.error(f"[get_tests] SECURITY VIOLATION: Test {test_id} ({test_title}) created_by='{test_created_by_str}' != user_id='{user_id_normalized}' - REJECTING")
+            continue
+        
+        # CRITICAL: Reject AIML tests - they should be isolated
+        test_type = test.get("test_type")
+        if test_type == "aiml":
+            logger.warning(f"[get_tests] Filtering out AIML test {test_id} ({test_title}) from DSA results")
             continue
         
         # Only add if it passes all checks

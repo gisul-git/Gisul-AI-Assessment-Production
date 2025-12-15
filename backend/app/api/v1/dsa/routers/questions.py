@@ -48,6 +48,16 @@ async def get_questions(
         {"created_by": user_id_normalized}  # Exact string match
     ]
     
+    # CRITICAL: Filter to only get DSA questions (exclude AIML questions)
+    # This handles both legacy questions (no module_type) and new questions (module_type: "dsa")
+    base_conditions.append({
+        "$or": [
+            {"module_type": {"$exists": False}},  # Legacy DSA questions without module_type
+            {"module_type": None},                 # Questions with null module_type
+            {"module_type": "dsa"}                 # Explicitly marked DSA questions
+        ]
+    })
+    
     # Filter by published status if specified
     # If published_only is None, don't add the filter - return all questions for the user (both published and unpublished)
     if published_only is not None:
@@ -90,6 +100,12 @@ async def get_questions(
         # Use the already normalized user_id from above
         if q_created_by_str != user_id_normalized:
             logger.error(f"[get_questions] SECURITY VIOLATION: Question {q_id} ({q_title}) created_by='{q_created_by_str}' != user_id='{user_id_normalized}' - REJECTING")
+            continue
+        
+        # CRITICAL: Reject AIML questions - they should be isolated
+        q_module_type = q.get("module_type")
+        if q_module_type == "aiml":
+            logger.warning(f"[get_questions] Filtering out AIML question {q_id} ({q_title}) from DSA results")
             continue
         
         # Only add if it passes all checks
@@ -203,8 +219,9 @@ async def create_question(
         raise HTTPException(status_code=400, detail="Invalid user ID")
     user_id = str(user_id).strip()  # Ensure no whitespace
     question_dict["created_by"] = user_id
+    question_dict["module_type"] = "dsa"  # Mark as DSA question to isolate from AIML
     
-    logger.info(f"[create_question] Creating question with created_by={user_id}, title={question_dict.get('title')}")
+    logger.info(f"[create_question] Creating DSA question with created_by={user_id}, title={question_dict.get('title')}")
     
     result = await db.questions.insert_one(question_dict)
     

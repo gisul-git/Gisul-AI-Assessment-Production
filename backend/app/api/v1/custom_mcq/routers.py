@@ -7,8 +7,10 @@ import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+import csv
+import io
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status, UploadFile, File
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import ValidationError
 
@@ -17,21 +19,11 @@ from ....db.mongo import get_db
 from ....utils.mongo import serialize_document, to_object_id
 from ....utils.responses import success_response, error_response
 from .schemas import (
-    CreateCustomMCQTestRequest,
-    CSVUploadRequest,
-    CSVValidationResponse,
-    ProctoringSettings,
-    ScheduleSettings,
-    TimerSettings,
-    CreateDraftRequest,
-    UpdateDraftRequest,
-    PublishDraftRequest,
-    DraftData,
-)
-from .services import (
-    generate_csv_template,
-    group_questions_by_section,
-    parse_csv_content,
+    MCQQuestion,
+    ValidateCSVRequest,
+    CreateCustomMCQAssessmentRequest,
+    UpdateCustomMCQAssessmentRequest,
+    VerifyCustomMCQCandidateRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -584,9 +576,11 @@ async def verify_custom_mcq_candidate(
 ) -> Dict[str, Any]:
     """Verify candidate access to custom MCQ assessment"""
     try:
-        oid = to_object_id(test_id)
-        test = await db.custom_mcq_tests.find_one({"_id": oid, "testToken": token})
-        
+        # Fetch assessment by ID
+        assessment_id = request.assessmentId
+        oid = to_object_id(assessment_id)
+        assessment = await db.custom_mcq_assessments.find_one({"_id": oid})
+
         if not assessment:
             return error_response("Assessment not found", status_code=404)
         
@@ -682,286 +676,87 @@ async def get_custom_mcq_assessment_for_taking(
 ) -> Dict[str, Any]:
     """Get assessment details for taking (candidate view)"""
     try:
-        draft_doc = {
-            "type": "custom_mcq",
-            "isDraft": True,
-            "title": payload.title or "Untitled Test",
-            "status": "draft",
-            "draftData": {
-                "csvRawData": None,
-                "parsedQuestions": [],
-                "sections": [],
-                "settings": None,
-                "scheduling": None,
-                "candidates": [],
-                "proctoringSettings": None,
-            },
-            "progressStep": 1,
-            "createdBy": to_object_id(current_user["id"]),
-            "organization": current_user.get("organization"),
-            "createdAt": _now_utc().isoformat(),
-            "updatedAt": _now_utc().isoformat(),
-        }
-        
-        result = await db.custom_mcq_tests.insert_one(draft_doc)
-        draft_id = str(result.inserted_id)
-        
-        logger.info(f"Custom MCQ draft created: {draft_id} by user {current_user['id']}")
-        
-        return success_response(
-            "Draft created successfully",
-            {
-                "draftId": draft_id,
-            }
-        )
-    except Exception as exc:
-        logger.exception(f"Error creating draft: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create draft: {str(exc)}"
-        ) from exc
+        # Fetch assessment
+        oid = to_object_id(assessment_id)
+        assessment = await db.custom_mcq_assessments.find_one({"_id": oid})
 
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
 
-@router.post("/update-draft/{draft_id}")
-async def update_draft(
-    draft_id: str,
-    payload: UpdateDraftRequest,
-    current_user: Dict[str, Any] = Depends(require_editor),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Update a draft with current progress."""
-    try:
-        oid = to_object_id(draft_id)
-        draft = await db.custom_mcq_tests.find_one({"_id": oid})
-        
-        if not draft:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
-        
-        _check_test_access(draft, current_user)
-        
-        # Update only draftData and progressStep, keep isDraft = True
-        update_doc = {
-            "draftData": payload.draftData.dict(),
-            "progressStep": payload.progressStep,
-            "updatedAt": _now_utc().isoformat(),
-        }
-        
-        # If title is provided in draftData.settings, update it
-        if payload.draftData.settings and payload.draftData.settings.get("title"):
-            update_doc["title"] = payload.draftData.settings.get("title")
-        
-        await db.custom_mcq_tests.update_one(
-            {"_id": oid},
-            {"$set": update_doc}
-        )
-        
-        logger.info(f"Draft updated: {draft_id} at step {payload.progressStep}")
-        
-        return success_response("Draft updated successfully", {"draftId": draft_id})
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"Error updating draft: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update draft: {str(exc)}"
-        ) from exc
-
-
-@router.get("/draft/{draft_id}")
-async def get_draft(
-    draft_id: str,
-    current_user: Dict[str, Any] = Depends(require_editor),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Get a draft with full draftData for editing."""
-    try:
-        oid = to_object_id(draft_id)
-        draft = await db.custom_mcq_tests.find_one({"_id": oid})
-        
-        if not draft:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
-        
-        _check_test_access(draft, current_user)
-        
-        # Convert ObjectId to string
-        draft["_id"] = str(draft["_id"])
-        
-        return success_response("Draft fetched successfully", draft)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"Error fetching draft: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch draft: {str(exc)}"
-        ) from exc
-
-
-@router.post("/publish/{draft_id}")
-async def publish_draft(
-    draft_id: str,
-    payload: PublishDraftRequest,
-    current_user: Dict[str, Any] = Depends(require_editor),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Convert draft into finalized CustomTest."""
-    try:
-        oid = to_object_id(draft_id)
-        draft = await db.custom_mcq_tests.find_one({"_id": oid})
-        
-        if not draft:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
-        
-        _check_test_access(draft, current_user)
-        
-        # Calculate total marks
-        total_marks = 0
-        for section in payload.sections:
-            for question in section.questions:
-                total_marks += question.marks
-        
-        # Generate test token
-        test_token = secrets.token_urlsafe(32)
-        
-        # Build finalized test document
-        test_doc = {
-            "type": "custom_mcq",
-            "isDraft": False,
-            "title": payload.settings.title,
-            "description": payload.settings.description,
-            "instructions": payload.settings.instructions if hasattr(payload.settings, 'instructions') else None,
-            "passingPercentage": payload.settings.passingPercentage,
-            "shuffleQuestions": payload.settings.shuffleQuestions,
-            "shuffleOptions": payload.settings.shuffleOptions,
-            "allowNegativeMarking": payload.settings.allowNegativeMarking,
-            "attemptLimit": payload.settings.attemptLimit,
-            "sections": [
-                {
-                    "name": section.name,
-                    "timeLimit": section.timeLimit,
-                    "questions": [
-                        {
-                            "question": q.question,
-                            "options": {
-                                "A": q.optionA,
-                                "B": q.optionB,
-                                "C": q.optionC,
-                                "D": q.optionD,
-                            },
-                            "correctAnswer": q.correctAnswer,
-                            "marks": q.marks,
-                        }
-                        for q in section.questions
-                    ],
-                }
-                for section in payload.sections
-            ],
-            "totalMarks": total_marks,
-            "timerMode": payload.timerSettings.timerMode,
-            "examDuration": payload.timerSettings.examDuration,
-            "sectionTimes": payload.timerSettings.sectionTimes or {},
-            "proctoring": payload.proctoringSettings.dict(),
-            "schedule": {
-                "startTime": payload.schedule.startTime.isoformat(),
-                "endTime": payload.schedule.endTime.isoformat(),
-                "candidateRequirements": payload.schedule.candidateRequirements or {},
-            },
-            "accessMode": payload.accessMode,
-            "testToken": test_token,
-            "candidates": [
-                {
-                    "name": c.name,
-                    "email": c.email.lower().strip(),
-                    "phone": c.phone,
-                    "invited": False,
-                    "inviteSentAt": None,
-                    "status": "pending",
-                }
-                for c in (payload.candidates or [])
-            ],
-            "candidateResponses": {},
-            "answerLogs": {},
-            "createdBy": to_object_id(current_user["id"]),
-            "organization": current_user.get("organization"),
-            "createdAt": draft.get("createdAt", _now_utc().isoformat()),
-            "updatedAt": _now_utc().isoformat(),
-            "status": "published",
-            # Keep draftData for history (optional - can be removed)
-            # "draftData": draft.get("draftData"),
-        }
-        
-        # Generate test access URL
-        from ....config.settings import get_settings
-        settings = get_settings()
-        base_url = getattr(settings, 'frontend_url', 'http://localhost:3000')
-        test_url = f"{base_url}/custom-mcq/test/{draft_id}/{test_token}"
-        
-        test_doc["examAccessUrl"] = test_url
-        
-        # Update the draft to finalized test
-        await db.custom_mcq_tests.update_one(
-            {"_id": oid},
-            {"$set": test_doc}
-        )
-        
-        logger.info(f"Draft published: {draft_id} by user {current_user['id']}")
-        
-        return success_response(
-            "Draft published successfully",
-            {
-                "testId": draft_id,
-                "testToken": test_token,
-                "testUrl": test_url,
-            }
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"Error publishing draft: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to publish draft: {str(exc)}"
-        ) from exc
-
-
-@router.delete("/{test_id}")
-async def delete_custom_mcq_test(
-    test_id: str,
-    current_user: Dict[str, Any] = Depends(require_editor),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Delete a custom MCQ test. Only users with access to the test can delete it."""
-    try:
-        oid = to_object_id(test_id)
-        test = await db.custom_mcq_tests.find_one({"_id": oid})
-        
-        if not test:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Test not found"
+        # Validate token
+        assessment_token = assessment.get("assessmentToken")
+        if not assessment_token:
+            logger.error(f"Assessment {assessment_id} has no assessmentToken configured")
+            return error_response("Assessment token not configured", status_code=500)
+        if assessment_token != token:
+            logger.warning(
+                f"Token mismatch for assessment {assessment_id}. "
+                f"Expected: {assessment_token[:10]}..., "
+                f"Got: {token[:10] if token else 'None'}..."
             )
-        
-        _check_test_access(test, current_user)
-        
-        # Delete the test
-        result = await db.custom_mcq_tests.delete_one({"_id": oid})
-        
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Test not found or already deleted",
-            )
-        
-        logger.info(f"Custom MCQ test deleted: {test_id} by user {current_user['id']}")
-        
-        return success_response("Custom MCQ test deleted successfully", {"testId": test_id})
-    except HTTPException:
-        raise
+            return error_response("Invalid or expired assessment token. Please use the correct assessment link.", status_code=403)
+
+        # Optional: if email/name provided, ensure candidate is allowed (same as verify endpoint)
+        if email and name:
+            submissions = assessment.get("submissions", {})
+            candidate_key = f"{email.lower().strip()}_{name.strip().lower()}"
+            existing_submission = submissions.get(candidate_key)
+
+            # Block if already completed or in progress
+            if existing_submission:
+                submission_status = existing_submission.get("status")
+                submitted_at = existing_submission.get("submittedAt")
+                started_at = existing_submission.get("startedAt")
+                score = existing_submission.get("score")
+
+                has_completed = (
+                    submission_status == "completed"
+                    or submitted_at
+                    or (score is not None and submitted_at)
+                )
+                is_in_progress = (
+                    started_at
+                    and not submitted_at
+                    and submission_status != "completed"
+                )
+
+                if has_completed:
+                    return error_response(
+                        "You have already submitted this assessment. You cannot take the test again.",
+                        status_code=400,
+                    )
+                if is_in_progress:
+                    return error_response(
+                        "You are already taking this assessment in another tab or browser. Please complete it there first.",
+                        status_code=400,
+                    )
+
+            access_mode = assessment.get("accessMode", "private")
+
+            if access_mode == "private":
+                candidates = assessment.get("candidates", [])
+                candidate_found = any(
+                    c.get("email", "").lower() == email.lower()
+                    and c.get("name", "").strip().lower() == name.strip().lower()
+                    for c in candidates
+                )
+                if not candidate_found:
+                    return error_response(
+                        "You are not authorized to access this assessment",
+                        status_code=403,
+                    )
+
+        # Prepare candidate-facing assessment data
+        assessment_serialized = serialize_document(assessment)
+        if not assessment_serialized:
+            return error_response("Failed to serialize assessment", status_code=500)
+
+        # Remove internal fields not needed for candidate
+        assessment_serialized.pop("submissions", None)
+        assessment_serialized.pop("assessmentToken", None)
+
+        return success_response("Assessment fetched successfully", assessment_serialized)
     except Exception as exc:
-        logger.exception(f"Error deleting custom MCQ test: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete test: {str(exc)}",
-        ) from exc
+        logger.exception(f"Error getting assessment for taking: {exc}")
+        return error_response(f"Failed to get assessment: {str(exc)}", status_code=500)
 

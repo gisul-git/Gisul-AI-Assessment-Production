@@ -1,76 +1,41 @@
-'use client'
-
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
-import { useSession } from 'next-auth/react'
 import { GetServerSideProps } from 'next'
 import { requireAuth } from '../../../../lib/auth'
 import Link from 'next/link'
-import dsaApi from '../../../../lib/dsa/api'
-import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video } from 'lucide-react'
-import { MultiProctorGrid } from '@/components/proctor/MultiProctorGrid'
-import { useMultiLiveProctorAdmin } from '@/hooks/useMultiLiveProctorAdmin'
+import aimlApi from '../../../../lib/aiml/api'
+import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock } from 'lucide-react'
 
 interface AIFeedback {
-  overall_score?: number
-  feedback_summary?: string
-  one_liner?: string
-  code_quality?: {
-    score?: number
-    comments?: string
-  }
-  efficiency?: {
-    time_complexity?: string
-    space_complexity?: string
-    comments?: string
-  }
-  correctness?: {
-    score?: number
-    comments?: string
-  }
-  suggestions?: string[]
+  overall_score: number
+  feedback_summary: string
+  one_liner: string
+  code_quality?: { score: number; comments: string }
+  correctness?: { score: number; comments: string }
+  task_completion?: { completed: number; total: number; details: string[] }
+  library_usage?: { score: number; comments: string }
+  output_quality?: { score: number; comments: string }
   strengths?: string[]
   areas_for_improvement?: string[]
+  suggestions?: string[]
   deduction_reasons?: string[]
-  improvement_suggestions?: string[]
-  test_breakdown?: {
-    public_passed?: number
-    public_total?: number
-    hidden_passed?: number
-    hidden_total?: number
-    total_passed?: number
-    total_tests?: number
-  }
-  scoring_basis?: {
-    base_score?: number
-    correctness_score?: number
-    pass_rate?: string
-    efficiency_bonus?: number
-    code_quality_score?: number
-    code_quality_adjustment?: number
-    time_complexity?: string
-    space_complexity?: string
-    final_score?: number
-    points_deducted?: number
-    explanation?: string
-  }
+  ai_generated?: boolean
 }
 
 interface QuestionAnalytics {
   question_id: string
   question_title: string
+  description?: string
+  tasks?: string[]
+  difficulty?: string
   language: string
   status?: string
-  invited?: boolean
-  invited_at?: string | null
-  passed_testcases: number
-  total_testcases: number
-  execution_time?: number
-  memory_used?: number
   code: string
-  test_results: any[]
-  ai_feedback?: AIFeedback
+  outputs: string[]
+  submitted_at: string | null
   created_at: string | null
+  score?: number
+  ai_feedback?: AIFeedback
 }
 
 interface CandidateAnalytics {
@@ -83,6 +48,13 @@ interface CandidateAnalytics {
     started_at: string | null
     submitted_at: string | null
     is_completed: boolean
+    ai_feedback_status?: string
+    evaluations?: Array<{
+      question_id: string
+      question_title: string
+      score: number
+      feedback: AIFeedback
+    }>
   } | null
   question_analytics: QuestionAnalytics[]
   activity_logs: any[]
@@ -101,18 +73,12 @@ interface Candidate {
 
 export default function AnalyticsPage() {
   const router = useRouter()
-  const { data: session } = useSession()
   const { id: testId, candidate: candidateUserId } = router.query
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null)
   const [analytics, setAnalytics] = useState<CandidateAnalytics | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingAnalytics, setLoadingAnalytics] = useState(false)
-  const [proctorLogs, setProctorLogs] = useState<any[]>([])
-  const [eventTypeLabels, setEventTypeLabels] = useState<Record<string, string>>({})
-  const [loadingProctorLogs, setLoadingProctorLogs] = useState(false)
-  const [showProctorLogs, setShowProctorLogs] = useState(false)
-  const [showLiveProctor, setShowLiveProctor] = useState(false)
   const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
   const [newCandidateName, setNewCandidateName] = useState("")
   const [newCandidateEmail, setNewCandidateEmail] = useState("")
@@ -123,89 +89,25 @@ export default function AnalyticsPage() {
   const [emailTemplate, setEmailTemplate] = useState({
     logoUrl: "",
     companyName: "",
-    message: "You have been invited to take a DSA test. Please click the link below to start.",
+    message: "You have been invited to take an AIML test. Please click the link below to start.",
     footer: "",
     sentBy: "AI Assessment Platform"
   })
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
-  
-  // Memoize proctorAssessmentId to prevent infinite loops
-  const proctorAssessmentId = useMemo(() => (testId as string) || "", [testId])
-  const proctorAdminId = useMemo(() => (session as any)?.user?.id || (session as any)?.user?.email || 'admin', [session])
-  
-  // Stable callback to prevent re-renders
-  const handleProctorError = useCallback((error: string) => {
-    console.error('Multi-proctor error:', error)
-  }, [])
-  
-  // Multi-proctor hook for viewing all candidates
-  const {
-    candidateStreams,
-    activeCandidates,
-    isLoading: isProctorLoading,
-    startMonitoring,
-    stopMonitoring,
-    refreshCandidate,
-    resumePollingIfPaused,
-  } = useMultiLiveProctorAdmin({
-    assessmentId: proctorAssessmentId,
-    adminId: proctorAdminId,
-    onError: handleProctorError,
-    debugMode: false, // Disable debug mode in production
-  })
-  
-  // Start monitoring when live proctor panel opens
-  // Note: startMonitoring/stopMonitoring are excluded from deps to prevent infinite loops
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (showLiveProctor && testId && typeof testId === 'string') {
-      startMonitoring()
-    } else {
-      stopMonitoring()
-    }
-    
-    return () => {
-      stopMonitoring()
-    }
-  }, [showLiveProctor, testId])
 
   const fetchAnalytics = async (userId: string) => {
     if (!testId || typeof testId !== 'string') return
     
     setLoadingAnalytics(true)
     try {
-      const response = await dsaApi.get(`/tests/${testId}/candidates/${userId}/analytics`)
+      const response = await aimlApi.get(`/tests/${testId}/candidates/${userId}/analytics`)
       setAnalytics(response.data)
     } catch (error) {
       console.error('Error fetching analytics:', error)
       alert('Failed to load analytics')
     } finally {
       setLoadingAnalytics(false)
-    }
-  }
-
-  const fetchProctorLogs = async (userId: string) => {
-    if (!testId || typeof testId !== 'string') return
-    
-    setLoadingProctorLogs(true)
-    try {
-      const response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(testId)}&userId=${encodeURIComponent(userId)}`)
-      const data = await response.json()
-      
-      if (data.success && data.data) {
-        setProctorLogs(data.data.logs || [])
-        setEventTypeLabels(data.data.eventTypeLabels || {})
-      } else {
-        setProctorLogs([])
-        setEventTypeLabels({})
-      }
-    } catch (error) {
-      console.error('Error fetching proctor logs:', error)
-      setProctorLogs([])
-      setEventTypeLabels({})
-    } finally {
-      setLoadingProctorLogs(false)
     }
   }
 
@@ -218,7 +120,7 @@ export default function AnalyticsPage() {
         
         // Fetch test info
         try {
-          const testResponse = await dsaApi.get(`/tests/${testId}`)
+          const testResponse = await aimlApi.get(`/tests/${testId}`)
           setTestInfo(testResponse.data)
           
           // Load email template if exists, otherwise use default
@@ -229,7 +131,7 @@ export default function AnalyticsPage() {
             setEmailTemplate({
               logoUrl: "",
               companyName: "",
-              message: "You have been invited to take a DSA test. Please click the link below to start.",
+              message: "You have been invited to take an AIML test. Please click the link below to start.",
               footer: "",
               sentBy: "AI Assessment Platform"
             })
@@ -239,14 +141,13 @@ export default function AnalyticsPage() {
         }
         
         // Fetch candidates
-        const response = await dsaApi.get(`/tests/${testId}/candidates`)
+        const response = await aimlApi.get(`/tests/${testId}/candidates`)
         setCandidates(response.data || [])
         
         // If candidate query param is set, load that candidate's analytics
         if (candidateUserId && typeof candidateUserId === 'string') {
           setSelectedCandidate(candidateUserId)
           fetchAnalytics(candidateUserId)
-          fetchProctorLogs(candidateUserId)
         }
       } catch (error) {
         console.error('Error fetching data:', error)
@@ -262,8 +163,6 @@ export default function AnalyticsPage() {
   const handleCandidateSelect = (userId: string) => {
     setSelectedCandidate(userId)
     fetchAnalytics(userId)
-    fetchProctorLogs(userId)
-    setShowProctorLogs(false)
     // Scroll to top of analytics content when candidate is selected
     setTimeout(() => {
       const analyticsContent = document.querySelector('[data-analytics-content]')
@@ -311,14 +210,14 @@ export default function AnalyticsPage() {
     setAddingCandidate(true)
     
     try {
-      const response = await dsaApi.post(`/tests/${testId}/add-candidate`, {
+      const response = await aimlApi.post(`/tests/${testId}/add-candidate`, {
         name: newCandidateName.trim(),
         email: newCandidateEmail.trim(),
       })
       
       if (response.data) {
         // Refresh candidates list
-        const candidatesResponse = await dsaApi.get(`/tests/${testId}/candidates`)
+        const candidatesResponse = await aimlApi.get(`/tests/${testId}/candidates`)
         setCandidates(candidatesResponse.data || [])
         
         // Close modal and reset form
@@ -339,15 +238,13 @@ export default function AnalyticsPage() {
     if (!testId || typeof testId !== 'string') return
     
     try {
-      // Note: DSA API may need a resend-invite endpoint similar to assessments
-      // For now, we'll use the add-candidate endpoint which should resend the invitation
       const candidate = candidates.find(c => c.email === email)
       if (!candidate) {
         alert("Candidate not found")
         return
       }
       
-      const response = await dsaApi.post(`/tests/${testId}/add-candidate`, {
+      const response = await aimlApi.post(`/tests/${testId}/add-candidate`, {
         name: candidate.name,
         email: candidate.email,
       })
@@ -355,7 +252,7 @@ export default function AnalyticsPage() {
       if (response.data) {
         alert("Invitation resent successfully!")
         // Refresh candidates list
-        const candidatesResponse = await dsaApi.get(`/tests/${testId}/candidates`)
+        const candidatesResponse = await aimlApi.get(`/tests/${testId}/candidates`)
         setCandidates(candidatesResponse.data || [])
       }
     } catch (err: any) {
@@ -370,9 +267,16 @@ export default function AnalyticsPage() {
     if (!confirm(`Are you sure you want to remove ${candidate.name} (${candidate.email}) from this test?`)) return
     
     try {
-      // Note: DSA API may need a remove-candidate endpoint
-      // For now, we'll show an alert that this feature needs backend support
-      alert("Remove candidate functionality requires backend API support. Please contact support.")
+      await aimlApi.delete(`/tests/${testId}/candidates/${userId}`)
+      // Refresh candidates list
+      const candidatesResponse = await aimlApi.get(`/tests/${testId}/candidates`)
+      setCandidates(candidatesResponse.data || [])
+      // Clear selection if removed candidate was selected
+      if (selectedCandidate === userId) {
+        setSelectedCandidate(null)
+        setAnalytics(null)
+      }
+      alert("Candidate removed successfully!")
     } catch (err: any) {
       alert(err.response?.data?.detail || err.response?.data?.message || "Failed to remove candidate")
     }
@@ -384,7 +288,7 @@ export default function AnalyticsPage() {
     setSavingTemplate(true)
     try {
       // Update test with email template
-      await dsaApi.patch(`/tests/${testId}`, {
+      await aimlApi.patch(`/tests/${testId}`, {
         invitationTemplate: emailTemplate
       })
       
@@ -417,14 +321,14 @@ export default function AnalyticsPage() {
     
     setSendingInvitations(true)
     try {
-      const response = await dsaApi.post(`/tests/${testId}/send-invitations-to-all`)
+      const response = await aimlApi.post(`/tests/${testId}/send-invitations-to-all`)
       
       if (response.data) {
         const successCount = response.data.success_count || 0
         const failedCount = response.data.failed_count || 0
         
         // Refresh candidates list to show updated statuses
-        const candidatesResponse = await dsaApi.get(`/tests/${testId}/candidates`)
+        const candidatesResponse = await aimlApi.get(`/tests/${testId}/candidates`)
         setCandidates(candidatesResponse.data || [])
         
         if (failedCount === 0) {
@@ -471,40 +375,29 @@ export default function AnalyticsPage() {
       <div className="card">
         {/* Back Button */}
         <div style={{ marginBottom: "1.5rem" }}>
-          <Link
-            href="/dashboard"
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => router.push("/dashboard")}
             style={{
-              display: "inline-flex",
+              display: "flex",
               alignItems: "center",
               gap: "0.5rem",
               padding: "0.5rem 1rem",
               fontSize: "0.875rem",
-              backgroundColor: "#f1f5f9",
-              color: "#475569",
-              border: "1px solid #e2e8f0",
-              borderRadius: "0.5rem",
-              textDecoration: "none",
-              cursor: "pointer",
-              transition: "all 0.2s",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = "#e2e8f0";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = "#f1f5f9";
             }}
           >
             <ArrowLeft className="h-4 w-4" />
             Back to Dashboard
-          </Link>
+          </button>
         </div>
 
         <div style={{ marginBottom: "2rem" }}>
           <h1 style={{ fontSize: "2rem", fontWeight: 700, marginBottom: "0.5rem" }}>
-            Test Analytics
+            AIML Test Analytics
           </h1>
           <p style={{ color: "#64748b", margin: 0 }}>
-            {testInfo?.title || 'DSA Test'} - View detailed analytics and AI feedback
+            {testInfo?.title || 'AIML Test'} - View detailed analytics and AI feedback
           </p>
         </div>
 
@@ -553,7 +446,7 @@ export default function AnalyticsPage() {
                 <div style={{ display: "flex", gap: "0.5rem" }}>
                   <input
                     type="text"
-                    value={`${typeof window !== 'undefined' ? window.location.origin : ''}/test/${testId}?token=${testInfo.test_token}`}
+                    value={`${typeof window !== 'undefined' ? window.location.origin : ''}/aiml/test/${testId}?token=${testInfo.test_token}`}
                     readOnly
                     style={{
                       flex: 1,
@@ -568,7 +461,7 @@ export default function AnalyticsPage() {
                     type="button"
                     className="btn-secondary"
                     onClick={() => {
-                      const testUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/test/${testId}?token=${testInfo.test_token}`;
+                      const testUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/aiml/test/${testId}?token=${testInfo.test_token}`;
                       navigator.clipboard.writeText(testUrl);
                       alert("Test URL copied to clipboard!");
                     }}
@@ -627,7 +520,7 @@ export default function AnalyticsPage() {
             </div>
           </div>
           
-                {candidates.length === 0 ? (
+          {candidates.length === 0 ? (
             <p style={{ color: "#64748b", fontSize: "0.875rem" }}>No candidates added yet.</p>
           ) : (
             <div style={{ overflowX: "auto" }}>
@@ -719,7 +612,6 @@ export default function AnalyticsPage() {
                 onClick={() => {
                   setSelectedCandidate(null)
                   setAnalytics(null)
-                  setProctorLogs([])
                 }}
                 style={{
                   width: "100%",
@@ -753,14 +645,14 @@ export default function AnalyticsPage() {
               </button>
               {candidates.length === 0 ? (
                 <p style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                    No candidates found
-                  </p>
-                ) : (
+                  No candidates found
+                </p>
+              ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                    {candidates.map((candidate) => (
-                      <button
-                        key={candidate.user_id}
-                        onClick={() => handleCandidateSelect(candidate.user_id)}
+                  {candidates.map((candidate) => (
+                    <button
+                      key={candidate.user_id}
+                      onClick={() => handleCandidateSelect(candidate.user_id)}
                       style={{
                         width: "100%",
                         textAlign: "left",
@@ -788,17 +680,17 @@ export default function AnalyticsPage() {
                     >
                       <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>{candidate.name}</div>
                       <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>
-                          {candidate.email}
-                        </div>
-                        {candidate.has_submitted && (
+                        {candidate.email}
+                      </div>
+                      {candidate.has_submitted && (
                         <div style={{ fontSize: "0.75rem", color: "#10b981", marginTop: "0.25rem", fontWeight: 600 }}>
                           Score: {candidate.submission_score || 0}
-                          </div>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
@@ -812,48 +704,11 @@ export default function AnalyticsPage() {
                 textAlign: "center",
                 backgroundColor: "#ffffff",
               }}>
-                  <div>Loading analytics...</div>
+                <div>Loading analytics...</div>
               </div>
             ) : !selectedCandidate ? (
               // Overall Analytics View
               <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-                {/* Live Proctoring Button for Overall View */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}>
-                  <div>
-                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-                      Live Proctoring Dashboard
-                    </h2>
-                    <p style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                      Monitor all candidates who have started the test. View their camera and screen in real-time.
-                    </p>
-                  </div>
-                  {testId && typeof testId === 'string' && (
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={() => setShowLiveProctor(true)}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        padding: "0.75rem 1.5rem",
-                        fontSize: "0.875rem",
-                        backgroundColor: "#10b981",
-                      }}
-                    >
-                      <Video style={{ width: "20px", height: "20px" }} />
-                      Live Proctoring
-                    </button>
-                  )}
-                </div>
                 <div style={{
                   border: "1px solid #e2e8f0",
                   borderRadius: "0.75rem",
@@ -926,8 +781,8 @@ export default function AnalyticsPage() {
                 backgroundColor: "#ffffff",
               }}>
                 <p style={{ color: "#64748b" }}>
-                    {analytics.candidate.name} has not submitted the test yet.
-                  </p>
+                  {analytics.candidate.name} has not submitted the test yet.
+                </p>
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
@@ -952,8 +807,12 @@ export default function AnalyticsPage() {
                     </div>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Score</div>
-                      <div style={{ fontSize: "1.5rem", fontWeight: 700 }}>
-                        {analytics.submission.score}
+                      <div style={{ 
+                        fontSize: "1.5rem", 
+                        fontWeight: 700,
+                        color: analytics.submission.score >= 70 ? "#166534" : analytics.submission.score >= 50 ? "#92400e" : "#991b1b"
+                      }}>
+                        {analytics.submission.score}/100
                       </div>
                     </div>
                     <div>
@@ -967,238 +826,6 @@ export default function AnalyticsPage() {
                   </div>
                 </div>
 
-                {/* Overall Performance Summary */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
-                      {analytics.candidate.name} - Overall Performance
-                    </h2>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
-                      <div>
-                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Score</div>
-                      <div style={{ fontSize: "2rem", fontWeight: 700 }}>{analytics.submission.score}</div>
-                      </div>
-                      <div>
-                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Started</div>
-                      <div style={{ fontSize: "1rem" }}>{formatDate(analytics.submission.started_at)}</div>
-                      </div>
-                      <div>
-                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Submitted</div>
-                      <div style={{ fontSize: "1rem" }}>{formatDate(analytics.submission.submitted_at)}</div>
-                      </div>
-                    </div>
-
-                    {/* Overall Score Deduction Reasons */}
-                    {(() => {
-                      const maxPossibleScore = analytics.question_analytics.length * 100
-                      const actualScore = analytics.submission.score
-                      const scoreDifference = maxPossibleScore - actualScore
-                      
-                      const allDeductionReasons: string[] = []
-                      const allImprovementSuggestions: string[] = []
-                      
-                      analytics.question_analytics.forEach((qa, index) => {
-                        if (qa.ai_feedback?.overall_score !== undefined && qa.ai_feedback.overall_score < 100) {
-                          const questionDeduction = 100 - qa.ai_feedback.overall_score
-                          
-                          if (qa.ai_feedback.deduction_reasons && qa.ai_feedback.deduction_reasons.length > 0) {
-                            qa.ai_feedback.deduction_reasons.forEach(reason => {
-                              allDeductionReasons.push(`Question ${index + 1}: ${reason} (-${questionDeduction} points)`)
-                            })
-                          } else if (qa.ai_feedback.scoring_basis) {
-                            const basis = qa.ai_feedback.scoring_basis
-                            const reasons: string[] = []
-                            
-                            if (basis.base_score && basis.base_score < 100) {
-                              reasons.push(`Base score reduced to ${basis.base_score}/100 due to test pass rate: ${basis.pass_rate || 'N/A'}`)
-                            }
-                            
-                            if (basis.efficiency_bonus && basis.efficiency_bonus < 0) {
-                              reasons.push(`Efficiency penalty: ${basis.efficiency_bonus} points (Time: ${basis.time_complexity}, Space: ${basis.space_complexity})`)
-                            }
-                            
-                            if (basis.code_quality_adjustment && basis.code_quality_adjustment < 0) {
-                              reasons.push(`Code quality adjustment: ${basis.code_quality_adjustment} points`)
-                            }
-                            
-                            if (reasons.length > 0) {
-                              reasons.forEach(reason => {
-                                allDeductionReasons.push(`Question ${index + 1}: ${reason} (-${questionDeduction} points)`)
-                              })
-                            } else {
-                              const effBonus = basis.efficiency_bonus || 0
-                              const codeQualAdj = basis.code_quality_adjustment || 0
-                              allDeductionReasons.push(
-                                `Question ${index + 1}: Score ${qa.ai_feedback.overall_score}/100 calculated as Base (${basis.base_score || 'N/A'}) + Efficiency (${effBonus >= 0 ? '+' : ''}${effBonus}) + Code Quality (${codeQualAdj >= 0 ? '+' : ''}${codeQualAdj}) = ${qa.ai_feedback.overall_score} (-${questionDeduction} points)`
-                              )
-                            }
-                          } else {
-                            allDeductionReasons.push(`Question ${index + 1}: Score ${qa.ai_feedback.overall_score}/100 (-${questionDeduction} points)`)
-                          }
-                          
-                          if (qa.ai_feedback.improvement_suggestions && qa.ai_feedback.improvement_suggestions.length > 0) {
-                            qa.ai_feedback.improvement_suggestions.forEach(suggestion => {
-                              allImprovementSuggestions.push(`Question ${index + 1}: ${suggestion}`)
-                            })
-                          }
-                        }
-                      })
-
-                      if (scoreDifference > 0) {
-                        return (
-                        <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                          <div style={{ backgroundColor: "#fee2e2", border: "2px solid #ef4444", borderRadius: "0.5rem", padding: "1rem" }}>
-                            <h4 style={{ fontSize: "1rem", fontWeight: 700, color: "#991b1b", marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                              <AlertTriangle style={{ width: "20px", height: "20px" }} />
-                                Overall Score Deduction ({scoreDifference} points deducted)
-                              </h4>
-                            <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#991b1b", marginBottom: "0.75rem", backgroundColor: "#fecaca", padding: "0.5rem 0.75rem", borderRadius: "0.375rem" }}>
-                                Total Score: {actualScore}/{maxPossibleScore}
-                              </div>
-                              {allDeductionReasons.length > 0 ? (
-                              <ul style={{ fontSize: "0.875rem", color: "#991b1b", listStyle: "disc", paddingLeft: "1.5rem", display: "flex", flexDirection: "column", gap: "0.5rem", fontWeight: 500 }}>
-                                  {allDeductionReasons.map((reason, idx) => (
-                                  <li key={idx} style={{ lineHeight: "1.5" }}>{reason}</li>
-                                  ))}
-                                </ul>
-                              ) : (
-                              <div style={{ fontSize: "0.875rem", color: "#991b1b" }}>
-                                <p style={{ fontWeight: 500, marginBottom: "0.5rem" }}>Score breakdown by question:</p>
-                                <ul style={{ listStyle: "disc", paddingLeft: "1.5rem", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-                                    {analytics.question_analytics.map((qa, idx) => {
-                                      if (qa.ai_feedback?.overall_score !== undefined && qa.ai_feedback.overall_score < 100) {
-                                        const deduction = 100 - qa.ai_feedback.overall_score
-                                        return (
-                                          <li key={idx}>
-                                            Question {idx + 1}: {qa.ai_feedback.overall_score}/100 (-{deduction} points)
-                                          </li>
-                                        )
-                                      }
-                                      return null
-                                    })}
-                                  </ul>
-                                </div>
-                              )}
-                            </div>
-
-                            {allImprovementSuggestions.length > 0 && (
-                            <div style={{ backgroundColor: "#fef3c7", border: "2px solid #fbbf24", borderRadius: "0.5rem", padding: "1rem" }}>
-                              <h4 style={{ fontSize: "1rem", fontWeight: 700, color: "#92400e", marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                                <Lightbulb style={{ width: "20px", height: "20px" }} />
-                                  Overall Improvement Suggestions
-                                </h4>
-                              <ul style={{ fontSize: "0.875rem", color: "#92400e", listStyle: "disc", paddingLeft: "1.5rem", display: "flex", flexDirection: "column", gap: "0.5rem", fontWeight: 500 }}>
-                                  {allImprovementSuggestions.map((suggestion, idx) => (
-                                  <li key={idx} style={{ lineHeight: "1.5" }}>{suggestion}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-                          </div>
-                        )
-                      }
-                      return null
-                    })()}
-                </div>
-
-                {/* Proctoring Logs Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                      <AlertTriangle style={{ width: "20px", height: "20px", color: "#f59e0b" }} />
-                      <h2 style={{ fontSize: "1.25rem", fontWeight: 600 }}>Proctoring Logs</h2>
-                        {proctorLogs.length > 0 && (
-                        <span style={{ padding: "0.25rem 0.75rem", fontSize: "0.75rem", fontWeight: 600, backgroundColor: "#fee2e2", color: "#991b1b", borderRadius: "9999px" }}>
-                            {proctorLogs.length} {proctorLogs.length === 1 ? 'violation' : 'violations'}
-                          </span>
-                        )}
-                      </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                          onClick={() => setShowProctorLogs(!showProctorLogs)}
-                          disabled={loadingProctorLogs}
-                        style={{ marginTop: 0 }}
-                        >
-                          {loadingProctorLogs ? 'Loading...' : showProctorLogs ? 'Hide Logs' : 'Show Logs'}
-                      </button>
-                      </div>
-                    </div>
-
-                    {loadingProctorLogs ? (
-                    <div style={{ textAlign: "center", padding: "1rem", color: "#64748b" }}>
-                        Loading proctoring logs...
-                      </div>
-                    ) : proctorLogs.length === 0 ? (
-                    <div style={{ textAlign: "center", padding: "1rem", color: "#64748b" }}>
-                        No proctoring violations detected
-                      </div>
-                    ) : showProctorLogs ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "600px", overflowY: "auto" }}>
-                        {proctorLogs.map((log, index) => (
-                          <div
-                            key={log._id || index}
-                          style={{ border: "1px solid #fca5a5", borderRadius: "0.5rem", padding: "1rem", backgroundColor: "#fef2f2" }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "0.5rem" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                              <AlertTriangle style={{ width: "16px", height: "16px", color: "#ef4444", flexShrink: 0 }} />
-                              <span style={{ fontWeight: 600, color: "#991b1b" }}>
-                                  {eventTypeLabels[log.eventType] || log.eventType || 'Unknown Violation'}
-                                </span>
-                              </div>
-                            <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", color: "#64748b" }}>
-                              <Clock style={{ width: "12px", height: "12px" }} />
-                                <span>{formatDate(log.timestamp)}</span>
-                              </div>
-                            </div>
-                            
-                            {log.metadata && Object.keys(log.metadata).length > 0 && (
-                            <div style={{ marginTop: "0.5rem", fontSize: "0.875rem" }}>
-                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Details:</div>
-                              <div style={{ backgroundColor: "#1e293b", borderRadius: "0.375rem", padding: "0.5rem", fontFamily: "monospace", fontSize: "0.75rem" }}>
-                                  {Object.entries(log.metadata).map(([key, value]) => (
-                                  <div key={key} style={{ marginBottom: "0.25rem" }}>
-                                    <span style={{ color: "#94a3b8" }}>{key}:</span>{' '}
-                                    <span style={{ color: "#e2e8f0" }}>
-                                        {typeof value === 'object' ? JSON.stringify(value) : String(value)}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-
-                            {log.snapshotBase64 && (
-                            <div style={{ marginTop: "0.75rem" }}>
-                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.5rem" }}>Evidence Snapshot:</div>
-                                <img
-                                  src={log.snapshotBase64.startsWith("data:") ? log.snapshotBase64 : `data:image/png;base64,${log.snapshotBase64}`}
-                                  alt="Violation snapshot"
-                                style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #475569", maxHeight: "200px" }}
-                                  onError={(e) => {
-                                    console.error("Error loading snapshot image:", e);
-                                    (e.target as HTMLImageElement).style.display = "none";
-                                  }}
-                                />
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                </div>
-
                 {/* Question Analytics */}
                 {analytics.question_analytics.map((qa, index) => (
                   <div key={qa.question_id} style={{
@@ -1207,131 +834,287 @@ export default function AnalyticsPage() {
                     padding: "1.5rem",
                     backgroundColor: "#ffffff",
                   }}>
-                    <h3 style={{ fontSize: "1.125rem", fontWeight: 600, marginBottom: "1rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
+                      <h3 style={{ fontSize: "1.125rem", fontWeight: 600, margin: 0 }}>
                         Question {index + 1}: {qa.question_title}
                       </h3>
-                      
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
-                        <div>
-                        <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Status</div>
-                        <div style={{ fontSize: "0.875rem", fontWeight: 500, color: qa.status === 'accepted' ? "#059669" : "#dc2626" }}>
-                            {qa.status}
-                          </div>
-                        </div>
-                        <div>
-                        <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Test Cases</div>
-                        <div style={{ fontSize: "0.875rem" }}>
-                            {qa.passed_testcases} / {qa.total_testcases} passed
-                          </div>
-                        </div>
-                        <div>
-                        <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Language</div>
-                        <div style={{ fontSize: "0.875rem" }}>{qa.language}</div>
-                        </div>
-                        {qa.execution_time && (
-                          <div>
-                          <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Execution Time</div>
-                          <div style={{ fontSize: "0.875rem" }}>{qa.execution_time}ms</div>
-                          </div>
+                      {qa.score !== undefined && (
+                        <span style={{
+                          padding: "0.5rem 1rem",
+                          borderRadius: "0.5rem",
+                          fontSize: "1rem",
+                          fontWeight: 700,
+                          backgroundColor: qa.score >= 70 ? "#dcfce7" : qa.score >= 50 ? "#fef3c7" : "#fee2e2",
+                          color: qa.score >= 70 ? "#166534" : qa.score >= 50 ? "#92400e" : "#991b1b",
+                        }}>
+                          {qa.score}/100
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Difficulty and Tasks */}
+                    {(qa.difficulty || qa.tasks) && (
+                      <div style={{ marginBottom: "1rem", padding: "0.75rem", backgroundColor: "#f8fafc", borderRadius: "0.5rem" }}>
+                        {qa.difficulty && (
+                          <span style={{
+                            display: "inline-block",
+                            marginRight: "0.75rem",
+                            padding: "0.25rem 0.5rem",
+                            borderRadius: "0.25rem",
+                            fontSize: "0.75rem",
+                            fontWeight: 600,
+                            backgroundColor: qa.difficulty === 'easy' ? "#d1fae5" : qa.difficulty === 'medium' ? "#fef3c7" : "#fee2e2",
+                            color: qa.difficulty === 'easy' ? "#065f46" : qa.difficulty === 'medium' ? "#92400e" : "#991b1b",
+                          }}>
+                            {qa.difficulty.charAt(0).toUpperCase() + qa.difficulty.slice(1)}
+                          </span>
+                        )}
+                        {qa.tasks && qa.tasks.length > 0 && (
+                          <span style={{ fontSize: "0.75rem", color: "#64748b" }}>
+                            {qa.tasks.length} task{qa.tasks.length !== 1 ? 's' : ''}
+                          </span>
                         )}
                       </div>
-
-                      {/* AI Feedback */}
-                      {qa.ai_feedback && (
-                      <div style={{ marginTop: "1.5rem", border: "1px solid #3b82f6", borderRadius: "0.5rem", backgroundColor: "#eff6ff", overflow: "hidden" }}>
-                        <div style={{ padding: "0.75rem 1rem", backgroundColor: "#dbeafe", borderBottom: "1px solid #3b82f6" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                            <Lightbulb style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                            <span style={{ fontWeight: 600, color: "#1e40af" }}>AI Feedback</span>
-                              {qa.ai_feedback.overall_score !== undefined && (
-                              <span style={{ fontSize: "1.125rem", fontWeight: 700, color: qa.ai_feedback.overall_score >= 80 ? "#059669" : qa.ai_feedback.overall_score >= 60 ? "#f59e0b" : "#dc2626" }}>
-                                  Score: {qa.ai_feedback.overall_score}/100
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          
-                        <div style={{ padding: "1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
-                            {/* Test Case Breakdown */}
-                            {qa.ai_feedback.test_breakdown && (
-                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #3b82f6" }}>
-                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                                <CheckCircle2 style={{ width: "12px", height: "12px" }} />
-                                  Test Case Results
-                                </h4>
-                              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "0.75rem", fontSize: "0.875rem" }}>
-                                <div style={{ backgroundColor: "#0f172a", borderRadius: "0.375rem", padding: "0.5rem" }}>
-                                  <div style={{ fontSize: "0.75rem", color: "#94a3b8", marginBottom: "0.25rem" }}>Public Test Cases</div>
-                                  <div style={{ fontSize: "1.125rem", fontWeight: 600, color: "#60a5fa" }}>
-                                      {qa.ai_feedback.test_breakdown?.public_passed ?? 0}/{qa.ai_feedback.test_breakdown?.public_total ?? 0}
-                                    </div>
-                                  </div>
-                                <div style={{ backgroundColor: "#0f172a", borderRadius: "0.375rem", padding: "0.5rem" }}>
-                                  <div style={{ fontSize: "0.75rem", color: "#94a3b8", marginBottom: "0.25rem" }}>Hidden Test Cases</div>
-                                  <div style={{ fontSize: "1.125rem", fontWeight: 600, color: "#a78bfa" }}>
-                                      {qa.ai_feedback.test_breakdown?.hidden_passed ?? 0}/{qa.ai_feedback.test_breakdown?.hidden_total ?? 0}
-                                    </div>
-                                  </div>
-                                <div style={{ gridColumn: "span 2", backgroundColor: "#0f172a", borderRadius: "0.375rem", padding: "0.5rem" }}>
-                                  <div style={{ fontSize: "0.75rem", color: "#94a3b8", marginBottom: "0.25rem" }}>Total</div>
-                                  <div style={{ fontSize: "1.125rem", fontWeight: 600, color: "#34d399" }}>
-                                      {(qa.ai_feedback.test_breakdown?.public_passed ?? 0) + (qa.ai_feedback.test_breakdown?.hidden_passed ?? 0)}/
-                                      {(qa.ai_feedback.test_breakdown?.public_total ?? 0) + (qa.ai_feedback.test_breakdown?.hidden_total ?? 0)}
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* Complexity */}
-                            {qa.ai_feedback.efficiency && (
-                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem" }}>
-                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                                <TrendingUp style={{ width: "12px", height: "12px" }} />
-                                  Complexity
-                                </h4>
-                              <div style={{ display: "flex", alignItems: "center", gap: "1rem", fontSize: "0.875rem" }}>
-                                  <div>
-                                  <span style={{ color: "#94a3b8" }}>Time: </span>
-                                  <span style={{ fontWeight: 600, color: "#60a5fa" }}>
-                                      {qa.ai_feedback.efficiency.time_complexity || 'N/A'}
-                                    </span>
-                                  </div>
-                                  <div>
-                                  <span style={{ color: "#94a3b8" }}>Space: </span>
-                                  <span style={{ fontWeight: 600, color: "#a78bfa" }}>
-                                      {qa.ai_feedback.efficiency.space_complexity || 'N/A'}
-                                    </span>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* AI Feedback Summary */}
-                            {qa.ai_feedback.feedback_summary && (
-                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem" }}>
-                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                                <Lightbulb style={{ width: "12px", height: "12px" }} />
-                                  AI Feedback
-                                </h4>
-                              <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
-                                  {qa.ai_feedback.feedback_summary}
-                                </p>
-                              </div>
-                            )}
-                          </div>
+                    )}
+                    
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Status</div>
+                        <div style={{ fontSize: "0.875rem", fontWeight: 500, color: qa.status === 'evaluated' ? "#059669" : qa.status === 'submitted' ? "#2563eb" : "#dc2626" }}>
+                          {qa.status === 'evaluated' ? '✓ Evaluated' : qa.status === 'submitted' ? '⏳ Submitted' : 'Not submitted'}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Language</div>
+                        <div style={{ fontSize: "0.875rem" }}>{qa.language}</div>
+                      </div>
+                      {qa.submitted_at && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Submitted At</div>
+                          <div style={{ fontSize: "0.875rem" }}>{formatDate(qa.submitted_at)}</div>
                         </div>
                       )}
+                    </div>
 
-                      {/* Code Display */}
-                    <details style={{ marginTop: "1rem" }}>
-                      <summary style={{ cursor: "pointer", fontSize: "0.875rem", fontWeight: 500, color: "#64748b" }}>
+                    {/* Code Display */}
+                    {qa.code && (
+                      <details style={{ marginTop: "1rem" }}>
+                        <summary style={{ cursor: "pointer", fontSize: "0.875rem", fontWeight: 500, color: "#64748b" }}>
                           View Code
                         </summary>
-                      <pre style={{ marginTop: "0.5rem", padding: "1rem", backgroundColor: "#1e293b", borderRadius: "0.5rem", overflowX: "auto", fontSize: "0.75rem", color: "#e2e8f0" }}>
+                        <pre style={{ marginTop: "0.5rem", padding: "1rem", backgroundColor: "#1e293b", borderRadius: "0.5rem", overflowX: "auto", fontSize: "0.75rem", color: "#e2e8f0" }}>
                           <code>{qa.code}</code>
                         </pre>
                       </details>
+                    )}
+
+                    {/* Outputs Display */}
+                    {qa.outputs && qa.outputs.length > 0 && (
+                      <details style={{ marginTop: "1rem" }}>
+                        <summary style={{ cursor: "pointer", fontSize: "0.875rem", fontWeight: 500, color: "#64748b" }}>
+                          View Outputs ({qa.outputs.length})
+                        </summary>
+                        <div style={{ marginTop: "0.5rem", padding: "1rem", backgroundColor: "#f8fafc", borderRadius: "0.5rem" }}>
+                          {qa.outputs.map((output, idx) => (
+                            <div key={idx} style={{ marginBottom: "0.5rem", padding: "0.5rem", backgroundColor: "#ffffff", borderRadius: "0.375rem", fontSize: "0.875rem" }}>
+                              <strong>Output {idx + 1}:</strong>
+                              <pre style={{ marginTop: "0.25rem", whiteSpace: "pre-wrap", fontFamily: "monospace" }}>{output}</pre>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+
+                    {/* AI Feedback Section */}
+                    {qa.ai_feedback && (
+                      <div style={{ 
+                        marginTop: "1.5rem", 
+                        padding: "1.5rem", 
+                        backgroundColor: "#f0fdf4", 
+                        borderRadius: "0.75rem",
+                        border: "1px solid #86efac"
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
+                          <Lightbulb size={24} className="text-emerald-600" />
+                          <h4 style={{ fontSize: "1.125rem", fontWeight: 600, color: "#166534", margin: 0 }}>
+                            AI Evaluation
+                          </h4>
+                          <span style={{
+                            marginLeft: "auto",
+                            padding: "0.25rem 0.75rem",
+                            borderRadius: "9999px",
+                            fontSize: "0.875rem",
+                            fontWeight: 700,
+                            backgroundColor: qa.ai_feedback.overall_score >= 70 ? "#dcfce7" : qa.ai_feedback.overall_score >= 50 ? "#fef3c7" : "#fee2e2",
+                            color: qa.ai_feedback.overall_score >= 70 ? "#166534" : qa.ai_feedback.overall_score >= 50 ? "#92400e" : "#991b1b",
+                          }}>
+                            Score: {qa.ai_feedback.overall_score}/100
+                          </span>
+                        </div>
+
+                        {/* One-liner summary */}
+                        {qa.ai_feedback.one_liner && (
+                          <div style={{ 
+                            fontSize: "0.875rem", 
+                            fontStyle: "italic", 
+                            color: "#475569", 
+                            marginBottom: "1rem",
+                            padding: "0.5rem 1rem",
+                            backgroundColor: "#ffffff",
+                            borderRadius: "0.375rem",
+                            borderLeft: "3px solid #10b981"
+                          }}>
+                            {qa.ai_feedback.one_liner}
+                          </div>
+                        )}
+
+                        {/* Feedback Summary */}
+                        {qa.ai_feedback.feedback_summary && (
+                          <div style={{ marginBottom: "1rem" }}>
+                            <h5 style={{ fontSize: "0.875rem", fontWeight: 600, color: "#1e293b", marginBottom: "0.5rem" }}>
+                              Summary
+                            </h5>
+                            <p style={{ fontSize: "0.875rem", color: "#475569", margin: 0 }}>
+                              {qa.ai_feedback.feedback_summary}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Score Breakdown */}
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
+                          {qa.ai_feedback.code_quality && (
+                            <div style={{ padding: "0.75rem", backgroundColor: "#ffffff", borderRadius: "0.5rem" }}>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Code Quality</div>
+                              <div style={{ fontSize: "1rem", fontWeight: 600 }}>{qa.ai_feedback.code_quality.score}/25</div>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>{qa.ai_feedback.code_quality.comments}</div>
+                            </div>
+                          )}
+                          {qa.ai_feedback.correctness && (
+                            <div style={{ padding: "0.75rem", backgroundColor: "#ffffff", borderRadius: "0.5rem" }}>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Correctness</div>
+                              <div style={{ fontSize: "1rem", fontWeight: 600 }}>{qa.ai_feedback.correctness.score}/40</div>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>{qa.ai_feedback.correctness.comments}</div>
+                            </div>
+                          )}
+                          {qa.ai_feedback.library_usage && (
+                            <div style={{ padding: "0.75rem", backgroundColor: "#ffffff", borderRadius: "0.5rem" }}>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Library Usage</div>
+                              <div style={{ fontSize: "1rem", fontWeight: 600 }}>{qa.ai_feedback.library_usage.score}/20</div>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>{qa.ai_feedback.library_usage.comments}</div>
+                            </div>
+                          )}
+                          {qa.ai_feedback.output_quality && (
+                            <div style={{ padding: "0.75rem", backgroundColor: "#ffffff", borderRadius: "0.5rem" }}>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Output Quality</div>
+                              <div style={{ fontSize: "1rem", fontWeight: 600 }}>{qa.ai_feedback.output_quality.score}/15</div>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>{qa.ai_feedback.output_quality.comments}</div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Task Completion */}
+                        {qa.ai_feedback.task_completion && (
+                          <div style={{ marginBottom: "1rem", padding: "0.75rem", backgroundColor: "#ffffff", borderRadius: "0.5rem" }}>
+                            <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#1e293b", marginBottom: "0.5rem" }}>
+                              Task Completion: {qa.ai_feedback.task_completion.completed}/{qa.ai_feedback.task_completion.total}
+                            </div>
+                            {qa.ai_feedback.task_completion.details && qa.ai_feedback.task_completion.details.length > 0 && (
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#475569" }}>
+                                {qa.ai_feedback.task_completion.details.map((detail, idx) => (
+                                  <li key={idx}>{detail}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Strengths and Areas for Improvement */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+                          {qa.ai_feedback.strengths && qa.ai_feedback.strengths.length > 0 && (
+                            <div>
+                              <h5 style={{ 
+                                fontSize: "0.875rem", 
+                                fontWeight: 600, 
+                                color: "#166534", 
+                                marginBottom: "0.5rem",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.5rem"
+                              }}>
+                                <CheckCircle2 size={16} /> Strengths
+                              </h5>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#166534" }}>
+                                {qa.ai_feedback.strengths.map((strength, idx) => (
+                                  <li key={idx}>{strength}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {qa.ai_feedback.areas_for_improvement && qa.ai_feedback.areas_for_improvement.length > 0 && (
+                            <div>
+                              <h5 style={{ 
+                                fontSize: "0.875rem", 
+                                fontWeight: 600, 
+                                color: "#dc2626", 
+                                marginBottom: "0.5rem",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.5rem"
+                              }}>
+                                <AlertTriangle size={16} /> Areas to Improve
+                              </h5>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#dc2626" }}>
+                                {qa.ai_feedback.areas_for_improvement.map((area, idx) => (
+                                  <li key={idx}>{area}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Suggestions */}
+                        {qa.ai_feedback.suggestions && qa.ai_feedback.suggestions.length > 0 && (
+                          <div style={{ marginTop: "1rem" }}>
+                            <h5 style={{ 
+                              fontSize: "0.875rem", 
+                              fontWeight: 600, 
+                              color: "#1e40af", 
+                              marginBottom: "0.5rem",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.5rem"
+                            }}>
+                              <TrendingUp size={16} /> Suggestions for Improvement
+                            </h5>
+                            <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#1e40af" }}>
+                              {qa.ai_feedback.suggestions.map((suggestion, idx) => (
+                                <li key={idx}>{suggestion}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* AI Generated Badge */}
+                        <div style={{ marginTop: "1rem", fontSize: "0.75rem", color: "#64748b", textAlign: "right" }}>
+                          {qa.ai_feedback.ai_generated ? "🤖 AI-generated feedback" : "📊 Rule-based evaluation"}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* If no AI feedback yet but test is completed */}
+                    {!qa.ai_feedback && qa.status === 'evaluated' && (
+                      <div style={{ 
+                        marginTop: "1rem", 
+                        padding: "1rem", 
+                        backgroundColor: "#fef3c7", 
+                        borderRadius: "0.5rem",
+                        textAlign: "center",
+                        fontSize: "0.875rem",
+                        color: "#92400e"
+                      }}>
+                        AI evaluation pending...
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1379,91 +1162,6 @@ export default function AnalyticsPage() {
               Add Candidate
             </h2>
             
-            {/* Bulk Upload Section */}
-            <div style={{ 
-              marginBottom: "1.5rem", 
-              padding: "1rem", 
-              border: "1px solid #A8E8BC", 
-              borderRadius: "0.5rem",
-              backgroundColor: "#f8f9fa"
-            }}>
-              <h4 style={{ fontSize: "0.875rem", fontWeight: 600, marginBottom: "0.5rem", color: "#1a1625" }}>
-                Bulk Upload (CSV)
-              </h4>
-              <p style={{ fontSize: "0.75rem", color: "#6b7280", marginBottom: "0.75rem" }}>
-                Upload a CSV file with 'name' and 'email' columns
-              </p>
-              <input
-                type="file"
-                accept=".csv"
-                onChange={async (e) => {
-                  const file = e.target.files?.[0]
-                  if (!file) return
-                  
-                  if (!testId || typeof testId !== 'string') return
-                  
-                  const formData = new FormData()
-                  formData.append('file', file)
-                  
-                  try {
-                    const response = await dsaApi.post(
-                      `/tests/${testId}/bulk-add-candidates`,
-                      formData,
-                      {
-                        headers: {
-                          'Content-Type': 'multipart/form-data',
-                        },
-                      }
-                    )
-                    
-                    alert(
-                      `Bulk upload completed!\n` +
-                      `Success: ${response.data.success_count || 0}\n` +
-                      `Failed: ${response.data.failed_count || 0}\n` +
-                      `Duplicates: ${response.data.duplicate_count || 0}`
-                    )
-                    
-                    // Refresh candidates list
-                    const candidatesResponse = await dsaApi.get(`/tests/${testId}/candidates`)
-                    setCandidates(candidatesResponse.data || [])
-                    
-                    // Reset file input
-                    e.target.value = ''
-                    
-                    // Close modal if successful
-                    if (response.data.success_count > 0) {
-                      setShowAddCandidateModal(false)
-                    }
-                  } catch (error: any) {
-                    alert(error.response?.data?.detail || error.response?.data?.message || 'Failed to upload CSV')
-                    e.target.value = ''
-                  }
-                }}
-                style={{
-                  width: "100%",
-                  padding: "0.5rem",
-                  border: "1px solid #A8E8BC",
-                  borderRadius: "0.375rem",
-                  backgroundColor: "#ffffff",
-                  cursor: "pointer",
-                  fontSize: "0.875rem"
-                }}
-              />
-            </div>
-            
-            <div style={{ 
-              display: "flex", 
-              alignItems: "center", 
-              gap: "0.5rem", 
-              marginBottom: "1rem",
-              padding: "0.5rem 0"
-            }}>
-              <div style={{ flex: 1, height: "1px", backgroundColor: "#e2e8f0" }}></div>
-              <span style={{ fontSize: "0.75rem", color: "#64748b" }}>OR</span>
-              <div style={{ flex: 1, height: "1px", backgroundColor: "#e2e8f0" }}></div>
-            </div>
-            
-            {/* Manual Add Section */}
             <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
               <div>
                 <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
@@ -1628,7 +1326,7 @@ export default function AnalyticsPage() {
                 <textarea
                   value={emailTemplate.message}
                   onChange={(e) => setEmailTemplate({ ...emailTemplate, message: e.target.value })}
-                  placeholder="You have been invited to take a DSA test. Please click the link below to start."
+                  placeholder="You have been invited to take an AIML test. Please click the link below to start."
                   rows={6}
                   style={{
                     width: "100%",
@@ -1716,117 +1414,8 @@ export default function AnalyticsPage() {
           </div>
         </div>
       )}
-
-      {/* Multi Live Proctoring Panel */}
-      {showLiveProctor && testId && typeof testId === 'string' && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: "rgba(0, 0, 0, 0.95)",
-            zIndex: 9999,
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          {/* Header */}
-          <div
-            style={{
-              padding: "1rem 1.5rem",
-              backgroundColor: "#1e293b",
-              borderBottom: "1px solid #334155",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-              <Video style={{ width: "24px", height: "24px", color: "#10b981" }} />
-              <div>
-                <h2 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700, color: "#ffffff" }}>
-                  Live Proctoring Dashboard
-                </h2>
-                <p style={{ margin: "0.25rem 0 0", fontSize: "0.875rem", color: "#94a3b8" }}>
-                  Monitoring {candidateStreams.length} active candidate{candidateStreams.length !== 1 ? 's' : ''}
-                  {candidates.filter(c => c.status === 'started').length > 0 && (
-                    <span style={{ marginLeft: "0.5rem" }}>
-                      ({candidates.filter(c => c.status === 'started').length} started)
-                    </span>
-                  )}
-                </p>
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
-              {candidateStreams.length === 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    console.log('[Live Proctor] Refresh clicked, resuming polling...')
-                    resumePollingIfPaused()
-                    startMonitoring()
-                  }}
-                  style={{
-                    padding: "0.75rem 1.5rem",
-                    backgroundColor: "#3b82f6",
-                    color: "#ffffff",
-                    border: "none",
-                    borderRadius: "0.5rem",
-                    fontSize: "0.875rem",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                  }}
-                >
-                  <span>↻</span>
-                  Refresh
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  console.log('[Live Proctor] Close button clicked, stopping monitoring...')
-                  stopMonitoring()
-                  setShowLiveProctor(false)
-                }}
-                style={{
-                  padding: "0.75rem 1.5rem",
-                  backgroundColor: "#ef4444",
-                  color: "#ffffff",
-                  border: "none",
-                  borderRadius: "0.5rem",
-                  fontSize: "0.875rem",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.5rem",
-                }}
-              >
-                <span>✕</span>
-                Close
-              </button>
-            </div>
-          </div>
-          
-          {/* Multi-Proctor Grid */}
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <MultiProctorGrid
-              candidateStreams={candidateStreams}
-              onRefreshCandidate={refreshCandidate}
-              isLoading={isProctorLoading}
-            />
-          </div>
-        </div>
-      )}
-      
     </div>
   )
 }
 
-// Server-side authentication check
 export const getServerSideProps: GetServerSideProps = requireAuth
