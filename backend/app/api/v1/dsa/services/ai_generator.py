@@ -1,0 +1,303 @@
+"""
+AI Question Generator - LANGUAGE AGNOSTIC
+
+Generates coding questions using OpenAI.
+Creates LeetCode-style questions with 3 parts:
+1. Description - Problem statement
+2. Examples - Input/Output examples with explanations
+3. Constraints - Input limits and requirements
+
+The admin specifies which languages to generate starter code for.
+"""
+
+import os
+import json
+import logging
+from dotenv import load_dotenv
+from typing import Dict, Any, List, Optional
+
+from openai import OpenAI
+
+load_dotenv()
+
+logger = logging.getLogger("backend")
+
+
+async def generate_question(
+    difficulty: str = "medium", 
+    topic: Optional[str] = None,
+    concepts: Optional[str] = None,
+    languages: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Generate a complete coding question using OpenAI.
+    
+    Creates LeetCode-style question with:
+    - description: Problem statement
+    - examples: Input/Output examples with explanations
+    - constraints: Input limits
+    
+    Args:
+        difficulty: easy, medium, or hard
+        topic: Main topic (e.g., "arrays", "dynamic programming")
+        concepts: Specific concepts to cover (e.g., "two pointers, sliding window")
+        languages: List of languages to generate starter code for (optional)
+    
+    Returns:
+        Complete question JSON with all fields populated
+    """
+    # Default to all supported DSA languages if none specified
+    if not languages:
+        languages = ["python", "javascript", "typescript", "cpp", "java", "c", "go", "rust", "kotlin", "csharp"]
+    
+    languages_str = json.dumps(languages)
+    
+    # Build topic/concept prompt
+    topic_prompt = ""
+    if topic:
+        topic_prompt += f"Topic: {topic}. "
+    if concepts:
+        topic_prompt += f"Concepts to cover: {concepts}. "
+    
+    prompt = f"""You are an expert coding problem generator. Generate a LeetCode-style coding question in JSON format.
+
+{topic_prompt}Difficulty: {difficulty}
+Languages to support: {languages_str}
+
+Generate a JSON object with this EXACT structure (like LeetCode):
+{{
+    "title": "Problem Title",
+    
+    "description": "Clear problem statement explaining what needs to be done. NO examples here, NO constraints here. Just the problem description in 2-3 paragraphs.",
+    
+    "examples": [
+        {{
+            "input": "nums = [2,7,11,15], target = 9",
+            "output": "[0,1]",
+            "explanation": "Because nums[0] + nums[1] == 9, we return [0, 1]."
+        }},
+        {{
+            "input": "nums = [3,2,4], target = 6",
+            "output": "[1,2]",
+            "explanation": "Because nums[1] + nums[2] == 6, we return [1, 2]."
+        }},
+        {{
+            "input": "nums = [3,3], target = 6",
+            "output": "[0,1]",
+            "explanation": null
+        }}
+    ],
+    
+    "constraints": [
+        "2 <= nums.length <= 10^4",
+        "-10^9 <= nums[i] <= 10^9",
+        "-10^9 <= target <= 10^9",
+        "Only one valid answer exists."
+    ],
+    
+    "difficulty": "{difficulty}",
+    "languages": {languages_str},
+    
+    "function_signature": {{
+        "name": "functionName",
+        "parameters": [
+            {{"name": "param1", "type": "int"}},
+            {{"name": "param2", "type": "string"}}
+        ],
+        "return_type": "int"
+    }},
+    
+    "public_testcases": [
+        {{"input": "exact stdin input", "expected_output": "exact expected output", "is_hidden": false}},
+        {{"input": "exact stdin input", "expected_output": "exact expected output", "is_hidden": false}},
+        {{"input": "exact stdin input", "expected_output": "exact expected output", "is_hidden": false}}
+    ],
+    
+    "hidden_testcases": [
+        {{"input": "exact stdin input", "expected_output": "exact expected output", "is_hidden": true}},
+        {{"input": "exact stdin input", "expected_output": "exact expected output", "is_hidden": true}},
+        {{"input": "exact stdin input", "expected_output": "exact expected output", "is_hidden": true}}
+    ],
+    
+    "starter_code": {{
+        "<language>": "function signature with placeholder - generate for ALL languages in the languages array"
+    }}
+}}
+
+CRITICAL REQUIREMENTS:
+1. "description" should be ONLY the problem statement (no examples, no constraints)
+2. "examples" should have at least 2-3 examples with input, output, and optional explanation
+3. "constraints" should list all input constraints like LeetCode
+4. Generate at least 3 public testcases and 3 hidden testcases
+5. Testcases MUST be in Judge0-compatible format:
+   - "input": exact stdin input (what the program reads from stdin)
+   - "expected_output": exact stdout output (what the program should write to stdout)
+   - Testcases support: Read stdin, Write to stdout, Static text comparison, Run code in many languages
+   - Input/output must be exact strings that Judge0 can compare directly
+   - For example: input="5\n1 2 3 4 5", expected_output="15" (for sum of array)
+6. "function_signature" MUST be included as a JSON object with EXACTLY these three fields (no other fields):
+   - "name": string - appropriate function name (e.g., "twoSum", "isPrime", "reverseString")
+   - "parameters": array - array of objects, each with "name" and "type" fields (e.g., [{{"name": "nums", "type": "int[]"}}, {{"name": "target", "type": "int"}}])
+   - "return_type": string - appropriate return type (e.g., "int", "string", "boolean", "int[]", "string[]")
+   CRITICAL: The function_signature object MUST have all three fields: "name", "parameters", and "return_type". Do not omit any of these fields.
+7. Starter code MUST be generated for ALL languages in the languages list
+8. Starter code should use the function name, parameters, and return type from function_signature
+9. Hidden testcases should cover edge cases
+10. All testcases must be compatible with Judge0 execution (stdin/stdout format only)
+
+IMPORTANT: Return ONLY valid JSON. No markdown code blocks, no explanations, just the JSON object."""
+
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are an expert coding problem generator. Generate LeetCode-style coding questions with separate description, examples, and constraints sections. Always return valid JSON only."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8,
+        )
+        
+        # Get content from response
+        if not response.choices or not response.choices[0].message.content:
+            raise ValueError("OpenAI API returned empty response")
+        
+        content = response.choices[0].message.content.strip()
+        
+        # Log raw content for debugging (first 500 chars)
+        logger.info(f"Raw AI response (first 500 chars): {content[:500]}")
+        
+        if not content:
+            raise ValueError("OpenAI API returned empty content")
+        
+        # Remove markdown code blocks if present
+        if content.startswith("```json"):
+            content = content[7:]
+        elif content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        
+        # Try to extract JSON if there's extra text
+        # Look for JSON object boundaries
+        json_start = content.find("{")
+        json_end = content.rfind("}") + 1
+        
+        if json_start >= 0 and json_end > json_start:
+            content = content[json_start:json_end]
+        
+        if not content:
+            raise ValueError("No JSON content found in AI response")
+        
+        # Try to parse JSON
+        try:
+            question_data = json.loads(content)
+        except json.JSONDecodeError as json_err:
+            # Log the problematic content for debugging
+            logger.error(f"Failed to parse JSON. Content length: {len(content)}")
+            logger.error(f"Content preview: {content[:200]}...")
+            logger.error(f"JSON error: {json_err}")
+            raise ValueError(f"Failed to parse AI response as JSON: {json_err}. Content preview: {content[:200]}")
+        
+        # Validate required fields
+        required_fields = ["title", "description", "difficulty", "languages", "public_testcases", "hidden_testcases", "starter_code", "function_signature"]
+        for field in required_fields:
+            if field not in question_data:
+                # For function_signature, try to create a default one
+                if field == "function_signature":
+                    logger.warning("function_signature missing, creating default...")
+                    title = question_data.get("title", "solve")
+                    func_name = title.lower().replace(" ", "").replace("-", "")[:20] or "solve"
+                    question_data["function_signature"] = {
+                        "name": func_name,
+                        "parameters": [],
+                        "return_type": "int"
+                    }
+                    logger.info(f"Created default function_signature: {question_data['function_signature']}")
+                else:
+                    raise ValueError(f"Generated question missing required field: {field}")
+        
+        # Validate and fix function_signature structure
+        if "function_signature" in question_data:
+            func_sig = question_data["function_signature"]
+            if not isinstance(func_sig, dict):
+                raise ValueError("function_signature must be an object")
+            
+            # Try to fix missing fields before validation
+            fixed = False
+            if "name" not in func_sig:
+                # Try to infer from title or use default
+                title = question_data.get("title", "solve")
+                func_sig["name"] = title.lower().replace(" ", "").replace("-", "")[:20] or "solve"
+                fixed = True
+                logger.warning(f"function_signature missing 'name', inferred: {func_sig['name']}")
+            
+            if "parameters" not in func_sig:
+                func_sig["parameters"] = []
+                fixed = True
+                logger.warning("function_signature missing 'parameters', using empty array")
+            elif not isinstance(func_sig["parameters"], list):
+                logger.warning(f"function_signature.parameters is not an array, converting...")
+                func_sig["parameters"] = []
+                fixed = True
+            
+            if "return_type" not in func_sig:
+                # Try to infer from description or use default
+                func_sig["return_type"] = "int"  # Default return type
+                fixed = True
+                logger.warning("function_signature missing 'return_type', using default: 'int'")
+            
+            if fixed:
+                logger.info(f"Fixed function_signature: {func_sig}")
+            
+            # Validate parameters structure if present
+            if func_sig["parameters"]:
+                for i, param in enumerate(func_sig["parameters"]):
+                    if not isinstance(param, dict):
+                        logger.warning(f"Parameter {i} is not an object, converting to object...")
+                        func_sig["parameters"][i] = {"name": f"param{i+1}", "type": "int"}
+                        continue
+                    
+                    # Fix missing name or type in parameter
+                    if "name" not in param:
+                        param["name"] = f"param{i+1}"
+                        logger.warning(f"Parameter {i} missing 'name', using: {param['name']}")
+                    if "type" not in param:
+                        param["type"] = "int"  # Default type
+                        logger.warning(f"Parameter {i} missing 'type', using: {param['type']}")
+        
+        # Ensure examples exist
+        if "examples" not in question_data:
+            question_data["examples"] = []
+        
+        # Ensure constraints exist
+        if "constraints" not in question_data:
+            question_data["constraints"] = []
+        
+        # Ensure testcases have correct structure
+        for testcase in question_data.get("public_testcases", []):
+            if "is_hidden" not in testcase:
+                testcase["is_hidden"] = False
+        
+        for testcase in question_data.get("hidden_testcases", []):
+            if "is_hidden" not in testcase:
+                testcase["is_hidden"] = True
+        
+        # Ensure starter_code has all requested languages
+        if "starter_code" not in question_data:
+            question_data["starter_code"] = {}
+        
+        for lang in languages:
+            if lang not in question_data["starter_code"]:
+                question_data["starter_code"][lang] = f"// TODO: Write your solution for {lang}"
+        
+        return question_data
+        
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse AI response as JSON: {e}")
+    except Exception as e:
+        raise Exception(f"OpenAI API error: {e}")
