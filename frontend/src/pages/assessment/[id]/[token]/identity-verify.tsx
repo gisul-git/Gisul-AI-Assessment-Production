@@ -230,10 +230,13 @@ export default function IdentityVerificationPage() {
     }
   }, [currentStep, steps]);
   
-  // Cleanup on unmount
+  // Cleanup on unmount - but don't stop screen stream if it's stored globally for take.tsx
   useEffect(() => {
     return () => {
-      screenStream?.getVideoTracks().forEach(track => track.stop());
+      // Only stop if NOT navigating to take (i.e., global not set)
+      if (!(window as any).__screenStream) {
+        screenStream?.getVideoTracks().forEach(track => track.stop());
+      }
     };
   }, [screenStream]);
   
@@ -266,6 +269,12 @@ export default function IdentityVerificationPage() {
     if (steps.every(step => step.status === "passed")) {
       // Store verification completion
       sessionStorage.setItem(`identityVerificationCompleted_${id}`, "true");
+      
+      // Store screen stream globally so take.tsx can access it for screen snapshots
+      if (screenStream && screenStream.active) {
+        (window as any).__screenStream = screenStream;
+        console.log('[Identity] Screen stream stored globally for take.tsx');
+      }
       
       // Navigate to exam
       router.push(`/assessment/${id}/${token}/take`);

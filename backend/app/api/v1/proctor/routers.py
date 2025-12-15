@@ -537,6 +537,64 @@ async def get_all_sessions(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+# ============================================================================
+# Snapshot Upload Endpoint
+# ============================================================================
+
+class SnapshotUploadRequest(BaseModel):
+    """Request model for snapshot upload."""
+    snapshotBase64: str
+    eventType: str
+    timestamp: str
+    assessmentId: str
+    candidateId: Optional[str] = None
+    userId: Optional[str] = None
+
+
+@router.post("/upload")
+async def upload_snapshot(
+    payload: SnapshotUploadRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Upload a proctoring snapshot.
+    Stores the snapshot in proctor_snapshots collection and returns the ID.
+    """
+    try:
+        # Use userId or candidateId
+        user_id = payload.userId or payload.candidateId or ""
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="userId or candidateId is required")
+        
+        snapshot_doc = {
+            "snapshotBase64": payload.snapshotBase64,
+            "eventType": payload.eventType,
+            "timestamp": payload.timestamp,
+            "assessmentId": payload.assessmentId,
+            "userId": user_id,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        result = await db.proctor_snapshots.insert_one(snapshot_doc)
+        
+        logger.info(
+            f"[Proctor API] Snapshot uploaded for {payload.eventType} "
+            f"(id: {result.inserted_id}, user: {user_id})"
+        )
+        
+        return {"status": "ok", "id": str(result.inserted_id)}
+    
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[Proctor API] Error uploading snapshot: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload snapshot: {str(exc)}"
+        ) from exc
+
+
 @router.post("/record")
 async def record_proctor_event(
     payload: ProctorEventIn,
@@ -549,6 +607,14 @@ async def record_proctor_event(
     and stores them in MongoDB for later review by admins.
     """
     try:
+        # Log incoming request
+        snapshot_size = len(payload.snapshotBase64) if payload.snapshotBase64 else 0
+        logger.info(
+            f"[Proctor API] Received event: {payload.eventType} | "
+            f"user={payload.userId} | assessment={payload.assessmentId} | "
+            f"snapshot={snapshot_size} bytes"
+        )
+        
         # Create the document to store
         proctor_event = {
             "userId": payload.userId.strip(),
@@ -653,16 +719,25 @@ async def get_proctor_logs(
     Get full proctoring logs for a specific candidate in an assessment.
     Returns all violation documents with metadata and snapshotBase64 for evidence gallery.
     
+    If userId is "*", returns all logs for the assessment (for admin view).
+    
     Returns:
     - logs: List of all violation documents sorted by timestamp (newest first)
     - totalCount: Total number of logs
     """
     try:
         # Query all events for this user and assessment, sorted newest first
-        query = {
-            "assessmentId": assessmentId.strip(),
-            "userId": userId.strip(),
-        }
+        # If userId is "*", return all logs for the assessment
+        if userId.strip() == "*":
+            query = {
+                "assessmentId": assessmentId.strip(),
+            }
+            logger.info(f"[Proctor API] Fetching ALL logs for assessment {assessmentId}")
+        else:
+            query = {
+                "assessmentId": assessmentId.strip(),
+                "userId": userId.strip(),
+            }
         
         # Use to_list with a reasonable limit to avoid timeout
         # Limit to 1000 most recent logs to prevent timeout issues

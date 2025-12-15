@@ -55,11 +55,29 @@ export default async function handler(
   try {
     const { eventType, timestamp, assessmentId, userId, metadata, snapshotBase64 } = req.body as ViolationPayload;
 
+    // Log received data for debugging
+    console.log("[Proctor API] Record request received:", {
+      eventType,
+      timestamp: !!timestamp,
+      assessmentId,
+      userId,
+      hasMetadata: !!metadata,
+      hasSnapshot: !!snapshotBase64,
+      snapshotSize: snapshotBase64 ? Math.round(snapshotBase64.length / 1024) + 'KB' : 'none',
+    });
+
     // Validate required fields
     if (!eventType || !timestamp || !assessmentId || !userId) {
+      console.error("[Proctor API] Missing required fields:", {
+        hasEventType: !!eventType,
+        hasTimestamp: !!timestamp,
+        hasAssessmentId: !!assessmentId,
+        hasUserId: !!userId,
+      });
       return res.status(400).json({
         status: "error",
         message: "Missing required fields: eventType, timestamp, assessmentId, userId",
+        received: { eventType, timestamp: !!timestamp, assessmentId, userId },
       });
     }
 
