@@ -164,6 +164,8 @@ export default function CandidateAssessmentPage() {
   const [faceMeshStatus, setFaceMeshStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
   const [displayedFacesCount, setDisplayedFacesCount] = useState(0);
   const [proctoringEnabled, setProctoringEnabled] = useState(false);
+  // AI (camera-based) proctoring toggle from schedule.proctoringSettings
+  const [aiProctoringEnabled, setAiProctoringEnabled] = useState(false);
 
   // Proctoring refs
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
@@ -349,7 +351,8 @@ export default function CandidateAssessmentPage() {
   const { isModelLoaded, modelError, facesCount } = useFaceMesh({
     videoRef: thumbVideoRef,
     onDetection: handleDetection,
-    enabled: proctoringEnabled && webcamLive,
+    // Camera-based AI proctoring only runs when the AI toggle is enabled
+    enabled: aiProctoringEnabled && webcamLive,
   });
 
   // Update FaceMesh status
@@ -557,10 +560,34 @@ export default function CandidateAssessmentPage() {
   useEffect(() => {
     if (appState === 'ready' && !proctoringEnabled && isClient) {
       console.log('[Proctor] Starting proctoring...');
+      // Always enable overall proctoring (TAB_SWITCH / FOCUS_LOST etc.)
       setProctoringEnabled(true);
+
+      if (aiProctoringEnabled) {
+        // Start webcam only when AI camera proctoring is enabled for this assessment
+        startWebcam();
+      } else {
+        console.log(
+          '[Proctor] AI proctoring disabled for this assessment; skipping webcam/FaceMesh'
+        );
+      }
+    }
+  }, [appState, proctoringEnabled, isClient, aiProctoringEnabled, startWebcam]);
+
+  // Safety: if proctoring is already enabled and we later discover AI flag is ON,
+  // ensure webcam starts as soon as possible.
+  useEffect(() => {
+    if (
+      appState === 'ready' &&
+      proctoringEnabled &&
+      aiProctoringEnabled &&
+      !webcamLive &&
+      isClient
+    ) {
+      console.log('[Proctor] AI flag enabled after proctor start; starting webcam now...');
       startWebcam();
     }
-  }, [appState, proctoringEnabled, isClient, startWebcam]);
+  }, [appState, proctoringEnabled, aiProctoringEnabled, webcamLive, isClient, startWebcam]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -1258,21 +1285,30 @@ export default function CandidateAssessmentPage() {
         setCandidateName(name);
 
         // Fetch full assessment with topics_v2 structure
-        const assessmentResponse = await axios.get(`/api/assessment/get-assessment-full?assessmentId=${id}&token=${token}`);
-        
+        const assessmentResponse = await axios.get(
+          `/api/assessment/get-assessment-full?assessmentId=${id}&token=${token}`
+        );
+
         console.log("[take.tsx] Assessment API response:", assessmentResponse.data);
-        
+
         if (!assessmentResponse.data?.success) {
           throw new Error("Failed to load assessment");
         }
 
-        const topics_v2 = assessmentResponse.data.data?.topics_v2 || [];
+        const assessment = assessmentResponse.data.data;
+        const topics_v2 = assessment?.topics_v2 || [];
         const fetchedSettings: ExamSettings = {
-          timerMode: assessmentResponse.data.data?.timerMode || "estimated",
-          estimatedTotalTime: assessmentResponse.data.data?.estimatedTotalTime || 60,
-          sectionTimes: assessmentResponse.data.data?.questionTypeTimes || {},
+          timerMode: assessment?.timerMode || "estimated",
+          estimatedTotalTime: assessment?.estimatedTotalTime || 60,
+          sectionTimes: assessment?.questionTypeTimes || {},
         };
         console.log("[take.tsx] Topics_v2 structure:", topics_v2);
+
+        // Read AI proctoring flag from schedule.proctoringSettings (if present)
+        const aiFlagFromSchedule =
+          assessment?.schedule?.proctoringSettings?.aiProctoringEnabled;
+        // Only explicit true enables AI camera proctoring; missing/false => OFF
+        setAiProctoringEnabled(aiFlagFromSchedule === true);
 
         // Transform topics_v2 into sections
         const transformed = transformTopicsV2ToSections(topics_v2);

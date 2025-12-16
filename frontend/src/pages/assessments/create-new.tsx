@@ -1297,6 +1297,11 @@ export default function CreateNewAssessmentPage() {
     requireResume: false,
   });
 
+  // Simple AI proctoring toggle (controls camera-based proctoring on candidate side)
+  const [proctoringSettings, setProctoringSettings] = useState({
+    aiProctoringEnabled: false, // default OFF until explicitly enabled
+  });
+
   const sliderRef = useRef<HTMLDivElement>(null);
   const originalTopicConfigsRef = useRef<Topic[]>([]);
   const minHandleRef = useRef<HTMLDivElement>(null);
@@ -9243,6 +9248,55 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 );
               })()}
 
+              {/* Proctoring Settings - AI Camera Toggle */}
+              <div
+                style={{
+                  marginTop: "2rem",
+                  padding: "1.5rem",
+                  backgroundColor: "#f8fafc",
+                  borderRadius: "0.75rem",
+                  border: "2px solid #e2e8f0",
+                }}
+              >
+                <h3
+                  style={{
+                    marginBottom: "1rem",
+                    fontSize: "1.125rem",
+                    color: "#1a1625",
+                    fontWeight: 600,
+                  }}
+                >
+                  Proctoring Settings
+                </h3>
+
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    cursor: "pointer",
+                    fontSize: "0.875rem",
+                    color: "#1e293b",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={proctoringSettings.aiProctoringEnabled}
+                    onChange={(e) =>
+                      setProctoringSettings((prev) => ({
+                        ...prev,
+                        aiProctoringEnabled: e.target.checked,
+                      }))
+                    }
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span>
+                    Enable AI Proctoring (camera-based: no face, multiple faces, gaze
+                    away)
+                  </span>
+                </label>
+              </div>
+
               {/* Candidate Requirements */}
               <div style={{ 
                 marginTop: "2rem", 
@@ -9336,18 +9390,23 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                     
                     // Save schedule to draft
                     try {
-                      if (assessmentId) {
-                        await axios.put("/api/assessments/update-draft", {
-                          assessmentId,
-                          schedule: {
-                            startTime,
-                            endTime,
-                            duration: Math.round((new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 60)),
-                            visibilityMode,
-                            candidateRequirements,
-                          },
-                        });
-                      }
+                          if (assessmentId) {
+                            await axios.put("/api/assessments/update-draft", {
+                              assessmentId,
+                              schedule: {
+                                startTime,
+                                endTime,
+                                duration: Math.round(
+                                  (new Date(endTime).getTime() - new Date(startTime).getTime()) /
+                                    (1000 * 60)
+                                ),
+                                visibilityMode,
+                                candidateRequirements,
+                                // Store simple AI proctoring toggle inside schedule
+                                proctoringSettings,
+                              },
+                            });
+                          }
                     } catch (err: any) {
                       console.error("Error saving schedule:", err);
                       setError(err.response?.data?.message || "Failed to save schedule");
