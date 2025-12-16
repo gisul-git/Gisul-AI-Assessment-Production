@@ -1969,7 +1969,12 @@ async def update_assessment_draft(
     
     # Update schedule if provided
     if payload.schedule is not None:
-        assessment["schedule"] = payload.schedule
+        # Merge into existing schedule instead of overwriting to preserve
+        # additional fields like candidateRequirements and proctoringSettings.
+        existing_schedule = assessment.get("schedule") or {}
+        merged_schedule = existing_schedule.copy()
+        merged_schedule.update(payload.schedule)
+        assessment["schedule"] = merged_schedule
     
     # Update additionalRequirements if provided
     if payload.additionalRequirements is not None:
@@ -2013,12 +2018,17 @@ async def update_schedule_and_candidates(
     assessment = await _get_assessment(db, assessment_id)
     _check_assessment_access(assessment, current_user)
 
-    # Update schedule
-    schedule = {
-        "startTime": payload.get("startTime"),
-        "endTime": payload.get("endTime"),
-        "timezone": "Asia/Kolkata",  # IST
-    }
+    # Update schedule - MERGE into existing schedule to preserve extra settings
+    # such as candidateRequirements and proctoringSettings.
+    existing_schedule = assessment.get("schedule") or {}
+    schedule = existing_schedule.copy()
+    schedule.update(
+        {
+            "startTime": payload.get("startTime"),
+            "endTime": payload.get("endTime"),
+            "timezone": "Asia/Kolkata",  # IST
+        }
+    )
     assessment["schedule"] = schedule
     
     # Store timer mode information
@@ -2626,7 +2636,10 @@ async def update_assessment_schedule(
     if start_time >= end_time:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Start time must be before end time")
 
-    schedule = {
+    # Merge new schedule data into any existing schedule so we don't lose
+    # fields such as candidateRequirements or proctoringSettings.
+    existing_schedule = assessment.get("schedule") or {}
+    schedule_updates = {
         "startTime": start_time,
         "endTime": end_time,
         "duration": payload.duration,
@@ -2635,18 +2648,21 @@ async def update_assessment_schedule(
         "vpnRequired": payload.vpnRequired or False,
         "linkSharingEnabled": payload.linkSharingEnabled or False,
         "mailFeedbackReport": payload.mailFeedbackReport or False,
-        "candidateQuestions": payload.candidateQuestions.model_dump(exclude_unset=True)
-        if payload.candidateQuestions
-        else {
-            "allowed": True,
-            "maxQuestions": 3,
-            "timeLimit": 5,
-            "questions": [],
-        },
+        "candidateQuestions": (
+            payload.candidateQuestions.model_dump(exclude_unset=True)
+            if payload.candidateQuestions
+            else {
+                "allowed": True,
+                "maxQuestions": 3,
+                "timeLimit": 5,
+                "questions": [],
+            }
+        ),
         "instructions": payload.instructions,
         "timezone": payload.timezone or "UTC",
         "isActive": bool(payload.isActive),
     }
+    schedule = {**existing_schedule, **schedule_updates}
 
     assessment["schedule"] = schedule
     if assessment.get("status") in {"draft", "ready"}:
