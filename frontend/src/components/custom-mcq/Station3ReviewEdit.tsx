@@ -46,7 +46,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
     setNewQuestion({
       ...question,
       options: [...options, { label: nextLabel, text: "" }],
-    });
+    } as Partial<MCQQuestion>);
   };
 
   const removeOption = (question: Partial<MCQQuestion>, index: number) => {
@@ -56,7 +56,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
       setNewQuestion({
         ...question,
         options: newOptions,
-      });
+      } as Partial<MCQQuestion>);
     }
   };
 
@@ -301,7 +301,11 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
                   </label>
                   <select
                     value={(newQuestion as Partial<MCQQuestion>).answerType || "single"}
-                    onChange={(e) => setNewQuestion({ ...newQuestion, answerType: e.target.value as any })}
+                    onChange={(e) => {
+                      if (newQuestionType === "mcq") {
+                        setNewQuestion({ ...newQuestion, answerType: e.target.value as "single" | "multiple_all" | "multiple_any" } as Partial<MCQQuestion>);
+                      }
+                    }}
                     style={{ width: "100%", padding: "0.5rem", border: "1px solid #A8E8BC", borderRadius: "0.25rem" }}
                   >
                     <option value="single">Single Choice</option>
@@ -328,7 +332,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
                         onChange={(e) => {
                           const newOptions = [...((newQuestion as Partial<MCQQuestion>).options || [])];
                           newOptions[idx].text = e.target.value;
-                          setNewQuestion({ ...newQuestion, options: newOptions });
+                          setNewQuestion({ ...newQuestion, options: newOptions } as Partial<MCQQuestion>);
                         }}
                         placeholder={`Option ${option.label}`}
                         style={{ flex: 1, padding: "0.5rem", border: "1px solid #A8E8BC", borderRadius: "0.25rem" }}
@@ -364,7 +368,11 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
                   <input
                     type="text"
                     value={(newQuestion as Partial<MCQQuestion>).correctAn || ""}
-                    onChange={(e) => setNewQuestion({ ...newQuestion, correctAn: e.target.value.toUpperCase() })}
+                    onChange={(e) => {
+                      if (newQuestionType === "mcq") {
+                        setNewQuestion({ ...newQuestion, correctAn: e.target.value.toUpperCase() } as Partial<MCQQuestion>);
+                      }
+                    }}
                     placeholder="A or A,B"
                     style={{ width: "100%", padding: "0.5rem", border: "1px solid #A8E8BC", borderRadius: "0.25rem" }}
                   />
