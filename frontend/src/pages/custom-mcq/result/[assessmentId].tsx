@@ -1,13 +1,15 @@
 import { useRouter } from "next/router";
+import { useState, useEffect } from "react";
 
 export default function CustomMCQResultPage() {
   const router = useRouter();
-  const { score, total, percentage, passed, token } = router.query;
+  const { score, total, percentage, passed, token, gradingStatus } = router.query;
 
-  const scoreNum = parseInt(score as string) || 0;
-  const totalNum = parseInt(total as string) || 0;
+  const scoreNum = parseFloat(score as string) || 0;
+  const totalNum = parseFloat(total as string) || 0;
   const percentageNum = parseFloat(percentage as string) || 0;
   const passedBool = passed === "true";
+  const gradingStatusStr = gradingStatus as string || "completed";
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#E8FAF0" }}>
@@ -83,8 +85,46 @@ export default function CustomMCQResultPage() {
           <strong>Status: {passedBool ? "PASSED" : "FAILED"}</strong>
         </div>
 
+        {gradingStatusStr === "grading" && (
+          <div
+            style={{
+              padding: "1rem",
+              backgroundColor: "#FEF3C7",
+              border: "1px solid #FCD34D",
+              borderRadius: "0.5rem",
+              color: "#92400E",
+              marginBottom: "1.5rem",
+            }}
+          >
+            <strong>⏳ AI Grading in Progress</strong>
+            <p style={{ marginTop: "0.5rem", fontSize: "0.875rem" }}>
+              Your subjective answers are being graded by AI. Results will be available shortly.
+            </p>
+          </div>
+        )}
+
+        {gradingStatusStr === "error" && (
+          <div
+            style={{
+              padding: "1rem",
+              backgroundColor: "#FEE2E2",
+              border: "1px solid #FCA5A5",
+              borderRadius: "0.5rem",
+              color: "#991B1B",
+              marginBottom: "1.5rem",
+            }}
+          >
+            <strong>⚠️ Grading Error</strong>
+            <p style={{ marginTop: "0.5rem", fontSize: "0.875rem" }}>
+              There was an error during AI grading. Please contact the administrator.
+            </p>
+          </div>
+        )}
+
         <p style={{ color: "#4A9A6A", fontSize: "0.875rem", marginBottom: "1.5rem" }}>
-          Your assessment has been submitted successfully. You can close this page.
+          {gradingStatusStr === "completed"
+            ? "Your assessment has been submitted and graded successfully. You can close this page."
+            : "Your assessment has been submitted successfully. You can close this page."}
         </p>
 
         <button
