@@ -1,7 +1,7 @@
 'use client'
 
 import { Button } from '../ui/button'
-import { Send, CheckCircle2, Circle, AlertCircle, ArrowLeft } from 'lucide-react'
+import { Send, CheckCircle2, Circle, AlertCircle, ArrowLeft, Lock } from 'lucide-react'
 import { useState } from 'react'
 import { useRouter } from 'next/router'
 
@@ -18,6 +18,7 @@ interface QuestionSidebarProps {
   onSubmit: () => void
   submitting: boolean
   questionStatus?: Record<string, 'solved' | 'attempted' | 'not-attempted'>
+  submittedQuestions?: Record<string, boolean>
   onBack?: () => void
 }
 
@@ -29,12 +30,25 @@ export function QuestionSidebar({
   onSubmit,
   submitting,
   questionStatus = {},
+  submittedQuestions = {},
   onBack
 }: QuestionSidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
   const router = useRouter()
 
+  // Check if a question is accessible (first question OR previous question submitted)
+  const isQuestionAccessible = (index: number): boolean => {
+    if (index === 0) return true // First question always accessible
+    const previousQuestionId = questions[index - 1]?.id
+    return previousQuestionId ? submittedQuestions[previousQuestionId] === true : false
+  }
+
   const getStatusIcon = (questionId: string, index: number) => {
+    // Show lock icon for inaccessible questions
+    if (!isQuestionAccessible(index)) {
+      return <Lock className="h-4 w-4 text-slate-500" />
+    }
+    
     const status = questionStatus[questionId] || 'not-attempted'
     if (index === currentQuestionIndex) {
       return <AlertCircle className="h-4 w-4 text-blue-400" />
@@ -58,19 +72,26 @@ export function QuestionSidebar({
           →
         </button>
         <div className="flex flex-col gap-2">
-          {questions.map((q, idx) => (
-            <button
-              key={q.id}
-              onClick={() => onQuestionChange(idx)}
-              className={`w-8 h-8 rounded flex items-center justify-center ${
-                idx === currentQuestionIndex
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
-              }`}
-            >
-              {idx + 1}
-            </button>
-          ))}
+          {questions.map((q, idx) => {
+            const accessible = isQuestionAccessible(idx)
+            return (
+              <button
+                key={q.id}
+                onClick={() => accessible && onQuestionChange(idx)}
+                disabled={!accessible}
+                className={`w-8 h-8 rounded flex items-center justify-center ${
+                  !accessible
+                    ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed'
+                    : idx === currentQuestionIndex
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                }`}
+                title={!accessible ? 'Submit previous question to unlock' : `Question ${idx + 1}`}
+              >
+                {!accessible ? <Lock className="h-3 w-3" /> : idx + 1}
+              </button>
+            )
+          })}
         </div>
       </div>
     )
@@ -108,25 +129,41 @@ export function QuestionSidebar({
         <h3 className="text-sm font-semibold text-slate-400 mb-3 uppercase tracking-wide">
           Questions ({questions.length})
         </h3>
-        {questions.map((q, idx) => (
-          <button
-            key={q.id}
-            onClick={() => onQuestionChange(idx)}
-            className={`w-full text-left p-3 rounded-lg border-2 transition-all duration-200 ${
-              idx === currentQuestionIndex
-                ? 'bg-blue-600/20 text-blue-300 border-blue-500 shadow-lg'
-                : 'bg-slate-800/50 text-slate-300 border-slate-700 hover:bg-slate-800 hover:border-slate-600'
-            }`}
-          >
-            <div className="flex items-center gap-2 mb-1">
-              {getStatusIcon(q.id, idx)}
-              <span className="font-semibold">Question {idx + 1}</span>
-            </div>
-            <div className={`text-xs ${idx === currentQuestionIndex ? 'text-blue-200' : 'text-slate-400'}`}>
-              {q.title}
-            </div>
-          </button>
-        ))}
+        {questions.map((q, idx) => {
+          const accessible = isQuestionAccessible(idx)
+          return (
+            <button
+              key={q.id}
+              onClick={() => accessible && onQuestionChange(idx)}
+              disabled={!accessible}
+              className={`w-full text-left p-3 rounded-lg border-2 transition-all duration-200 ${
+                !accessible
+                  ? 'bg-slate-800/30 text-slate-500 border-slate-700/50 cursor-not-allowed opacity-60'
+                  : idx === currentQuestionIndex
+                  ? 'bg-blue-600/20 text-blue-300 border-blue-500 shadow-lg'
+                  : 'bg-slate-800/50 text-slate-300 border-slate-700 hover:bg-slate-800 hover:border-slate-600'
+              }`}
+              title={!accessible ? 'Submit previous question to unlock' : undefined}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                {getStatusIcon(q.id, idx)}
+                <span className="font-semibold">Question {idx + 1}</span>
+                {!accessible && (
+                  <span className="text-xs text-slate-500 ml-auto">Locked</span>
+                )}
+              </div>
+              <div className={`text-xs ${
+                !accessible 
+                  ? 'text-slate-500' 
+                  : idx === currentQuestionIndex 
+                  ? 'text-blue-200' 
+                  : 'text-slate-400'
+              }`}>
+                {q.title}
+              </div>
+            </button>
+          )
+        })}
       </div>
 
       {/* Submit Button */}
