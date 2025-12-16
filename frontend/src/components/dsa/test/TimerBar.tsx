@@ -1,17 +1,43 @@
 'use client'
 
-import { Clock } from 'lucide-react'
+import { Clock, Timer } from 'lucide-react'
+
+// Timer mode types matching backend
+type TimerMode = 'GLOBAL' | 'PER_QUESTION'
 
 interface TimerBarProps {
   timeRemaining: number
   totalTime: number
+  // New props for per-question timer support
+  timerMode?: TimerMode
+  currentQuestionTitle?: string
+  questionTimeRemaining?: number  // Time remaining for current question (PER_QUESTION mode)
+  questionTotalTime?: number      // Total time for current question (PER_QUESTION mode)
 }
 
-export function TimerBar({ timeRemaining, totalTime }: TimerBarProps) {
-  const percentage = totalTime > 0 ? (timeRemaining / totalTime) * 100 : 0
-  const hours = Math.floor(timeRemaining / 3600)
-  const minutes = Math.floor((timeRemaining % 3600) / 60)
-  const seconds = timeRemaining % 60
+export function TimerBar({ 
+  timeRemaining, 
+  totalTime,
+  timerMode = 'GLOBAL',
+  currentQuestionTitle,
+  questionTimeRemaining,
+  questionTotalTime,
+}: TimerBarProps) {
+  // Determine which timer to display based on mode
+  const isPerQuestionMode = timerMode === 'PER_QUESTION'
+  
+  // Use question timer values in PER_QUESTION mode, otherwise use global timer
+  const displayTime = isPerQuestionMode && questionTimeRemaining !== undefined 
+    ? questionTimeRemaining 
+    : timeRemaining
+  const displayTotalTime = isPerQuestionMode && questionTotalTime !== undefined 
+    ? questionTotalTime 
+    : totalTime
+  
+  const percentage = displayTotalTime > 0 ? (displayTime / displayTotalTime) * 100 : 0
+  const hours = Math.floor(displayTime / 3600)
+  const minutes = Math.floor((displayTime % 3600) / 60)
+  const seconds = displayTime % 60
   const formattedTime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
 
   // Color based on remaining time
@@ -21,14 +47,25 @@ export function TimerBar({ timeRemaining, totalTime }: TimerBarProps) {
     return 'bg-red-500'
   }
 
+  // Timer label based on mode
+  const timerLabel = isPerQuestionMode ? 'Question Time' : 'Test Time'
+  const TimerIcon = isPerQuestionMode ? Timer : Clock
+
   return (
     <div className="sticky top-0 z-50 bg-slate-900 border-b border-slate-700 shadow-lg">
       <div className="px-4 py-3">
-        {/* Overall Test Timer */}
+        {/* Timer Display */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Clock className={`h-5 w-5 ${percentage > 25 ? 'text-green-400' : 'text-red-400'} animate-pulse`} />
-            <span className="font-bold text-lg text-white">Test Time: {formattedTime}</span>
+            <TimerIcon className={`h-5 w-5 ${percentage > 25 ? 'text-green-400' : 'text-red-400'} animate-pulse`} />
+            <div className="flex flex-col">
+              <span className="font-bold text-lg text-white">{timerLabel}: {formattedTime}</span>
+              {isPerQuestionMode && currentQuestionTitle && (
+                <span className="text-xs text-slate-400 truncate max-w-[200px]">
+                  {currentQuestionTitle}
+                </span>
+              )}
+            </div>
           </div>
           <div className="flex-1 mx-4">
             <div className="w-full bg-slate-800 rounded-full h-2.5">
@@ -38,8 +75,15 @@ export function TimerBar({ timeRemaining, totalTime }: TimerBarProps) {
               />
             </div>
           </div>
-          <div className="text-sm font-medium text-slate-300">
-            {Math.round(percentage)}% remaining
+          <div className="flex flex-col items-end">
+            <div className="text-sm font-medium text-slate-300">
+              {Math.round(percentage)}% remaining
+            </div>
+            {isPerQuestionMode && (
+              <span className="text-xs text-slate-500">
+                Per-question timer
+              </span>
+            )}
           </div>
         </div>
       </div>

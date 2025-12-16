@@ -11,10 +11,23 @@ interface Question {
   difficulty: string;
 }
 
+// Timer mode types
+type TimerMode = "GLOBAL" | "PER_QUESTION";
+
+// Question timing for per-question mode
+interface QuestionTiming {
+  question_id: string;
+  duration_minutes: number;
+}
+
 export default function CreateDSACompetencyPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [questions, setQuestions] = useState<Question[]>([]);
+  
+  // Timer mode state
+  const [timerMode, setTimerMode] = useState<TimerMode>("GLOBAL");
+  const [questionTimings, setQuestionTimings] = useState<Record<string, number>>({});
   
   const [formData, setFormData] = useState({
     title: "",
@@ -63,15 +76,41 @@ export default function CreateDSACompetencyPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Validation for per-question mode
+    if (timerMode === "PER_QUESTION") {
+      for (const qid of formData.question_ids) {
+        const timing = questionTimings[qid];
+        if (!timing || timing < 1) {
+          alert(`Please set a valid duration (at least 1 minute) for all questions`);
+          return;
+        }
+      }
+    }
+    
     setLoading(true);
 
     try {
-      // Create the test
-      const response = await dsaApi.post("/tests/", {
+      // Build payload based on timer mode
+      const payload: any = {
         ...formData,
         start_time: new Date(formData.start_time).toISOString(),
         end_time: new Date(formData.end_time).toISOString(),
-      });
+        timer_mode: timerMode,
+      };
+      
+      if (timerMode === "PER_QUESTION") {
+        // Convert questionTimings record to array format expected by backend
+        payload.question_timings = formData.question_ids.map(qid => ({
+          question_id: qid,
+          duration_minutes: questionTimings[qid] || 10,
+        }));
+        // Set total duration as sum of all question timings
+        payload.duration_minutes = calculateTotalDuration();
+      }
+      
+      // Create the test
+      const response = await dsaApi.post("/tests/", payload);
       
       const testId = response.data?.id || response.data?._id;
       
@@ -98,16 +137,48 @@ export default function CreateDSACompetencyPage() {
 
   const toggleQuestion = (questionId: string) => {
     if (formData.question_ids.includes(questionId)) {
+      // Remove from selected questions
       setFormData({
         ...formData,
         question_ids: formData.question_ids.filter((id) => id !== questionId),
       });
+      // Also remove from question timings
+      const newTimings = { ...questionTimings };
+      delete newTimings[questionId];
+      setQuestionTimings(newTimings);
     } else {
+      // Add to selected questions
       setFormData({
         ...formData,
         question_ids: [...formData.question_ids, questionId],
       });
+      // Initialize timing with default value (10 minutes)
+      setQuestionTimings({
+        ...questionTimings,
+        [questionId]: 10,
+      });
     }
+  };
+
+  // Update timing for a specific question
+  const updateQuestionTiming = (questionId: string, minutes: number) => {
+    setQuestionTimings({
+      ...questionTimings,
+      [questionId]: Math.max(1, minutes), // Minimum 1 minute
+    });
+  };
+
+  // Calculate total duration from per-question timings
+  const calculateTotalDuration = (): number => {
+    return formData.question_ids.reduce((total, qid) => {
+      return total + (questionTimings[qid] || 10);
+    }, 0);
+  };
+
+  // Get question title by ID
+  const getQuestionTitle = (questionId: string): string => {
+    const question = questions.find(q => q.id === questionId);
+    return question?.title || "Unknown Question";
   };
 
 
@@ -199,43 +270,8 @@ export default function CreateDSACompetencyPage() {
               />
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
-              <div>
-                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
-                  Duration (minutes) *
-                </label>
-                <input
-                  type="number"
-                  required
-                  min="1"
-                  value={formData.duration_minutes}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    // Allow empty string while typing
-                    if (value === '') {
-                      setFormData({ ...formData, duration_minutes: 0 });
-                      return;
-                    }
-                    const numValue = parseInt(value, 10);
-                    // Only update if it's a valid number
-                    if (!isNaN(numValue) && numValue >= 0) {
-                      setFormData({ ...formData, duration_minutes: numValue });
-                    }
-                  }}
-                  onBlur={(e) => {
-                    // Ensure minimum value of 1 when field loses focus
-                    if (formData.duration_minutes < 1) {
-                      setFormData({ ...formData, duration_minutes: 1 });
-                    }
-                  }}
-                  style={{
-                    width: "100%",
-                    padding: "0.75rem",
-                    border: "1px solid #A8E8BC",
-                    borderRadius: "0.375rem",
-                  }}
-                />
-              </div>
+            {/* Start and End Time */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
               <div>
                 <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
                   Start Time *
@@ -270,6 +306,158 @@ export default function CreateDSACompetencyPage() {
                   }}
                 />
               </div>
+            </div>
+
+            {/* Timer Configuration - Show mode selector only when 2+ questions selected */}
+            <div style={{ marginBottom: "1.5rem" }}>
+              <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+                Timer Configuration *
+              </label>
+              
+              {formData.question_ids.length >= 2 && (
+                <div style={{ 
+                  marginBottom: "1rem", 
+                  padding: "1rem", 
+                  backgroundColor: "#F0FDF4", 
+                  borderRadius: "0.375rem",
+                  border: "1px solid #A8E8BC"
+                }}>
+                  <div style={{ display: "flex", gap: "2rem" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="timerMode"
+                        value="GLOBAL"
+                        checked={timerMode === "GLOBAL"}
+                        onChange={() => setTimerMode("GLOBAL")}
+                        style={{ accentColor: "#2D7A52" }}
+                      />
+                      <span>Single timer for entire test</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="timerMode"
+                        value="PER_QUESTION"
+                        checked={timerMode === "PER_QUESTION"}
+                        onChange={() => setTimerMode("PER_QUESTION")}
+                        style={{ accentColor: "#2D7A52" }}
+                      />
+                      <span>Individual timer per question</span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {/* Global Duration Input - shown when GLOBAL mode or single question */}
+              {(timerMode === "GLOBAL" || formData.question_ids.length < 2) && (
+                <div>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 500, fontSize: "0.875rem", color: "#374151" }}>
+                    Duration (minutes)
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    value={formData.duration_minutes}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (value === '') {
+                        setFormData({ ...formData, duration_minutes: 0 });
+                        return;
+                      }
+                      const numValue = parseInt(value, 10);
+                      if (!isNaN(numValue) && numValue >= 0) {
+                        setFormData({ ...formData, duration_minutes: numValue });
+                      }
+                    }}
+                    onBlur={() => {
+                      if (formData.duration_minutes < 1) {
+                        setFormData({ ...formData, duration_minutes: 1 });
+                      }
+                    }}
+                    style={{
+                      width: "200px",
+                      padding: "0.75rem",
+                      border: "1px solid #A8E8BC",
+                      borderRadius: "0.375rem",
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* Per-Question Duration Inputs - shown when PER_QUESTION mode and 2+ questions */}
+              {timerMode === "PER_QUESTION" && formData.question_ids.length >= 2 && (
+                <div>
+                  <p style={{ fontSize: "0.875rem", color: "#6B7280", marginBottom: "0.75rem" }}>
+                    Set duration for each question individually:
+                  </p>
+                  <div style={{ 
+                    border: "1px solid #A8E8BC", 
+                    borderRadius: "0.375rem", 
+                    padding: "1rem",
+                    maxHeight: "300px",
+                    overflowY: "auto"
+                  }}>
+                    {formData.question_ids.map((qid, index) => (
+                      <div 
+                        key={qid} 
+                        style={{ 
+                          display: "flex", 
+                          alignItems: "center", 
+                          justifyContent: "space-between",
+                          padding: "0.75rem",
+                          marginBottom: index < formData.question_ids.length - 1 ? "0.5rem" : 0,
+                          backgroundColor: "#ffffff",
+                          borderRadius: "0.375rem",
+                          border: "1px solid #E8FAF0"
+                        }}
+                      >
+                        <div style={{ flex: 1 }}>
+                          <span style={{ fontWeight: 500, color: "#1a1625" }}>
+                            {index + 1}. {getQuestionTitle(qid)}
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                          <input
+                            type="number"
+                            min="1"
+                            value={questionTimings[qid] || 10}
+                            onChange={(e) => {
+                              const value = parseInt(e.target.value, 10);
+                              if (!isNaN(value)) {
+                                updateQuestionTiming(qid, value);
+                              }
+                            }}
+                            style={{
+                              width: "80px",
+                              padding: "0.5rem",
+                              border: "1px solid #A8E8BC",
+                              borderRadius: "0.375rem",
+                              textAlign: "center",
+                            }}
+                          />
+                          <span style={{ fontSize: "0.875rem", color: "#6B7280" }}>min</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ 
+                    marginTop: "0.75rem", 
+                    padding: "0.75rem", 
+                    backgroundColor: "#E8FAF0", 
+                    borderRadius: "0.375rem",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center"
+                  }}>
+                    <span style={{ fontWeight: 600, color: "#2D7A52" }}>Total Duration:</span>
+                    <span style={{ fontWeight: 600, color: "#1a1625" }}>
+                      {calculateTotalDuration()} minutes
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div style={{ marginBottom: "1.5rem" }}>

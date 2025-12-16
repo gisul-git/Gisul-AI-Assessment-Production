@@ -9,7 +9,10 @@ import { Input } from '../../../components/dsa/ui/input'
 import { Textarea } from '../../../components/dsa/ui/textarea'
 import { Checkbox } from '../../../components/dsa/ui/checkbox'
 import dsaApi from '../../../lib/dsa/api'
-import { Sparkles, Loader2 } from 'lucide-react'
+import { Sparkles, Loader2, Code, Database, Table2 } from 'lucide-react'
+
+// Question type - Coding or SQL
+type QuestionType = 'coding' | 'sql'
 
 type Testcase = {
   input: string
@@ -56,12 +59,34 @@ int main() {
 `,
 }
 
+// SQL Categories
+const SQL_CATEGORIES = [
+  { value: 'select', label: 'SELECT Queries', description: 'Basic data retrieval' },
+  { value: 'join', label: 'JOIN Operations', description: 'INNER, LEFT, RIGHT, FULL joins' },
+  { value: 'aggregation', label: 'Aggregation', description: 'GROUP BY, HAVING, COUNT, SUM' },
+  { value: 'subquery', label: 'Subqueries', description: 'Nested queries, EXISTS, IN' },
+  { value: 'window', label: 'Window Functions', description: 'ROW_NUMBER, RANK, LAG, LEAD' },
+]
+
+// SQL Topics for quick selection
+const SQL_TOPICS = [
+  'Basic SELECT', 'Filtering with WHERE', 'INNER JOIN', 'LEFT JOIN',
+  'GROUP BY', 'HAVING Clause', 'Aggregate Functions', 'Subqueries', 'Window Functions'
+]
+
+type TableSchema = {
+  columns: Record<string, string>
+}
+
 export default function QuestionCreatePage() {
   const router = useRouter()
 
   const [saving, setSaving] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  
+  // Question Type selector
+  const [questionType, setQuestionType] = useState<QuestionType>('coding')
   
   // AI Generation fields
   const [aiTopic, setAiTopic] = useState('')
@@ -100,6 +125,15 @@ export default function QuestionCreatePage() {
     { name: '', type: 'int' }
   ])
   const [isAiGenerated, setIsAiGenerated] = useState(false)
+
+  // SQL-specific state
+  const [sqlCategory, setSqlCategory] = useState('select')
+  const [schemas, setSchemas] = useState<Record<string, TableSchema>>({})
+  const [sampleData, setSampleData] = useState<Record<string, any[][]>>({})
+  const [starterQuery, setStarterQuery] = useState('-- Write your SQL query here\n\nSELECT ')
+  const [referenceQuery, setReferenceQuery] = useState('')  // Correct SQL answer for evaluation
+  const [hints, setHints] = useState<string[]>([''])
+  const [orderSensitive, setOrderSensitive] = useState(false)
 
   const toggleLanguage = (lang: string) => {
     setLanguages((prev) =>
@@ -148,7 +182,7 @@ export default function QuestionCreatePage() {
     }
   }
 
-  // AI Generation handler
+  // AI Generation handler - handles both Coding and SQL
   const handleGenerateWithAI = async () => {
     if (!aiTopic.trim() && !aiConcepts.trim()) {
       setError('Please provide a topic or concepts for AI generation')
@@ -159,7 +193,12 @@ export default function QuestionCreatePage() {
     setError(null)
 
     try {
-      const response = await dsaApi.post('/admin/generate-question', {
+      // Different endpoint based on question type
+      const endpoint = questionType === 'sql' 
+        ? '/admin/generate-sql-question' 
+        : '/admin/generate-question'
+      
+      const response = await dsaApi.post(endpoint, {
         difficulty: aiDifficulty,
         topic: aiTopic || undefined,
         concepts: aiConcepts || undefined,
@@ -167,10 +206,22 @@ export default function QuestionCreatePage() {
 
       const data = response.data
 
-      // Auto-fill form with generated data
+      // Common fields
       setTitle(data.title || '')
       setDescription(data.description || '')
       setDifficulty(data.difficulty || 'medium')
+      
+      if (questionType === 'sql') {
+        // SQL-specific fields
+        setSqlCategory(data.sql_category || 'select')
+        setSchemas(data.schemas || {})
+        setSampleData(data.sample_data || {})
+        setConstraints(data.constraints?.length > 0 ? data.constraints : [''])
+        setStarterQuery(data.starter_query || '-- Write your SQL query here\n\nSELECT ')
+        setHints(data.hints?.length > 0 ? data.hints : [''])
+        setOrderSensitive(data.evaluation?.order_sensitive || false)
+      } else {
+        // Coding-specific fields
       setLanguages(data.languages || ['python'])
       
       // Set examples (LeetCode style)
@@ -195,7 +246,6 @@ export default function QuestionCreatePage() {
         })
         setStarterCode(newStarterCode)
       } else {
-        // Initialize with defaults for all languages
         const newStarterCode: Record<string, string> = {}
         SUPPORTED_LANGUAGES.forEach(lang => {
           newStarterCode[lang] = DEFAULT_STARTER_CODE[lang] || ''
@@ -210,11 +260,8 @@ export default function QuestionCreatePage() {
         if (data.function_signature.parameters && data.function_signature.parameters.length > 0) {
           setParameters(data.function_signature.parameters)
         }
-        setSecureMode(true) // Enable secure mode when function_signature is provided
+          setSecureMode(true)
       }
-      
-      // Mark as AI-generated
-      setIsAiGenerated(true)
 
       // Set public testcases
       if (data.public_testcases && data.public_testcases.length > 0) {
@@ -234,16 +281,30 @@ export default function QuestionCreatePage() {
             expected_output: tc.expected_output || '',
           }))
         )
+        }
       }
+      
+      // Mark as AI-generated
+      setIsAiGenerated(true)
 
       // Show success message
-      alert('✨ Question generated successfully! Review and edit as needed.')
+      const typeLabel = questionType === 'sql' ? 'SQL' : 'Coding'
+      alert(`✨ ${typeLabel} Question generated successfully! Review and edit as needed.`)
     } catch (err: any) {
       console.error('AI generation error:', err)
-      setError(
-        err.response?.data?.detail || 
-        'Failed to generate question with AI. Make sure your OpenAI API key is configured.'
-      )
+      console.error('Error response:', err.response?.data)
+      console.error('Error status:', err.response?.status)
+      
+      let errorMessage = 'Failed to generate question with AI.'
+      if (err.response?.data?.detail) {
+        errorMessage = err.response.data.detail
+      } else if (err.message) {
+        errorMessage = `${errorMessage} Error: ${err.message}`
+      } else if (err.code === 'ERR_NETWORK') {
+        errorMessage = 'Network error. Make sure the backend server is running.'
+      }
+      
+      setError(errorMessage)
     } finally {
       setGenerating(false)
     }
@@ -254,6 +315,9 @@ export default function QuestionCreatePage() {
       setError('Title is required')
       return
     }
+    
+    // Validation based on question type
+    if (questionType === 'coding') {
     if (languages.length === 0) {
       setError('Select at least one language')
       return
@@ -270,13 +334,46 @@ export default function QuestionCreatePage() {
         setError('At least one parameter is required when secure mode is enabled')
         return
       }
+      }
+    } else {
+      // SQL validation - schemas are optional for manual creation
+      // They can be added via AI generation or later via edit
     }
 
     setSaving(true)
     setError(null)
 
     try {
-      // Build function signature if secure mode is enabled
+      let payload: any
+      
+      if (questionType === 'sql') {
+        // SQL question payload
+        payload = {
+          title,
+          description,
+          difficulty,
+          question_type: 'SQL',
+          sql_category: sqlCategory,
+          schemas,
+          sample_data: sampleData,
+          constraints: constraints.filter((c) => c.trim()),
+          starter_query: starterQuery,
+          reference_query: referenceQuery.trim() || null,  // Correct SQL for evaluation
+          hints: hints.filter((h) => h.trim()),
+          evaluation: {
+            engine: 'postgres',
+            comparison: 'result_set',
+            order_sensitive: orderSensitive,
+          },
+          is_published: isPublished,
+          // Empty coding fields for SQL
+          languages: [],
+          starter_code: {},
+          public_testcases: [],
+          hidden_testcases: [],
+        }
+      } else {
+        // Coding question payload
       let functionSignature = null
       if (secureMode && functionName.trim()) {
         functionSignature = {
@@ -288,10 +385,9 @@ export default function QuestionCreatePage() {
         }
       }
       
-      const payload = {
+        payload = {
         title,
         description,
-        // LeetCode-style examples and constraints
         examples: examples
           .filter((ex) => ex.input.trim() || ex.output.trim())
           .map((ex) => ({
@@ -320,10 +416,12 @@ export default function QuestionCreatePage() {
         function_signature: functionSignature,
         secure_mode: secureMode,
         is_published: isPublished,
+        }
       }
 
       await dsaApi.post('/questions/', payload)
-      alert('Question created successfully!')
+      const typeLabel = questionType === 'sql' ? 'SQL' : 'Coding'
+      alert(`${typeLabel} Question created successfully!`)
       router.push('/dsa/questions')
     } catch (err: any) {
       console.error(err)
@@ -356,17 +454,17 @@ export default function QuestionCreatePage() {
 
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-bold">Create Question</h1>
+            <h1 className="text-3xl font-bold">Create DSA Question</h1>
             <p className="text-muted-foreground mt-1">
-              Add a new coding question with test cases.
+              Create a {questionType === 'sql' ? 'SQL' : 'Coding'} question with AI assistance.
             </p>
           </div>
           <div className="flex gap-3">
-            <Link href="/admin/questions">
+            <Link href="/dsa/questions">
               <Button variant="outline">Cancel</Button>
             </Link>
             <Button onClick={handleCreate} disabled={saving}>
-              {saving ? 'Creating...' : 'Create Question'}
+              {saving ? 'Creating...' : `Create ${questionType === 'sql' ? 'SQL' : 'Coding'} Question`}
             </Button>
           </div>
         </div>
@@ -377,21 +475,94 @@ export default function QuestionCreatePage() {
           </div>
         )}
 
+        {/* Question Type Selector */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Question Type</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setQuestionType('coding')
+                  setIsAiGenerated(false)
+                  setTitle('')
+                  setDescription('')
+                }}
+                className={`p-4 rounded-lg border-2 transition-all ${
+                  questionType === 'coding'
+                    ? 'border-purple-500 bg-purple-500/10'
+                    : 'border-slate-700 hover:border-slate-600'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Code className={`w-8 h-8 ${questionType === 'coding' ? 'text-purple-400' : 'text-slate-400'}`} />
+                  <div className="text-left">
+                    <h3 className={`font-semibold ${questionType === 'coding' ? 'text-purple-400' : ''}`}>
+                      Coding Question
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      Python, Java, C++, JavaScript...
+                    </p>
+                  </div>
+                </div>
+              </button>
+              
+              <button
+                type="button"
+                onClick={() => {
+                  setQuestionType('sql')
+                  setIsAiGenerated(false)
+                  setTitle('')
+                  setDescription('')
+                }}
+                className={`p-4 rounded-lg border-2 transition-all ${
+                  questionType === 'sql'
+                    ? 'border-blue-500 bg-blue-500/10'
+                    : 'border-slate-700 hover:border-slate-600'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Database className={`w-8 h-8 ${questionType === 'sql' ? 'text-blue-400' : 'text-slate-400'}`} />
+                  <div className="text-left">
+                    <h3 className={`font-semibold ${questionType === 'sql' ? 'text-blue-400' : ''}`}>
+                      SQL Question
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      SELECT, JOIN, Aggregation...
+                    </p>
+                  </div>
+                </div>
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+
         {/* AI Question Generator */}
-        <Card className="border-purple-500/30 bg-gradient-to-r from-purple-500/5 to-blue-500/5">
+        <Card className={questionType === 'sql' 
+          ? "border-blue-500/30 bg-gradient-to-r from-blue-500/5 to-cyan-500/5"
+          : "border-purple-500/30 bg-gradient-to-r from-purple-500/5 to-blue-500/5"
+        }>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-purple-400" />
-              Generate Question with AI
-              <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded ml-2">
+              <Sparkles className={`w-5 h-5 ${questionType === 'sql' ? 'text-blue-400' : 'text-purple-400'}`} />
+              Generate {questionType === 'sql' ? 'SQL' : 'Coding'} Question with AI
+              <span className={`text-xs px-2 py-0.5 rounded ml-2 ${
+                questionType === 'sql' 
+                  ? 'bg-blue-500/20 text-blue-400' 
+                  : 'bg-purple-500/20 text-purple-400'
+              }`}>
                 Powered by GPT-4
               </span>
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              Describe the topic and concepts, and AI will generate a complete question with 
-              description, starter code, and test cases.
+              {questionType === 'sql'
+                ? 'Describe the SQL topic and concepts, and AI will generate table schemas, sample data, and problem description.'
+                : 'Describe the topic and concepts, and AI will generate a complete question with description, starter code, and test cases.'
+              }
             </p>
             
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -400,16 +571,37 @@ export default function QuestionCreatePage() {
                 <Input
                   value={aiTopic}
                   onChange={(e) => setAiTopic(e.target.value)}
-                  placeholder="e.g., Arrays, Trees, Graphs"
+                  placeholder={questionType === 'sql' 
+                    ? "e.g., Joins, Aggregation, Window Functions"
+                    : "e.g., Arrays, Trees, Graphs"
+                  }
                   disabled={generating}
                 />
+                {questionType === 'sql' && (
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {SQL_TOPICS.slice(0, 4).map((topic) => (
+                      <button
+                        key={topic}
+                        type="button"
+                        className="text-xs px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded"
+                        onClick={() => setAiTopic(topic)}
+                        disabled={generating}
+                      >
+                        {topic}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
               <div>
                 <label className="text-sm font-medium">Concepts</label>
                 <Input
                   value={aiConcepts}
                   onChange={(e) => setAiConcepts(e.target.value)}
-                  placeholder="e.g., Two pointers, BFS, Dynamic programming"
+                  placeholder={questionType === 'sql'
+                    ? "e.g., LEFT JOIN, GROUP BY, HAVING"
+                    : "e.g., Two pointers, BFS, Dynamic programming"
+                  }
                   disabled={generating}
                 />
               </div>
@@ -421,9 +613,19 @@ export default function QuestionCreatePage() {
                   disabled={generating}
                   className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
                 >
+                  {questionType === 'sql' ? (
+                    <>
+                      <option value="easy">Easy - Basic SELECT, WHERE</option>
+                      <option value="medium">Medium - JOINs, GROUP BY</option>
+                      <option value="hard">Hard - Window Functions, CTEs</option>
+                    </>
+                  ) : (
+                    <>
                   <option value="easy">Easy</option>
                   <option value="medium">Medium</option>
                   <option value="hard">Hard</option>
+                    </>
+                  )}
                 </select>
               </div>
             </div>
@@ -431,42 +633,48 @@ export default function QuestionCreatePage() {
             <Button
               onClick={handleGenerateWithAI}
               disabled={generating}
-              className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
+              className={questionType === 'sql'
+                ? "bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700"
+                : "bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
+              }
             >
               {generating ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  Generating with AI...
+                  Generating {questionType === 'sql' ? 'SQL' : 'Coding'} Question...
                 </>
               ) : (
                 <>
                   <Sparkles className="w-4 h-4 mr-2" />
-                  Generate Question
+                  Generate {questionType === 'sql' ? 'SQL' : 'Coding'} Question
                 </>
               )}
             </Button>
 
             {generating && (
               <p className="text-xs text-muted-foreground">
-                This may take 10-20 seconds. AI is generating title, description, 
-                starter code, and test cases...
+                {questionType === 'sql'
+                  ? 'This may take 10-20 seconds. AI is generating table schemas, sample data, and problem description...'
+                  : 'This may take 10-20 seconds. AI is generating title, description, starter code, and test cases...'
+                }
               </p>
             )}
           </CardContent>
         </Card>
 
+        {/* Divider */}
         <div className="relative">
           <div className="absolute inset-0 flex items-center">
             <div className="w-full border-t border-slate-700"></div>
           </div>
           <div className="relative flex justify-center text-xs uppercase">
             <span className="bg-background px-2 text-muted-foreground">
-              Or create manually
+              {isAiGenerated ? 'Review and edit generated question' : 'Or create manually'}
             </span>
           </div>
         </div>
 
-        {/* Basic Details */}
+            {/* Basic Details - Common for both types */}
         <Card>
           <CardHeader>
             <CardTitle>Basic Details</CardTitle>
@@ -477,7 +685,7 @@ export default function QuestionCreatePage() {
               <Input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g., Two Sum"
+                    placeholder={questionType === 'sql' ? "e.g., Employee Salary Analysis" : "e.g., Two Sum"}
               />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -493,6 +701,22 @@ export default function QuestionCreatePage() {
                   <option value="hard">Hard</option>
                 </select>
               </div>
+                  {questionType === 'sql' && (
+                    <div>
+                      <label className="text-sm font-medium">SQL Category</label>
+                      <select
+                        value={sqlCategory}
+                        onChange={(e) => setSqlCategory(e.target.value)}
+                        className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      >
+                        {SQL_CATEGORIES.map((cat) => (
+                          <option key={cat.value} value={cat.value}>
+                            {cat.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
               <div>
                 <label className="text-sm font-medium">Publish Status</label>
                 <div className="mt-2 flex items-center gap-2">
@@ -506,6 +730,8 @@ export default function QuestionCreatePage() {
                 </div>
               </div>
             </div>
+                {/* Language selector - only for coding questions */}
+                {questionType === 'coding' && (
             <div>
               <label className="text-sm font-medium mb-2 block">
                 Supported Languages *
@@ -522,27 +748,339 @@ export default function QuestionCreatePage() {
                 ))}
               </div>
             </div>
+                )}
           </CardContent>
         </Card>
 
-        {/* Problem Details - Description, Examples, Constraints in ONE card */}
+            {/* Problem Description - Common for both */}
         <Card>
           <CardHeader>
-            <CardTitle>Problem Details</CardTitle>
+                <CardTitle>Problem Description</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-6">
-            {/* Description */}
-            <div>
-              <label className="text-sm font-medium mb-2 block">Description</label>
+              <CardContent className="space-y-4">
               <Textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 rows={5}
                 className="text-sm"
-                placeholder="Write a function that takes an integer as an input and checks if it is a prime number or not..."
-              />
-            </div>
+                  placeholder={questionType === 'sql' 
+                    ? "Describe the business problem and what data needs to be retrieved..."
+                    : "Write a function that takes an integer as an input and checks if it is a prime number or not..."
+                  }
+                />
+              </CardContent>
+            </Card>
 
+            {/* SQL-SPECIFIC SECTIONS */}
+            {questionType === 'sql' && (
+              <>
+                {/* Table Schemas */}
+                <Card className="border-blue-500/20">
+                  <CardHeader>
+                    <CardTitle className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Table2 className="w-5 h-5 text-blue-400" />
+                        Table Schemas
+                        {isAiGenerated && (
+                          <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded">
+                            AI Generated
+                          </span>
+                        )}
+            </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          const tableName = prompt('Enter table name:')
+                          if (tableName && tableName.trim()) {
+                            setSchemas({
+                              ...schemas,
+                              [tableName.trim()]: { columns: { id: 'INTEGER' } }
+                            })
+                            setSampleData({
+                              ...sampleData,
+                              [tableName.trim()]: []
+                            })
+                          }
+                        }}
+                      >
+                        + Add Table
+                      </Button>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {Object.keys(schemas).length === 0 ? (
+                      <p className="text-sm text-muted-foreground italic">
+                        No schemas yet. Use AI to generate or add tables manually.
+                      </p>
+                    ) : (
+                      Object.entries(schemas).map(([tableName, schema]) => (
+                        <div key={tableName} className="border border-slate-700 rounded-lg p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Table2 className="w-4 h-4 text-blue-400" />
+                              <span className="font-mono font-medium text-blue-400">{tableName}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-blue-400 hover:text-blue-300 h-7 px-2 text-xs"
+                                onClick={() => {
+                                  const colName = prompt('Enter column name:')
+                                  if (colName && colName.trim()) {
+                                    const colType = prompt('Enter column type (e.g., INTEGER, VARCHAR(255), DATE):') || 'VARCHAR(255)'
+                                    setSchemas({
+                                      ...schemas,
+                                      [tableName]: {
+                                        columns: {
+                                          ...schema.columns,
+                                          [colName.trim()]: colType.trim()
+                                        }
+                                      }
+                                    })
+                                  }
+                                }}
+                              >
+                                + Column
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-red-400 hover:text-red-300 h-7 px-2 text-xs"
+                                onClick={() => {
+                                  const newSchemas = { ...schemas }
+                                  delete newSchemas[tableName]
+                                  setSchemas(newSchemas)
+                                  const newSampleData = { ...sampleData }
+                                  delete newSampleData[tableName]
+                                  setSampleData(newSampleData)
+                                }}
+                              >
+                                Remove Table
+                              </Button>
+                            </div>
+                          </div>
+                          <div className="bg-slate-900 rounded p-3">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="text-muted-foreground">
+                                  <th className="text-left py-1">Column</th>
+                                  <th className="text-left py-1">Type</th>
+                                  <th className="text-right py-1 w-16"></th>
+                                </tr>
+                              </thead>
+                              <tbody className="font-mono">
+                                {Object.entries(schema.columns).map(([colName, colType]) => (
+                                  <tr key={colName} className="border-t border-slate-800">
+                                    <td className="py-1 text-green-400">{colName}</td>
+                                    <td className="py-1 text-yellow-400">{String(colType)}</td>
+                                    <td className="py-1 text-right">
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="text-red-400 hover:text-red-300 h-6 px-1 text-xs"
+                                        onClick={() => {
+                                          const newColumns = { ...schema.columns }
+                                          delete newColumns[colName]
+                                          setSchemas({
+                                            ...schemas,
+                                            [tableName]: { columns: newColumns }
+                                          })
+                                        }}
+                                      >
+                                        ✕
+                                      </Button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Sample Data */}
+                <Card className="border-purple-500/20">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Database className="w-5 h-5 text-purple-400" />
+                      Sample Data
+                      {isAiGenerated && (
+                        <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">
+                          AI Generated
+                        </span>
+                      )}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {Object.keys(sampleData).length === 0 ? (
+                      <p className="text-sm text-muted-foreground italic">
+                        {Object.keys(schemas).length === 0 
+                          ? 'Add table schemas first, then sample data will appear here.'
+                          : 'No sample data yet. Add rows to your tables.'}
+                      </p>
+                    ) : (
+                      Object.entries(sampleData).map(([tableName, rows]) => {
+                        const schema = schemas[tableName]
+                        const columns = schema ? Object.keys(schema.columns) : []
+                        return (
+                          <div key={tableName} className="border border-slate-700 rounded-lg p-4 space-y-3">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <Database className="w-4 h-4 text-purple-400" />
+                                <span className="font-mono font-medium text-purple-400">{tableName}</span>
+                                <span className="text-xs text-muted-foreground">({rows.length} rows)</span>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-purple-400 hover:text-purple-300 h-7 px-2 text-xs"
+                                onClick={() => {
+                                  // Add a new row with empty/default values
+                                  const newRow = columns.map(() => '')
+                                  setSampleData({
+                                    ...sampleData,
+                                    [tableName]: [...rows, newRow]
+                                  })
+                                }}
+                              >
+                                + Add Row
+                              </Button>
+                            </div>
+                            <div className="bg-slate-900 rounded p-3 overflow-x-auto">
+                              <table className="w-full text-sm">
+                                <thead>
+                                  <tr className="text-muted-foreground">
+                                    {columns.map((col) => (
+                                      <th key={col} className="text-left py-1 px-2">{col}</th>
+                                    ))}
+                                    <th className="w-12"></th>
+                                  </tr>
+                                </thead>
+                                <tbody className="font-mono">
+                                  {rows.map((row, rowIdx) => (
+                                    <tr key={rowIdx} className="border-t border-slate-800">
+                                      {row.map((cell, cellIdx) => (
+                                        <td key={cellIdx} className="py-1 px-2">
+                                          <Input
+                                            value={cell === null ? '' : String(cell)}
+                                            onChange={(e) => {
+                                              const newRows = [...rows]
+                                              newRows[rowIdx] = [...newRows[rowIdx]]
+                                              newRows[rowIdx][cellIdx] = e.target.value
+                                              setSampleData({
+                                                ...sampleData,
+                                                [tableName]: newRows
+                                              })
+                                            }}
+                                            className="h-7 text-xs font-mono bg-transparent border-slate-700"
+                                            placeholder="value"
+                                          />
+                                        </td>
+                                      ))}
+                                      <td className="py-1 px-2 text-right">
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          className="text-red-400 hover:text-red-300 h-6 px-1 text-xs"
+                                          onClick={() => {
+                                            const newRows = rows.filter((_, i) => i !== rowIdx)
+                                            setSampleData({
+                                              ...sampleData,
+                                              [tableName]: newRows
+                                            })
+                                          }}
+                                        >
+                                          ✕
+                                        </Button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* SQL Starter Query */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Starter Query</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <Textarea
+                      value={starterQuery}
+                      onChange={(e) => setStarterQuery(e.target.value)}
+                      rows={4}
+                      className="font-mono text-sm"
+                      placeholder="-- Write your SQL query here"
+                    />
+                  </CardContent>
+                </Card>
+
+                {/* Reference Query (Correct Answer) */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Reference Query (Correct Answer)</CardTitle>
+                    <p className="text-sm text-muted-foreground">
+                      This is the correct SQL query that produces the expected output. 
+                      Candidate submissions will be compared against this query's results.
+                    </p>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <Textarea
+                      value={referenceQuery}
+                      onChange={(e) => setReferenceQuery(e.target.value)}
+                      rows={6}
+                      className="font-mono text-sm"
+                      placeholder="SELECT column1, column2 FROM table_name WHERE condition ORDER BY column1;"
+                    />
+                    <p className="text-xs text-yellow-600 dark:text-yellow-400">
+                      ⚠️ This query is never shown to candidates. It is only used to generate the expected output for comparison.
+                    </p>
+                  </CardContent>
+                </Card>
+
+                {/* SQL Evaluation Settings */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Evaluation Settings</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="flex items-start gap-3">
+                      <Checkbox
+                        checked={orderSensitive}
+                        onCheckedChange={(val) => setOrderSensitive(!!val)}
+                      />
+                      <div>
+                        <label className="text-sm font-medium">Order Sensitive</label>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          When enabled, results must be in the exact same order as expected.
+                        </p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </>
+            )}
+
+            {/* CODING-SPECIFIC SECTIONS */}
+            {questionType === 'coding' && (
+              <>
+                {/* Problem Details - Examples */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Examples</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
             {/* Examples */}
             <div>
               <div className="flex items-center justify-between mb-3">
@@ -612,46 +1150,6 @@ export default function QuestionCreatePage() {
                         className="text-sm"
                       />
                     </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Constraints */}
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <label className="text-sm font-medium">Constraints</label>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setConstraints([...constraints, ''])}
-                >
-                  + Add Constraint
-                </Button>
-              </div>
-              <div className="space-y-2">
-                {constraints.map((constraint, idx) => (
-                  <div key={idx} className="flex items-center gap-2">
-                    <Input
-                      value={constraint}
-                      onChange={(e) => {
-                        const newConstraints = [...constraints]
-                        newConstraints[idx] = e.target.value
-                        setConstraints(newConstraints)
-                      }}
-                      placeholder='0 <= n <= 5 * 10^6'
-                      className="font-mono text-sm flex-1"
-                    />
-                    {constraints.length > 1 && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-red-400 hover:text-red-300 h-8 px-2"
-                        onClick={() => setConstraints(constraints.filter((_, i) => i !== idx))}
-                      >
-                        ✕
-                      </Button>
-                    )}
                   </div>
                 ))}
               </div>
@@ -995,17 +1493,64 @@ export default function QuestionCreatePage() {
               onClick={() => addTestcase('hidden')}
             >
               + Add Hidden Test Case
+                    </Button>
+                  </CardContent>
+                </Card>
+              </>
+            )}
+
+            {/* Constraints - Common for both */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Constraints</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  {constraints.map((constraint, idx) => (
+                    <div key={idx} className="flex items-center gap-2">
+                      <Input
+                        value={constraint}
+                        onChange={(e) => {
+                          const newConstraints = [...constraints]
+                          newConstraints[idx] = e.target.value
+                          setConstraints(newConstraints)
+                        }}
+                        placeholder={questionType === 'sql' 
+                          ? "e.g., Results must be ordered by salary DESC"
+                          : "e.g., 0 <= n <= 5 * 10^6"
+                        }
+                        className="font-mono text-sm flex-1"
+                      />
+                      {constraints.length > 1 && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-400 hover:text-red-300 h-8 px-2"
+                          onClick={() => setConstraints(constraints.filter((_, i) => i !== idx))}
+                        >
+                          ✕
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setConstraints([...constraints, ''])}
+                >
+                  + Add Constraint
             </Button>
           </CardContent>
         </Card>
 
         {/* Bottom Actions */}
         <div className="flex justify-end gap-3 pb-8">
-          <Link href="/admin/questions">
+          <Link href="/dsa/questions">
             <Button variant="outline">Cancel</Button>
           </Link>
           <Button onClick={handleCreate} disabled={saving}>
-            {saving ? 'Creating...' : 'Create Question'}
+            {saving ? 'Creating...' : `Create ${questionType === 'sql' ? 'SQL' : 'Coding'} Question`}
           </Button>
         </div>
       </div>

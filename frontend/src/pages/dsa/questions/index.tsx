@@ -116,7 +116,7 @@ export default function QuestionsListPage() {
         <div className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-4xl font-bold">Questions Management</h1>
-            <p className="text-muted-foreground mt-1">Create, edit, and manage coding questions</p>
+            <p className="text-muted-foreground mt-1">Create, edit, and manage DSA questions (Coding & SQL)</p>
           </div>
           <Link href="/dsa/questions/create">
             <Button>

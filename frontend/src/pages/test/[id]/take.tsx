@@ -12,6 +12,7 @@ import { QuestionSidebar } from '../../../components/dsa/test/QuestionSidebar'
 import { QuestionTabs } from '../../../components/dsa/test/QuestionTabs'
 import { EditorContainer, SubmissionTestcaseResult } from '../../../components/dsa/test/EditorContainer'
 import type { SubmissionHistoryEntry } from '../../../components/dsa/test/EditorContainer'
+import { SQLEditorContainer } from '../../../components/dsa/test/SQLEditorContainer'
 import { OutputConsole } from '../../../components/dsa/test/OutputConsole'
 import { useProctor } from '../../../hooks/useProctor'
 import { useCameraProctor } from '../../../hooks/useCameraProctor'
@@ -41,6 +42,11 @@ interface FunctionSignature {
   return_type: string
 }
 
+// Table schema for SQL questions
+interface TableSchema {
+  columns: Record<string, string>
+}
+
 interface Question {
   id: string
   title: string
@@ -53,6 +59,22 @@ interface Question {
   function_signature?: FunctionSignature
   public_testcases?: Array<{ input: string; expected_output: string }>
   hidden_testcases?: Array<{ input: string; expected_output: string }>
+  // SQL-specific fields
+  question_type?: 'coding' | 'SQL'
+  sql_category?: string
+  schemas?: Record<string, TableSchema>
+  sample_data?: Record<string, any[][]>
+  starter_query?: string
+  hints?: string[]
+}
+
+// Timer mode types
+type TimerMode = 'GLOBAL' | 'PER_QUESTION'
+
+// Question timing for per-question mode
+interface QuestionTiming {
+  question_id: string
+  duration_minutes: number
 }
 
 interface Test {
@@ -63,6 +85,9 @@ interface Test {
   duration_minutes: number
   start_time: string
   end_time: string
+  // Timer configuration
+  timer_mode?: TimerMode
+  question_timings?: QuestionTiming[]
 }
 
 interface VisibleTestcase {
@@ -116,6 +141,16 @@ export default function TestTakePage() {
   const [language, setLanguage] = useState<Record<string, string>>({})
   const [timeRemaining, setTimeRemaining] = useState(0)
   const [totalTime, setTotalTime] = useState(0)
+  
+  // Per-question timer state (for PER_QUESTION mode)
+  const [questionTimeRemaining, setQuestionTimeRemaining] = useState<Record<string, number>>({})
+  const [questionTotalTime, setQuestionTotalTime] = useState<Record<string, number>>({})
+  const [activeQuestionTimer, setActiveQuestionTimer] = useState<string | null>(null)
+  
+  // Sequential question progression state
+  const [submittedQuestions, setSubmittedQuestions] = useState<Record<string, boolean>>({})
+  const [questionTimerStarted, setQuestionTimerStarted] = useState<Record<string, boolean>>({})
+  
   const [testSubmission, setTestSubmission] = useState<any>(null)
   const [submitted, setSubmitted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -833,9 +868,9 @@ export default function TestTakePage() {
           }
         }
         
-        // Fetch test data
+        // Fetch test data (use public endpoint for candidates)
         console.log('[Test Load] Fetching test data...')
-        const testRes = await dsaApi.get(`/tests/${testId}`)
+        const testRes = await dsaApi.get(`/tests/${testId}/public?user_id=${userId}`)
         const testData = testRes.data
         console.log('[Test Load] Test data fetched:', { 
           id: testData.id, 
@@ -977,13 +1012,15 @@ export default function TestTakePage() {
         }
         
         // Fetch all questions in parallel with timeout (reduced to 3 seconds for faster failure)
+        // Use the public test question endpoint (no auth required, uses user_id)
         const questionPromises = testData.question_ids.map(async (qId: string) => {
           try {
             const controller = new AbortController()
-            const timeoutId = setTimeout(() => controller.abort(), 3000) // 3 second timeout per question
+            const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout per question
             
             try {
-              const response = await dsaApi.get(`/questions/${qId}`, {
+              // Use public endpoint for test questions (includes SQL-specific fields)
+              const response = await dsaApi.get(`/tests/${testId}/question/${qId}?user_id=${userId}`, {
                 signal: controller.signal
               })
               clearTimeout(timeoutId)
@@ -991,7 +1028,7 @@ export default function TestTakePage() {
             } catch (fetchError: any) {
               clearTimeout(timeoutId)
               if (fetchError.name === 'AbortError' || fetchError.code === 'ECONNABORTED') {
-                console.warn(`Question ${qId} request timed out after 3 seconds`)
+                console.warn(`Question ${qId} request timed out after 5 seconds`)
                 return null
               }
               if (fetchError.response?.status === 404) {
@@ -1048,21 +1085,69 @@ export default function TestTakePage() {
           })
           setVisibleTestcasesMap(visibleMap)
           
+          // Initialize per-question timers if timer_mode is PER_QUESTION
+          if (testData.timer_mode === 'PER_QUESTION' && testData.question_timings) {
+            const qTimeRemaining: Record<string, number> = {}
+            const qTotalTime: Record<string, number> = {}
+            
+            // Initialize all questions with their full duration (from admin settings)
+            testData.question_timings.forEach((timing: QuestionTiming) => {
+              const durationSeconds = timing.duration_minutes * 60
+              qTimeRemaining[timing.question_id] = durationSeconds
+              qTotalTime[timing.question_id] = durationSeconds
+            })
+            
+            // Note: We don't load saved timers on initialization
+            // Each question will start from full duration when entered
+            // Timer state is saved as it counts down, but restored only for active questions
+            
+            setQuestionTimeRemaining(qTimeRemaining)
+            setQuestionTotalTime(qTotalTime)
+            
+            // Set the first question as active and mark its timer as started
+            // First question starts immediately with full duration
+            if (questionsData.length > 0) {
+              const firstQuestionId = questionsData[0].id
+              setActiveQuestionTimer(firstQuestionId)
+              setQuestionTimerStarted(prev => ({
+                ...prev,
+                [firstQuestionId]: true
+              }))
+              // Ensure first question has full duration
+              if (qTotalTime[firstQuestionId] !== undefined) {
+                setQuestionTimeRemaining(prev => ({
+                  ...prev,
+                  [firstQuestionId]: qTotalTime[firstQuestionId]
+                }))
+              }
+            }
+            
+            console.log('[Timer] Initialized per-question timers with full durations:', qTimeRemaining)
+            console.log('[Timer] Total times:', qTotalTime)
+          }
+          
           // Initialize code and language for all questions
           const initialCode: Record<string, string> = {}
           const initialLanguage: Record<string, string> = {}
           questionsData.forEach((q: Question) => {
-            const defaultLang = q.languages[0] || 'python'
-            let starterCode = ''
-            if (q.function_signature) {
-              starterCode = generateBoilerplate(defaultLang, q)
-            } else if (q.starter_code && q.starter_code[defaultLang]) {
-              starterCode = q.starter_code[defaultLang]
+            // Handle SQL questions differently (case-insensitive check)
+            if (q.question_type?.toUpperCase() === 'SQL') {
+              initialCode[q.id] = q.starter_query || '-- Write your SQL query here\n\nSELECT '
+              initialLanguage[q.id] = 'sql'
             } else {
-              starterCode = generateBoilerplate(defaultLang, q)
+              // Coding questions
+              const defaultLang = q.languages[0] || 'python'
+              let starterCode = ''
+              if (q.function_signature) {
+                starterCode = generateBoilerplate(defaultLang, q)
+              } else if (q.starter_code && q.starter_code[defaultLang]) {
+                starterCode = q.starter_code[defaultLang]
+              } else {
+                starterCode = generateBoilerplate(defaultLang, q)
+              }
+              initialCode[q.id] = starterCode
+              initialLanguage[q.id] = defaultLang
             }
-            initialCode[q.id] = starterCode
-            initialLanguage[q.id] = defaultLang
           })
           
           // Use userId in localStorage key to ensure code isolation between candidates
@@ -1422,6 +1507,69 @@ export default function TestTakePage() {
     }
   }, [timerStarted, submitted, testSubmission, test]) // Don't include timeRemaining to avoid recreating interval
 
+  // Per-question timer countdown - only runs in PER_QUESTION mode and when question timer is started
+  useEffect(() => {
+    if (!timerStarted || submitted || test?.timer_mode !== 'PER_QUESTION' || !activeQuestionTimer) {
+      return
+    }
+    
+    // Only run countdown if this question's timer has been started (on first entry)
+    if (!questionTimerStarted[activeQuestionTimer]) {
+      console.log(`[Timer] Timer not started yet for question ${activeQuestionTimer}`)
+      return
+    }
+    
+    const currentQuestionTime = questionTimeRemaining[activeQuestionTimer]
+    if (currentQuestionTime === undefined || currentQuestionTime <= 0) {
+      // Question time expired - auto-submit this question and move to next
+      const currentIndex = questions.findIndex(q => q.id === activeQuestionTimer)
+      
+      // Mark current question as submitted (to unlock next)
+      setSubmittedQuestions(prev => ({
+        ...prev,
+        [activeQuestionTimer]: true
+      }))
+      
+      if (currentIndex < questions.length - 1) {
+        // Move to next question
+        console.log(`[Timer] Question ${activeQuestionTimer} time expired, moving to next question`)
+        handleQuestionChange(currentIndex + 1)
+      } else {
+        // Last question - auto-submit the test
+        console.log('[Timer] Last question time expired, auto-submitting')
+        handleAutoSubmit()
+      }
+      return
+    }
+    
+    console.log(`[Timer] Per-question countdown active for ${activeQuestionTimer}: ${currentQuestionTime}s remaining`)
+    
+    const timer = setInterval(() => {
+      setQuestionTimeRemaining(prev => {
+        const newTime = Math.max(0, (prev[activeQuestionTimer] || 0) - 1)
+        const updated = { ...prev, [activeQuestionTimer]: newTime }
+        
+        // Save to localStorage for persistence
+        if (userId && testId) {
+          const storageKey = `test_${testId}_${userId}_questionTimers`
+          localStorage.setItem(storageKey, JSON.stringify(updated))
+        }
+        
+        // Check if time expired
+        if (newTime <= 0) {
+          console.log(`[Timer] Question ${activeQuestionTimer} time expired`)
+          // The effect will handle auto-move/submit on next run
+        }
+        
+        return updated
+      })
+    }, 1000)
+    
+    return () => {
+      clearInterval(timer)
+    }
+  }, [timerStarted, submitted, test?.timer_mode, activeQuestionTimer, questions.length, questionTimerStarted])
+
   const handleAutoSubmit = async () => {
     if (submitted || submitting) return
     await handleSubmit(true)
@@ -1486,29 +1634,109 @@ export default function TestTakePage() {
   }
 
   const handleQuestionChange = (index: number) => {
+    const previousQuestion = questions[currentQuestionIndex]
+    const newQuestion = questions[index]
+    
+    // Check if navigation is allowed (sequential mode)
+    // First question is always accessible, others require previous question to be submitted
+    if (index > 0) {
+      const previousQuestionId = questions[index - 1]?.id
+      if (previousQuestionId && !submittedQuestions[previousQuestionId]) {
+        // Previous question not submitted - block navigation
+        alert(`Please submit Question ${index} before moving to Question ${index + 1}`)
+        return
+      }
+    }
+    
+    // Handle per-question timer mode - pause previous, resume new
+    if (test?.timer_mode === 'PER_QUESTION' && previousQuestion && newQuestion && previousQuestion.id !== newQuestion.id) {
+      // Set the new question as the active timer
+      setActiveQuestionTimer(newQuestion.id)
+      console.log(`[Timer] Switched from question ${previousQuestion.id} to ${newQuestion.id}`)
+    }
+    
     setCurrentQuestionIndex(index)
     
-    const newQuestion = questions[index]
     if (newQuestion) {
+      // Track question start time
       if (!questionStartTimes[newQuestion.id]) {
         setQuestionStartTimes(prev => ({
           ...prev,
           [newQuestion.id]: new Date().toISOString()
         }))
       }
-    
-      const currentLang = language[newQuestion.id] || newQuestion.languages[0] || 'python'
-      if (!code[newQuestion.id] || code[newQuestion.id].trim() === '') {
-        let starterCode = ''
-        if (newQuestion.starter_code && newQuestion.starter_code[currentLang]) {
-          starterCode = newQuestion.starter_code[currentLang]
-        } else {
-          starterCode = generateBoilerplate(currentLang, newQuestion)
+      
+      // Start per-question timer - reset to full duration when entering question for first time
+      if (test?.timer_mode === 'PER_QUESTION') {
+        const fullDuration = questionTotalTime[newQuestion.id]
+        if (fullDuration !== undefined) {
+          // If timer hasn't been started for this question, reset to full duration
+          if (!questionTimerStarted[newQuestion.id]) {
+            console.log(`[Timer] Starting timer for question ${newQuestion.id} with full duration: ${fullDuration}s`)
+            setQuestionTimeRemaining(prev => {
+              const updated = { ...prev, [newQuestion.id]: fullDuration }
+              
+              // Save to localStorage for persistence
+              if (userId && testId) {
+                const storageKey = `test_${testId}_${userId}_questionTimers`
+                localStorage.setItem(storageKey, JSON.stringify(updated))
+              }
+              
+              return updated
+            })
+            
+            // Mark timer as started
+            setQuestionTimerStarted(prev => ({
+              ...prev,
+              [newQuestion.id]: true
+            }))
+          } else {
+            // Timer already started - preserve remaining time (user might be going back)
+            const currentRemaining = questionTimeRemaining[newQuestion.id]
+            if (currentRemaining === undefined || currentRemaining <= 0) {
+              // If somehow timer is missing or expired, reset to full duration
+              console.log(`[Timer] Timer was expired/missing for question ${newQuestion.id}, resetting to full duration`)
+              setQuestionTimeRemaining(prev => {
+                const updated = { ...prev, [newQuestion.id]: fullDuration }
+                if (userId && testId) {
+                  const storageKey = `test_${testId}_${userId}_questionTimers`
+                  localStorage.setItem(storageKey, JSON.stringify(updated))
+                }
+                return updated
+              })
+            } else {
+              console.log(`[Timer] Resuming timer for question ${newQuestion.id} with remaining time: ${currentRemaining}s`)
+            }
+          }
+          
+          setActiveQuestionTimer(newQuestion.id)
         }
-        setCode({ ...code, [newQuestion.id]: starterCode })
       }
-      if (!language[newQuestion.id]) {
-        setLanguage({ ...language, [newQuestion.id]: currentLang })
+    
+      // Handle SQL questions differently (case-insensitive check)
+      if (newQuestion.question_type?.toUpperCase() === 'SQL') {
+        if (!code[newQuestion.id] || code[newQuestion.id].trim() === '') {
+          const starterQuery = newQuestion.starter_query || '-- Write your SQL query here\n\nSELECT '
+          setCode({ ...code, [newQuestion.id]: starterQuery })
+        }
+        if (!language[newQuestion.id]) {
+          setLanguage({ ...language, [newQuestion.id]: 'sql' })
+        }
+      } else {
+        // Coding questions
+        const currentLang = language[newQuestion.id] || newQuestion.languages[0] || 'python'
+        if (!code[newQuestion.id] || code[newQuestion.id].trim() === '') {
+          let starterCode = ''
+          if (newQuestion.starter_code && newQuestion.starter_code[currentLang]) {
+            starterCode = newQuestion.starter_code[currentLang]
+          } else {
+            starterCode = generateBoilerplate(currentLang, newQuestion)
+          }
+          setCode({ ...code, [newQuestion.id]: starterCode })
+        }
+        if (!language[newQuestion.id]) {
+          setLanguage({ ...language, [newQuestion.id]: currentLang })
+        }
       }
     }
   }
@@ -1524,6 +1752,70 @@ export default function TestTakePage() {
     
     const currentQuestion = questions[currentQuestionIndex]
     if (!currentQuestion) return
+
+    // Handle SQL questions - execute via Judge0 SQLite
+    const isSQLQuestion = currentQuestion.question_type?.toUpperCase() === 'SQL'
+    if (isSQLQuestion) {
+      setRunning(true)
+      setOutput(prev => ({
+        ...prev,
+        [currentQuestion.id]: {
+          stdout: '⏳ Executing SQL query...',
+          status: 'running'
+        }
+      }))
+
+      try {
+        const sqlQuery = code[currentQuestion.id] || currentQuestion.starter_query || ''
+        
+        const response = await dsaApi.post('/assessment/run-sql', {
+          question_id: currentQuestion.id,
+          sql_query: sqlQuery,
+        })
+
+        const result = response.data
+        
+        if (result.status === 'executed') {
+          // Format output nicely
+          const outputLines = result.output?.split('\n') || []
+          const formattedOutput = outputLines.length > 0 
+            ? `✅ Query executed successfully!\n\n📊 Results:\n${result.output}`
+            : '✅ Query executed successfully (no output rows)'
+          
+          setOutput(prev => ({
+            ...prev,
+            [currentQuestion.id]: {
+              stdout: formattedOutput,
+              status: 'success'
+            }
+          }))
+        } else {
+          // Error occurred
+          setOutput(prev => ({
+            ...prev,
+            [currentQuestion.id]: {
+              stderr: `❌ ${result.message}\n\n${result.error || ''}`,
+              status: 'error'
+            }
+          }))
+        }
+
+        setQuestionStatus({ ...questionStatus, [currentQuestion.id]: 'attempted' })
+      } catch (error: any) {
+        console.error('SQL Run error:', error)
+        const errorMessage = error.response?.data?.detail || error.message || 'Failed to execute SQL query'
+        setOutput(prev => ({
+          ...prev,
+          [currentQuestion.id]: {
+            stderr: `❌ Error: ${errorMessage}`,
+            status: 'error'
+          }
+        }))
+      } finally {
+        setRunning(false)
+      }
+      return
+    }
 
     setRunning(true)
     setOutput({})
@@ -1603,6 +1895,107 @@ export default function TestTakePage() {
     
     const currentQuestion = questions[currentQuestionIndex]
     if (!currentQuestion) return
+
+    // Handle SQL questions - submit via Judge0 SQLite
+    const isSQLQuestion = currentQuestion.question_type?.toUpperCase() === 'SQL'
+    if (isSQLQuestion) {
+      setRunning(true)
+      setOutput(prev => ({
+        ...prev,
+        [currentQuestion.id]: {
+          stdout: '⏳ Submitting SQL query for evaluation...',
+          status: 'running'
+        }
+      }))
+
+      try {
+        const sqlQuery = code[currentQuestion.id] || currentQuestion.starter_query || ''
+        const startedAt = questionStartTimes[currentQuestion.id] || new Date().toISOString()
+        const submittedAt = new Date().toISOString()
+        const startTime = new Date(startedAt).getTime()
+        const endTime = new Date(submittedAt).getTime()
+        const timeSpentSeconds = Math.floor((endTime - startTime) / 1000)
+        
+        const response = await dsaApi.post('/assessment/submit-sql', {
+          question_id: currentQuestion.id,
+          sql_query: sqlQuery,
+          started_at: startedAt,
+          submitted_at: submittedAt,
+          time_spent_seconds: timeSpentSeconds,
+        }, {
+          params: { user_id: userId },
+        })
+
+        const result = response.data
+        
+        if (result.passed) {
+          setOutput(prev => ({
+            ...prev,
+            [currentQuestion.id]: {
+              stdout: `✅ ${result.message}\n\n📊 Your Output:\n${result.user_output || '(empty)'}\n\n⏱️ Execution Time: ${result.time || 'N/A'}s\n💾 Memory: ${result.memory || 'N/A'} KB\n\n🏆 Score: ${result.score}/${result.max_score}`,
+              status: 'accepted'
+            }
+          }))
+          setQuestionStatus({ ...questionStatus, [currentQuestion.id]: 'solved' })
+        } else {
+          let outputMessage = `❌ ${result.message}\n\n📊 Your Output:\n${result.user_output || '(empty)'}`
+          
+          if (result.expected_output) {
+            outputMessage += `\n\n📋 Expected Output:\n${result.expected_output}`
+          }
+          
+          outputMessage += `\n\n🏆 Score: ${result.score}/${result.max_score}`
+          
+          setOutput(prev => ({
+            ...prev,
+            [currentQuestion.id]: {
+              stdout: outputMessage,
+              status: 'wrong_answer'
+            }
+          }))
+          setQuestionStatus({ ...questionStatus, [currentQuestion.id]: 'attempted' })
+        }
+
+        // Add to submission history
+        const historyEntry: SubmissionHistoryEntry = {
+          id: result.submission_id || `sql-${currentQuestion.id}-${Date.now()}`,
+          status: result.status,
+          passed: result.passed ? 1 : 0,
+          total: 1,
+          score: result.score || 0,
+          max_score: result.max_score || 100,
+          created_at: new Date().toISOString(),
+          results: [],
+        }
+        
+        setSubmissionHistory((prev) => {
+          const existing = prev[currentQuestion.id] || []
+          const updated = [historyEntry, ...existing].slice(0, 5)
+          return { ...prev, [currentQuestion.id]: updated }
+        })
+        
+        // Mark question as submitted (unlock next question)
+        setSubmittedQuestions(prev => ({
+          ...prev,
+          [currentQuestion.id]: true
+        }))
+
+      } catch (error: any) {
+        console.error('SQL Submit error:', error)
+        const errorMessage = error.response?.data?.detail || error.message || 'Failed to submit SQL query'
+        setOutput(prev => ({
+          ...prev,
+          [currentQuestion.id]: {
+            stderr: `❌ Error: ${errorMessage}`,
+            status: 'error'
+          }
+        }))
+        setQuestionStatus({ ...questionStatus, [currentQuestion.id]: 'attempted' })
+      } finally {
+        setRunning(false)
+      }
+      return
+    }
 
     setRunning(true)
     setOutput({})
@@ -1705,6 +2098,12 @@ export default function TestTakePage() {
         const updated = [historyEntry, ...existing].slice(0, 5)
         return { ...prev, [questionId]: updated }
       })
+      
+      // Mark question as submitted (unlock next question)
+      setSubmittedQuestions(prev => ({
+        ...prev,
+        [currentQuestion.id]: true
+      }))
     } catch (error: any) {
       console.error('Submit error:', error)
       setOutput(prev => ({
@@ -1723,16 +2122,23 @@ export default function TestTakePage() {
     const currentQuestion = questions[currentQuestionIndex]
     if (!currentQuestion) return
 
-    const currentLang = language[currentQuestion.id] || currentQuestion.languages[0] || 'python'
-    let starterCode = ''
-    if (currentQuestion.function_signature) {
-      starterCode = generateBoilerplate(currentLang, currentQuestion)
-    } else if (currentQuestion.starter_code && currentQuestion.starter_code[currentLang]) {
-      starterCode = currentQuestion.starter_code[currentLang]
+    // Handle SQL questions differently (case-insensitive check)
+    if (currentQuestion.question_type?.toUpperCase() === 'SQL') {
+      const starterQuery = currentQuestion.starter_query || '-- Write your SQL query here\n\nSELECT '
+      setCode({ ...code, [currentQuestion.id]: starterQuery })
     } else {
-      starterCode = generateBoilerplate(currentLang, currentQuestion)
+      // Coding questions
+      const currentLang = language[currentQuestion.id] || currentQuestion.languages[0] || 'python'
+      let starterCode = ''
+      if (currentQuestion.function_signature) {
+        starterCode = generateBoilerplate(currentLang, currentQuestion)
+      } else if (currentQuestion.starter_code && currentQuestion.starter_code[currentLang]) {
+        starterCode = currentQuestion.starter_code[currentLang]
+      } else {
+        starterCode = generateBoilerplate(currentLang, currentQuestion)
+      }
+      setCode({ ...code, [currentQuestion.id]: starterCode })
     }
-    setCode({ ...code, [currentQuestion.id]: starterCode })
   }
 
   const handleLanguageChange = (newLang: string) => {
@@ -1942,6 +2348,10 @@ export default function TestTakePage() {
         <TimerBar
           timeRemaining={timeRemaining} 
           totalTime={totalTime}
+          timerMode={test?.timer_mode || 'GLOBAL'}
+          currentQuestionTitle={currentQuestion?.title}
+          questionTimeRemaining={currentQuestion ? questionTimeRemaining[currentQuestion.id] : undefined}
+          questionTotalTime={currentQuestion ? questionTotalTime[currentQuestion.id] : undefined}
         />
         <div className="flex-1 overflow-y-auto">
           <QuestionSidebar
@@ -1952,40 +2362,90 @@ export default function TestTakePage() {
             onSubmit={() => handleSubmit(false)}
             submitting={submitting}
             questionStatus={questionStatus}
+            submittedQuestions={submittedQuestions}
           />
           <div className="border-t border-slate-700">
             <QuestionTabs question={currentQuestion} />
           </div>
           <div className="border-t border-slate-700" style={{ minHeight: '400px' }} ref={editorRef}>
-            <EditorContainer
-              code={currentCode}
-              language={currentLang}
-              languages={availableLanguages}
-              starterCode={currentQuestion.starter_code}
-              onCodeChange={(newCode) => setCode({ ...code, [currentQuestion.id]: newCode })}
-              onLanguageChange={handleLanguageChange}
-              onRun={handleRun}
-              onSubmit={handleCodeSubmit}
-              onReset={handleReset}
-              running={running}
-              submitting={submitting}
-              submissions={submissionHistory[currentQuestion.id] || []}
-              visibleTestcases={visibleTestcasesMap[currentQuestion.id] || []}
-              output={output[currentQuestion.id] || {}}
-              publicResults={publicResults[currentQuestion.id] || []}
-              hiddenSummary={hiddenSummary?.[currentQuestion.id] || null}
-            />
+            {/* Conditionally render SQL or Coding editor based on question_type */}
+            {currentQuestion.question_type?.toUpperCase() === 'SQL' ? (
+              <SQLEditorContainer
+                code={currentCode}
+                question={currentQuestion as any}
+                onCodeChange={(newCode) => setCode({ ...code, [currentQuestion.id]: newCode })}
+                onRun={handleRun}
+                onSubmit={handleCodeSubmit}
+                onReset={handleReset}
+                running={running}
+                submitting={submitting}
+                output={output[currentQuestion.id] || {}}
+              />
+            ) : (
+              <EditorContainer
+                code={currentCode}
+                language={currentLang}
+                languages={availableLanguages}
+                starterCode={currentQuestion.starter_code}
+                onCodeChange={(newCode) => setCode({ ...code, [currentQuestion.id]: newCode })}
+                onLanguageChange={handleLanguageChange}
+                onRun={handleRun}
+                onSubmit={handleCodeSubmit}
+                onReset={handleReset}
+                running={running}
+                submitting={submitting}
+                submissions={submissionHistory[currentQuestion.id] || []}
+                visibleTestcases={visibleTestcasesMap[currentQuestion.id] || []}
+                output={output[currentQuestion.id] || {}}
+                publicResults={publicResults[currentQuestion.id] || []}
+                hiddenSummary={hiddenSummary?.[currentQuestion.id] || null}
+              />
+            )}
+            {/* Next Question Banner - shows after question is submitted */}
+            {submittedQuestions[currentQuestion.id] && currentQuestionIndex < questions.length - 1 && (
+              <div className="bg-green-600/20 border-t border-green-500 p-4 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-green-400">
+                  <span className="text-lg">✅</span>
+                  <span className="font-medium">Question submitted successfully!</span>
+                </div>
+                <button
+                  onClick={() => handleQuestionChange(currentQuestionIndex + 1)}
+                  className="px-4 py-2 bg-green-600 hover:bg-green-500 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+                >
+                  Next Question →
+                </button>
+              </div>
+            )}
+            {/* Last Question Submitted Banner */}
+            {submittedQuestions[currentQuestion.id] && currentQuestionIndex === questions.length - 1 && (
+              <div className="bg-blue-600/20 border-t border-blue-500 p-4 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-blue-400">
+                  <span className="text-lg">🎉</span>
+                  <span className="font-medium">All questions submitted! Ready to finish the test.</span>
+                </div>
+                <button
+                  onClick={() => handleSubmit(false)}
+                  disabled={submitting}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors flex items-center gap-2 disabled:opacity-50"
+                >
+                  {submitting ? 'Submitting...' : 'Submit Test'}
+                </button>
+              </div>
+            )}
           </div>
-          <div className="border-t border-slate-700">
-            <OutputConsole
-              stdout={output[currentQuestion.id]?.stdout}
-              stderr={output[currentQuestion.id]?.stderr}
-              compileOutput={output[currentQuestion.id]?.compileOutput}
-              status={output[currentQuestion.id]?.status}
-              time={output[currentQuestion.id]?.time}
-              memory={output[currentQuestion.id]?.memory}
-            />
-          </div>
+          {/* Output Console - only shown for coding questions (SQL has it integrated) */}
+          {currentQuestion.question_type?.toUpperCase() !== 'SQL' && (
+            <div className="border-t border-slate-700">
+              <OutputConsole
+                stdout={output[currentQuestion.id]?.stdout}
+                stderr={output[currentQuestion.id]?.stderr}
+                compileOutput={output[currentQuestion.id]?.compileOutput}
+                status={output[currentQuestion.id]?.status}
+                time={output[currentQuestion.id]?.time}
+                memory={output[currentQuestion.id]?.memory}
+              />
+            </div>
+          )}
         </div>
       </div>
     )
@@ -2028,6 +2488,10 @@ export default function TestTakePage() {
       <TimerBar 
         timeRemaining={timeRemaining} 
         totalTime={totalTime}
+        timerMode={test?.timer_mode || 'GLOBAL'}
+        currentQuestionTitle={currentQuestion?.title}
+        questionTimeRemaining={currentQuestion ? questionTimeRemaining[currentQuestion.id] : undefined}
+        questionTotalTime={currentQuestion ? questionTotalTime[currentQuestion.id] : undefined}
       />
 
       <div className="flex-1 overflow-hidden">
@@ -2051,6 +2515,7 @@ export default function TestTakePage() {
               onSubmit={() => handleSubmit(false)}
               submitting={submitting}
               questionStatus={questionStatus}
+              submittedQuestions={submittedQuestions}
             />
           </div>
 
@@ -2058,28 +2523,78 @@ export default function TestTakePage() {
             <QuestionTabs question={currentQuestion} />
           </div>
 
-          <div className="h-full overflow-hidden bg-slate-950" ref={editorRef}>
-            <EditorContainer
-              code={currentCode}
-              language={currentLang}
-              languages={availableLanguages}
-              starterCode={currentQuestion.starter_code}
-              onCodeChange={(newCode) => {
-                const updatedCode = { ...code, [currentQuestion.id]: newCode }
-                setCode(updatedCode)
-              }}
-              onLanguageChange={handleLanguageChange}
-              onRun={handleRun}
-              onSubmit={handleCodeSubmit}
-              onReset={handleReset}
-              running={running}
-              submitting={submitting}
-              submissions={submissionHistory[currentQuestion.id] || []}
-              visibleTestcases={visibleTestcasesMap[currentQuestion.id] || []}
-              output={output[currentQuestion.id] || {}}
-              publicResults={publicResults[currentQuestion.id] || []}
-              hiddenSummary={hiddenSummary?.[currentQuestion.id] || null}
-            />
+          <div className="h-full overflow-hidden bg-slate-950 flex flex-col" ref={editorRef}>
+            {/* Conditionally render SQL or Coding editor based on question_type */}
+            <div className="flex-1 overflow-hidden">
+              {currentQuestion.question_type?.toUpperCase() === 'SQL' ? (
+                <SQLEditorContainer
+                  code={currentCode}
+                  question={currentQuestion as any}
+                  onCodeChange={(newCode) => {
+                    const updatedCode = { ...code, [currentQuestion.id]: newCode }
+                    setCode(updatedCode)
+                  }}
+                  onRun={handleRun}
+                  onSubmit={handleCodeSubmit}
+                  onReset={handleReset}
+                  running={running}
+                  submitting={submitting}
+                  output={output[currentQuestion.id] || {}}
+                />
+              ) : (
+                <EditorContainer
+                  code={currentCode}
+                  language={currentLang}
+                  languages={availableLanguages}
+                  starterCode={currentQuestion.starter_code}
+                  onCodeChange={(newCode) => {
+                    const updatedCode = { ...code, [currentQuestion.id]: newCode }
+                    setCode(updatedCode)
+                  }}
+                  onLanguageChange={handleLanguageChange}
+                  onRun={handleRun}
+                  onSubmit={handleCodeSubmit}
+                  onReset={handleReset}
+                  running={running}
+                  submitting={submitting}
+                  submissions={submissionHistory[currentQuestion.id] || []}
+                  visibleTestcases={visibleTestcasesMap[currentQuestion.id] || []}
+                  output={output[currentQuestion.id] || {}}
+                  publicResults={publicResults[currentQuestion.id] || []}
+                  hiddenSummary={hiddenSummary?.[currentQuestion.id] || null}
+                />
+              )}
+            </div>
+            {/* Next Question Banner - shows after question is submitted */}
+            {submittedQuestions[currentQuestion.id] && currentQuestionIndex < questions.length - 1 && (
+              <div className="bg-green-600/20 border-t border-green-500 p-3 flex items-center justify-between flex-shrink-0">
+                <div className="flex items-center gap-2 text-green-400">
+                  <span>✅</span>
+                  <span className="font-medium text-sm">Question submitted!</span>
+                </div>
+                <button
+                  onClick={() => handleQuestionChange(currentQuestionIndex + 1)}
+                  className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-sm font-medium rounded transition-colors"
+                >
+                  Next Question →
+                </button>
+              </div>
+            )}
+            {submittedQuestions[currentQuestion.id] && currentQuestionIndex === questions.length - 1 && (
+              <div className="bg-blue-600/20 border-t border-blue-500 p-3 flex items-center justify-between flex-shrink-0">
+                <div className="flex items-center gap-2 text-blue-400">
+                  <span>🎉</span>
+                  <span className="font-medium text-sm">All done!</span>
+                </div>
+                <button
+                  onClick={() => handleSubmit(false)}
+                  disabled={submitting}
+                  className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-colors disabled:opacity-50"
+                >
+                  {submitting ? 'Submitting...' : 'Submit Test'}
+                </button>
+              </div>
+            )}
           </div>
         </Split>
       </div>
