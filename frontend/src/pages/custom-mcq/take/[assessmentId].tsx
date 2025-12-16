@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/router";
 import { customMCQApi } from "../../../lib/custom-mcq/api";
-import { CustomMCQAssessment, MCQQuestion } from "../../../types/custom-mcq";
+import { CustomMCQAssessment, MCQQuestion, SubjectiveQuestion, Question } from "../../../types/custom-mcq";
 
 export default function CustomMCQTakePage() {
   const router = useRouter();
   const { assessmentId, token } = router.query;
   const [assessment, setAssessment] = useState<CustomMCQAssessment | null>(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [answers, setAnswers] = useState<Record<string, string[]>>({}); // For MCQ answers
+  const [textAnswers, setTextAnswers] = useState<Record<string, string>>({}); // For subjective answers
+  const [selectedQuestionType, setSelectedQuestionType] = useState<"mcq" | "subjective">("mcq");
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -242,6 +244,13 @@ export default function CustomMCQTakePage() {
     });
   };
 
+  const handleTextAnswerChange = (questionId: string, text: string) => {
+    setTextAnswers((prev) => ({
+      ...prev,
+      [questionId]: text,
+    }));
+  };
+
   const handleSubmit = useCallback(async (isAuto = false) => {
     if (!assessment || !candidateInfo || submitting) return;
 
@@ -252,10 +261,28 @@ export default function CustomMCQTakePage() {
       // Clear the timer to prevent multiple submissions
       setTimeRemaining(0);
 
-      const submissions = Object.entries(answers).map(([questionId, selectedAnswers]) => ({
-        questionId,
-        selectedAnswers,
-      }));
+      // Combine MCQ and subjective answers
+      const submissions = [];
+      
+      // Add MCQ submissions
+      for (const [questionId, selectedAnswers] of Object.entries(answers)) {
+        if (selectedAnswers && selectedAnswers.length > 0) {
+          submissions.push({
+            questionId,
+            selectedAnswers,
+          });
+        }
+      }
+      
+      // Add subjective submissions
+      for (const [questionId, textAnswer] of Object.entries(textAnswers)) {
+        if (textAnswer && textAnswer.trim()) {
+          submissions.push({
+            questionId,
+            textAnswer: textAnswer.trim(),
+          });
+        }
+      }
 
       const result = await customMCQApi.submitAssessment(
         assessmentId as string,
@@ -272,7 +299,7 @@ export default function CustomMCQTakePage() {
 
       // Redirect to results page
       router.push(
-        `/custom-mcq/result/${assessmentId}?score=${result.score}&total=${result.totalMarks}&percentage=${result.percentage}&passed=${result.passed}&token=${token}`
+        `/custom-mcq/result/${assessmentId}?score=${result.score}&total=${result.totalMarks}&percentage=${result.percentage}&passed=${result.passed}&token=${token}&gradingStatus=${result.gradingStatus || "completed"}`
       );
     } catch (err: any) {
       setError(err.message || "Failed to submit assessment");
@@ -306,6 +333,37 @@ export default function CustomMCQTakePage() {
 
     return () => clearInterval(interval);
   }, [timeRemaining, waitingForStart]);
+
+  // Set initial question type based on available questions
+  useEffect(() => {
+    if (!assessment || !assessment.questions || assessment.questions.length === 0) return;
+    
+    const questions = assessment.questions || [];
+    const hasMCQ = questions.some(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
+    const hasSubjective = questions.some(q => q.questionType === "subjective" || !("options" in q && "correctAn" in q));
+    const hasBothTypes = hasMCQ && hasSubjective;
+    
+    if (hasBothTypes) {
+      // When type changes, find first question of that type
+      const firstOfType = questions.findIndex(q => {
+        const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
+        return qType === selectedQuestionType;
+      });
+      if (firstOfType >= 0) {
+        const currentQ = questions[currentQuestionIndex];
+        const currentQType = currentQ ? (currentQ.questionType || (("options" in currentQ && "correctAn" in currentQ) ? "mcq" : "subjective")) : null;
+        // Only update if current question doesn't match selected type
+        if (currentQType !== selectedQuestionType) {
+          setCurrentQuestionIndex(firstOfType);
+        }
+      }
+    } else if (hasMCQ && selectedQuestionType !== "mcq") {
+      setSelectedQuestionType("mcq");
+    } else if (hasSubjective && !hasMCQ && selectedQuestionType !== "subjective") {
+      setSelectedQuestionType("subjective");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assessment, selectedQuestionType]);
 
   if (loading) {
     return (
@@ -415,12 +473,102 @@ export default function CustomMCQTakePage() {
   }
 
   const questions = assessment.questions || [];
-  const currentQuestion = questions[currentQuestionIndex];
-  const currentAnswers = answers[currentQuestion?.id || ""] || [];
+  
+  // Check if we have both types
+  const hasMCQ = questions.some(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
+  const hasSubjective = questions.some(q => q.questionType === "subjective" || !("options" in q && "correctAn" in q));
+  const hasBothTypes = hasMCQ && hasSubjective;
+  
+  // Filter questions by selected type when both types exist
+  const filteredQuestions = hasBothTypes 
+    ? questions.filter(q => {
+        const qType = (q as any).questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
+        return qType === selectedQuestionType;
+      })
+    : questions;
+  
+  // Find current question index in filtered list
+  const currentQuestionIndexInFiltered = filteredQuestions.findIndex(q => q.id === questions[currentQuestionIndex]?.id);
+  
+  // If current question is not in filtered list (type changed), go to first question of filtered type
+  const currentQuestion = (currentQuestionIndexInFiltered >= 0 
+    ? filteredQuestions[currentQuestionIndexInFiltered] 
+    : filteredQuestions[0]) || filteredQuestions[0];
+  
+  const actualIndex = questions.findIndex(q => q.id === currentQuestion?.id);
+  
+  const isMCQ = currentQuestion && (currentQuestion.questionType === "mcq" || ("options" in currentQuestion && "correctAn" in currentQuestion));
+  const currentAnswers = isMCQ ? (answers[currentQuestion?.id || ""] || []) : [];
+  const currentTextAnswer = !isMCQ ? (textAnswers[currentQuestion?.id || ""] || "") : "";
 
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#ffffff", padding: "2rem" }}>
-      <div style={{ maxWidth: "1000px", margin: "0 auto" }}>
+      <div style={{ maxWidth: "1000px", margin: "0 auto", display: "flex", gap: "2rem" }}>
+        {/* Question Type Selector (Left Panel) - Only show if both types exist */}
+        {hasBothTypes && examStarted && (
+          <div style={{ width: "200px", flexShrink: 0 }}>
+            <div
+              style={{
+                padding: "1rem",
+                backgroundColor: "#E8FAF0",
+                border: "2px solid #A8E8BC",
+                borderRadius: "0.5rem",
+                position: "sticky",
+                top: "2rem",
+              }}
+            >
+              <h3 style={{ marginBottom: "1rem", color: "#1E5A3B", fontSize: "1rem" }}>Question Type</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                {hasMCQ && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedQuestionType("mcq");
+                      const firstMCQ = questions.findIndex(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
+                      setCurrentQuestionIndex(firstMCQ >= 0 ? firstMCQ : 0);
+                    }}
+                    style={{
+                      padding: "0.75rem",
+                      border: selectedQuestionType === "mcq" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                      borderRadius: "0.5rem",
+                      backgroundColor: selectedQuestionType === "mcq" ? "#C9F4D4" : "#ffffff",
+                      color: "#1E5A3B",
+                      fontWeight: selectedQuestionType === "mcq" ? 600 : 400,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    MCQ
+                  </button>
+                )}
+                {hasSubjective && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedQuestionType("subjective");
+                      const firstSubjective = questions.findIndex(q => q.questionType === "subjective" || !("options" in q && "correctAn" in q));
+                      setCurrentQuestionIndex(firstSubjective >= 0 ? firstSubjective : 0);
+                    }}
+                    style={{
+                      padding: "0.75rem",
+                      border: selectedQuestionType === "subjective" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                      borderRadius: "0.5rem",
+                      backgroundColor: selectedQuestionType === "subjective" ? "#C9F4D4" : "#ffffff",
+                      color: "#1E5A3B",
+                      fontWeight: selectedQuestionType === "subjective" ? 600 : 400,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    Subjective
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+        
+        <div style={{ flex: 1 }}>
         {/* Header with Timer */}
         <div
           style={{
@@ -487,44 +635,79 @@ export default function CustomMCQTakePage() {
           >
             <div style={{ marginBottom: "1.5rem" }}>
               <span style={{ color: "#2D7A52", fontWeight: 600 }}>
-                Question {currentQuestionIndex + 1} of {questions.length}
+                Question {currentQuestionIndexInFiltered + 1} of {filteredQuestions.length}
+                {hasBothTypes && ` (Total: ${questions.length})`}
               </span>
               <span style={{ color: "#4A9A6A", marginLeft: "1rem" }}>[{currentQuestion.section}]</span>
+              <span style={{ 
+                marginLeft: "1rem",
+                padding: "0.25rem 0.5rem", 
+                backgroundColor: isMCQ ? "#E8FAF0" : "#FFF4E6", 
+                color: isMCQ ? "#1E5A3B" : "#B45309",
+                borderRadius: "0.25rem",
+                fontSize: "0.875rem",
+                fontWeight: 600
+              }}>
+                {isMCQ ? "MCQ" : "Subjective"}
+              </span>
             </div>
 
             <h2 style={{ marginBottom: "2rem", color: "#1E5A3B" }}>{currentQuestion.question}</h2>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-              {currentQuestion.options.map((option) => {
-                const isSelected = currentAnswers.includes(option.label);
-                return (
-                  <label
-                    key={option.label}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      padding: "1rem",
-                      border: isSelected ? "2px solid #2D7A52" : "1px solid #A8E8BC",
-                      borderRadius: "0.5rem",
-                      cursor: "pointer",
-                      backgroundColor: isSelected ? "#E8FAF0" : "#ffffff",
-                      transition: "all 0.2s",
-                    }}
-                  >
-                    <input
-                      type={currentQuestion.answerType === "single" ? "radio" : "checkbox"}
-                      checked={isSelected}
-                      onChange={() => handleAnswerChange(currentQuestion.id!, option.label, currentQuestion)}
-                      style={{ marginRight: "1rem", width: "20px", height: "20px" }}
-                    />
-                    <div>
-                      <strong style={{ color: "#1E5A3B", marginRight: "0.5rem" }}>{option.label}:</strong>
-                      <span style={{ color: "#2D7A52" }}>{option.text}</span>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
+            {isMCQ && (currentQuestion as MCQQuestion).options ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                {(currentQuestion as MCQQuestion).options.map((option) => {
+                  const isSelected = currentAnswers.includes(option.label);
+                  return (
+                    <label
+                      key={option.label}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        padding: "1rem",
+                        border: isSelected ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                        borderRadius: "0.5rem",
+                        cursor: "pointer",
+                        backgroundColor: isSelected ? "#E8FAF0" : "#ffffff",
+                        transition: "all 0.2s",
+                      }}
+                    >
+                      <input
+                        type={(currentQuestion as MCQQuestion).answerType === "single" ? "radio" : "checkbox"}
+                        checked={isSelected}
+                        onChange={() => handleAnswerChange(currentQuestion.id!, option.label, currentQuestion as MCQQuestion)}
+                        style={{ marginRight: "1rem", width: "20px", height: "20px" }}
+                      />
+                      <div>
+                        <strong style={{ color: "#1E5A3B", marginRight: "0.5rem" }}>{option.label}:</strong>
+                        <span style={{ color: "#2D7A52" }}>{option.text}</span>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <div>
+                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
+                  Your Answer
+                </label>
+                <textarea
+                  value={currentTextAnswer}
+                  onChange={(e) => handleTextAnswerChange(currentQuestion.id!, e.target.value)}
+                  placeholder="Type your answer here..."
+                  rows={10}
+                  style={{
+                    width: "100%",
+                    padding: "1rem",
+                    border: "2px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                    fontFamily: "inherit",
+                    resize: "vertical",
+                  }}
+                />
+              </div>
+            )}
           </div>
         )}
 
@@ -533,35 +716,73 @@ export default function CustomMCQTakePage() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
           <button
             type="button"
-            onClick={() => setCurrentQuestionIndex(Math.max(0, currentQuestionIndex - 1))}
-            disabled={currentQuestionIndex === 0}
+                  onClick={() => {
+                    if (hasBothTypes) {
+                      // Find previous question of same type
+                      for (let i = actualIndex - 1; i >= 0; i--) {
+                        const q = questions[i];
+                        const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
+                        if (qType === selectedQuestionType) {
+                          setCurrentQuestionIndex(i);
+                          break;
+                        }
+                      }
+                    } else {
+                      const prevIndex = actualIndex - 1;
+                      if (prevIndex >= 0) {
+                        setCurrentQuestionIndex(prevIndex);
+                      }
+                    }
+                  }}
+            disabled={actualIndex === 0}
             className="btn-secondary"
             style={{
               padding: "0.75rem 1.5rem",
-              opacity: currentQuestionIndex === 0 ? 0.5 : 1,
-              cursor: currentQuestionIndex === 0 ? "not-allowed" : "pointer",
+              opacity: actualIndex === 0 ? 0.5 : 1,
+              cursor: actualIndex === 0 ? "not-allowed" : "pointer",
             }}
           >
             ← Previous
           </button>
 
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "center" }}>
-            {questions.map((_, idx) => {
-              const hasAnswer = answers[questions[idx].id || ""]?.length > 0;
+            {questions.map((q, idx) => {
+              const isQMCQ = q.questionType === "mcq" || ("options" in q && "correctAn" in q);
+              const hasAnswer = isQMCQ 
+                ? (answers[q.id || ""]?.length > 0)
+                : (textAnswers[q.id || ""]?.trim().length > 0);
+              const isCurrent = idx === actualIndex;
+              const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
+              const isInCurrentFilter = !hasBothTypes || qType === selectedQuestionType;
+              
               return (
                 <button
                   key={idx}
                   type="button"
-                  onClick={() => setCurrentQuestionIndex(idx)}
+                  onClick={() => {
+                    if (hasBothTypes) {
+                      if (qType === selectedQuestionType) {
+                        setCurrentQuestionIndex(idx);
+                      } else {
+                        // Switch to the correct type and go to this question
+                        setSelectedQuestionType(qType as "mcq" | "subjective");
+                        setCurrentQuestionIndex(idx);
+                      }
+                    } else {
+                      setCurrentQuestionIndex(idx);
+                    }
+                  }}
+                  disabled={hasBothTypes && !isInCurrentFilter}
                   style={{
                     width: "40px",
                     height: "40px",
                     borderRadius: "50%",
-                    border: idx === currentQuestionIndex ? "2px solid #2D7A52" : "1px solid #A8E8BC",
-                    backgroundColor: hasAnswer ? "#C9F4D4" : idx === currentQuestionIndex ? "#E8FAF0" : "#ffffff",
-                    color: "#1E5A3B",
-                    cursor: "pointer",
-                    fontWeight: idx === currentQuestionIndex ? 700 : 400,
+                    border: isCurrent ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                    backgroundColor: hasAnswer ? "#C9F4D4" : isCurrent ? "#E8FAF0" : (hasBothTypes && !isInCurrentFilter ? "#f0f0f0" : "#ffffff"),
+                    color: hasBothTypes && !isInCurrentFilter ? "#999" : "#1E5A3B",
+                    cursor: hasBothTypes && !isInCurrentFilter ? "not-allowed" : "pointer",
+                    fontWeight: isCurrent ? 700 : 400,
+                    opacity: hasBothTypes && !isInCurrentFilter ? 0.5 : 1,
                   }}
                 >
                   {idx + 1}
@@ -570,10 +791,29 @@ export default function CustomMCQTakePage() {
             })}
           </div>
 
-          {currentQuestionIndex < questions.length - 1 ? (
+          {(hasBothTypes 
+            ? filteredQuestions.findIndex((q, idx) => idx > currentQuestionIndexInFiltered) >= 0
+            : actualIndex < questions.length - 1) ? (
             <button
               type="button"
-              onClick={() => setCurrentQuestionIndex(Math.min(questions.length - 1, currentQuestionIndex + 1))}
+              onClick={() => {
+                if (hasBothTypes) {
+                  // Find next question of same type
+                  for (let i = actualIndex + 1; i < questions.length; i++) {
+                    const q = questions[i];
+                    const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
+                    if (qType === selectedQuestionType) {
+                      setCurrentQuestionIndex(i);
+                      break;
+                    }
+                  }
+                } else {
+                  const nextIndex = actualIndex + 1;
+                  if (nextIndex < questions.length) {
+                    setCurrentQuestionIndex(nextIndex);
+                  }
+                }
+              }}
               className="btn-primary"
               style={{ padding: "0.75rem 1.5rem" }}
             >
@@ -620,6 +860,7 @@ export default function CustomMCQTakePage() {
           </button>
         </div>
         )}
+        </div>
       </div>
     </div>
   );

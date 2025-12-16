@@ -14,11 +14,23 @@ class MCQOption(BaseModel):
 class MCQQuestion(BaseModel):
     """MCQ Question model"""
     id: Optional[str] = None
+    questionType: str = Field(default="mcq", pattern=r"^mcq$")
     section: str
     question: str
     options: List[MCQOption]  # Dynamic options (A, B, C, D, E, ...)
     correctAn: str  # Single: "A" or Multiple: "A,B" or "A,B,C"
     answerType: str = Field(default="single", pattern=r"^(single|multiple_all|multiple_any)$")
+    marks: int = Field(default=1, ge=1)
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
+
+
+class SubjectiveQuestion(BaseModel):
+    """Subjective Question model"""
+    id: Optional[str] = None
+    questionType: str = Field(default="subjective", pattern=r"^subjective$")
+    section: str
+    question: str
     marks: int = Field(default=1, ge=1)
     createdAt: Optional[datetime] = None
     updatedAt: Optional[datetime] = None
@@ -34,7 +46,7 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     """Request to create a custom MCQ assessment"""
     title: Optional[str] = None  # Optional for drafts
     description: Optional[str] = None
-    questions: Optional[List[MCQQuestion]] = None  # Optional for drafts
+    questions: Optional[List[Any]] = None  # Can contain both MCQQuestion and SubjectiveQuestion
     candidates: Optional[List[Candidate]] = None
     accessMode: str = Field(default="private", pattern=r"^(private|public)$")
     examMode: str = Field(default="strict", pattern=r"^(strict|flexible)$")
@@ -50,7 +62,7 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     """Request to update a custom MCQ assessment"""
     title: Optional[str] = None
     description: Optional[str] = None
-    questions: Optional[List[MCQQuestion]] = None
+    questions: Optional[List[Any]] = None  # Can contain both MCQQuestion and SubjectiveQuestion
     candidates: Optional[List[Candidate]] = None
     accessMode: Optional[str] = Field(default=None, pattern=r"^(private|public)$")
     examMode: Optional[str] = Field(default=None, pattern=r"^(strict|flexible)$")
@@ -70,7 +82,8 @@ class ValidateCSVRequest(BaseModel):
 class CandidateSubmission(BaseModel):
     """Candidate submission model"""
     questionId: str
-    selectedAnswers: List[str]  # List of selected option labels (e.g., ["A", "B"])
+    selectedAnswers: Optional[List[str]] = None  # For MCQ questions: List of selected option labels (e.g., ["A", "B"])
+    textAnswer: Optional[str] = None  # For subjective questions: Text answer
 
 
 class SubmitCustomMCQRequest(BaseModel):
@@ -113,11 +126,23 @@ class MCQOption(BaseModel):
 class FrontendMCQQuestion(BaseModel):
     """Frontend MCQ question format."""
     id: Optional[str] = Field(None, description="Question ID")
+    questionType: str = Field("mcq", description="Question type: 'mcq'")
     section: str = Field(..., description="Section name")
     question: str = Field(..., description="Question text")
     options: List[MCQOption] = Field(..., description="List of options")
     correctAn: str = Field(..., description="Correct answer(s) - single: 'A' or multiple: 'A,B'")
     answerType: str = Field("single", description="Answer type: 'single', 'multiple_all', or 'multiple_any'")
+    marks: int = Field(..., gt=0, description="Marks for this question")
+    createdAt: Optional[str] = Field(None, description="Creation timestamp")
+    updatedAt: Optional[str] = Field(None, description="Update timestamp")
+
+
+class FrontendSubjectiveQuestion(BaseModel):
+    """Frontend Subjective question format."""
+    id: Optional[str] = Field(None, description="Question ID")
+    questionType: str = Field("subjective", description="Question type: 'subjective'")
+    section: str = Field(..., description="Section name")
+    question: str = Field(..., description="Question text")
     marks: int = Field(..., gt=0, description="Marks for this question")
     createdAt: Optional[str] = Field(None, description="Creation timestamp")
     updatedAt: Optional[str] = Field(None, description="Update timestamp")
@@ -133,7 +158,7 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     """Request to create a custom MCQ assessment (frontend format)."""
     title: str = Field(..., description="Assessment title")
     description: Optional[str] = Field(None, description="Assessment description")
-    questions: List[FrontendMCQQuestion] = Field(default_factory=list, description="List of questions")
+    questions: List[Any] = Field(default_factory=list, description="List of questions (MCQ or Subjective)")
     candidates: Optional[List[Candidate]] = Field(None, description="List of candidates")
     accessMode: str = Field("private", description="'private' or 'public'")
     examMode: str = Field("strict", description="'strict' or 'flexible'")
@@ -149,7 +174,7 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     """Request to update a custom MCQ assessment (frontend format)."""
     title: Optional[str] = Field(None, description="Assessment title")
     description: Optional[str] = Field(None, description="Assessment description")
-    questions: Optional[List[FrontendMCQQuestion]] = Field(None, description="List of questions")
+    questions: Optional[List[Any]] = Field(None, description="List of questions (MCQ or Subjective)")
     candidates: Optional[List[Candidate]] = Field(None, description="List of candidates")
     accessMode: Optional[str] = Field(None, description="'private' or 'public'")
     examMode: Optional[str] = Field(None, description="'strict' or 'flexible'")
@@ -169,7 +194,8 @@ class ValidateCSVRequest(BaseModel):
 class CandidateSubmission(BaseModel):
     """Candidate submission for a question."""
     questionId: str = Field(..., description="Question ID")
-    selectedAnswers: List[str] = Field(..., description="Selected answer(s)")
+    selectedAnswers: Optional[List[str]] = Field(None, description="Selected answer(s) for MCQ questions")
+    textAnswer: Optional[str] = Field(None, description="Text answer for subjective questions")
 
 
 class SubmitCustomMCQRequest(BaseModel):
