@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -463,49 +464,329 @@ async def classify_technical_topic(topic: str) -> Dict[str, Any]:
     
     Returns:
     {
-        "questionType": "MCQ" | "Subjective" | "PseudoCode" | "Coding",
-        "canUseJudge0": bool,
-        "coding_supported": bool,  # NEW: Whether topic supports coding questions
+        "questionType": "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML",
+        "canUseJudge0": bool,  # True ONLY for Coding type with strict Judge0 support
+        "coding_supported": bool,  # Engine-driven coding support flag (kept)
+        "competency": "general" | "coding" | "sql" | "aiml",
+        "executionEnvironment": "judge0" | "sql_sandbox" | "jupyter_notebook" | "none",
+        "supportedLanguages": List[str] | None,  # Only for Coding type
+        "resourceLimits": Dict[str, Any] | None,  # Only for AIML competency
         "contextExplanation": str
     }
     """
     from .services import determine_topic_coding_support
+
+    def _contains_any(haystack: str, needles: List[str]) -> bool:
+        return any(n in haystack for n in needles)
+
+    topic_raw = topic or ""
+    topic_lower = topic_raw.lower().strip()
+
+    # Judge0 supported languages (restricted set)
+    JUDGE0_LANGUAGES = [
+        "javascript",
+        "cpp",        # c++
+        "csharp",     # c#
+        "go",
+        "rust",
+        "python",
+        "typescript",
+        "java",
+        "c",
+        "kotlin",
+    ]
+
+    # Language surface forms to detect in topic text
+    LANGUAGE_ALIASES = {
+        "javascript": ["javascript", "js"],
+        "typescript": ["typescript", "ts"],
+        "python": ["python"],
+        "java": ["java"],
+        "cpp": ["c++", "cpp"],
+        "c": [" c ", "c language", "c programming", "c (", " c,"],
+        "csharp": ["c#", "csharp", "c sharp"],
+        "go": [" golang", "go language", "go programming", " go "],
+        "rust": ["rust"],
+        "kotlin": ["kotlin"],
+    }
+
+    AIML_KEYWORDS = [
+        # Data science libraries
+        "pandas", "numpy", "matplotlib", "seaborn", "plotly", "scipy",
+        # ML frameworks
+        "tensorflow", "keras", "pytorch", "torch", "scikit-learn", "sklearn",
+        # ML concepts
+        "machine learning", "deep learning", "neural network", "random forest", "decision tree",
+        "regression", "classification", "clustering", "supervised learning", "unsupervised learning",
+        "gradient descent", "backpropagation",
+        # Tools
+        "jupyter", "notebook", "colab", "anaconda",
+        # Operations
+        "data preprocessing", "feature engineering", "model training", "dataframe", "series",
+        "model evaluation", "cross validation",
+    ]
+
+    # SQL detection MUST avoid substring false positives (e.g., "overview" contains "view").
+    # We therefore use word-boundary regex patterns for indicators and require strong context for ops.
+    SQL_INDICATOR_PATTERNS = [
+        r"\bsql\b",
+        r"\bmysql\b",
+        r"\bpostgresql\b",
+        r"\bsqlite\b",
+        r"\boracle\b",
+        r"\bmssql\b",
+        r"\bdatabase\b",
+        r"\bdb\b",
+        r"\bschema\b",
+        r"\btable\b",
+        r"\btables\b",
+        r"\bquery\b",
+        r"\bqueries\b",
+        r"\bstored\s+procedure\b",
+        r"\btrigger\b",
+        r"\bview\b",
+        r"\bindex\b",
+        r"\bindexes\b",
+        r"\bindexing\b",
+        r"\btransaction\b",
+        r"\btransactions\b",
+        r"\bacid\b",
+        r"\bprimary\s+key\b",
+        r"\bforeign\s+key\b",
+        r"\bnormalization\b",
+        r"\bdenormalization\b",
+    ]
+    # SQL operations require context (e.g., SELECT ... FROM) to avoid generic words.
+    SQL_OP_PATTERNS = [
+        r"\bselect\b.*\bfrom\b",
+        r"\bjoin\b.*\bon\b",
+        r"\bgroup\s+by\b",
+        r"\border\s+by\b",
+        r"\bwhere\b",
+        r"\bhaving\b",
+        r"\binsert\b.*\binto\b",
+        r"\bupdate\b.*\bset\b",
+        r"\bdelete\b.*\bfrom\b",
+        r"\bsubquery\b",
+        r"\bsubqueries\b",
+    ]
+
+    def _is_sql_topic(text: str) -> bool:
+        # Strong DB indicator wins immediately (word-boundary patterns)
+        for pat in SQL_INDICATOR_PATTERNS:
+            if re.search(pat, text):
+                return True
+        # Otherwise require multiple SQL ops (with strong context) to avoid accidental matches
+        op_hits = 0
+        for pat in SQL_OP_PATTERNS:
+            if re.search(pat, text):
+                op_hits += 1
+                if op_hits >= 2:
+                    return True
+        return False
+
+    WEB_KEYWORDS = [
+        # Frontend frameworks
+        "react", "angular", "vue", "svelte", "nextjs", "next.js", "nuxt", "gatsby", "ember",
+        # Web technologies
+        "html", "css", "scss", "sass", "less", "tailwind", "bootstrap", "material ui", "chakra ui", "ant design",
+        # Browser/DOM
+        "dom", "browser", "document", "window", "event listener", "fetch api", "localstorage", "sessionstorage",
+        "cookie", "webstorage",
+        # Web frameworks (backend)
+        "express", "koa", "fastify", "nest", "nestjs", "meteor",
+        # Frontend build tools
+        "webpack", "vite", "rollup", "parcel", "babel",
+        # UI libraries
+        "jquery", "d3", "chart.js", "three.js", "gsap", "anime.js",
+        # Web concepts
+        "frontend", "web development", "responsive design", "web page", "website", "web app", "web application",
+        "spa", "single page", "ssr", "server side rendering", "csr", "client side rendering",
+        # Node.js web
+        "node server", "express server", "api endpoint", "http server", "rest api in node",
+    ]
+
+    DSA_KEYWORDS = [
+        "algorithm", "algorithms", "data structure", "data structures", "dsa", "problem solving",
+        "sorting", "searching", "binary search", "merge sort", "quick sort", "quicksort",
+        "two sum", "array", "arrays", "string", "strings", "hash", "hash table", "hashtable",
+        "stack", "queue", "linked list", "tree", "binary tree", "bst", "heap", "trie",
+        "graph", "bfs", "dfs", "dijkstra", "dynamic programming", "dp", "recursion",
+    ]
+
+    DISALLOWED_CODING_KEYWORDS = [
+        # External libs / DS
+        "pandas", "numpy", "matplotlib", "seaborn", "plotly", "scipy",
+        "tensorflow", "keras", "pytorch", "torch", "scikit-learn", "sklearn",
+        "jupyter", "notebook", "colab", "anaconda",
+        # Non-judge0 / non-stdin-stdout constraints
+        "file", "filesystem", "read file", "write file", "file i/o", "io file",
+        "network", "socket", "http", "api call", "request", "requests", "beautifulsoup", "web scraping",
+        "gui", "window", "desktop app", "mobile app", "android", "ios",
+        "database", "sql", "mysql", "postgresql", "mongodb", "redis", "connection",
+        # Web technologies / browser execution (platform not supported)
+        "react", "angular", "vue", "svelte", "nextjs", "next.js", "nuxt", "gatsby", "ember",
+        "html", "css", "scss", "sass", "less", "tailwind", "bootstrap", "material ui", "chakra ui", "ant design",
+        "dom", "browser", "document", "window", "event listener", "fetch api", "localstorage", "sessionstorage",
+        "cookie", "webstorage",
+        "express", "koa", "fastify", "nest", "nestjs", "meteor",
+        "webpack", "vite", "rollup", "parcel", "babel",
+        "jquery", "d3", "chart.js", "three.js", "gsap", "anime.js",
+        "frontend", "web development", "responsive design", "web page", "website", "web app", "web application",
+        "spa", "single page", "ssr", "server side rendering", "csr", "client side rendering",
+    ]
+
+    def _detect_judge0_language(text: str) -> Optional[str]:
+        hits: List[str] = []
+        for lang, aliases in LANGUAGE_ALIASES.items():
+            for a in aliases:
+                if a in text:
+                    hits.append(lang)
+                    break
+        # STRICT: must mention exactly one of the supported languages
+        hits = list(dict.fromkeys(hits))  # de-dupe while preserving order
+        if len(hits) == 1 and hits[0] in JUDGE0_LANGUAGES:
+            return hits[0]
+        return None
+
+    def _is_strict_coding_topic(text: str) -> bool:
+        lang = _detect_judge0_language(text)
+        if not lang:
+            return False
+        if not _contains_any(text, DSA_KEYWORDS):
+            return False
+        if _contains_any(text, AIML_KEYWORDS) or _is_sql_topic(text):
+            return False
+        if _contains_any(text, DISALLOWED_CODING_KEYWORDS):
+            return False
+        # Heuristic: must look like a runnable task
+        runnable_markers = ["implement", "write", "solve", "program", "function", "stdin", "stdout", "input/output"]
+        if not _contains_any(text, runnable_markers) and not _contains_any(text, DSA_KEYWORDS):
+            return False
+        return True
     
     # Determine coding support using ENGINE-DRIVEN logic
     coding_supported = await determine_topic_coding_support(topic)
+
+    # Deterministic high-priority classification to avoid Judge0 false positives
+    if _contains_any(topic_lower, AIML_KEYWORDS):
+        return {
+            "questionType": "AIML",
+            "canUseJudge0": False,
+            "coding_supported": coding_supported,
+            "competency": "aiml",
+            "executionEnvironment": "jupyter_notebook",
+            "supportedLanguages": None,
+            "resourceLimits": {"maxRows": 30, "maxColumns": 10, "gpuEnabled": False},
+            "contextExplanation": "Topic indicates AI/ML or data science tools/libraries (e.g., pandas/numpy/sklearn), which are not Judge0-executable.",
+        }
+
+    if _is_sql_topic(topic_lower):
+        return {
+            "questionType": "SQL",
+            "canUseJudge0": False,
+            "coding_supported": coding_supported,
+            "competency": "sql",
+            "executionEnvironment": "sql_sandbox",
+            "supportedLanguages": None,
+            "resourceLimits": None,
+            "contextExplanation": "Topic indicates SQL/database competency; classify as SQL and do not enable Judge0 code execution.",
+        }
+
+    # Web technology topics are NEVER Coding (platform doesn't support browser/web execution)
+    if _contains_any(topic_lower, WEB_KEYWORDS):
+        implementation_keywords = ["build", "create", "implement", "design", "develop", "write"]
+        web_question_type = "Subjective" if _contains_any(topic_lower, implementation_keywords) else "MCQ"
+        web_context = (
+            "Topic involves web technologies/frameworks/browser APIs which require a browser/web runtime not supported by this platform. "
+            "Classified as Subjective for implementation/design or MCQ for theory/concepts."
+        )
+        return {
+            "questionType": web_question_type,
+            "canUseJudge0": False,
+            "coding_supported": False,
+            "competency": "general",
+            "executionEnvironment": "none",
+            "supportedLanguages": None,
+            "resourceLimits": None,
+            "contextExplanation": web_context,
+        }
+
+    if coding_supported and _is_strict_coding_topic(topic_lower):
+        return {
+            "questionType": "Coding",
+            "canUseJudge0": True,
+            "coding_supported": coding_supported,
+            "competency": "coding",
+            "executionEnvironment": "judge0",
+            "supportedLanguages": JUDGE0_LANGUAGES,
+            "resourceLimits": None,
+            "contextExplanation": "Topic is a Judge0-compatible DSA/algorithmic coding task in a supported language with no external library requirements.",
+        }
     
-    prompt = f"""You are an expert technical assessor. Analyze the following topic:
+    prompt = f"""You are an expert technical assessor. Analyze this topic: "{topic_raw}"
 
-Topic: {topic}
+STRICT CLASSIFICATION RULES (in priority order):
 
-Determine:
-1. The topic category type based on semantic meaning:
-   - concept/theory
-   - logic/algorithm
-   - implementation/coding
+1. AIML COMPETENCY (canUseJudge0=false, environment=jupyter_notebook)
+   - Triggers: pandas, numpy, matplotlib, sklearn, tensorflow, keras, pytorch, machine learning, deep learning, neural network, jupyter, data preprocessing, feature engineering, dataframe, model training
+   - Examples: "NumPy Arrays", "Pandas DataFrame Operations", "Matplotlib Visualization", "Train RandomForest Model", "Scikit-learn Classification"
+   - Return: {{"questionType": "AIML", "competency": "aiml", "canUseJudge0": false, "executionEnvironment": "jupyter_notebook"}}
 
-2. The most appropriate question type:
-   - MCQ -> for basic factual technical recall
-   - Subjective -> for conceptual, architectural, or explanation-focused topics
-   - PseudoCode -> for algorithmic or logic-flow topics
-   - Coding -> ONLY if the topic clearly requires writing runnable code
+2. SQL COMPETENCY (canUseJudge0=false, environment=sql_sandbox)
+   - Triggers: sql, mysql, postgresql, database, query, select, join, normalization, indexing, transaction
+   - Examples: "SQL Joins", "Database Normalization", "Complex Subqueries", "Query Optimization"
+   - Return: {{"questionType": "SQL", "competency": "sql", "canUseJudge0": false, "executionEnvironment": "sql_sandbox"}}
 
-3. Determine whether Coding is valid and supported by Judge0.
-   Coding is allowed ONLY IF:
-      - The topic implies an algorithm, data structure operation,
-        computation, programmatic task, or implementable logic
-      - AND it can be evaluated via input/output test cases.
+3. WEB TECHNOLOGY TOPICS (NEVER Coding - platform doesn't support browser/web execution)
+   - Triggers: react, angular, vue, html, css, dom, browser, document, window, fetch api, localstorage, express, next.js, webpack, vite, jquery, d3, chart.js, three.js, frontend, web development
+   - Classification:
+     * Theory/Concepts → MCQ
+     * Implementation/Design/Architecture → Subjective
+     * NEVER → Coding
+   - Return: {{"questionType": "MCQ" or "Subjective", "competency": "general", "canUseJudge0": false, "executionEnvironment": "none"}}
 
-4. Return:
+4. CODING COMPETENCY - Judge0 ONLY (canUseJudge0=true, environment=judge0)
+   - STRICT REQUIREMENTS (ALL must be true):
+     a) Topic mentions ONE of these 10 languages: JavaScript, TypeScript, Java, Python, C++, C#, C, Go, Rust, Kotlin
+     b) Topic is DSA/algorithmic: sorting, searching, trees, graphs, dynamic programming, recursion, linked lists, stacks, queues, hash tables, arrays, strings, heaps, tries
+     c) Topic is executable with stdin/stdout test cases
+     d) Topic does NOT use external libraries (NO pandas, numpy, matplotlib, sklearn, tensorflow, pytorch, beautifulsoup, requests, etc.)
+     e) Topic does NOT use web technologies/frameworks/browser APIs (NO react, angular, vue, express, dom, html, css, etc.)
+     f) Topic does NOT require: file I/O, GUI, network operations, database connections, browser environment
+   - Return: {{"questionType": "Coding", "competency": "coding", "canUseJudge0": true, "executionEnvironment": "judge0", "supportedLanguages": ["javascript", "typescript", "java", "python", "cpp", "csharp", "c", "go", "rust", "kotlin"]}}
+
+5. PSEUDOCODE (canUseJudge0=false, environment=none)
+   - Complex algorithms needing design but not full code execution OR algorithmic topics in non-Judge0 languages.
+   - Return: {{"questionType": "PseudoCode", "competency": "coding", "canUseJudge0": false, "executionEnvironment": "none"}}
+
+6. SUBJECTIVE (canUseJudge0=false, environment=none)
+   - Conceptual, architectural, explanation-focused, comparison topics; OR topics requiring external libraries / file/network/gui.
+   - Return: {{"questionType": "Subjective", "competency": "general", "canUseJudge0": false, "executionEnvironment": "none"}}
+
+7. MCQ (canUseJudge0=false, environment=none)
+   - Factual recall / theory / basic concepts.
+   - Return: {{"questionType": "MCQ", "competency": "general", "canUseJudge0": false, "executionEnvironment": "none"}}
+
+CRITICAL RULES:
+- If topic mentions pandas, numpy, sklearn, tensorflow, matplotlib, seaborn → ALWAYS AIML (never Coding)
+- If topic mentions SQL, database, query → ALWAYS SQL (never Coding)
+- If topic mentions react, angular, vue, express, dom, browser, html, css → MCQ or Subjective (NEVER Coding)
+- canUseJudge0=true is ONLY allowed when questionType="Coding"
+- For AIML, add resourceLimits: {{"maxRows": 30, "maxColumns": 10, "gpuEnabled": false}}
+- For Coding, add supportedLanguages: ["javascript", "typescript", "java", "python", "cpp", "csharp", "c", "go", "rust", "kotlin"]
+- Python Coding questions: ONLY standard library (no numpy/pandas/matplotlib)
+
+Return ONLY valid JSON:
 {{
-  "questionType": "...",
-  "canUseJudge0": true | false,
-  "contextExplanation": "Short explanation of how you interpreted this topic."
-}}
-
-Do NOT generate the question here. Only classify.
-
-Return ONLY valid JSON. No markdown, no explanations."""
+  "questionType": "MCQ|Subjective|PseudoCode|Coding|SQL|AIML",
+  "competency": "general|coding|sql|aiml",
+  "canUseJudge0": true/false,
+  "executionEnvironment": "judge0|sql_sandbox|jupyter_notebook|none",
+  "supportedLanguages": ["javascript","typescript","java","python","cpp","csharp","c","go","rust","kotlin"] or null,
+  "resourceLimits": {{"maxRows": 30, "maxColumns": 10, "gpuEnabled": false}} or null,
+  "contextExplanation": "Brief explanation"
+}}"""
     
     try:
         client = _get_openai_client()
@@ -531,26 +812,74 @@ Return ONLY valid JSON. No markdown, no explanations."""
         result = json.loads(content)
         
         # Validate question type
-        valid_types = ["MCQ", "Subjective", "PseudoCode", "Coding"]
+        valid_types = ["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"]
         question_type = result.get("questionType", "MCQ")
         if question_type not in valid_types:
             question_type = "MCQ"
         
-        # Validate canUseJudge0
+        # Validate competency
+        valid_competencies = ["general", "coding", "sql", "aiml"]
+        competency = result.get("competency", "general")
+        if competency not in valid_competencies:
+            competency = "general"
+
+        # Validate executionEnvironment
+        valid_environments = ["judge0", "sql_sandbox", "jupyter_notebook", "none"]
+        execution_env = result.get("executionEnvironment", "none")
+        if execution_env not in valid_environments:
+            execution_env = "none"
+
+        # Enforce canUseJudge0 rules
         can_use_judge0 = bool(result.get("canUseJudge0", False))
-        
-        # If question type is not Coding, canUseJudge0 must be false
         if question_type != "Coding":
             can_use_judge0 = False
-        
-        # If coding_supported is True, ensure canUseJudge0 is also True for Coding type
-        if coding_supported and question_type == "Coding":
-            can_use_judge0 = True
+        else:
+            # Even for Coding, enforce engine + strict constraints
+            if not coding_supported or not _is_strict_coding_topic(topic_lower):
+                can_use_judge0 = False
+                # Downgrade if model tried to force Coding but it's not Judge0-safe
+                question_type = "PseudoCode" if _contains_any(topic_lower, DSA_KEYWORDS) else "Subjective"
+                competency = "coding" if question_type == "PseudoCode" else "general"
+                execution_env = "none"
+
+        # supportedLanguages for Coding type (only when Judge0 is actually enabled)
+        supported_languages = None
+        if question_type == "Coding" and can_use_judge0:
+            supported_languages = JUDGE0_LANGUAGES
+            competency = "coding"
+            execution_env = "judge0"
+
+        # resourceLimits for AIML
+        resource_limits = None
+        if question_type == "AIML" or competency == "aiml":
+            question_type = "AIML"
+            competency = "aiml"
+            execution_env = "jupyter_notebook"
+            resource_limits = {"maxRows": 30, "maxColumns": 10, "gpuEnabled": False}
+            can_use_judge0 = False
+
+        # enforce SQL environment (only if topic is actually SQL-like)
+        if question_type == "SQL" or competency == "sql":
+            if _is_sql_topic(topic_lower):
+                question_type = "SQL"
+                competency = "sql"
+                execution_env = "sql_sandbox"
+                can_use_judge0 = False
+            else:
+                # Downgrade invalid SQL classifications
+                question_type = "Subjective" if _contains_any(topic_lower, ["vs", "versus", "difference", "compare", "comparison"]) else "MCQ"
+                competency = "general"
+                execution_env = "none"
+                can_use_judge0 = False
         
         return {
             "questionType": question_type,
             "canUseJudge0": can_use_judge0,
             "coding_supported": coding_supported,  # NEW: Engine-driven coding support
+            "competency": competency,
+            "executionEnvironment": execution_env,
+            "supportedLanguages": supported_languages,
+            "resourceLimits": resource_limits,
             "contextExplanation": result.get("contextExplanation", f"This topic evaluates technical knowledge in {topic}.")
         }
         
@@ -561,6 +890,10 @@ Return ONLY valid JSON. No markdown, no explanations."""
             "questionType": "MCQ",
             "canUseJudge0": False,
             "coding_supported": coding_supported,  # Still use the determined coding support
+            "competency": "general",
+            "executionEnvironment": "none",
+            "supportedLanguages": None,
+            "resourceLimits": None,
             "contextExplanation": f"This topic evaluates technical knowledge in {topic}."
         }
 

@@ -962,6 +962,10 @@ const renderQuestionByType = (question: any, questionType: string, isEditing: bo
       return renderPseudoCodeQuestion(question, isEditing, onEditChange);
     case "Coding":
       return renderCodingQuestion(question, isEditing, onEditChange);
+    case "SQL":
+      return renderSubjectiveQuestion(question, isEditing, onEditChange);
+    case "AIML":
+      return renderSubjectiveQuestion(question, isEditing, onEditChange);
     default:
       return (
         <div style={{ padding: "1rem", backgroundColor: "#fef3c7", borderRadius: "0.5rem", color: "#92400e" }}>
@@ -1003,6 +1007,10 @@ function getQuestionText(question: any, questionType: string): string {
       return question.question || question.questionText || "";
     case "Coding":
       return question.problemStatement || question.title || "";
+    case "SQL":
+      return question.question || question.questionText || "";
+    case "AIML":
+      return question.question || question.questionText || "";
     default:
       return JSON.stringify(question);
   }
@@ -1025,6 +1033,10 @@ function getBaseTimePerQuestion(questionType: string): number {
       return 390; // 6.5 minutes (5-8 min range)
     case "Coding":
       return 960; // 16 minutes (12-20 min range)
+    case "SQL":
+      return 600; // 10 minutes baseline
+    case "AIML":
+      return 720; // 12 minutes baseline
     default:
       return 120; // 2 minutes default
   }
@@ -6840,6 +6852,52 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   </div>
                 )}
 
+                {/* Selected Skills Display */}
+                {selectedSkills.length > 0 && (
+                  <div style={{ marginBottom: "2rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                      Selected Skills *
+                    </label>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
+                      {selectedSkills.map((skill) => (
+                        <div
+                          key={skill}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "0.5rem",
+                            backgroundColor: "#eff6ff",
+                            color: "#1e40af",
+                            padding: "0.5rem 1rem",
+                            borderRadius: "0.5rem",
+                            fontSize: "0.875rem",
+                            fontWeight: 500,
+                          }}
+                        >
+                          {skill}
+                          {(isEditMode || !hasVisitedConfigureStation) && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveSkill(skill)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                color: "#1e40af",
+                                cursor: "pointer",
+                                padding: 0,
+                                fontSize: "1.125rem",
+                                lineHeight: 1,
+                              }}
+                            >
+                              ×
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* CSV Upload Section */}
                 <div style={{ marginBottom: "2rem" }}>
                   <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
@@ -7064,52 +7122,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 </div>
               </div>
 
-              {/* Selected Skills Display */}
-              {selectedSkills.length > 0 && (
-                <div style={{ marginBottom: "2rem" }}>
-                  <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
-                    Selected Skills *
-                  </label>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
-                    {selectedSkills.map((skill) => (
-                      <div
-                        key={skill}
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: "0.5rem",
-                          backgroundColor: "#eff6ff",
-                          color: "#1e40af",
-                          padding: "0.5rem 1rem",
-                          borderRadius: "0.5rem",
-                          fontSize: "0.875rem",
-                          fontWeight: 500,
-                        }}
-                      >
-                        {skill}
-                        {(isEditMode || !hasVisitedConfigureStation) && (
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveSkill(skill)}
-                            style={{
-                              background: "none",
-                              border: "none",
-                              color: "#1e40af",
-                              cursor: "pointer",
-                              padding: 0,
-                              fontSize: "1.125rem",
-                              lineHeight: 1,
-                            }}
-                          >
-                            ×
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               <div style={{ display: "flex", justifyContent: "center", gap: "1rem", marginTop: "2rem" }}>
                 {/* Check if topics have been generated (either in edit mode or after generating topics) */}
                 {(() => {
@@ -7297,7 +7309,9 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                   "MCQ", 
                                   "Subjective", 
                                   "PseudoCode", 
-                                  ...(row.canUseJudge0 ? ["Coding"] : [])
+                                  "SQL",
+                                  "AIML",
+                                  ...((topic.coding_supported !== false && row.canUseJudge0) ? ["Coding"] : [])
                                 ];
                           
                           return [
@@ -7438,7 +7452,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                     name={`question-type-${topic.id}-${row.rowId}`}
                                     value={row.questionType}
                                     onChange={(e) => {
-                                      const newType = e.target.value as "MCQ" | "Subjective" | "PseudoCode" | "Coding";
+                                      const newType = e.target.value as "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML";
                                       handleUpdateRow(topic.id, row.rowId, "questionType", newType);
                                       
                                       // If changing to Coding and canUseJudge0 is false, update it

@@ -94,7 +94,191 @@ JUDGE0_UNSUPPORTED_FRAMEWORKS = [
     "babel",
     "gulp",
     "grunt",
+    # Treat SQL/database topics as non-Judge0-coding to prevent auto-conversion to Coding
+    "sql",
+    "database",
+    "mysql",
+    "postgresql",
+    "sqlite",
+    "oracle",
+    "mssql",
+    # Web technologies / browser APIs (platform doesn't support web execution)
+    "html",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "tailwind",
+    "bootstrap",
+    "dom",
+    "document",
+    "window",
+    "browser",
+    "fetch",
+    "localstorage",
+    "sessionstorage",
+    "cookie",
+    "vite",
+    "rollup",
+    "parcel",
+    "jquery",
+    "d3",
+    "chart.js",
+    "three.js",
 ]
+
+# Additional deterministic classifiers for v2 topic flows (keeps UI consistent with backend restrictions)
+V2_AIML_KEYWORDS = [
+    "pandas", "numpy", "matplotlib", "seaborn", "plotly", "scipy",
+    "tensorflow", "keras", "pytorch", "torch", "scikit-learn", "sklearn",
+    "machine learning", "deep learning", "neural network", "random forest", "decision tree",
+    "regression", "classification", "clustering", "supervised learning", "unsupervised learning",
+    "gradient descent", "backpropagation",
+    "jupyter", "notebook", "colab", "anaconda",
+    "data preprocessing", "feature engineering", "model training", "dataframe", "series",
+    "model evaluation", "cross validation",
+]
+
+V2_SQL_THEORY_KEYWORDS = [
+    " vs ", " versus ", "compare", "comparison", "difference", "differences",
+    "advantages", "disadvantages", "benefits", "drawbacks",
+    "concept", "concepts", "principle", "principles", "fundamental", "fundamentals", "basic", "basics",
+    "explained", "explain", "explanation", "understanding", "overview", "introduction",
+    "types of", "what is", "why", "when",
+    "strategy", "strategies", "approach", "approaches", "technique", "techniques", "best practice", "best practices",
+    "design", "architecture", "modeling", "modelling",
+    "vulnerability", "vulnerabilities", "security", "prevention", "mitigation",
+    "injection",
+]
+
+V2_SQL_EXECUTION_KEYWORDS = [
+    "write sql", "write a sql", "write query", "write a query", "construct query", "create query",
+    "sql query to", "query to", "using sql to",
+    "implement stored procedure", "write stored procedure", "create stored procedure", "stored procedure implementation",
+    "create procedure", "write procedure", "implement procedure",
+    "create trigger", "write trigger", "trigger implementation",
+    "optimize query", "optimizing query", "query optimization", "rewrite query", "improve query performance",
+    "recursive query", "writing recursive",
+]
+
+V2_AIML_THEORY_KEYWORDS = [
+    " vs ", " versus ", "compare", "comparison", "difference", "differences",
+    "advantages", "disadvantages", "benefits", "drawbacks",
+    "concept", "concepts", "principle", "principles", "fundamental", "fundamentals", "basic", "basics",
+    "theory", "explained", "explain", "explanation", "understanding", "overview", "introduction",
+    "what is", "why", "when", "how does",
+    "architecture", "design", "workflow", "process",
+]
+
+V2_AIML_EXECUTION_KEYWORDS = [
+    "implement", "implementation", "build", "train", "fit", "predict",
+    "write code", "coding", "notebook", "jupyter", "colab",
+    "using pandas", "with pandas", "using numpy", "with numpy",
+    "using sklearn", "with sklearn", "using scikit-learn", "with scikit-learn",
+    "using tensorflow", "with tensorflow", "using pytorch", "with pytorch",
+    "data preprocessing", "feature engineering", "model training",
+]
+
+V2_SQL_INDICATOR_PATTERNS = [
+    # DB indicators must be word-boundary based to avoid substring false positives (e.g., "overview" contains "view")
+    r"\bsql\b",
+    r"\bmysql\b",
+    r"\bpostgresql\b",
+    r"\bsqlite\b",
+    r"\boracle\b",
+    r"\bmssql\b",
+    r"\bdatabase\b",
+    r"\bdb\b",
+    r"\bschema\b",
+    r"\btable\b",
+    r"\btables\b",
+    r"\bquery\b",
+    r"\bqueries\b",
+    r"\bstored\s+procedure\b",
+    r"\btrigger\b",
+    r"\bview\b",
+    r"\bindex\b",
+    r"\bindexes\b",
+    r"\bindexing\b",
+    r"\btransaction\b",
+    r"\btransactions\b",
+    r"\bacid\b",
+    r"\bprimary\s+key\b",
+    r"\bforeign\s+key\b",
+    r"\bnormalization\b",
+    r"\bdenormalization\b",
+]
+
+V2_WEB_KEYWORDS = [
+    "react", "angular", "vue", "svelte", "nextjs", "next.js", "nuxt", "gatsby", "ember",
+    "html", "css", "scss", "sass", "less", "tailwind", "bootstrap", "material ui", "chakra ui", "ant design",
+    "dom", "browser", "document", "window", "event listener", "fetch api", "localstorage", "sessionstorage",
+    "cookie", "webstorage",
+    "express", "koa", "fastify", "nest", "nestjs", "meteor",
+    "webpack", "vite", "rollup", "parcel", "babel",
+    "jquery", "d3", "chart.js", "three.js", "gsap", "anime.js",
+    "frontend", "web development", "responsive design", "web page", "website", "web app", "web application",
+    "spa", "single page", "ssr", "server side rendering", "csr", "client side rendering",
+    "node server", "express server", "api endpoint", "http server", "rest api in node",
+]
+
+def _v2_contains_any(haystack: str, needles: List[str]) -> bool:
+    return any(n in haystack for n in needles)
+
+def _v2_is_sql_topic(text: str) -> bool:
+    for pat in V2_SQL_INDICATOR_PATTERNS:
+        if re.search(pat, text):
+            return True
+    sql_op_patterns = [
+        r"\bselect\b.*\bfrom\b",
+        r"\bjoin\b.*\bon\b",
+        r"\bgroup\s+by\b",
+        r"\border\s+by\b",
+        r"\bwhere\b",
+        r"\bhaving\b",
+        r"\binsert\b.*\binto\b",
+        r"\bupdate\b.*\bset\b",
+        r"\bdelete\b.*\bfrom\b",
+        r"\bsubquery\b",
+        r"\bsubqueries\b",
+    ]
+    hits = 0
+    for pat in sql_op_patterns:
+        if re.search(pat, text):
+            hits += 1
+            if hits >= 2:
+                return True
+    return False
+
+def _v2_is_sql_execution_topic(text: str) -> bool:
+    if not _v2_is_sql_topic(text):
+        return False
+    if _v2_contains_any(text, V2_SQL_THEORY_KEYWORDS):
+        return False
+    if _v2_contains_any(text, V2_SQL_EXECUTION_KEYWORDS):
+        return True
+    # If it contains strong SQL op context (e.g., SELECT...FROM) treat as execution
+    sql_op_patterns = [
+        r"\bselect\b.*\bfrom\b",
+        r"\bjoin\b.*\bon\b",
+        r"\bgroup\s+by\b",
+        r"\border\s+by\b",
+        r"\bwhere\b",
+        r"\bhaving\b",
+        r"\binsert\b.*\binto\b",
+        r"\bupdate\b.*\bset\b",
+        r"\bdelete\b.*\bfrom\b",
+        r"\bsubquery\b",
+        r"\bsubqueries\b",
+    ]
+    return any(re.search(pat, text) for pat in sql_op_patterns)
+
+def _v2_is_aiml_execution_topic(text: str) -> bool:
+    if not _v2_contains_any(text, V2_AIML_KEYWORDS):
+        return False
+    if _v2_contains_any(text, V2_AIML_THEORY_KEYWORDS):
+        return False
+    return _v2_contains_any(text, V2_AIML_EXECUTION_KEYWORDS)
 
 
 def is_judge0_supported(skill_name: str) -> bool:
@@ -918,15 +1102,37 @@ Generate 8-12 topics. Return only the JSON array, no explanations."""
             difficulty = topic_data.get("difficulty", "Medium")
             can_use_judge0 = topic_data.get("canUseJudge0", False)
             topic_label = topic_data.get("label", "")
+            topic_label_lower = (topic_label or "").lower()
             
             # Validate question type
-            if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding"]:
+            if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"]:
                 question_type = "MCQ"
             
             # Validate difficulty
             if difficulty not in ["Easy", "Medium", "Hard"]:
                 difficulty = "Medium"
             
+            # Deterministic overrides for AIML/SQL/web topics (SQL/AIML ONLY for execution topics)
+            if _v2_is_aiml_execution_topic(topic_label_lower):
+                question_type = "AIML"
+                can_use_judge0 = False
+            elif _v2_is_sql_execution_topic(topic_label_lower):
+                question_type = "SQL"
+                can_use_judge0 = False
+            elif _v2_contains_any(topic_label_lower, V2_WEB_KEYWORDS):
+                impl_keywords = ["build", "create", "implement", "design", "develop", "write"]
+                question_type = "Subjective" if _v2_contains_any(topic_label_lower, impl_keywords) else "MCQ"
+                can_use_judge0 = False
+
+            # If model returned SQL but it's not an execution SQL topic, downgrade
+            if question_type == "SQL" and not _v2_is_sql_execution_topic(topic_label_lower):
+                question_type = "Subjective" if any(k in topic_label_lower for k in ["vs", "versus", "difference", "compare", "comparison", "overview", "explained", "explain", "injection", "security"]) else "MCQ"
+                can_use_judge0 = False
+            # If model returned AIML but it's not an execution AIML topic, downgrade
+            if question_type == "AIML" and not _v2_is_aiml_execution_topic(topic_label_lower):
+                question_type = "Subjective"
+                can_use_judge0 = False
+
             # CRITICAL: If question type is Coding, validate it's supported by Judge0
             # Check both the topic label and the skills list
             if question_type == "Coding":
@@ -1053,6 +1259,10 @@ async def generate_questions_for_row_v2(
         question_type_normalized = "PseudoCode"
     elif question_type_normalized.lower() == "coding":
         question_type_normalized = "Coding"
+    elif question_type_normalized.lower() == "sql":
+        question_type_normalized = "SQL"
+    elif question_type_normalized.lower() in ["aiml", "ai/ml", "ai-ml", "ml", "machinelearning", "machine learning"]:
+        question_type_normalized = "AIML"
     
     # Normalize experience mode
     if not experience_mode or experience_mode.lower() in ["student", "college"]:
@@ -1107,9 +1317,13 @@ async def generate_questions_for_row_v2(
         return await _generate_pseudocode_questions(topic_label, difficulty, questions_count, experience_mode, final_additional_requirements)
     elif question_type_normalized == "Coding":
         return await _generate_coding_questions(topic_label, difficulty, questions_count, can_use_judge0, coding_language, experience_mode, final_additional_requirements)
+    elif question_type_normalized == "SQL":
+        return await _generate_sql_questions(topic_label, difficulty, questions_count, experience_mode, final_additional_requirements)
+    elif question_type_normalized == "AIML":
+        return await _generate_aiml_questions(topic_label, difficulty, questions_count, experience_mode, final_additional_requirements)
     else:
         logger.error(f"Unsupported question type: {question_type} (normalized: {question_type_normalized})")
-        raise HTTPException(status_code=400, detail=f"Unsupported question type: {question_type}. Supported types: MCQ, Subjective, PseudoCode, Coding")
+        raise HTTPException(status_code=400, detail=f"Unsupported question type: {question_type}. Supported types: MCQ, Subjective, PseudoCode, Coding, SQL, AIML")
 
 
 # Keep old function name for backward compatibility during transition
@@ -1344,6 +1558,135 @@ async def _process_requirements_for_subjective(requirements: Optional[str]) -> O
     
     # It's plain text, use it directly
     return requirements
+
+
+async def _generate_sql_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Generate SQL questions.
+    Output is compatible with the existing review UI (uses 'question' field).
+    """
+    # Normalize experience mode
+    if not experience_mode or experience_mode.lower() in ["student", "college"]:
+        experience_mode = "college"
+    else:
+        experience_mode = "corporate"
+
+    additional_req_text = ""
+    if additional_requirements:
+        additional_req_text = f"\nAdditional Requirements: {additional_requirements}\n"
+
+    prompt = f"""You are an expert SQL assessor. Generate {count} SQL question(s) for the topic: {topic}.
+
+CRITICAL REQUIREMENTS:
+1. Each question MUST be practical and test SQL competency (queries, joins, aggregations, schema reasoning, indexes, transactions).
+2. Difficulty level: {difficulty}
+3. Each question MUST include a small schema description (tables + key columns) inside the question text.
+4. The question MUST ask the candidate to write a SQL query (or multiple queries) to solve the task.
+5. Do NOT include answers or expected output.
+6. Experience mode: {experience_mode}{additional_req_text}
+7. Keep it runnable in a typical SQL sandbox (avoid vendor-specific features unless required by the topic).
+8. **CRITICAL DIVERSITY REQUIREMENT**: questions must be different from each other.
+
+Output format (JSON array):
+[
+  {{
+    "question": "<SQL scenario + schema + task>"
+  }}
+]
+
+Return ONLY the JSON array. No markdown, no explanations."""
+
+    try:
+        client = _get_openai_client()
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert SQL assessment writer. Always return valid JSON arrays. Never include markdown code blocks or any answer fields."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+        )
+
+        content = response.choices[0].message.content.strip()
+        questions = _parse_json_response(content, "SQL questions JSON")
+
+        validated_questions: List[Dict[str, Any]] = []
+        for q in questions:
+            if isinstance(q, dict) and "question" in q and isinstance(q["question"], str):
+                qt = q["question"].strip()
+                if len(qt) > 40:
+                    validated_questions.append({"question": qt})
+        return validated_questions[:count]
+    except Exception as exc:
+        logger.error(f"Error generating SQL questions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate SQL questions: {str(exc)}") from exc
+
+
+async def _generate_aiml_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Generate AIML (AI/ML + data science) questions intended for notebook-style work.
+    Output is compatible with the existing review UI (uses 'question' field).
+    """
+    # Normalize experience mode
+    if not experience_mode or experience_mode.lower() in ["student", "college"]:
+        experience_mode = "college"
+    else:
+        experience_mode = "corporate"
+
+    additional_req_text = ""
+    if additional_requirements:
+        additional_req_text = f"\nAdditional Requirements: {additional_requirements}\n"
+
+    prompt = f"""You are an expert AI/ML assessor. Generate {count} notebook-style AIML question(s) for the topic: {topic}.
+
+CRITICAL REQUIREMENTS:
+1. Questions MUST test practical data science / ML competency (pandas/numpy/sklearn concepts, evaluation, preprocessing, feature engineering, model selection).
+2. Difficulty level: {difficulty}
+3. Each question MUST be self-contained: include a small dataset description (columns + meaning) or a toy sample table in the question text.
+4. Ask for steps/code as if in a Jupyter notebook, but do NOT require execution here and do NOT include answers.
+5. Do NOT ask for web/framework work (no React/DOM/Express).
+6. Experience mode: {experience_mode}{additional_req_text}
+7. **CRITICAL DIVERSITY REQUIREMENT**: questions must be different from each other.
+
+Output format (JSON array):
+[
+  {{
+    "question": "<AIML scenario + dataset description + tasks>"
+  }}
+]
+
+Return ONLY the JSON array. No markdown, no explanations."""
+
+    try:
+        client = _get_openai_client()
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert AI/ML assessment writer. Always return valid JSON arrays. Never include markdown code blocks or any answer fields."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.75,
+        )
+
+        content = response.choices[0].message.content.strip()
+        questions = _parse_json_response(content, "AIML questions JSON")
+
+        validated_questions: List[Dict[str, Any]] = []
+        for q in questions:
+            if isinstance(q, dict) and "question" in q and isinstance(q["question"], str):
+                qt = q["question"].strip()
+                if len(qt) > 40:
+                    validated_questions.append({"question": qt})
+        return validated_questions[:count]
+    except Exception as exc:
+        logger.error(f"Error generating AIML questions: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate AIML questions: {str(exc)}") from exc
 
 
 async def _generate_subjective_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -2154,12 +2497,34 @@ Generate 2-4 topics. Return only the JSON array, no explanations."""
                 difficulty = topic_data.get("difficulty", "Medium")
                 can_use_judge0 = topic_data.get("canUseJudge0", False)
                 topic_label = topic_data.get("label", "")
+                topic_label_lower = (topic_label or "").lower()
                 
-                if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding"]:
+                if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"]:
                     question_type = "MCQ"
                 if difficulty not in ["Easy", "Medium", "Hard"]:
                     difficulty = "Medium"
                 
+                # Deterministic overrides for AIML/SQL/web topics (SQL/AIML ONLY for execution topics)
+                if _v2_is_aiml_execution_topic(topic_label_lower):
+                    question_type = "AIML"
+                    can_use_judge0 = False
+                elif _v2_is_sql_execution_topic(topic_label_lower):
+                    question_type = "SQL"
+                    can_use_judge0 = False
+                elif _v2_contains_any(topic_label_lower, V2_WEB_KEYWORDS):
+                    impl_keywords = ["build", "create", "implement", "design", "develop", "write"]
+                    question_type = "Subjective" if _v2_contains_any(topic_label_lower, impl_keywords) else "MCQ"
+                    can_use_judge0 = False
+
+                # If model returned SQL but it's not an execution SQL topic, downgrade
+                if question_type == "SQL" and not _v2_is_sql_execution_topic(topic_label_lower):
+                    question_type = "Subjective" if any(k in topic_label_lower for k in ["vs", "versus", "difference", "compare", "comparison", "overview", "explained", "explain", "injection", "security"]) else "MCQ"
+                    can_use_judge0 = False
+                # If model returned AIML but it's not an execution AIML topic, downgrade
+                if question_type == "AIML" and not _v2_is_aiml_execution_topic(topic_label_lower):
+                    question_type = "Subjective"
+                    can_use_judge0 = False
+
                 # CRITICAL: If question type is Coding, validate it's supported by Judge0
                 # Check both the topic label and the skill name
                 if question_type == "Coding":
@@ -2382,14 +2747,36 @@ No explanations. No markdown. JSON only."""
         topic_data = json.loads(content)
         
         question_type = topic_data.get("questionType", "MCQ")
-        if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding"]:
+        if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"]:
             question_type = "MCQ"
         
         difficulty = topic_data.get("difficulty", "Medium")
         if difficulty not in ["Easy", "Medium", "Hard"]:
             difficulty = "Medium"
-        
+
         can_use_judge0 = topic_data.get("canUseJudge0", False)
+
+        # Deterministic overrides for AIML/SQL/web topics (SQL/AIML ONLY for execution topics)
+        improved_label_lower = (improved_label or "").lower()
+        if _v2_is_aiml_execution_topic(improved_label_lower):
+            question_type = "AIML"
+            can_use_judge0 = False
+        elif _v2_is_sql_execution_topic(improved_label_lower):
+            question_type = "SQL"
+            can_use_judge0 = False
+        elif _v2_contains_any(improved_label_lower, V2_WEB_KEYWORDS):
+            impl_keywords = ["build", "create", "implement", "design", "develop", "write"]
+            question_type = "Subjective" if _v2_contains_any(improved_label_lower, impl_keywords) else "MCQ"
+            can_use_judge0 = False
+
+        # If model returned SQL/AIML but it's not an execution topic, downgrade
+        if question_type == "SQL" and not _v2_is_sql_execution_topic(improved_label_lower):
+            question_type = "Subjective" if any(k in improved_label_lower for k in ["vs", "versus", "difference", "compare", "comparison", "overview", "explained", "explain", "injection", "security"]) else "MCQ"
+            can_use_judge0 = False
+        if question_type == "AIML" and not _v2_is_aiml_execution_topic(improved_label_lower):
+            question_type = "Subjective"
+            can_use_judge0 = False
+
         # Ensure canUseJudge0 is only True for Coding
         if question_type != "Coding":
             can_use_judge0 = False
