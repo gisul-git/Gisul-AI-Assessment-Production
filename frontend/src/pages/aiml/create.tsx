@@ -135,19 +135,14 @@ export default function CreateAIMLCompetencyPage() {
       const response = await aimlApi.post("/tests/", payload);
       
       const testId = response.data?.id || response.data?._id;
-      
-      // Automatically publish the test
+
+      // New tests should start unpublished; editor will publish from AIML Test Management.
+      alert("Test created successfully!");
       if (testId) {
-        try {
-          await aimlApi.patch(`/tests/${testId}/publish?is_published=true`);
-        } catch (publishError: any) {
-          console.error("Error publishing test:", publishError);
-        }
+        router.push(`/aiml/tests?testId=${encodeURIComponent(String(testId))}`);
+      } else {
+        router.push("/aiml/tests");
       }
-      
-      // Redirect to dashboard
-      alert("Test created and published successfully!");
-      router.push("/dashboard");
     } catch (error: any) {
       alert(error.response?.data?.detail || error.response?.data?.message || "Failed to create AIML competency test");
       setLoading(false);
@@ -440,7 +435,7 @@ export default function CreateAIMLCompetencyPage() {
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() => router.push("/dashboard")}
+                onClick={() => router.push("/aiml")}
                 style={{ flex: 1 }}
               >
                 Cancel

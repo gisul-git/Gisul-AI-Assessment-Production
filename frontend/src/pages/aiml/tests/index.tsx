@@ -1,76 +1,89 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
-import { GetServerSideProps } from 'next'
-import { requireAuth } from '../../../lib/auth'
+import { Card, CardContent } from '../../../components/dsa/ui/card'
+import { Button } from '../../../components/dsa/ui/button'
 import aimlApi from '../../../lib/aiml/api'
+import { Clock, Eye, EyeOff, Users, Mail, Edit, Upload, List } from 'lucide-react'
 import Link from 'next/link'
+
+// Helper function to format dates
+const formatDate = (dateString: string, formatStr: string) => {
+  const date = new Date(dateString)
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const month = months[date.getMonth()]
+  const day = date.getDate()
+  const year = date.getFullYear()
+  const hours = date.getHours().toString().padStart(2, '0')
+  const minutes = date.getMinutes().toString().padStart(2, '0')
+
+  if (formatStr === 'MMM dd, yyyy HH:mm') {
+    return `${month} ${day}, ${year} ${hours}:${minutes}`
+  }
+  return date.toLocaleDateString()
+}
 
 interface Test {
   id: string
   title: string
   description: string
   duration_minutes: number
+  start_time: string
+  end_time: string
+  is_active: boolean
   is_published: boolean
+  invited_users: string[]
+  question_ids?: string[]
   test_token?: string
-  created_at?: string
-  pausedAt?: string
-}
-
-// Helper function to get test status
-const getTestStatus = (test: Test): 'draft' | 'active' | 'paused' => {
-  if (test.pausedAt) {
-    return 'paused'
-  } else if (test.is_published) {
-    return 'active'
-  } else {
-    return 'draft'
-  }
-}
-
-// Helper function to get status badge colors
-const getStatusColors = (status: 'draft' | 'active' | 'paused') => {
-  switch (status) {
-    case 'active':
-      return { bg: '#dbeafe', text: '#1e40af', border: '#3b82f6' }
-    case 'paused':
-      return { bg: '#fef3c7', text: '#92400e', border: '#f59e0b' }
-    case 'draft':
-      return { bg: 'rgba(201, 244, 212, 0.2)', text: '#1E5A3B', border: '#C9F4D4' }
-    default:
-      return { bg: 'rgba(201, 244, 212, 0.2)', text: '#1E5A3B', border: '#C9F4D4' }
-  }
+  pausedAt?: string | null
 }
 
 export default function AIMLTestsListPage() {
   const router = useRouter()
   const [tests, setTests] = useState<Test[]>([])
   const [loading, setLoading] = useState(true)
-  const [deletingId, setDeletingId] = useState<string | null>(null)
-  const [pausingId, setPausingId] = useState<string | null>(null)
-  const [resumingId, setResumingId] = useState<string | null>(null)
-
-  useEffect(() => {
-    fetchTests()
-  }, [])
+  const [inviteModal, setInviteModal] = useState<{ testId: string; open: boolean }>({ testId: '', open: false })
 
   const fetchTests = async () => {
     try {
-      setLoading(true)
-      const response = await aimlApi.get('/tests/')
-      setTests(response.data || [])
+      const response = await aimlApi.get('/tests/', {
+        params: { active_only: false }
+      })
+      setTests(response.data)
     } catch (error) {
       console.error('Error fetching tests:', error)
-      alert('Failed to fetch tests')
     } finally {
       setLoading(false)
     }
   }
 
+  useEffect(() => {
+    fetchTests()
+  }, [])
+
+  // Refresh when query parameter changes (e.g., returning from edit page)
+  useEffect(() => {
+    if (router.query.refreshed === 'true') {
+      fetchTests()
+      // Remove refreshed=true but preserve testId filter (if present)
+      const testId = router.query.testId
+      const nextQuery: Record<string, any> = {}
+      if (testId) nextQuery.testId = testId
+      router.replace({ pathname: '/aiml/tests', query: nextQuery }, undefined, { shallow: true })
+    }
+  }, [router.query.refreshed])
+
+  const filteredTests = (() => {
+    const q = router.query.testId
+    const testId = typeof q === 'string' ? q : (Array.isArray(q) ? q[0] : undefined)
+    if (!testId) return tests
+    return tests.filter(t => String(t.id) === String(testId))
+  })()
+
   const handlePublish = async (testId: string, currentStatus: boolean) => {
     try {
       const newStatus = !currentStatus
       await aimlApi.patch(`/tests/${testId}/publish?is_published=${newStatus}`)
-      setTests(tests.map(t => 
+      setTests(tests.map(t =>
         t.id === testId ? { ...t, is_published: newStatus } : t
       ))
       alert(`Test ${newStatus ? 'published' : 'unpublished'} successfully!`)
@@ -82,71 +95,51 @@ export default function AIMLTestsListPage() {
     }
   }
 
-  const handleDelete = async (testId: string) => {
-    if (!confirm('Are you sure you want to delete this test? This action cannot be undone.')) {
+  const [candidateName, setCandidateName] = useState('')
+  const [candidateEmail, setCandidateEmail] = useState('')
+  const [addingCandidate, setAddingCandidate] = useState(false)
+  const [generatedLink, setGeneratedLink] = useState<{testId: string, link: string, name: string, email: string} | null>(null)
+
+  const handleAddCandidate = async (testId: string) => {
+    if (!candidateName.trim() || !candidateEmail.trim()) {
+      alert('Please enter both name and email')
       return
     }
 
-    setDeletingId(testId)
+    setAddingCandidate(true)
     try {
-      await aimlApi.delete(`/tests/${testId}`)
-      setTests(tests.filter(t => t.id !== testId))
-      alert('Test deleted successfully!')
-    } catch (error: any) {
-      alert(error.response?.data?.detail || 'Failed to delete test')
-    } finally {
-      setDeletingId(null)
-    }
-  }
+      const response = await aimlApi.post(`/tests/${testId}/add-candidate`, {
+        name: candidateName.trim(),
+        email: candidateEmail.trim(),
+      })
 
-  const handlePauseTest = async (testId: string) => {
-    setPausingId(testId)
-    try {
-      await aimlApi.post(`/tests/${testId}/pause`)
-      alert('Test paused successfully')
-      await fetchTests()
+      setGeneratedLink({
+        testId: testId,
+        link: '',
+        name: response.data.name,
+        email: response.data.email
+      })
     } catch (error: any) {
-      alert(error.response?.data?.detail || error.response?.data?.message || 'Failed to pause test')
+      alert(error.response?.data?.detail || 'Failed to add candidate')
     } finally {
-      setPausingId(null)
-    }
-  }
-
-  const handleResumeTest = async (testId: string) => {
-    setResumingId(testId)
-    try {
-      await aimlApi.post(`/tests/${testId}/resume`)
-      alert('Test resumed successfully')
-      await fetchTests()
-    } catch (error: any) {
-      alert(error.response?.data?.detail || error.response?.data?.message || 'Failed to resume test')
-    } finally {
-      setResumingId(null)
-    }
-  }
-
-  const formatDate = (dateString?: string) => {
-    if (!dateString) return 'N/A'
-    try {
-      return new Date(dateString).toLocaleDateString()
-    } catch {
-      return 'N/A'
+      setAddingCandidate(false)
     }
   }
 
   if (loading) {
     return (
-      <div style={{ backgroundColor: "#ffffff", minHeight: "100vh" }}>
-        <div className="container" style={{ paddingTop: "2rem", paddingBottom: "2rem" }}>
-          <div style={{ textAlign: "center" }}>Loading tests...</div>
+      <div className="min-h-screen bg-background">
+        <div className="container mx-auto px-4 py-8">
+          <div className="text-center">Loading...</div>
         </div>
       </div>
     )
   }
 
   return (
-    <div style={{ backgroundColor: "#ffffff", minHeight: "100vh" }}>
-      <div className="container" style={{ paddingTop: "2rem", paddingBottom: "2rem" }}>
+   <div className="min-h-screen bg-background">
+      <div className="container mx-auto px-4 py-8">
+        {/* Back Button */}
         <div style={{ marginBottom: "1.5rem" }}>
           <button
             type="button"
@@ -164,258 +157,322 @@ export default function AIMLTestsListPage() {
           </button>
         </div>
 
-        <div style={{ marginBottom: "1.5rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h1 style={{ margin: 0, color: "#1a1625" }}>AIML Tests</h1>
-          <Link href="/aiml/create">
-            <button className="btn-primary" style={{ padding: "0.5rem 1rem" }}>
-              + Create Test
-            </button>
-          </Link>
+        <div className="mb-6 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-4xl font-bold">Test Management</h1>
+            <p className="text-muted-foreground mt-1">Manage tests and candidates</p>
+          </div>
+          <Button
+            variant="default"
+            onClick={() => router.push("/dashboard")}
+            title="Save and go back to dashboard"
+          >
+            Save
+          </Button>
         </div>
 
-        <div className="card">
-          {tests.length === 0 ? (
-            <div style={{ padding: "3rem", textAlign: "center", color: "#64748b" }}>
-              <p>No tests found. Create your first test!</p>
-              <Link href="/aiml/create">
-                <button className="btn-primary" style={{ marginTop: "1rem" }}>
-                  Create Test
-                </button>
-              </Link>
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-              {tests.map((test) => (
-                <div
-                  key={test.id}
-                  style={{
-                    padding: "1.5rem",
-                    border: "1px solid #A8E8BC",
-                    borderRadius: "0.5rem",
-                    backgroundColor: "#ffffff",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "0.75rem" }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "0.5rem" }}>
-                        <h3 style={{ margin: 0, color: "#1a1625", fontSize: "1.25rem", fontWeight: 600 }}>
-                          {test.title}
-                        </h3>
-                        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                          <span
-                            style={{
-                              padding: "0.375rem 0.75rem",
-                              borderRadius: "0.375rem",
-                              fontSize: "0.8125rem",
-                              fontWeight: 600,
-                              color: "#1E5A3B",
-                              backgroundColor: "#C9F4D4",
-                            }}
-                          >
-                            AIML
+        {filteredTests.length === 0 ? (
+          <Card>
+            <CardContent className="p-8 text-center">
+              <p className="text-muted-foreground">
+                {router.query.testId ? 'Test not found.' : 'No tests available. Create tests from the dashboard.'}
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="space-y-4">
+            {filteredTests.map((test) => (
+              <Card key={test.id}>
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <h3 className="font-semibold text-lg">{test.title}</h3>
+                      <p className="text-sm text-muted-foreground mt-1">{test.description}</p>
+                      <div className="flex items-center gap-4 mt-2 text-sm">
+                        <div className="flex items-center gap-1">
+                          <Clock className="h-4 w-4" />
+                          {test.duration_minutes} minutes
+                        </div>
+                        <div>
+                          Start: {formatDate(test.start_time, 'MMM dd, yyyy HH:mm')}
+                        </div>
+                        <div>
+                          End: {formatDate(test.end_time, 'MMM dd, yyyy HH:mm')}
+                        </div>
+                        <span
+                          className={`px-2 py-1 rounded text-xs ${
+                            test.is_active
+                              ? 'bg-green-500/20 text-green-500'
+                              : 'bg-gray-500/20 text-gray-500'
+                          }`}
+                        >
+                          {test.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                        <span
+                          className={`px-2 py-1 rounded text-xs ${
+                            test.is_published
+                              ? 'bg-blue-500/20 text-blue-500'
+                              : 'bg-gray-500/20 text-gray-500'
+                          }`}
+                        >
+                          {test.is_published ? 'Published' : 'Draft'}
+                        </span>
+                        {test.pausedAt && (
+                          <span className="px-2 py-1 rounded text-xs bg-amber-500/20 text-amber-700">
+                            Paused
                           </span>
-                          {(() => {
-                            const status = getTestStatus(test)
-                            const colors = getStatusColors(status)
-                            return (
-                              <span
-                                style={{
-                                  padding: "0.375rem 0.75rem",
-                                  borderRadius: "0.375rem",
-                                  fontSize: "0.8125rem",
-                                  fontWeight: 600,
-                                  backgroundColor: colors.bg,
-                                  color: colors.text,
-                                  border: `1px solid ${colors.border}`,
-                                  textTransform: 'capitalize',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '0.375rem'
-                                }}
-                              >
-                                {status === 'paused' && '⏸️'}
-                                {status}
-                              </span>
-                            )
-                          })()}
+                        )}
+                        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <Users className="h-3 w-3" />
+                          {test.invited_users?.length || 0} candidates
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {test.question_ids?.length || 0} questions
                         </div>
                       </div>
-                      <p style={{ margin: 0, marginBottom: "0.5rem", color: "#64748b", fontSize: "0.875rem" }}>
-                        {test.description || "No description"}
-                      </p>
-                      {test.created_at && (
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", marginBottom: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                          <span>🕐</span>
-                          <span>Created: {formatDate(test.created_at)}</span>
+                      {test.is_published && test.test_token && (
+                        <div className="mt-3 p-3 bg-blue-500/10 border border-blue-500/20 rounded-md">
+                          <div className="text-xs font-medium text-blue-400 mb-2">Shared Test Link:</div>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={`${typeof window !== 'undefined' ? window.location.origin : ''}/aiml/test/${test.id}?token=${test.test_token}`}
+                              readOnly
+                              className="flex-1 p-2 border rounded-md bg-background text-xs font-mono"
+                            />
+                            <Button
+                              size="sm"
+                              onClick={async () => {
+                                const link = `${window.location.origin}/aiml/test/${test.id}?token=${test.test_token}`
+                                try {
+                                  await navigator.clipboard.writeText(link)
+                                  alert('Link copied to clipboard!')
+                                } catch (err) {
+                                  const input = document.createElement('input')
+                                  input.value = link
+                                  document.body.appendChild(input)
+                                  input.select()
+                                  document.execCommand('copy')
+                                  document.body.removeChild(input)
+                                  alert('Link copied to clipboard!')
+                                }
+                              }}
+                            >
+                              Copy
+                            </Button>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-2">
+                            Share this single link with all candidates. They will enter their email and name to verify.
+                          </p>
                         </div>
                       )}
-                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
-                        <span
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: "0.375rem",
-                            padding: "0.25rem 0.75rem",
-                            borderRadius: "0.375rem",
-                            fontSize: "0.875rem",
-                            fontWeight: 500,
-                            color: test.is_published ? "#059669" : "#6B7280",
-                            backgroundColor: test.is_published ? "#D1FAE5" : "#F3F4F6",
-                          }}
-                        >
-                          <span style={{
-                            width: "8px",
-                            height: "8px",
-                            borderRadius: "50%",
-                            backgroundColor: test.is_published ? "#059669" : "#6B7280",
-                          }}></span>
-                          {test.is_published ? "Scheduled" : "Not Scheduled"}
-                        </span>
-                        <span
-                          style={{
-                            padding: "0.25rem 0.75rem",
-                            borderRadius: "0.375rem",
-                            fontSize: "0.875rem",
-                            color: "#64748b",
-                            backgroundColor: "#F3F4F6",
-                          }}
-                        >
-                          ⏱️ {test.duration_minutes} minutes
-                        </span>
-                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant={test.is_published ? "outline" : "default"}
+                        size="sm"
+                        onClick={() => handlePublish(test.id, test.is_published || false)}
+                        disabled={!test.question_ids || test.question_ids.length === 0}
+                        title={!test.question_ids || test.question_ids.length === 0 ? "Add questions to the test first" : test.is_published ? "Click to unpublish the test" : "Click to publish the test"}
+                      >
+                        {test.is_published ? (
+                          <>
+                            <EyeOff className="h-4 w-4 mr-2" />
+                            Unpublish
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="h-4 w-4 mr-2" />
+                            Publish
+                          </>
+                        )}
+                      </Button>
+                      <Link href={`/aiml/tests/${test.id}/edit`}>
+                        <Button variant="outline" size="sm">
+                          <Edit className="h-4 w-4 mr-2" />
+                          Edit
+                        </Button>
+                      </Link>
+                      <Link href={`/aiml/tests/${test.id}/candidates`}>
+                        <Button variant="outline" size="sm" disabled={!test.is_published}>
+                          <List className="h-4 w-4 mr-2" />
+                          Candidates
+                        </Button>
+                      </Link>
+                      <Button
+                        variant="default"
+                        size="sm"
+                        onClick={() => {
+                          setInviteModal({ testId: test.id, open: true })
+                          setGeneratedLink(null)
+                          setCandidateName('')
+                          setCandidateEmail('')
+                        }}
+                        disabled={!test.is_published}
+                        title={!test.is_published ? "Test must be published to add candidates" : "Add a candidate"}
+                      >
+                        <Mail className="h-4 w-4 mr-2" />
+                        Add Candidate
+                      </Button>
                     </div>
                   </div>
-                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
-                    {(() => {
-                      const status = getTestStatus(test)
-                      return (
-                        <>
-                          {/* Analytics button: Show only when active */}
-                          {status === 'active' && (
-                            <Link href={`/aiml/tests/${test.id}/analytics`}>
-                              <button 
-                                className="btn-secondary" 
-                                style={{ 
-                                  padding: "0.75rem 1.5rem", 
-                                  fontSize: "0.875rem",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: "0.5rem",
-                                  borderRadius: "0.5rem",
-                                }}
-                              >
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                  <line x1="18" y1="20" x2="18" y2="10" />
-                                  <line x1="12" y1="20" x2="12" y2="4" />
-                                  <line x1="6" y1="20" x2="6" y2="14" />
-                                </svg>
-                                Analytics
-                              </button>
-                            </Link>
-                          )}
-                          {/* Edit button: Show when paused or draft */}
-                          {(status === 'paused' || status === 'draft') && (
-                            <Link href={`/aiml/tests/${test.id}/edit`}>
-                              <button 
-                                className="btn-secondary" 
-                                style={{ 
-                                  padding: "0.75rem 1.5rem", 
-                                  fontSize: "0.875rem",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: "0.5rem",
-                                  borderRadius: "0.5rem",
-                                }}
-                              >
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                                </svg>
-                                Edit
-                              </button>
-                            </Link>
-                          )}
-                          {/* Pause button: Show when active */}
-                          {status === 'active' && (
-                            <button
-                              onClick={() => handlePauseTest(test.id)}
-                              disabled={pausingId === test.id || resumingId === test.id}
-                              className="btn-secondary"
-                              style={{
-                                padding: "0.75rem 1.5rem",
-                                fontSize: "0.875rem",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "0.5rem",
-                                borderRadius: "0.5rem",
-                              }}
-                            >
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <rect x="6" y="4" width="4" height="16" />
-                                <rect x="14" y="4" width="4" height="16" />
-                              </svg>
-                              {pausingId === test.id ? 'Pausing...' : 'Pause'}
-                            </button>
-                          )}
-                          {/* Resume button: Show when paused */}
-                          {status === 'paused' && (
-                            <button
-                              onClick={() => handleResumeTest(test.id)}
-                              disabled={pausingId === test.id || resumingId === test.id}
-                              className="btn-secondary"
-                              style={{
-                                padding: "0.75rem 1.5rem",
-                                fontSize: "0.875rem",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "0.5rem",
-                                borderRadius: "0.5rem",
-                              }}
-                            >
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <polygon points="5 3 19 12 5 21 5 3" />
-                              </svg>
-                              {resumingId === test.id ? 'Resuming...' : 'Resume'}
-                            </button>
-                          )}
-                        </>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Add Candidate Modal */}
+      {inviteModal.open && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setInviteModal({ testId: '', open: false })
+              setGeneratedLink(null)
+              setCandidateName('')
+              setCandidateEmail('')
+            }
+          }}
+        >
+          <Card className="w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <CardContent className="p-6">
+              <h3 className="text-lg font-semibold mb-4">Add Candidate</h3>
+
+              {/* CSV Upload Section */}
+              <div className="mb-4 p-4 border rounded-md" style={{ backgroundColor: '#f8f9fa', borderColor: '#A8E8BC' }}>
+                <h4 className="text-sm font-medium mb-2" style={{ color: '#1a1625' }}>Bulk Upload (CSV)</h4>
+                <p className="text-xs mb-3" style={{ color: '#6b7280' }}>
+                  Upload a CSV file with 'name' and 'email' columns
+                </p>
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0]
+                    if (!file) return
+
+                    const formData = new FormData()
+                    formData.append('file', file)
+
+                    try {
+                      const response = await aimlApi.post(
+                        `/tests/${inviteModal.testId}/bulk-add-candidates`,
+                        formData,
+                        {
+                          headers: {
+                            'Content-Type': 'multipart/form-data',
+                          },
+                        }
                       )
-                    })()}
-                    <button
-                      onClick={() => handleDelete(test.id)}
-                      disabled={deletingId === test.id}
-                      style={{
-                        padding: "0.75rem 1.5rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        borderRadius: "0.5rem",
-                        backgroundColor: "#EF4444",
-                        color: "#ffffff",
-                        border: "none",
-                        cursor: deletingId === test.id ? "not-allowed" : "pointer",
-                        opacity: deletingId === test.id ? 0.6 : 1,
+
+                      alert(
+                        `Bulk upload completed!\n` +
+                        `Success: ${response.data.success_count}\n` +
+                        `Failed: ${response.data.failed_count}\n` +
+                        `Duplicates: ${response.data.duplicate_count}`
+                      )
+
+                      const testsRes = await aimlApi.get('/tests/', { params: { active_only: false } })
+                      setTests(testsRes.data)
+
+                      e.target.value = ''
+                    } catch (error: any) {
+                      alert(error.response?.data?.detail || 'Failed to upload CSV')
+                      e.target.value = ''
+                    }
+                  }}
+                  className="text-sm"
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem',
+                    border: '1px solid #A8E8BC',
+                    borderRadius: '0.375rem',
+                    backgroundColor: '#ffffff',
+                    cursor: 'pointer'
+                  }}
+                />
+              </div>
+
+              {generatedLink && generatedLink.testId === inviteModal.testId ? (
+                <div className="space-y-4">
+                  <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-md">
+                    <p className="text-sm font-medium mb-2">Candidate Added Successfully!</p>
+                    <p className="text-xs text-muted-foreground">
+                      {generatedLink.name} ({generatedLink.email}) has been added.
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="default"
+                      onClick={() => {
+                        setInviteModal({ testId: '', open: false })
+                        setGeneratedLink(null)
+                        setCandidateName('')
+                        setCandidateEmail('')
+                        fetchTests()
                       }}
+                      className="flex-1"
                     >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="3 6 5 6 21 6" />
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                      </svg>
-                      {deletingId === test.id ? "Deleting..." : "Delete"}
-                    </button>
+                      Done
+                    </Button>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
+              ) : (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Candidate Name</label>
+                    <input
+                      type="text"
+                      className="input w-full"
+                      value={candidateName}
+                      onChange={(e) => setCandidateName(e.target.value)}
+                      placeholder="Enter candidate name"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Candidate Email</label>
+                    <input
+                      type="email"
+                      className="input w-full"
+                      value={candidateEmail}
+                      onChange={(e) => setCandidateEmail(e.target.value)}
+                      placeholder="Enter candidate email"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setInviteModal({ testId: '', open: false })
+                        setGeneratedLink(null)
+                        setCandidateName('')
+                        setCandidateEmail('')
+                      }}
+                      className="flex-1"
+                      disabled={addingCandidate}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="default"
+                      onClick={() => handleAddCandidate(inviteModal.testId)}
+                      className="flex-1"
+                      disabled={addingCandidate}
+                    >
+                      {addingCandidate ? 'Adding...' : 'Add Candidate'}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
-      </div>
+      )}
     </div>
   )
 }
-
-export const getServerSideProps: GetServerSideProps = requireAuth
 
 
 

@@ -339,22 +339,9 @@ export default function AnalyticsPage() {
     if (!testId || typeof testId !== 'string') return
     
     try {
-      // Note: DSA API may need a resend-invite endpoint similar to assessments
-      // For now, we'll use the add-candidate endpoint which should resend the invitation
-      const candidate = candidates.find(c => c.email === email)
-      if (!candidate) {
-        alert("Candidate not found")
-        return
-      }
-      
-      const response = await dsaApi.post(`/tests/${testId}/add-candidate`, {
-        name: candidate.name,
-        email: candidate.email,
-      })
-      
+      const response = await dsaApi.post(`/tests/${testId}/send-invitation`, { email })
       if (response.data) {
-        alert("Invitation resent successfully!")
-        // Refresh candidates list
+        alert("Invitation sent successfully!")
         const candidatesResponse = await dsaApi.get(`/tests/${testId}/candidates`)
         setCandidates(candidatesResponse.data || [])
       }

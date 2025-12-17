@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Dep
 from typing import List, Dict, Any, Optional
 from bson import ObjectId
 from datetime import datetime, timedelta
+import re
 import secrets
 import csv
 import io
@@ -472,6 +473,9 @@ async def get_tests(
             "test_token": test.get("test_token"),
             "created_by": str(test.get("created_by", "")),  # CRITICAL: Include for client-side verification
         }
+        if test.get("pausedAt"):
+            paused_val = test.get("pausedAt")
+            test_dict["pausedAt"] = paused_val.isoformat() if isinstance(paused_val, datetime) else paused_val
         # Add created_at if it exists
         if "created_at" in test and test.get("created_at"):
             test_dict["created_at"] = test.get("created_at").isoformat() if isinstance(test.get("created_at"), datetime) else test.get("created_at")
@@ -495,13 +499,19 @@ async def get_test_public(
     if not ObjectId.is_valid(test_id):
         raise HTTPException(status_code=400, detail="Invalid test ID")
     
-    # Verify user has a submission for this test (meaning they're authorized)
-    test_submission = await db.test_submissions.find_one({
-        "test_id": test_id,
-        "user_id": user_id
-    })
+    # Verify user is authorized for this test.
+    # Allow access if they are a registered candidate (before starting) OR already have a submission.
+    test_submission = await db.test_submissions.find_one({"test_id": test_id, "user_id": user_id})
     if not test_submission:
-        raise HTTPException(status_code=403, detail="User not authorized for this test")
+        # Fall back to candidate list check (covers "added candidate but not started yet")
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+        candidate_email = (user_doc or {}).get("email")
+        candidate_email = str(candidate_email).strip().lower() if candidate_email else ""
+        if not candidate_email:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
+        candidate = await db.test_candidates.find_one({"test_id": test_id, "email": candidate_email})
+        if not candidate:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
     
     # Get test data
     test = await db.tests.find_one({"_id": ObjectId(test_id)})
@@ -827,10 +837,6 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     
     if not test.get("is_published", False):
         raise HTTPException(status_code=403, detail="Test is not published")
-
-    # If paused, block new entrants (existing candidates can continue / resume submissions)
-    if test.get("pausedAt"):
-        raise HTTPException(status_code=403, detail="Test is currently paused")
     
     # For test-taking platform, allow taking published tests regardless of time window
     # The time window is informational, not restrictive
@@ -869,6 +875,29 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
             "started_at": existing["started_at"].isoformat() if isinstance(existing.get("started_at"), datetime) else existing.get("started_at"),
             "is_completed": existing.get("is_completed", False)
         }
+
+    # If paused, allow ONLY candidates who were added before the pause time.
+    paused_at = test.get("pausedAt")
+    if paused_at:
+        # Resolve candidate email from user_id and check candidate record timestamp
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+        candidate_email = str((user_doc or {}).get("email") or "").strip().lower()
+        if not candidate_email:
+            raise HTTPException(status_code=403, detail="Test is currently paused")
+
+        # Case-insensitive match (older records may store mixed-case emails)
+        candidate_doc = await db.test_candidates.find_one({
+            "test_id": test_id,
+            "email": {"$regex": f"^{re.escape(candidate_email)}$", "$options": "i"}
+        })
+        if not candidate_doc:
+            raise HTTPException(status_code=403, detail="Test is currently paused")
+
+        created_at = candidate_doc.get("created_at")
+        # If we can compare timestamps, block only if candidate was added after pause.
+        if isinstance(paused_at, datetime) and isinstance(created_at, datetime):
+            if created_at > paused_at:
+                raise HTTPException(status_code=403, detail="Test is currently paused")
     
     # Create test submission
     test_submission = {
@@ -962,13 +991,18 @@ async def get_test_question(
     if question_id not in test.get("question_ids", []):
         raise HTTPException(status_code=403, detail="Question not part of this test")
     
-    # Verify user has a submission for this test (meaning they're authorized)
-    test_submission = await db.test_submissions.find_one({
-        "test_id": test_id,
-        "user_id": user_id
-    })
+    # Verify user is authorized for this test.
+    # Allow access if they are a registered candidate (before starting) OR already have a submission.
+    test_submission = await db.test_submissions.find_one({"test_id": test_id, "user_id": user_id})
     if not test_submission:
-        raise HTTPException(status_code=403, detail="User not authorized for this test")
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+        candidate_email = (user_doc or {}).get("email")
+        candidate_email = str(candidate_email).strip().lower() if candidate_email else ""
+        if not candidate_email:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
+        candidate = await db.test_candidates.find_one({"test_id": test_id, "email": candidate_email})
+        if not candidate:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
     
     # Check if test submission is completed
     if test_submission.get("is_completed", False):
@@ -1561,6 +1595,9 @@ async def add_candidate(
     if not test.get("is_published", False):
         raise HTTPException(status_code=400, detail="Test must be published before adding candidates")
     
+    # Normalize email for consistent lookups
+    candidate.email = candidate.email.strip().lower()
+
     # Check if candidate already exists for this test
     existing_candidate = await db.test_candidates.find_one({
         "test_id": test_id,
@@ -1600,7 +1637,7 @@ async def add_candidate(
     await db.test_candidates.insert_one(candidate_record)
     
     # Add email to invited_users if not already there
-    current_invited = set(test.get("invited_users", []))
+    current_invited = set([str(e).strip().lower() for e in test.get("invited_users", [])])
     current_invited.add(candidate.email)
     await db.tests.update_one(
         {"_id": ObjectId(test_id)},
@@ -1623,7 +1660,66 @@ async def add_candidate(
     cors_origins = settings.cors_origins.split(",")[0].strip() if settings.cors_origins else "http://localhost:3000"
     test_link = f"{cors_origins}/test/{test_id}?token={test_token}"
     
-    # Get email template
+    # IMPORTANT: Do NOT send emails on add-candidate.
+    # Invitations are sent only when explicitly triggered from Analytics/Test Management (Send Email buttons).
+
+    return {
+        "candidate_id": user_id,
+        "test_link": test_link,
+        "name": candidate.name,
+        "email": candidate.email,
+    }
+
+
+@router.post("/{test_id}/send-invitation", response_model=dict)
+async def send_invitation(
+    test_id: str,
+    email: str = Body(..., embed=True),
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Send invitation email to a single candidate (explicit action only).
+    Uses test.invitationTemplate if configured, otherwise system default template.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    test_created_by = test.get("created_by")
+    if not test_created_by or str(test_created_by).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to send invitations for this test")
+
+    if not test.get("is_published", False):
+        raise HTTPException(status_code=400, detail="Test must be published before sending invitations")
+
+    candidate_email = str(email or "").strip().lower()
+    if not candidate_email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    candidate = await db.test_candidates.find_one({"test_id": test_id, "email": candidate_email})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found for this test")
+
+    candidate_name = candidate.get("name") or "Candidate"
+
+    # Ensure shared token exists
+    test_token = test.get("test_token")
+    if not test_token:
+        test_token = secrets.token_urlsafe(32)
+        await db.tests.update_one({"_id": ObjectId(test_id)}, {"$set": {"test_token": test_token}})
+
+    settings = get_settings()
+    cors_origins = settings.cors_origins.split(",")[0].strip() if settings.cors_origins else "http://localhost:3000"
+    test_link = f"{cors_origins}/test/{test_id}?token={test_token}"
+
     stored_template = test.get("invitationTemplate", {})
     default_template = {
         "logoUrl": "",
@@ -1633,118 +1729,74 @@ async def add_candidate(
         "sentBy": "AI Assessment Platform"
     }
     template_to_use = stored_template if stored_template else default_template
-    
-    # Send invitation email
-    try:
-        settings = get_settings()
-        if settings.sendgrid_api_key and settings.sendgrid_from_email:
-            email_service = get_email_service()
-            
-            # Build exam URL with candidate params
-            encoded_email = urllib.parse.quote(candidate.email)
-            encoded_name = urllib.parse.quote(candidate.name)
-            exam_url_with_params = f"{test_link}&email={encoded_email}&name={encoded_name}"
-            
-            # Replace placeholders
-            message = template_to_use.get("message", default_template["message"])
-            email_body = message
-            email_body = email_body.replace("{{candidate_name}}", candidate.name)
-            email_body = email_body.replace("{{candidate_email}}", candidate.email)
-            email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
-            email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
-            
-            # Build HTML email
-            logo_url = template_to_use.get("logoUrl", "")
-            company_name = template_to_use.get("companyName", "")
-            footer = template_to_use.get("footer", "")
-            sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
-            
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ text-align: center; margin-bottom: 30px; }}
-                    .logo {{ max-width: 200px; margin-bottom: 20px; }}
-                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
-                    .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
-                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
-                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
-                        {f'<h1>{company_name}</h1>' if company_name else ''}
-                    </div>
-                    <div class="content">
-                        <p>Dear {candidate.name},</p>
-                        <p>{email_body}</p>
-                        <div class="candidate-info">
-                            <p><strong>Your Details:</strong></p>
-                            <p><strong>Name:</strong> {candidate.name}</p>
-                            <p><strong>Email:</strong> {candidate.email}</p>
-                        </div>
-                        <div style="text-align: center;">
-                            <a href="{exam_url_with_params}" class="button">Start Test</a>
-                        </div>
-                    </div>
-                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
-                    <div class="footer">
-                        <p>Sent by {sent_by}</p>
-                    </div>
+
+    if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+        raise HTTPException(status_code=500, detail="Email service is not configured")
+
+    email_service = get_email_service()
+
+    encoded_email = urllib.parse.quote(candidate_email)
+    encoded_name = urllib.parse.quote(candidate_name)
+    exam_url_with_params = f"{test_link}&email={encoded_email}&name={encoded_name}"
+
+    message = template_to_use.get("message", default_template["message"])
+    email_body = message
+    email_body = email_body.replace("{{candidate_name}}", candidate_name)
+    email_body = email_body.replace("{{candidate_email}}", candidate_email)
+    email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+    email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
+
+    logo_url = template_to_use.get("logoUrl", "")
+    company_name = template_to_use.get("companyName", "")
+    footer = template_to_use.get("footer", "")
+    sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .logo {{ max-width: 200px; margin-bottom: 20px; }}
+            .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+            .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                {f'<h1>{company_name}</h1>' if company_name else ''}
+            </div>
+            <div class="content">
+                <p>Dear {candidate_name},</p>
+                <p>{email_body}</p>
+                <div style="text-align: center;">
+                    <a href="{exam_url_with_params}" class="button">Start Test</a>
                 </div>
-            </body>
-            </html>
-            """
-            
-            subject = f"DSA Test Invitation - {company_name if company_name else 'AI Assessment Platform'}"
-            
-            await email_service.send_email(candidate.email, subject, html_content)
-            logger.info(f"Invitation email sent successfully to {candidate.email}")
-        else:
-            logger.warning("SendGrid is not configured. Email not sent.")
-        
-        # Update candidate status to "invited" regardless of email success
-        # (Email might fail but we still want to mark as invited if we attempted to send)
-        try:
-            await db.test_candidates.update_one(
-                {"test_id": test_id, "email": candidate.email},
-                {"$set": {
-                    "status": "invited",
-                    "invited": True,
-                    "invited_at": datetime.utcnow()
-                }}
-            )
-            logger.info(f"Updated candidate status to 'invited' for {candidate.email}")
-        except Exception as update_error:
-            logger.error(f"Failed to update candidate status for {candidate.email}: {str(update_error)}")
-    except Exception as e:
-        logger.error(f"Failed to send invitation email to {candidate.email}: {str(e)}")
-        # Still try to update status even if email failed
-        try:
-            await db.test_candidates.update_one(
-                {"test_id": test_id, "email": candidate.email},
-                {"$set": {
-                    "status": "invited",
-                    "invited": True,
-                    "invited_at": datetime.utcnow()
-                }}
-            )
-        except Exception as update_error:
-            logger.error(f"Failed to update candidate status after email error: {str(update_error)}")
-        # Don't fail the request if email fails - candidate is still added
-    
-    return {
-        "candidate_id": user_id,
-        "test_link": test_link,
-        "name": candidate.name,
-        "email": candidate.email,
-    }
+            </div>
+            {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+            <div class="footer">
+                <p>Sent by {sent_by}</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    subject = f"DSA Test Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+    await email_service.send_email(candidate_email, subject, html_content)
+
+    await db.test_candidates.update_one(
+        {"test_id": test_id, "email": candidate_email},
+        {"$set": {"status": "invited", "invited": True, "invited_at": datetime.utcnow()}}
+    )
+
+    return {"message": "Invitation sent", "email": candidate_email}
 
 
 @router.post("/{test_id}/send-invitations-to-all")

@@ -1,10 +1,13 @@
-from fastapi import APIRouter, HTTPException, Query, Body, Depends, status
+from fastapi import APIRouter, HTTPException, Query, Body, Depends, status, UploadFile, File
 from typing import List, Dict, Any, Optional
 from bson import ObjectId
 from datetime import datetime, timedelta
 import logging
 import secrets
 import urllib.parse
+import re
+import csv
+import io
 from ..database import get_aiml_database as get_database
 from ..models.test import TestCreate, Test, AddCandidateRequest
 from .....core.dependencies import get_current_user, require_editor
@@ -451,19 +454,12 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     
     if not test.get("is_published", False):
         raise HTTPException(status_code=403, detail="Test is not published")
-    
+
     if not test.get("is_active", True):
         raise HTTPException(status_code=400, detail="Test is not active")
 
-    # Enforce schedule window (strict/flexible both require start/end window)
-    schedule = test.get("schedule") or {}
-    start_time = schedule.get("startTime") or test.get("start_time")
-    end_time = schedule.get("endTime") or test.get("end_time")
-    now = datetime.utcnow()
-    if start_time and isinstance(start_time, datetime) and now < start_time:
-        raise HTTPException(status_code=403, detail="Test has not started yet.")
-    if end_time and isinstance(end_time, datetime) and now > end_time:
-        raise HTTPException(status_code=403, detail="Test window has ended.")
+    # For test-taking platform, allow taking published tests regardless of time window.
+    # The time window is informational, not restrictive (mirrors DSA behavior).
 
     # Resolve candidate email (email is unique identity)
     user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
@@ -493,6 +489,19 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
             "started_at": existing["started_at"].isoformat() if isinstance(existing.get("started_at"), datetime) else existing.get("started_at"),
             "is_completed": existing.get("is_completed", False)
         }
+
+    # If paused, allow ONLY candidates who were added before the pause time.
+    paused_at = test.get("pausedAt")
+    if paused_at:
+        candidate_doc = await db.test_candidates.find_one({
+            "test_id": test_id,
+            "email": {"$regex": f"^{re.escape(candidate_email)}$", "$options": "i"}
+        })
+        if not candidate_doc:
+            raise HTTPException(status_code=403, detail="Test is currently paused")
+        created_at = candidate_doc.get("created_at")
+        if isinstance(paused_at, datetime) and isinstance(created_at, datetime) and created_at > paused_at:
+            raise HTTPException(status_code=403, detail="Test is currently paused")
     
     # Create test submission
     test_submission = {
@@ -561,48 +570,29 @@ async def get_test_for_candidate(
         started_at = test_submission.get("started_at")
         is_completed = test_submission.get("is_completed", False)
         
+        # Calculate remaining time for candidate timer.
+        # We treat start/end window as informational (mirrors start_test behavior); timer is based on test duration.
+        started_datetime = None
         if started_at and not is_completed:
-            # Calculate remaining time
-            # MongoDB stores datetime objects, but handle both datetime and string
-            started_datetime = None
             if isinstance(started_at, datetime):
                 started_datetime = started_at
             elif isinstance(started_at, str):
-                # Try ISO format first (most common)
                 try:
-                    # Handle ISO format with or without timezone
                     if started_at.endswith('Z'):
                         started_datetime = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
                     else:
                         started_datetime = datetime.fromisoformat(started_at)
-                except:
-                    # Fallback to dateutil parser if available
+                except Exception:
                     try:
                         from dateutil import parser  # type: ignore
                         started_datetime = parser.parse(started_at)
-                    except:
+                    except Exception:
                         started_datetime = None
-            
-        if started_datetime:
-            # Compute remaining time based on examMode semantics (without changing candidate UI):
-            # - strict: ends at scheduled endTime (fixed window)
-            # - flexible: fixed duration from schedule.duration but cannot exceed endTime
-            schedule = test.get("schedule") or {}
-            exam_mode = test.get("examMode", "strict")
-            end_time = schedule.get("endTime") or test.get("end_time")
-            end_remaining = None
-            if isinstance(end_time, datetime):
-                end_remaining = max(0, int((end_time - datetime.utcnow()).total_seconds()))
 
-            if exam_mode == "flexible":
-                dur = schedule.get("duration") or test.get("duration_minutes", 0)
-                duration_seconds = int(dur) * 60
-                elapsed_seconds = (datetime.utcnow() - started_datetime).total_seconds()
-                remaining = max(0, int(duration_seconds - elapsed_seconds))
-                time_remaining_seconds = min(remaining, end_remaining) if end_remaining is not None else remaining
-            else:
-                # strict: remaining is until end of window
-                time_remaining_seconds = end_remaining
+        if started_datetime and not is_completed:
+            duration_seconds = int(test.get("duration_minutes", 0) or 0) * 60
+            elapsed_seconds = (datetime.utcnow() - started_datetime).total_seconds()
+            time_remaining_seconds = max(0, int(duration_seconds - elapsed_seconds))
     
     # Get questions (without hidden testcases for candidate view)
     question_ids = test.get("question_ids", [])
@@ -940,7 +930,8 @@ async def pause_test(
 ):
     """
     Pause an AIML test.
-    Sets is_published to False and records pausedAt timestamp.
+    Keeps the test published (is_published stays as-is) but records pausedAt.
+    Candidates can still be added; new test starts should be blocked while paused.
     """
     db = get_database()
     if not ObjectId.is_valid(test_id):
@@ -958,23 +949,23 @@ async def pause_test(
     if str(test.get("created_by")) != user_id:
         raise HTTPException(status_code=403, detail="You don't have permission to pause this test")
     
-    current_status = test.get("is_published", False)
-    if not current_status:
-        # Already paused/unpublished
+    if test.get("pausedAt"):
         return {
             "message": "Test is already paused",
             "test_id": test_id,
-            "is_published": False
+            "is_published": test.get("is_published", False),
+            "pausedAt": test.get("pausedAt").isoformat() if isinstance(test.get("pausedAt"), datetime) else test.get("pausedAt")
         }
+
+    current_status = test.get("is_published", False)
     
     now = datetime.utcnow()
     
-    # Update test to paused state
+    # Update test to paused state (do NOT unpublish)
     await db.tests.update_one(
         {"_id": ObjectId(test_id)},
         {
             "$set": {
-                "is_published": False,
                 "pausedAt": now,
                 "statusBeforePause": "published" if current_status else "draft"
             }
@@ -986,7 +977,7 @@ async def pause_test(
     return {
         "message": "Test paused successfully",
         "test_id": test_id,
-        "is_published": False,
+        "is_published": test.get("is_published", False),
         "pausedAt": now.isoformat()
     }
 
@@ -998,7 +989,7 @@ async def resume_test(
 ):
     """
     Resume a paused AIML test.
-    Sets is_published back to True and records resumeAt timestamp.
+    Clears pausedAt and records resumeAt timestamp.
     """
     db = get_database()
     if not ObjectId.is_valid(test_id):
@@ -1016,24 +1007,21 @@ async def resume_test(
     if str(test.get("created_by")) != user_id:
         raise HTTPException(status_code=403, detail="You don't have permission to resume this test")
     
-    current_status = test.get("is_published", False)
-    if current_status:
-        # Already published/resumed
+    if not test.get("pausedAt"):
         return {
             "message": "Test is already active",
             "test_id": test_id,
-            "is_published": True
+            "is_published": test.get("is_published", False)
         }
     
     now = datetime.utcnow()
     previous_status = test.get("statusBeforePause", "published")
     
-    # Update test to resumed state
+    # Update test to resumed state (do NOT force publish on)
     await db.tests.update_one(
         {"_id": ObjectId(test_id)},
         {
             "$set": {
-                "is_published": True,
                 "resumeAt": now,
                 "pausedAt": None,
                 "statusBeforePause": None
@@ -1046,7 +1034,7 @@ async def resume_test(
     return {
         "message": "Test resumed successfully",
         "test_id": test_id,
-        "is_published": True,
+        "is_published": test.get("is_published", False),
         "resumeAt": now.isoformat()
     }
 
@@ -1183,8 +1171,8 @@ async def add_candidate(
     candidate: AddCandidateRequest
 ):
     """
-    Add a candidate to an AIML test (creates user account and sends invitation)
-    Uses a single shared test link for all candidates
+    Add a candidate to an AIML test (creates user account).
+    IMPORTANT: Does NOT send invitation email. Emails are sent only from explicit "Send Email" actions.
     """
     db = get_database()
     if not ObjectId.is_valid(test_id):
@@ -1258,7 +1246,165 @@ async def add_candidate(
     cors_origins = settings.cors_origins.split(",")[0].strip() if settings.cors_origins else "http://localhost:3000"
     test_link = f"{cors_origins}/aiml/test/{test_id}?token={test_token}"
     
-    # Get email template
+    return {
+        "candidate_id": user_id,
+        "test_link": test_link,
+        "name": candidate.name,
+        "email": candidate.email,
+    }
+
+
+@router.post("/{test_id}/bulk-add-candidates")
+async def bulk_add_candidates(
+    test_id: str,
+    file: UploadFile = File(...)
+):
+    """
+    Bulk add candidates from CSV file
+    CSV format: name,email (header row required)
+    IMPORTANT: Does NOT send invitation emails.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    if not test.get("is_published", False):
+        raise HTTPException(status_code=400, detail="Test must be published before adding candidates")
+    
+    contents = await file.read()
+    try:
+        csv_text = contents.decode('utf-8')
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid file encoding. Please use UTF-8 encoded CSV.")
+    
+    csv_reader = csv.DictReader(io.StringIO(csv_text))
+    
+    if not csv_reader.fieldnames or 'name' not in csv_reader.fieldnames or 'email' not in csv_reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV must have 'name' and 'email' columns")
+    
+    results = {
+        "success": [],
+        "failed": [],
+        "duplicates": []
+    }
+    
+    current_invited = set([str(e).strip().lower() for e in test.get("invited_users", [])])
+    
+    for row in csv_reader:
+        name = (row.get('name', '') or '').strip()
+        email = (row.get('email', '') or '').strip().lower()
+        
+        if not name or not email:
+            results["failed"].append({
+                "name": name or "N/A",
+                "email": email or "N/A",
+                "reason": "Name or email is empty"
+            })
+            continue
+        
+        existing_candidate = await db.test_candidates.find_one({"test_id": test_id, "email": email})
+        if existing_candidate:
+            results["duplicates"].append({"name": name, "email": email})
+            continue
+        
+        existing_user = await db.users.find_one({"email": email})
+        if existing_user:
+            user_id = str(existing_user["_id"])
+        else:
+            user_dict = {
+                "username": name.lower().replace(" ", "_"),
+                "email": email,
+                "hashed_password": "",
+                "is_admin": False,
+                "total_score": 0,
+                "questions_solved": 0,
+            }
+            result = await db.users.insert_one(user_dict)
+            user_id = str(result.inserted_id)
+        
+        candidate_record = {
+            "test_id": test_id,
+            "user_id": user_id,
+            "name": name,
+            "email": email,
+            "status": "pending",
+            "invited": False,
+            "invited_at": None,
+            "created_at": datetime.utcnow(),
+        }
+        await db.test_candidates.insert_one(candidate_record)
+        
+        current_invited.add(email)
+        results["success"].append({"name": name, "email": email})
+    
+    await db.tests.update_one(
+        {"_id": ObjectId(test_id)},
+        {"$set": {"invited_users": list(current_invited)}}
+    )
+    
+    return {
+        "success_count": len(results["success"]),
+        "failed_count": len(results["failed"]),
+        "duplicate_count": len(results["duplicates"]),
+        "success": results["success"],
+        "failed": results["failed"],
+        "duplicates": results["duplicates"],
+    }
+
+
+@router.post("/{test_id}/send-invitation")
+async def send_invitation(
+    test_id: str,
+    email: str = Body(..., embed=True),
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Send invitation email to a single candidate (explicit action only).
+    Uses test.invitationTemplate if configured, otherwise system default template.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+    
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    if str(test.get("created_by")) != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to send invitations for this test")
+    
+    if not test.get("is_published", False):
+        raise HTTPException(status_code=400, detail="Test must be published before sending invitations")
+    
+    candidate_email = str(email or "").strip().lower()
+    if not candidate_email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    
+    candidate = await db.test_candidates.find_one({"test_id": test_id, "email": candidate_email})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found for this test")
+    
+    candidate_name = candidate.get("name") or "Candidate"
+    
+    # Ensure shared token exists
+    test_token = test.get("test_token")
+    if not test_token:
+        test_token = secrets.token_urlsafe(32)
+        await db.tests.update_one({"_id": ObjectId(test_id)}, {"$set": {"test_token": test_token}})
+    
+    settings = get_settings()
+    cors_origins = settings.cors_origins.split(",")[0].strip() if settings.cors_origins else "http://localhost:3000"
+    test_link = f"{cors_origins}/aiml/test/{test_id}?token={test_token}"
+    
     stored_template = test.get("invitationTemplate", {})
     default_template = {
         "logoUrl": "",
@@ -1269,115 +1415,73 @@ async def add_candidate(
     }
     template_to_use = stored_template if stored_template else default_template
     
-    # Send invitation email
-    try:
-        settings = get_settings()
-        if settings.sendgrid_api_key and settings.sendgrid_from_email:
-            email_service = get_email_service()
-            
-            # Build exam URL with candidate params
-            encoded_email = urllib.parse.quote(candidate.email)
-            encoded_name = urllib.parse.quote(candidate.name)
-            exam_url_with_params = f"{test_link}&email={encoded_email}&name={encoded_name}"
-            
-            # Replace placeholders
-            message = template_to_use.get("message", default_template["message"])
-            email_body = message
-            email_body = email_body.replace("{{candidate_name}}", candidate.name)
-            email_body = email_body.replace("{{candidate_email}}", candidate.email)
-            email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
-            email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
-            
-            # Build HTML email
-            logo_url = template_to_use.get("logoUrl", "")
-            company_name = template_to_use.get("companyName", "")
-            footer = template_to_use.get("footer", "")
-            sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
-            
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ text-align: center; margin-bottom: 30px; }}
-                    .logo {{ max-width: 200px; margin-bottom: 20px; }}
-                    .content {{ background-color: #f0fdf4; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 2px solid #10b981; }}
-                    .button {{ display: inline-block; padding: 12px 24px; background-color: #10b981; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
-                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
-                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #10b981; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
-                        {f'<h1>{company_name}</h1>' if company_name else ''}
-                    </div>
-                    <div class="content">
-                        <p>Dear {candidate.name},</p>
-                        <p>{email_body}</p>
-                        <div class="candidate-info">
-                            <p><strong>Your Details:</strong></p>
-                            <p><strong>Name:</strong> {candidate.name}</p>
-                            <p><strong>Email:</strong> {candidate.email}</p>
-                        </div>
-                        <div style="text-align: center;">
-                            <a href="{exam_url_with_params}" class="button">Start AIML Assessment</a>
-                        </div>
-                    </div>
-                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
-                    <div class="footer">
-                        <p>Sent by {sent_by}</p>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            subject = f"AIML Assessment Invitation - {company_name if company_name else 'AI Assessment Platform'}"
-            
-            await email_service.send_email(candidate.email, subject, html_content)
-            logger.info(f"Invitation email sent successfully to {candidate.email}")
-        else:
-            logger.warning("SendGrid is not configured. Email not sent.")
-        
-        # Update candidate status to "invited"
-        try:
-            await db.test_candidates.update_one(
-                {"test_id": test_id, "email": candidate.email},
-                {"$set": {
-                    "status": "invited",
-                    "invited": True,
-                    "invited_at": datetime.utcnow()
-                }}
-            )
-            logger.info(f"Updated candidate status to 'invited' for {candidate.email}")
-        except Exception as update_error:
-            logger.error(f"Failed to update candidate status for {candidate.email}: {str(update_error)}")
-    except Exception as e:
-        logger.error(f"Failed to send invitation email to {candidate.email}: {str(e)}")
-        # Still try to update status even if email failed
-        try:
-            await db.test_candidates.update_one(
-                {"test_id": test_id, "email": candidate.email},
-                {"$set": {
-                    "status": "invited",
-                    "invited": True,
-                    "invited_at": datetime.utcnow()
-                }}
-            )
-        except Exception as update_error:
-            logger.error(f"Failed to update candidate status after email error: {str(update_error)}")
+    if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+        raise HTTPException(status_code=500, detail="Email service is not configured")
     
-    return {
-        "candidate_id": user_id,
-        "test_link": test_link,
-        "name": candidate.name,
-        "email": candidate.email,
-    }
+    email_service = get_email_service()
+    
+    encoded_email = urllib.parse.quote(candidate_email)
+    encoded_name = urllib.parse.quote(candidate_name)
+    exam_url_with_params = f"{test_link}&email={encoded_email}&name={encoded_name}"
+    
+    message = template_to_use.get("message", default_template["message"])
+    email_body = message
+    email_body = email_body.replace("{{candidate_name}}", candidate_name)
+    email_body = email_body.replace("{{candidate_email}}", candidate_email)
+    email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+    email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
+    
+    logo_url = template_to_use.get("logoUrl", "")
+    company_name = template_to_use.get("companyName", "")
+    footer = template_to_use.get("footer", "")
+    sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .logo {{ max-width: 200px; margin-bottom: 20px; }}
+            .content {{ background-color: #f0fdf4; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 2px solid #10b981; }}
+            .button {{ display: inline-block; padding: 12px 24px; background-color: #10b981; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+            .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                {f'<h1>{company_name}</h1>' if company_name else ''}
+            </div>
+            <div class="content">
+                <p>Dear {candidate_name},</p>
+                <p>{email_body}</p>
+                <div style="text-align: center;">
+                    <a href="{exam_url_with_params}" class="button">Start AIML Assessment</a>
+                </div>
+            </div>
+            {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+            <div class="footer">
+                <p>Sent by {sent_by}</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    subject = f"AIML Assessment Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+    await email_service.send_email(candidate_email, subject, html_content)
+    
+    await db.test_candidates.update_one(
+        {"test_id": test_id, "email": candidate_email},
+        {"$set": {"status": "invited", "invited": True, "invited_at": datetime.utcnow()}}
+    )
+    
+    return {"message": "Invitation sent", "email": candidate_email}
 
 
 @router.get("/{test_id}/candidates")
