@@ -5,6 +5,7 @@ export interface MCQOption {
 
 export interface MCQQuestion {
   id?: string;
+  questionType: "mcq";
   section: string;
   question: string;
   options: MCQOption[];
@@ -15,6 +16,18 @@ export interface MCQQuestion {
   updatedAt?: string;
 }
 
+export interface SubjectiveQuestion {
+  id?: string;
+  questionType: "subjective";
+  section: string;
+  question: string;
+  marks: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type Question = MCQQuestion | SubjectiveQuestion;
+
 export interface Candidate {
   name: string;
   email: string;
@@ -24,7 +37,7 @@ export interface CustomMCQAssessment {
   id?: string;
   title: string;
   description?: string;
-  questions: MCQQuestion[];
+  questions: Question[];
   candidates?: Candidate[];
   accessMode: "private" | "public";
   examMode: "strict" | "flexible";
@@ -57,5 +70,5 @@ export interface AssessmentSubmission {
   status: string;
   startedAt?: string;
   submittedAt?: string;
+  gradingStatus?: "pending" | "grading" | "completed";
 }
-

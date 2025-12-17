@@ -158,6 +158,25 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
+    async redirect({ url, baseUrl }) {
+      // Prevent the "flash" of landing page by never redirecting to "/"
+      // after sign-in. Also restrict redirects to same-origin for safety.
+      try {
+        // Relative URLs (e.g. "/dashboard")
+        if (url.startsWith("/")) {
+          return url === "/" ? `${baseUrl}/dashboard` : `${baseUrl}${url}`;
+        }
+
+        // Absolute URLs
+        const parsed = new URL(url);
+        if (parsed.origin !== baseUrl) {
+          return `${baseUrl}/dashboard`;
+        }
+        return parsed.pathname === "/" ? `${baseUrl}/dashboard` : url;
+      } catch {
+        return `${baseUrl}/dashboard`;
+      }
+    },
     async signIn({ user, account, profile }) {
       if (!account || account.provider === "credentials") {
         return true;
@@ -289,18 +308,6 @@ export const authOptions: NextAuthOptions = {
       (session as any).refreshToken = token.refreshToken as string | undefined;
       (session as any).provider = token.provider as string | undefined;
       return session;
-    },
-    async redirect({ url, baseUrl }) {
-      // Handle role-based redirects
-      // If redirecting to home page or dashboard, we'll let the pages handle it
-      // This prevents interfering with explicit redirects from signin
-      if (url === `${baseUrl}/` || url === baseUrl) {
-        // If going to home, let home page handle redirect based on role
-        return url;
-      }
-      
-      // For other URLs, allow them through
-      return url.startsWith(baseUrl) ? url : baseUrl;
     },
   },
 };

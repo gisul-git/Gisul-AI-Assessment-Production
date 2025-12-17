@@ -7,6 +7,7 @@ import Image from "next/image";
 import Link from "next/link";
 import fastApiClient from "../../lib/fastapi";
 import { sortedCountryCodes, getCountryNameFromCode } from "../../lib/countryCodes";
+import { validateEmailWithCommonTypos } from "../../lib/validation/email";
 
 // Phone number validation based on country code
 const validatePhoneNumber = (phone: string, countryCode: string): { valid: boolean; error?: string } => {
@@ -250,6 +251,12 @@ export default function SignupPage({ providers }: SignupPageProps) {
 
   const onSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+
+    const emailValidation = validateEmailWithCommonTypos(email);
+    if (!emailValidation.valid) {
+      showMessage("error", emailValidation.message);
+      return;
+    }
     
     // Validate phone number
     if (!phone.trim()) {
