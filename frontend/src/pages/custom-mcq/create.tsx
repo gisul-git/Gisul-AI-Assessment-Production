@@ -38,6 +38,11 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
   const isInitialLoadRef = useRef(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false); // Prevent auto-save from overwriting during initial load
   const isCreatingDraftRef = useRef(false); // Prevent multiple drafts from being created
+  const assessmentIdRef = useRef<string | null>(null); // Avoid stale closures during route changes/unload
+
+  useEffect(() => {
+    assessmentIdRef.current = assessmentId;
+  }, [assessmentId]);
 
   const stations = [
     { id: 1, name: "Assessment Information", icon: "📋" },
@@ -108,6 +113,52 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
   // Track if assessment was just created/activated to prevent auto-save from overwriting
   const isActivatedRef = useRef(false);
 
+  // Ensure we create EXACTLY ONE draft as soon as the user has meaningful input.
+  // This prevents race conditions where other effects (route change/unload/cleanup) also try to create.
+  useEffect(() => {
+    if (!initialLoadDone) return;
+    if (assessmentIdRef.current) return;
+    if (isActivatedRef.current) return;
+    if (isCreatingDraftRef.current) return;
+
+    const hasMeaningfulInput =
+      !!assessmentData.title ||
+      !!(assessmentData.questions && assessmentData.questions.length > 0);
+
+    if (!hasMeaningfulInput) return;
+
+    const createDraft = async () => {
+      isCreatingDraftRef.current = true;
+      try {
+        const draftData: any = {
+          title: assessmentData.title || "",
+          description: assessmentData.description || "",
+          questions: assessmentData.questions || [],
+          candidates: assessmentData.candidates || [],
+          accessMode: assessmentData.accessMode || "private",
+          examMode: assessmentData.examMode || "strict",
+          startTime: assessmentData.startTime,
+          endTime: assessmentData.endTime,
+          duration: assessmentData.duration,
+          passPercentage: assessmentData.passPercentage || 50,
+          status: "draft",
+          currentStation: currentStation,
+        };
+
+        const result = await customMCQApi.createAssessment(draftData as any);
+        setAssessmentId(result.assessmentId);
+        // Update URL to include the new ID for consistency (shallow to avoid a full reload)
+        router.replace(`/custom-mcq/create?testId=${result.assessmentId}`, undefined, { shallow: true });
+      } catch (err) {
+        // Allow retry if creation fails
+        isCreatingDraftRef.current = false;
+        throw err;
+      }
+    };
+
+    createDraft().catch((err) => console.error("Error creating draft:", err));
+  }, [initialLoadDone, assessmentData, currentStation, router]);
+
   // Auto-save draft to backend on every change (debounced)
   // Only auto-save if initial load is complete AND assessment is not active
   useEffect(() => {
@@ -151,20 +202,8 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           // Update existing draft (same ID - keeps it as draft)
           await customMCQApi.updateAssessment(assessmentId, draftData);
         } else {
-          // Only create draft if we haven't already created one and we're not in the process of creating
-          if (!isCreatingDraftRef.current && (assessmentData.title || (assessmentData.questions && assessmentData.questions.length > 0))) {
-            isCreatingDraftRef.current = true; // Mark that we're creating a draft
-            try {
-              const result = await customMCQApi.createAssessment(draftData as any);
-              setAssessmentId(result.assessmentId);
-              // Update URL to include the new ID for consistency
-              router.replace(`/custom-mcq/create?testId=${result.assessmentId}`, undefined, { shallow: true });
-            } catch (err) {
-              // If creation fails, allow retry by resetting flag
-              isCreatingDraftRef.current = false;
-              throw err;
-            }
-          }
+          // Draft creation is handled by the dedicated "ensure draft exists" effect above.
+          // We intentionally do NOT create drafts here to avoid duplicate inserts.
         }
       } catch (err) {
         console.error("Error auto-saving draft:", err);
@@ -197,10 +236,15 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
       if (isActivatedRef.current) return; // Don't save if assessment was just activated
       
       try {
+        // Never create a NEW draft during unload/navigation/cleanup (this is what caused duplicates).
+        // If we don't have an ID yet, we simply skip and rely on the normal creation flow.
+        const idToSave = assessmentIdRef.current;
+        if (!idToSave) return;
+
         // Check if assessment is already active - don't overwrite
-        if (assessmentId) {
+        if (idToSave) {
           try {
-            const current = await customMCQApi.getAssessment(assessmentId);
+            const current = await customMCQApi.getAssessment(idToSave);
             if (current && current.status === 'active') {
               // Don't overwrite active status
               return;
@@ -225,24 +269,9 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           currentStation: currentStation,
         };
 
-        if (assessmentId) {
+        if (idToSave) {
           // Update existing draft immediately
-          await customMCQApi.updateAssessment(assessmentId, draftData);
-        } else if (!isCreatingDraftRef.current && (assessmentData.title || (assessmentData.questions && assessmentData.questions.length > 0))) {
-          // Only create new draft in beforeunload if we haven't created one already
-          // Check if we already have one in progress by checking URL params
-          const { id, testId } = router.query;
-          if (!id && !testId) {
-            // Only create if truly new (no ID in URL either) and we're not already creating
-            isCreatingDraftRef.current = true;
-            try {
-              const result = await customMCQApi.createAssessment(draftData as any);
-              // Note: Can't update state during unload, but at least we've saved it
-            } catch (err) {
-              isCreatingDraftRef.current = false;
-              throw err;
-            }
-          }
+          await customMCQApi.updateAssessment(idToSave, draftData);
         }
       } catch (err) {
         console.error("Error saving draft before unload:", err);
@@ -257,23 +286,10 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
       }
     };
 
-    const handleRouteChange = () => {
-      // Save before navigating away
-      if (initialLoadDone) {
-        saveBeforeUnload().catch(err => console.error("Failed to save before navigation:", err));
-      }
-    };
-
     window.addEventListener("beforeunload", handleBeforeUnload);
-    router.events?.on('routeChangeStart', handleRouteChange);
     
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
-      router.events?.off('routeChangeStart', handleRouteChange);
-      // Final save attempt on cleanup
-      if (initialLoadDone) {
-        saveBeforeUnload().catch(() => {});
-      }
     };
   }, [assessmentData, currentStation, assessmentId, initialLoadDone, router]);
 

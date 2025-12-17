@@ -20,11 +20,14 @@ from ....utils.mongo import serialize_document, to_object_id
 from ....utils.responses import success_response, error_response
 from .schemas import (
     MCQQuestion,
+    SubjectiveQuestion,
     ValidateCSVRequest,
     CreateCustomMCQAssessmentRequest,
     UpdateCustomMCQAssessmentRequest,
     VerifyCustomMCQCandidateRequest,
+    SubmitCustomMCQRequest,
 )
+from .ai_grading import grade_multiple_subjective_answers
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,7 @@ def _generate_assessment_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _parse_csv_to_questions(csv_data: List[Dict[str, Any]]) -> List[MCQQuestion]:
+def _parse_csv_to_mcq_questions(csv_data: List[Dict[str, Any]]) -> List[MCQQuestion]:
     """Parse CSV data to MCQQuestion objects"""
     questions = []
     
@@ -101,6 +104,7 @@ def _parse_csv_to_questions(csv_data: List[Dict[str, Any]]) -> List[MCQQuestion]
                 continue
             
             question = MCQQuestion(
+                questionType="mcq",
                 section=section,
                 question=question_text,
                 options=[{"label": opt["label"], "text": opt["text"]} for opt in options],
@@ -117,14 +121,54 @@ def _parse_csv_to_questions(csv_data: List[Dict[str, Any]]) -> List[MCQQuestion]
     return questions
 
 
+def _parse_csv_to_subjective_questions(csv_data: List[Dict[str, Any]]) -> List[SubjectiveQuestion]:
+    """Parse CSV data to SubjectiveQuestion objects"""
+    questions = []
+    
+    for idx, row in enumerate(csv_data):
+        try:
+            # Extract section and question
+            section = str(row.get("section", "")).strip()
+            question_text = str(row.get("question", "")).strip()
+            
+            if not question_text:
+                continue
+            
+            # Extract marks
+            try:
+                marks = int(row.get("marks", 1))
+                if marks < 1:
+                    marks = 1
+            except (ValueError, TypeError):
+                marks = 1
+            
+            question = SubjectiveQuestion(
+                questionType="subjective",
+                section=section,
+                question=question_text,
+                marks=marks,
+            )
+            questions.append(question)
+            
+        except Exception as e:
+            logger.error(f"Error parsing row {idx + 1}: {e}")
+            continue
+    
+    return questions
+
+
 @router.post("/validate-csv")
 async def validate_csv(
     request: ValidateCSVRequest,
+    questionType: str = Query("mcq", description="Question type: 'mcq' or 'subjective'"),
     current_user: Dict[str, Any] = Depends(require_editor),
 ) -> Dict[str, Any]:
     """Validate CSV data and parse it into questions"""
     try:
-        questions = _parse_csv_to_questions(request.csvData)
+        if questionType.lower() == "subjective":
+            questions = _parse_csv_to_subjective_questions(request.csvData)
+        else:
+            questions = _parse_csv_to_mcq_questions(request.csvData)
         
         if not questions:
             return error_response("No valid questions found in CSV", status_code=400)
@@ -145,6 +189,7 @@ async def validate_csv(
 @router.post("/upload-csv", response_model=None)
 async def upload_csv(
     file: UploadFile = File(...),
+    questionType: str = Query("mcq", description="Question type: 'mcq' or 'subjective'"),
     current_user: Dict[str, Any] = Depends(require_editor),
 ) -> Dict[str, Any]:
     """Upload and parse CSV file"""
@@ -162,8 +207,11 @@ async def upload_csv(
         if not csv_data:
             return error_response("CSV file is empty", status_code=400)
         
-        # Validate and parse questions
-        questions = _parse_csv_to_questions(csv_data)
+        # Validate and parse questions based on type
+        if questionType.lower() == "subjective":
+            questions = _parse_csv_to_subjective_questions(csv_data)
+        else:
+            questions = _parse_csv_to_mcq_questions(csv_data)
         
         if not questions:
             return error_response("No valid questions found in CSV", status_code=400)
@@ -182,23 +230,35 @@ async def upload_csv(
 
 @router.get("/sample-csv")
 async def download_sample_csv(
+    questionType: str = Query("mcq", description="Question type: 'mcq' or 'subjective'"),
     current_user: Dict[str, Any] = Depends(require_editor),
 ) -> Any:
     """Download sample CSV file"""
     from fastapi.responses import Response
     
-    # Sample CSV content
-    sample_csv = """section,question,optionA,optionB,optionC,optionD,optionE,optionF,correctAn,answerType,marks
+    if questionType.lower() == "subjective":
+        # Sample CSV content for subjective questions
+        sample_csv = """section,question,marks
+que,What is Cloud Computing and why is it used in software applications?,5
+que,Explain the concept of time complexity in algorithms with examples.,3
+que,Describe the difference between SQL and NoSQL databases.,4
+que,What are the key principles of object-oriented programming?,5
+que,Explain how a binary search algorithm works.,4"""
+        filename = "sample_subjective.csv"
+    else:
+        # Sample CSV content for MCQ questions
+        sample_csv = """section,question,optionA,optionB,optionC,optionD,optionE,optionF,correctAn,answerType,marks
 aptitude,What is 2+2?,2,3,4,5,,,C,single,1
 logical_re,Select all prime numbers,2,4,5,6,7,8,"A,C,E",multiple_all,1
 verbal,Choose synonym (any one) ,happy,joyful,angry,sad,,,"A,B",multiple_any,1
 technical,What does CPU stand for?,Computer,processing,Central Processing Unit,Computer Central Unit,,,B,single,1
 quantitative,What is the square of 3?,6,9,12,15,,,B,single,1"""
+        filename = "sample_mcq.csv"
     
     return Response(
         content=sample_csv,
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=sample_mcq.csv"}
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
 
@@ -239,11 +299,26 @@ async def create_custom_mcq_assessment(
             # Generate assessment URL only for scheduled assessments
             # We'll generate it after insert for drafts
         
-        # Prepare questions with IDs
+        # Prepare questions with IDs (handle both MCQ and Subjective)
         questions_with_ids = []
         if request.questions:
             for idx, q in enumerate(request.questions):
-                q_dict = q.model_dump()
+                # Handle dict or model instance
+                if isinstance(q, dict):
+                    q_dict = q
+                else:
+                    q_dict = q.model_dump() if hasattr(q, 'model_dump') else dict(q)
+                
+                # Ensure questionType is set
+                question_type = q_dict.get("questionType", "mcq")
+                if question_type not in ["mcq", "subjective"]:
+                    # Try to infer from structure
+                    if "options" in q_dict and "correctAn" in q_dict:
+                        question_type = "mcq"
+                    else:
+                        question_type = "subjective"
+                    q_dict["questionType"] = question_type
+                
                 q_dict["id"] = q_dict.get("id") or f"q_{idx + 1}"
                 if "createdAt" not in q_dict or not q_dict.get("createdAt"):
                     q_dict["createdAt"] = _now_utc()
@@ -444,7 +519,22 @@ async def update_custom_mcq_assessment(
         if request.questions is not None:
             questions_with_ids = []
             for idx, q in enumerate(request.questions):
-                q_dict = q.model_dump()
+                # Handle dict or model instance
+                if isinstance(q, dict):
+                    q_dict = q
+                else:
+                    q_dict = q.model_dump() if hasattr(q, 'model_dump') else dict(q)
+                
+                # Ensure questionType is set
+                question_type = q_dict.get("questionType", "mcq")
+                if question_type not in ["mcq", "subjective"]:
+                    # Try to infer from structure
+                    if "options" in q_dict and "correctAn" in q_dict:
+                        question_type = "mcq"
+                    else:
+                        question_type = "subjective"
+                    q_dict["questionType"] = question_type
+                
                 q_dict["id"] = q_dict.get("id") or f"q_{idx + 1}"
                 q_dict["updatedAt"] = _now_utc()
                 if "createdAt" not in q_dict:
@@ -760,3 +850,199 @@ async def get_custom_mcq_assessment_for_taking(
         logger.exception(f"Error getting assessment for taking: {exc}")
         return error_response(f"Failed to get assessment: {str(exc)}", status_code=500)
 
+
+@router.post("/submit")
+async def submit_custom_mcq_assessment(
+    request: SubmitCustomMCQRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """Submit custom MCQ assessment answers"""
+    try:
+        # Fetch assessment
+        oid = to_object_id(request.assessmentId)
+        assessment = await db.custom_mcq_assessments.find_one({"_id": oid})
+
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
+
+        # Validate token
+        assessment_token = assessment.get("assessmentToken")
+        if not assessment_token or assessment_token != request.token:
+            return error_response("Invalid or expired assessment token", status_code=403)
+
+        # Check if already submitted
+        submissions = assessment.get("submissions", {})
+        candidate_key = f"{request.email.lower().strip()}_{request.name.strip().lower()}"
+        existing_submission = submissions.get(candidate_key)
+
+        if existing_submission and existing_submission.get("submittedAt"):
+            return error_response("You have already submitted this assessment", status_code=400)
+
+        # Get questions
+        questions = assessment.get("questions", [])
+        questions_dict = {q.get("id"): q for q in questions}
+
+        # Grade MCQ questions
+        mcq_score = 0
+        mcq_total = 0
+        graded_submissions = []
+
+        # Separate MCQ and subjective submissions
+        mcq_submissions = []
+        subjective_submissions = []
+
+        for submission in request.submissions:
+            question = questions_dict.get(submission.questionId)
+            if not question:
+                continue
+
+            question_type = question.get("questionType", "mcq")
+            if "options" in question and "correctAn" in question:
+                question_type = "mcq"
+            elif question_type not in ["mcq", "subjective"]:
+                question_type = "subjective"
+
+            if question_type == "mcq" and submission.selectedAnswers:
+                mcq_submissions.append({
+                    "questionId": submission.questionId,
+                    "question": question,
+                    "selectedAnswers": submission.selectedAnswers,
+                })
+            elif question_type == "subjective" and submission.textAnswer:
+                subjective_submissions.append({
+                    "questionId": submission.questionId,
+                    "question": question.get("question", ""),
+                    "answer": submission.textAnswer,
+                    "max_marks": question.get("marks", 1),
+                    "section": question.get("section", ""),
+                })
+
+        # Grade MCQ questions
+        for mcq_sub in mcq_submissions:
+            question = mcq_sub["question"]
+            selected = set(mcq_sub["selectedAnswers"])
+            correct_ans = set([a.strip() for a in question.get("correctAn", "").split(",")])
+            answer_type = question.get("answerType", "single")
+            marks = question.get("marks", 1)
+            mcq_total += marks
+
+            is_correct = False
+            if answer_type == "single":
+                is_correct = selected == correct_ans
+            elif answer_type == "multiple_all":
+                is_correct = selected == correct_ans and len(selected) == len(correct_ans)
+            elif answer_type == "multiple_any":
+                is_correct = len(selected.intersection(correct_ans)) > 0
+
+            if is_correct:
+                mcq_score += marks
+
+            graded_submissions.append({
+                "questionId": mcq_sub["questionId"],
+                "questionType": "mcq",
+                "selectedAnswers": list(selected),
+                "correctAnswer": question.get("correctAn", ""),
+                "isCorrect": is_correct,
+                "marksAwarded": marks if is_correct else 0,
+                "maxMarks": marks,
+            })
+
+        # Grade subjective questions using AI
+        subjective_score = 0
+        subjective_total = 0
+        grading_status = "completed"
+
+        if subjective_submissions:
+            try:
+                grading_status = "grading"
+                ai_results = await grade_multiple_subjective_answers(subjective_submissions)
+
+                for result in ai_results:
+                    question_id = result["questionId"]
+                    score = result["score"]
+                    max_marks = next(
+                        (s["max_marks"] for s in subjective_submissions if s["questionId"] == question_id),
+                        1
+                    )
+                    subjective_total += max_marks
+                    subjective_score += score
+
+                    graded_submissions.append({
+                        "questionId": question_id,
+                        "questionType": "subjective",
+                        "textAnswer": next(
+                            (s["answer"] for s in subjective_submissions if s["questionId"] == question_id),
+                            ""
+                        ),
+                        "marksAwarded": score,
+                        "maxMarks": max_marks,
+                        "feedback": result.get("feedback", ""),
+                        "reasoning": result.get("reasoning", ""),
+                    })
+                grading_status = "completed"
+            except Exception as e:
+                logger.exception(f"Error during AI grading: {e}")
+                grading_status = "error"
+                # Still save submissions but with 0 marks for subjective
+                for sub in subjective_submissions:
+                    max_marks = sub["max_marks"]
+                    subjective_total += max_marks
+                    graded_submissions.append({
+                        "questionId": sub["questionId"],
+                        "questionType": "subjective",
+                        "textAnswer": sub["answer"],
+                        "marksAwarded": 0,
+                        "maxMarks": max_marks,
+                        "feedback": "Error during AI grading. Please contact administrator.",
+                        "reasoning": "",
+                    })
+
+        # Calculate totals
+        total_score = mcq_score + subjective_score
+        total_marks = mcq_total + subjective_total
+        percentage = (total_score / total_marks * 100) if total_marks > 0 else 0
+        pass_percentage = assessment.get("passPercentage", 50)
+        passed = percentage >= pass_percentage
+
+        # Save submission
+        submission_data = {
+            "candidateInfo": {
+                "name": request.name,
+                "email": request.email,
+            },
+            "submissions": graded_submissions,
+            "score": total_score,
+            "totalMarks": total_marks,
+            "percentage": round(percentage, 2),
+            "passed": passed,
+            "status": "completed" if grading_status == "completed" else "grading",
+            "gradingStatus": grading_status,
+            "startedAt": request.startedAt.isoformat() if request.startedAt else _now_utc().isoformat(),
+            "submittedAt": request.submittedAt.isoformat() if request.submittedAt else _now_utc().isoformat(),
+            "mcqScore": mcq_score,
+            "mcqTotal": mcq_total,
+            "subjectiveScore": subjective_score,
+            "subjectiveTotal": subjective_total,
+        }
+
+        submissions[candidate_key] = submission_data
+
+        await db.custom_mcq_assessments.update_one(
+            {"_id": oid},
+            {"$set": {"submissions": submissions, "updated_at": _now_utc()}}
+        )
+
+        return success_response(
+            "Assessment submitted successfully",
+            {
+                "score": total_score,
+                "totalMarks": total_marks,
+                "percentage": round(percentage, 2),
+                "passed": passed,
+                "gradingStatus": grading_status,
+            }
+        )
+
+    except Exception as e:
+        logger.exception(f"Error submitting assessment: {e}")
+        return error_response(f"Failed to submit assessment: {str(e)}", status_code=500)

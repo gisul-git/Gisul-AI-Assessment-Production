@@ -60,6 +60,31 @@ export default function HomePage() {
     }
   }, [status, router]);
 
+  // Avoid flashing the landing page when we already know we're going to redirect.
+  if (status === "loading" || status === "authenticated") {
+    return (
+      <main
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: "#ffffff",
+          padding: "2rem",
+        }}
+      >
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: "1rem", fontWeight: 600, color: "#1a1625" }}>
+            Redirecting to dashboard...
+          </div>
+          <div style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#6b6678" }}>
+            Please wait.
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main>
       <ScrollProgress />

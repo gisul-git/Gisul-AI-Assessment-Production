@@ -20,9 +20,41 @@ def _validate_password_strength(password: str) -> None:
         raise ValueError("Password must contain at least one special character")
 
 
+def _validate_email_common_typos(email: str) -> None:
+    """Block a small set of high-confidence email provider typos like gmail.co -> gmail.com.
+
+    Note: syntactically `gmail.co` is a valid email domain; this is a product decision to prevent common mistakes.
+    """
+    normalized = (email or "").strip().lower()
+    if "@" not in normalized:
+        return
+    _, domain = normalized.split("@", 1)
+
+    typo_suggestions = {
+        "gmail.co": "gmail.com",
+        "gmai.com": "gmail.com",
+        "gamil.com": "gmail.com",
+        "gmial.com": "gmail.com",
+        "gmail.con": "gmail.com",
+        "yahoo.co": "yahoo.com",
+        "outlook.co": "outlook.com",
+        "hotmail.co": "hotmail.com",
+    }
+
+    suggestion = typo_suggestions.get(domain)
+    if suggestion:
+        raise ValueError(f"Email format is incorrect. Did you mean {suggestion}?")
+
+
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: EmailStr) -> EmailStr:
+        _validate_email_common_typos(str(v))
+        return v
 
 
 class OrgSignupRequest(BaseModel):
@@ -31,6 +63,12 @@ class OrgSignupRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=255, description="Password must be at least 8 characters")
     phone: str | None = Field(default=None, max_length=50, description="Optional phone number")
     country: str | None = Field(default=None, max_length=100, description="Optional country")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: EmailStr) -> EmailStr:
+        _validate_email_common_typos(str(v))
+        return v
     
     @field_validator("password")
     @classmethod
@@ -53,6 +91,12 @@ class SuperAdminSignupRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=255, description="Password must be at least 8 characters")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: EmailStr) -> EmailStr:
+        _validate_email_common_typos(str(v))
+        return v
     
     @field_validator("password")
     @classmethod
@@ -81,14 +125,32 @@ class OAuthLoginRequest(BaseModel):
     provider: str = Field(..., min_length=2, max_length=50)
     role: str | None = Field(default=None, pattern=r"^(org_admin|editor|viewer|super_admin)$")
 
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: EmailStr) -> EmailStr:
+        _validate_email_common_typos(str(v))
+        return v
+
 
 class SendVerificationCodeRequest(BaseModel):
     email: EmailStr
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: EmailStr) -> EmailStr:
+        _validate_email_common_typos(str(v))
+        return v
 
 
 class VerifyEmailCodeRequest(BaseModel):
     email: EmailStr
     code: str = Field(..., min_length=4, max_length=10)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: EmailStr) -> EmailStr:
+        _validate_email_common_typos(str(v))
+        return v
 
 
 class RefreshTokenRequest(BaseModel):
