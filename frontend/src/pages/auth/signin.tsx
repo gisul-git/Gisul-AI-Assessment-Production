@@ -6,6 +6,7 @@ import Image from "next/image";
 import Link from "next/link";
 import axios from "axios";
 import fastApiClient from "../../lib/fastapi";
+import { validateEmailWithCommonTypos } from "../../lib/validation/email";
 
 interface SignInPageProps {
   providers: Awaited<ReturnType<typeof getProviders>>;
@@ -164,6 +165,13 @@ export default function SignInPage({ providers }: SignInPageProps) {
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+
+    const emailValidation = validateEmailWithCommonTypos(email);
+    if (!emailValidation.valid) {
+      setError(emailValidation.message);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
