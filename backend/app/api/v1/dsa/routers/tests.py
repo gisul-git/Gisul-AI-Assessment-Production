@@ -420,6 +420,50 @@ async def get_tests(
         result.append(test_dict)
     return result
 
+@router.get("/{test_id}/public")
+async def get_test_public(
+    test_id: str,
+    user_id: str = Query(..., description="User ID from link token")
+):
+    """
+    Get test details for candidates (public endpoint).
+    Returns test info including duration for timer display.
+    Verifies user has access via test submission.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    # Verify user has a submission for this test (meaning they're authorized)
+    test_submission = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "user_id": user_id
+    })
+    if not test_submission:
+        raise HTTPException(status_code=403, detail="User not authorized for this test")
+    
+    # Get test data
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # Return test data for candidates (limited fields)
+    test_dict = {
+        "id": str(test["_id"]),
+        "title": test.get("title", ""),
+        "description": test.get("description", ""),
+        "duration_minutes": test.get("duration_minutes", 0),
+        "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in test.get("question_ids", [])],
+        # Include timer mode and question timings if set
+        "timer_mode": test.get("timer_mode", "GLOBAL"),
+        "question_timings": test.get("question_timings", []),
+    }
+    
+    logger.info(f"[get_test_public] Returning test {test_id} for user {user_id}, duration_minutes={test_dict['duration_minutes']}")
+    
+    return test_dict
+
+
 @router.get("/{test_id}", response_model=dict)
 async def get_test(
     test_id: str,
@@ -742,6 +786,107 @@ async def get_test_submission(test_id: str, user_id: str = Query(..., descriptio
             submission_dict["submitted_at"] = submitted_at_val
     
     return submission_dict
+
+
+@router.get("/{test_id}/question/{question_id}")
+async def get_test_question(
+    test_id: str, 
+    question_id: str,
+    user_id: str = Query(..., description="User ID from link token")
+):
+    """
+    Get a specific question for a test (public endpoint for candidates).
+    Returns question data including SQL-specific fields.
+    Verifies that the question belongs to the test and user has access.
+    """
+    db = get_database()
+    
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    if not ObjectId.is_valid(question_id):
+        raise HTTPException(status_code=400, detail="Invalid question ID")
+    
+    # Verify the test exists and contains this question
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    if question_id not in test.get("question_ids", []):
+        raise HTTPException(status_code=403, detail="Question not part of this test")
+    
+    # Verify user has a submission for this test (meaning they're authorized)
+    test_submission = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "user_id": user_id
+    })
+    if not test_submission:
+        raise HTTPException(status_code=403, detail="User not authorized for this test")
+    
+    # Check if test submission is completed
+    if test_submission.get("is_completed", False):
+        raise HTTPException(status_code=403, detail="Test already submitted")
+    
+    # Get the question
+    question = await db.questions.find_one({"_id": ObjectId(question_id)})
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    
+    # Build response with all necessary fields
+    question_dict = {
+        "id": str(question["_id"]),
+        "title": question.get("title", ""),
+        "description": question.get("description", ""),
+        "difficulty": question.get("difficulty", ""),
+        "languages": question.get("languages", []),
+        "starter_code": question.get("starter_code", {}),
+        # Only return public testcases for candidates
+        "public_testcases": question.get("public_testcases", []),
+        # Don't return hidden testcases to candidates
+    }
+    
+    # Add function_signature if it exists
+    if question.get("function_signature"):
+        question_dict["function_signature"] = question["function_signature"]
+    
+    # Detect question type - explicit or inferred from SQL-specific fields
+    question_type = question.get("question_type")
+    
+    # Infer SQL type if not explicitly set but has SQL-specific fields
+    if not question_type:
+        has_schemas = question.get("schemas") and len(question.get("schemas", {})) > 0
+        has_sql_category = question.get("sql_category") is not None
+        has_starter_query = question.get("starter_query") is not None
+        has_evaluation = question.get("evaluation") and question.get("evaluation", {}).get("engine")
+        
+        if has_schemas or has_sql_category or has_starter_query or has_evaluation:
+            question_type = "SQL"
+            logger.info(f"[get_test_question] Inferred question_type=SQL for question {question_id}")
+    
+    # Add question_type to response
+    if question_type:
+        question_dict["question_type"] = question_type
+    
+    # Add SQL-specific fields
+    if question.get("sql_category"):
+        question_dict["sql_category"] = question["sql_category"]
+    if question.get("schemas"):
+        question_dict["schemas"] = question["schemas"]
+    if question.get("sample_data"):
+        question_dict["sample_data"] = question["sample_data"]
+    if question.get("starter_query"):
+        question_dict["starter_query"] = question["starter_query"]
+    if question.get("hints"):
+        question_dict["hints"] = question["hints"]
+    if question.get("evaluation"):
+        question_dict["evaluation"] = question["evaluation"]
+    if question.get("constraints"):
+        question_dict["constraints"] = question["constraints"]
+    if question.get("examples"):
+        question_dict["examples"] = question["examples"]
+    
+    logger.info(f"[get_test_question] Returning question {question_id} for test {test_id}, user {user_id}")
+    
+    return question_dict
 
 
 @router.patch("/{test_id}/submission")

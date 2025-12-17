@@ -9,6 +9,11 @@ Secure Mode:
 - When enabled, user code is validated and wrapped
 - Users can only write function body (no I/O code allowed)
 - System handles all input parsing and output formatting
+
+SQL Support:
+- SQL questions use Judge0 SQLite (language_id 82)
+- run-sql: Execute query and show results
+- submit-sql: Compare results with reference query
 """
 import logging
 from datetime import datetime
@@ -1059,3 +1064,404 @@ async def validate_code_endpoint(request: ValidateCodeRequest):
         "valid": True,
         "message": "Code validation passed"
     }
+
+
+# ============================================================================
+# SQL Execution Endpoints (Judge0 SQLite)
+# ============================================================================
+
+class RunSQLRequest(BaseModel):
+    """Request for running SQL query"""
+    question_id: str
+    sql_query: str
+
+
+class SubmitSQLRequest(BaseModel):
+    """Request for submitting SQL query"""
+    question_id: str
+    sql_query: str
+    started_at: Optional[str] = None
+    submitted_at: Optional[str] = None
+    time_spent_seconds: Optional[int] = None
+
+
+def build_sql_script(
+    schemas: Dict[str, Any],
+    sample_data: Dict[str, Any],
+    user_query: str,
+    reference_query: Optional[str] = None
+) -> str:
+    """
+    Build a complete SQL script for Judge0 SQLite execution.
+    
+    The script:
+    1. Creates all tables from schemas
+    2. Inserts sample data
+    3. Runs the user's query
+    4. Optionally runs reference query for comparison
+    """
+    script_parts = []
+    
+    # 1. Create tables
+    for table_name, table_def in schemas.items():
+        columns = table_def.get("columns", {})
+        if not columns:
+            continue
+        
+        column_defs = []
+        for col_name, col_type in columns.items():
+            # Convert common data types to SQLite compatible types
+            sqlite_type = col_type.upper()
+            # SQLite type mappings
+            if "VARCHAR" in sqlite_type or "CHAR" in sqlite_type:
+                sqlite_type = "TEXT"
+            elif "INT" in sqlite_type:
+                sqlite_type = "INTEGER"
+            elif "DECIMAL" in sqlite_type or "FLOAT" in sqlite_type or "DOUBLE" in sqlite_type:
+                sqlite_type = "REAL"
+            elif "BOOL" in sqlite_type:
+                sqlite_type = "INTEGER"  # SQLite uses 0/1 for boolean
+            elif "DATE" in sqlite_type or "TIME" in sqlite_type:
+                sqlite_type = "TEXT"  # SQLite stores dates as text
+            
+            # Keep PRIMARY KEY if present
+            if "PRIMARY KEY" in col_type.upper():
+                sqlite_type = sqlite_type.replace("PRIMARY KEY", "").strip() + " PRIMARY KEY"
+            
+            column_defs.append(f"    {col_name} {sqlite_type}")
+        
+        create_stmt = f"CREATE TABLE {table_name} (\n{','.join(column_defs)}\n);"
+        script_parts.append(create_stmt)
+    
+    # 2. Insert sample data
+    for table_name, rows in sample_data.items():
+        if not rows or table_name not in schemas:
+            continue
+        
+        # Get column names from schema
+        columns = list(schemas[table_name].get("columns", {}).keys())
+        if not columns:
+            continue
+        
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            
+            # Format values for SQL
+            formatted_values = []
+            for val in row:
+                if val is None:
+                    formatted_values.append("NULL")
+                elif isinstance(val, str):
+                    # Escape single quotes
+                    escaped = val.replace("'", "''")
+                    formatted_values.append(f"'{escaped}'")
+                elif isinstance(val, bool):
+                    formatted_values.append("1" if val else "0")
+                else:
+                    formatted_values.append(str(val))
+            
+            insert_stmt = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({', '.join(formatted_values)});"
+            script_parts.append(insert_stmt)
+    
+    # 3. Add user query
+    # Clean up the user query (remove trailing semicolons, add one at end)
+    clean_query = user_query.strip()
+    if clean_query.endswith(';'):
+        clean_query = clean_query[:-1].strip()
+    
+    script_parts.append(f"\n-- User Query\n{clean_query};")
+    
+    return "\n".join(script_parts)
+
+
+async def execute_sql_with_judge0(sql_script: str) -> Dict[str, Any]:
+    """
+    Execute SQL script using Judge0 SQLite (language_id 82).
+    Returns the execution result.
+    """
+    from ..utils.judge0 import submit_to_judge0
+    
+    SQLITE_LANGUAGE_ID = 82
+    
+    try:
+        result = await submit_to_judge0(
+            source_code=sql_script,
+            language_id=SQLITE_LANGUAGE_ID,
+            stdin="",  # SQLite doesn't use stdin
+            timeout=30.0,
+        )
+        
+        status = result.get("status", {})
+        status_id = status.get("id", 0)
+        
+        return {
+            "success": status_id == 3,  # 3 = Accepted
+            "status_id": status_id,
+            "status": status.get("description", "Unknown"),
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+            "compile_output": result.get("compile_output", ""),
+            "time": result.get("time"),
+            "memory": result.get("memory"),
+        }
+        
+    except Exception as e:
+        logger.error(f"SQL execution error: {e}")
+        return {
+            "success": False,
+            "status_id": 13,
+            "status": "Execution Error",
+            "stdout": "",
+            "stderr": str(e),
+            "compile_output": "",
+            "time": None,
+            "memory": None,
+        }
+
+
+def compare_sql_results(user_output: str, expected_output: str, order_sensitive: bool = False) -> bool:
+    """
+    Compare SQL query results.
+    
+    If order_sensitive is False, compares results as sets of rows.
+    If order_sensitive is True, compares results as ordered lists.
+    """
+    if not user_output or not expected_output:
+        return user_output.strip() == expected_output.strip()
+    
+    # Parse output into rows
+    user_rows = [line.strip() for line in user_output.strip().split('\n') if line.strip()]
+    expected_rows = [line.strip() for line in expected_output.strip().split('\n') if line.strip()]
+    
+    if order_sensitive:
+        return user_rows == expected_rows
+    else:
+        # Compare as sets (order doesn't matter)
+        return sorted(user_rows) == sorted(expected_rows)
+
+
+@router.post("/assessment/run-sql")
+async def run_sql(request: RunSQLRequest):
+    """
+    RUN SQL - Execute SQL query against sample data.
+    Returns the query results for preview.
+    Used when user clicks "Run" button on SQL questions.
+    """
+    logger.info(f"Running SQL for question {request.question_id}")
+    
+    db = get_database()
+    
+    # Validate question ID
+    if not ObjectId.is_valid(request.question_id):
+        raise HTTPException(status_code=400, detail="Invalid question ID")
+    
+    question = await db.questions.find_one({"_id": ObjectId(request.question_id)})
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    
+    # Verify this is a SQL question
+    question_type = question.get("question_type", "").upper()
+    if question_type != "SQL":
+        raise HTTPException(status_code=400, detail="This endpoint is for SQL questions only")
+    
+    # Get schemas and sample data
+    schemas = question.get("schemas", {})
+    sample_data = question.get("sample_data", {})
+    
+    if not schemas:
+        raise HTTPException(status_code=400, detail="Question has no table schemas defined")
+    
+    # Build and execute SQL script
+    sql_script = build_sql_script(
+        schemas=schemas,
+        sample_data=sample_data,
+        user_query=request.sql_query
+    )
+    
+    logger.info(f"Executing SQL script:\n{sql_script[:500]}...")
+    
+    result = await execute_sql_with_judge0(sql_script)
+    
+    # Format response
+    if result["success"]:
+        status = "executed"
+        message = "Query executed successfully"
+    elif result["status_id"] == 6:
+        status = "syntax_error"
+        message = "SQL syntax error"
+    else:
+        status = "error"
+        message = result.get("stderr") or result.get("compile_output") or "Execution failed"
+    
+    return {
+        "question_id": request.question_id,
+        "status": status,
+        "message": message,
+        "output": result.get("stdout", ""),
+        "error": result.get("stderr", "") or result.get("compile_output", ""),
+        "time": result.get("time"),
+        "memory": result.get("memory"),
+        "sql_script_preview": sql_script[:1000] + "..." if len(sql_script) > 1000 else sql_script,
+    }
+
+
+@router.post("/assessment/submit-sql")
+async def submit_sql(
+    request: SubmitSQLRequest,
+    user_id: str = Query(None, description="User ID for tracking submission"),
+):
+    """
+    SUBMIT SQL - Execute SQL query and compare with expected result.
+    Used when user clicks "Submit" button on SQL questions.
+    
+    The question should have a reference_query that produces the expected output.
+    """
+    logger.info(f"Submitting SQL for question {request.question_id}")
+    
+    db = get_database()
+    
+    # Validate question ID
+    if not ObjectId.is_valid(request.question_id):
+        raise HTTPException(status_code=400, detail="Invalid question ID")
+    
+    question = await db.questions.find_one({"_id": ObjectId(request.question_id)})
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    
+    # Verify this is a SQL question
+    question_type = question.get("question_type", "").upper()
+    if question_type != "SQL":
+        raise HTTPException(status_code=400, detail="This endpoint is for SQL questions only")
+    
+    # Get schemas and sample data
+    schemas = question.get("schemas", {})
+    sample_data = question.get("sample_data", {})
+    reference_query = question.get("reference_query")
+    evaluation = question.get("evaluation", {})
+    order_sensitive = evaluation.get("order_sensitive", False)
+    
+    if not schemas:
+        raise HTTPException(status_code=400, detail="Question has no table schemas defined")
+    
+    # Execute user's query
+    user_sql_script = build_sql_script(
+        schemas=schemas,
+        sample_data=sample_data,
+        user_query=request.sql_query
+    )
+    
+    logger.info(f"Executing user SQL script...")
+    user_result = await execute_sql_with_judge0(user_sql_script)
+    
+    # Check for execution errors
+    if not user_result["success"] and user_result["status_id"] != 3:
+        error_msg = user_result.get("stderr") or user_result.get("compile_output") or "Query execution failed"
+        
+        response = {
+            "question_id": request.question_id,
+            "status": "error",
+            "passed": False,
+            "message": f"Query execution failed: {error_msg}",
+            "user_output": "",
+            "error": error_msg,
+            "time": user_result.get("time"),
+            "memory": user_result.get("memory"),
+        }
+        
+        # Save submission if user_id provided
+        if user_id:
+            submission_record = {
+                "user_id": user_id,
+                "question_id": request.question_id,
+                "question_type": "SQL",
+                "sql_query": request.sql_query,
+                "user_output": "",
+                "error": error_msg,
+                "passed": False,
+                "status": "error",
+                "started_at": request.started_at,
+                "submitted_at": request.submitted_at or datetime.utcnow().isoformat(),
+                "time_spent_seconds": request.time_spent_seconds,
+                "execution_time": user_result.get("time"),
+                "memory_used": user_result.get("memory"),
+                "created_at": datetime.utcnow(),
+            }
+            await db.sql_submissions.insert_one(submission_record)
+        
+        return response
+    
+    user_output = user_result.get("stdout", "").strip()
+    
+    # If there's a reference query, execute it and compare
+    if reference_query:
+        ref_sql_script = build_sql_script(
+            schemas=schemas,
+            sample_data=sample_data,
+            user_query=reference_query
+        )
+        
+        logger.info(f"Executing reference SQL script...")
+        ref_result = await execute_sql_with_judge0(ref_sql_script)
+        
+        if not ref_result["success"]:
+            # Reference query failed - this is a problem with the question setup
+            logger.error(f"Reference query execution failed: {ref_result.get('stderr')}")
+            raise HTTPException(
+                status_code=500, 
+                detail="Reference query execution failed. Please contact administrator."
+            )
+        
+        expected_output = ref_result.get("stdout", "").strip()
+        passed = compare_sql_results(user_output, expected_output, order_sensitive)
+        
+    else:
+        # No reference query - just check if query executed successfully
+        passed = user_result["success"]
+        expected_output = None
+    
+    # Determine status
+    if passed:
+        status = "accepted"
+        message = "Query produces correct results!"
+    else:
+        status = "wrong_answer"
+        message = "Query output does not match expected results"
+    
+    response = {
+        "question_id": request.question_id,
+        "status": status,
+        "passed": passed,
+        "message": message,
+        "user_output": user_output,
+        "expected_output": expected_output if not passed else None,  # Only show expected on failure
+        "time": user_result.get("time"),
+        "memory": user_result.get("memory"),
+        "score": 100 if passed else 0,
+        "max_score": 100,
+    }
+    
+    # Save submission if user_id provided
+    if user_id:
+        submission_record = {
+            "user_id": user_id,
+            "question_id": request.question_id,
+            "question_type": "SQL",
+            "sql_query": request.sql_query,
+            "user_output": user_output,
+            "expected_output": expected_output,
+            "passed": passed,
+            "status": status,
+            "score": 100 if passed else 0,
+            "started_at": request.started_at,
+            "submitted_at": request.submitted_at or datetime.utcnow().isoformat(),
+            "time_spent_seconds": request.time_spent_seconds,
+            "execution_time": user_result.get("time"),
+            "memory_used": user_result.get("memory"),
+            "created_at": datetime.utcnow(),
+        }
+        insert_result = await db.sql_submissions.insert_one(submission_record)
+        response["submission_id"] = str(insert_result.inserted_id)
+        logger.info(f"Saved SQL submission for user {user_id}")
+    
+    return response
