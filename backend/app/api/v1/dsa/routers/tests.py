@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Depends, status, BackgroundTasks
 from typing import List, Dict, Any, Optional
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timedelta
 import secrets
 import csv
 import io
@@ -827,6 +827,10 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     
     if not test.get("is_published", False):
         raise HTTPException(status_code=403, detail="Test is not published")
+
+    # If paused, block new entrants (existing candidates can continue / resume submissions)
+    if test.get("pausedAt"):
+        raise HTTPException(status_code=403, detail="Test is currently paused")
     
     # For test-taking platform, allow taking published tests regardless of time window
     # The time window is informational, not restrictive
@@ -2696,6 +2700,180 @@ async def publish_test(
         "test_token": test.get("test_token"),
     }
     return test_dict
+
+
+@router.post("/{test_id}/pause", response_model=dict)
+async def pause_test(
+    test_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Pause a DSA test.
+    Keeps the test published (is_published stays True) but records pausedAt.
+    Candidates can still be added; new test starts should be blocked while paused.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    if str(test.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to pause this test")
+
+    # If already paused, return idempotently
+    if test.get("pausedAt"):
+        return {"message": "Test is already paused", "test_id": test_id, "is_published": test.get("is_published", False), "pausedAt": test.get("pausedAt").isoformat() if test.get("pausedAt") else None}
+
+    now = datetime.utcnow()
+    await db.tests.update_one(
+        {"_id": ObjectId(test_id)},
+        {"$set": {"pausedAt": now, "statusBeforePause": "published" if test.get("is_published", False) else "draft"}}
+    )
+
+    return {"message": "Test paused successfully", "test_id": test_id, "is_published": test.get("is_published", False), "pausedAt": now.isoformat()}
+
+
+@router.post("/{test_id}/resume", response_model=dict)
+async def resume_test(
+    test_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Resume a paused DSA test.
+    Mirrors AIML: sets is_published back to True and records resumeAt timestamp.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    if str(test.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to resume this test")
+
+    # If not paused, return idempotently
+    if not test.get("pausedAt"):
+        return {"message": "Test is already active", "test_id": test_id, "is_published": test.get("is_published", False)}
+
+    now = datetime.utcnow()
+    await db.tests.update_one(
+        {"_id": ObjectId(test_id)},
+        {"$set": {"resumeAt": now, "pausedAt": None, "statusBeforePause": None}}
+    )
+
+    return {"message": "Test resumed successfully", "test_id": test_id, "is_published": test.get("is_published", False), "resumeAt": now.isoformat()}
+
+
+@router.post("/{test_id}/clone", response_model=dict)
+async def clone_test(
+    test_id: str,
+    payload: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Clone a DSA test for the current editor (creates a new test document with a new ID).
+    Payload:
+      - newTitle: str (required)
+      - keepSchedule: bool (optional, default False)
+      - keepCandidates: bool (optional, default False)
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    original = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not original:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    # Ensure DSA test (legacy may not have test_type)
+    if original.get("test_type") not in (None, "dsa"):
+        raise HTTPException(status_code=400, detail="Not a DSA test")
+
+    if str(original.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to clone this test")
+
+    new_title = (payload.get("newTitle") or "").strip()
+    if len(new_title) < 3:
+        raise HTTPException(status_code=400, detail="newTitle must be at least 3 characters")
+
+    keep_schedule = bool(payload.get("keepSchedule", False))
+    keep_candidates = bool(payload.get("keepCandidates", False))
+
+    now = datetime.utcnow()
+    duration_minutes = int(original.get("duration_minutes") or 60)
+
+    cloned = {k: v for k, v in original.items() if k != "_id"}
+    cloned["title"] = new_title
+    cloned["created_by"] = user_id
+    cloned["created_at"] = now
+    cloned["updated_at"] = now
+    cloned["is_published"] = False
+    cloned["is_active"] = False
+    cloned["pausedAt"] = None
+    cloned["statusBeforePause"] = None
+    cloned["resumeAt"] = None
+    cloned["test_token"] = None
+    cloned["test_type"] = "dsa"
+
+    if not keep_candidates:
+        cloned["invited_users"] = []
+
+    if keep_schedule:
+        if not cloned.get("start_time"):
+            cloned["start_time"] = now
+        if not cloned.get("end_time"):
+            cloned["end_time"] = now + timedelta(minutes=duration_minutes)
+    else:
+        cloned["examMode"] = "strict"
+        cloned["schedule"] = None
+        cloned["start_time"] = now
+        cloned["end_time"] = now + timedelta(minutes=duration_minutes)
+
+    res = await db.tests.insert_one(cloned)
+    created = await db.tests.find_one({"_id": res.inserted_id})
+    if not created:
+        raise HTTPException(status_code=500, detail="Failed to clone test")
+
+    return {
+        "message": "Test cloned successfully",
+        "data": {
+            "id": str(created["_id"]),
+            "title": created.get("title", ""),
+            "description": created.get("description", ""),
+            "duration_minutes": created.get("duration_minutes", 0),
+            "start_time": created.get("start_time").isoformat() if created.get("start_time") else None,
+            "end_time": created.get("end_time").isoformat() if created.get("end_time") else None,
+            "examMode": created.get("examMode", "strict"),
+            "schedule": created.get("schedule"),
+            "is_active": created.get("is_active", False),
+            "is_published": created.get("is_published", False),
+            "invited_users": created.get("invited_users", []),
+            "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in created.get("question_ids", [])],
+            "question_time_limits": created.get("question_time_limits"),
+            "test_token": created.get("test_token"),
+            "pausedAt": created.get("pausedAt"),
+        }
+    }
 
 @router.delete("/{test_id}")
 async def delete_test(

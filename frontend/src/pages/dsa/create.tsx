@@ -154,22 +154,15 @@ export default function CreateDSACompetencyPage() {
       const response = await dsaApi.post("/tests/", payload);
       
       const testId = response.data?.id || response.data?._id;
-      
-      // Automatically publish the test
+
+      // New tests should start unpublished; editor will publish from Test Management.
+      alert("Test created successfully!");
+      // After creating, land on Test Management filtered to this test only.
       if (testId) {
-        try {
-          await dsaApi.patch(`/tests/${testId}/publish`, {
-            is_published: true
-          });
-        } catch (publishError: any) {
-          console.error("Error publishing test:", publishError);
-          // Continue even if publish fails - test is still created
-        }
+        router.push(`/dsa/tests?testId=${encodeURIComponent(String(testId))}`);
+      } else {
+        router.push("/dsa/tests");
       }
-      
-      // Redirect to dashboard
-      alert("Test created and published successfully!");
-      router.push("/dashboard");
     } catch (error: any) {
       alert(error.response?.data?.detail || error.response?.data?.message || "Failed to create DSA competency test");
       setLoading(false);
@@ -650,7 +643,7 @@ export default function CreateDSACompetencyPage() {
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() => router.push("/dashboard")}
+                onClick={() => router.push("/dsa")}
                 style={{ flex: 1 }}
               >
                 Cancel

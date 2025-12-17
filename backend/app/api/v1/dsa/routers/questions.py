@@ -670,3 +670,58 @@ async def delete_question(
     
     return {"message": "Question deleted successfully"}
 
+
+@router.post("/{question_id}/clone", response_model=dict)
+async def clone_question(
+    question_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Clone (duplicate) a DSA question for the same owner.
+    Creates a new question document with a new _id and timestamps, and sets is_published=False.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(question_id):
+        raise HTTPException(status_code=400, detail="Invalid question ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    original = await db.questions.find_one({"_id": ObjectId(question_id)})
+    if not original:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if str(original.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to clone this question")
+
+    # Build clone doc (strip identity/timestamps)
+    clone_doc = {k: v for k, v in original.items() if k not in ("_id", "id", "created_at", "updated_at")}
+    clone_doc["title"] = f"{original.get('title', 'Untitled')} (Copy)"
+    clone_doc["is_published"] = False
+    clone_doc["created_at"] = datetime.utcnow()
+    clone_doc["updated_at"] = datetime.utcnow()
+    # Keep module isolation
+    clone_doc["module_type"] = original.get("module_type") or "dsa"
+    clone_doc["created_by"] = user_id
+
+    # Validate the cloned payload for DSA coding questions (skip SQL)
+    _validate_dsa_coding_payload(clone_doc)
+
+    result = await db.questions.insert_one(clone_doc)
+    created = await db.questions.find_one({"_id": result.inserted_id})
+    return {
+        "id": str(created["_id"]),
+        "title": created.get("title", ""),
+        "description": created.get("description", ""),
+        "difficulty": created.get("difficulty", ""),
+        "languages": created.get("languages", []),
+        "starter_code": created.get("starter_code", {}),
+        "public_testcases": created.get("public_testcases", []),
+        "hidden_testcases": created.get("hidden_testcases", []),
+        "is_published": created.get("is_published", False),
+        "created_at": created.get("created_at").isoformat() if created.get("created_at") else None,
+        "updated_at": created.get("updated_at").isoformat() if created.get("updated_at") else None,
+    }
+

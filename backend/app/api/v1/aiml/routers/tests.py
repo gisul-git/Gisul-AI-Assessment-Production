@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Body, Depends, status
 from typing import List, Dict, Any, Optional
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import secrets
 import urllib.parse
@@ -1048,6 +1048,101 @@ async def resume_test(
         "test_id": test_id,
         "is_published": True,
         "resumeAt": now.isoformat()
+    }
+
+
+@router.post("/{test_id}/clone")
+async def clone_test(
+    test_id: str,
+    payload: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Clone an AIML test for the current editor (creates a new test document with a new ID).
+    Payload:
+      - newTitle: str (required)
+      - keepSchedule: bool (optional, default False)
+      - keepCandidates: bool (optional, default False)
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+    
+    original = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not original:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    # Ensure AIML test
+    if original.get("test_type") != "aiml":
+        raise HTTPException(status_code=400, detail="Not an AIML test")
+    
+    if str(original.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to clone this test")
+    
+    new_title = (payload.get("newTitle") or "").strip()
+    if len(new_title) < 3:
+        raise HTTPException(status_code=400, detail="newTitle must be at least 3 characters")
+
+    keep_schedule = bool(payload.get("keepSchedule", False))
+    keep_candidates = bool(payload.get("keepCandidates", False))
+
+    now = datetime.utcnow()
+    duration_minutes = int(original.get("duration_minutes") or 60)
+    
+    cloned = {k: v for k, v in original.items() if k != "_id"}
+    cloned["title"] = new_title
+    cloned["created_by"] = user_id
+    cloned["created_at"] = now
+    cloned["updated_at"] = now
+    cloned["is_published"] = False
+    cloned["is_active"] = False
+    cloned["pausedAt"] = None
+    cloned["statusBeforePause"] = None
+    cloned["resumeAt"] = None
+    cloned["test_token"] = None
+    cloned["test_type"] = "aiml"
+
+    if not keep_candidates:
+        cloned["invited_users"] = []
+
+    if keep_schedule:
+        if not cloned.get("start_time"):
+            cloned["start_time"] = now
+        if not cloned.get("end_time"):
+            cloned["end_time"] = now + timedelta(minutes=duration_minutes)
+    else:
+        cloned["examMode"] = "strict"
+        cloned["schedule"] = None
+        cloned["start_time"] = now
+        cloned["end_time"] = now + timedelta(minutes=duration_minutes)
+
+    res = await db.tests.insert_one(cloned)
+    created = await db.tests.find_one({"_id": res.inserted_id})
+    if not created:
+        raise HTTPException(status_code=500, detail="Failed to clone test")
+
+    return {
+        "message": "Test cloned successfully",
+        "data": {
+            "id": str(created["_id"]),
+            "title": created.get("title", ""),
+            "description": created.get("description", ""),
+            "duration_minutes": created.get("duration_minutes", 0),
+            "start_time": created.get("start_time").isoformat() if created.get("start_time") else None,
+            "end_time": created.get("end_time").isoformat() if created.get("end_time") else None,
+            "examMode": created.get("examMode", "strict"),
+            "schedule": created.get("schedule"),
+            "is_active": created.get("is_active", False),
+            "is_published": created.get("is_published", False),
+            "invited_users": created.get("invited_users", []),
+            "test_token": created.get("test_token"),
+            "pausedAt": created.get("pausedAt"),
+        }
     }
 
 

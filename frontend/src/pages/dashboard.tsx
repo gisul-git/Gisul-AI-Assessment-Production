@@ -599,16 +599,27 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       const originalAssessment = assessments.find(a => a.id === assessmentId);
       const assessmentType = originalAssessment?.type || 'assessment';
       
-      // Use different endpoint for custom MCQ
-      const endpoint = assessmentType === 'custom_mcq' 
-        ? `/api/custom-mcq/clone?assessmentId=${assessmentId}`
-        : `/api/assessments/clone?assessmentId=${assessmentId}`;
-      
-      const response = await axios.post(endpoint, {
-        newTitle: newTitle.trim(),
-        keepSchedule: false,
-        keepCandidates: false,
-      });
+      let response: any;
+      if (assessmentType === 'dsa') {
+        // DSA has its own backend clone endpoint
+        const r = await dsaApi.post(`/tests/${assessmentId}/clone`, {
+          newTitle: newTitle.trim(),
+          keepSchedule: false,
+          keepCandidates: false,
+        });
+        response = { data: r.data }; // normalize
+      } else {
+        // Keep existing behavior for other cards (do not change)
+        const endpoint = assessmentType === 'custom_mcq' 
+          ? `/api/custom-mcq/clone?assessmentId=${assessmentId}`
+          : `/api/assessments/clone?assessmentId=${assessmentId}`;
+        
+        response = await axios.post(endpoint, {
+          newTitle: newTitle.trim(),
+          keepSchedule: false,
+          keepCandidates: false,
+        });
+      }
       
       // Handle response - check both success wrapper and direct response
       const responseData = response.data;
@@ -1740,7 +1751,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       borderTop: "1px solid #E8FAF0" 
                     }}>
                       {/* CASE A: Draft - Show Edit and Delete, HIDE Analytics */}
-                      {assessment.status === 'draft' && assessment.type !== 'dsa' && (
+                      {assessment.status === 'draft' && (
                         <>
                         <button
                           type="button"
@@ -1763,8 +1774,10 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           }}
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (assessment.type === 'aiml' || assessment.type === 'dsa') {
-                              // Direct to unified test edit resolver
+                            if (assessment.type === 'dsa') {
+                              router.push(`/dsa/tests/${assessment.id}/edit`);
+                            } else if (assessment.type === 'aiml') {
+                              // keep existing AIML behavior (do not change)
                               router.push(`/tests/${assessment.id}/edit`);
                             } else if (assessment.type === 'custom_mcq') {
                               router.push(`/custom-mcq/create?testId=${assessment.id}`);
@@ -1856,7 +1869,10 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (assessment.type === 'aiml' || assessment.type === 'dsa') {
+                              if (assessment.type === 'dsa') {
+                                router.push(`/dsa/tests/${assessment.id}/edit`);
+                              } else if (assessment.type === 'aiml') {
+                                // keep existing AIML behavior (do not change)
                                 router.push(`/tests/${assessment.id}/edit`);
                               } else if (assessment.type === 'custom_mcq') {
                                 router.push(`/custom-mcq/create?testId=${assessment.id}`);
