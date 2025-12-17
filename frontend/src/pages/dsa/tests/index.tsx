@@ -35,6 +35,7 @@ interface Test {
   invited_users: string[]
   question_ids?: string[]
   test_token?: string
+  pausedAt?: string | null
 }
 
 export default function TestsListPage() {
@@ -224,6 +225,11 @@ export default function TestsListPage() {
                         >
                           {test.is_published ? 'Published' : 'Draft'}
                         </span>
+                        {test.pausedAt && (
+                          <span className="px-2 py-1 rounded text-xs bg-amber-500/20 text-amber-700">
+                            Paused
+                          </span>
+                        )}
                         <div className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Users className="h-3 w-3" />
                           {test.invited_users?.length || 0} candidates

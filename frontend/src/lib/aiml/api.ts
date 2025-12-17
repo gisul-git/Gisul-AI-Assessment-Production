@@ -17,7 +17,11 @@ aimlApi.interceptors.request.use(
       let token: string | null = null
       
       try {
-        const session = await getSession()
+        // Don't block requests for too long waiting on NextAuth
+        const session = await Promise.race([
+          getSession(),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 300)),
+        ])
         if (session?.backendToken) {
           token = session.backendToken
         }

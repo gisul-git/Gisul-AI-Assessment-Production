@@ -87,7 +87,7 @@ export default function AimlTestEditPage() {
         question_ids: form.question_ids,
       });
       alert("Test updated");
-      router.push("/aiml/tests");
+      router.push(`/aiml/tests?testId=${encodeURIComponent(String(id))}&refreshed=true`);
     } catch (err: any) {
       console.error("Failed to save AIML test:", err);
       setError(err.response?.data?.detail || "Failed to save test");
@@ -118,7 +118,7 @@ export default function AimlTestEditPage() {
           </div>
           <button
             className="btn-secondary"
-            onClick={() => router.push("/aiml/tests")}
+            onClick={() => router.push(`/aiml/tests?testId=${encodeURIComponent(String(id))}`)}
           >
             ← Back
           </button>
@@ -188,7 +188,7 @@ export default function AimlTestEditPage() {
             </button>
             <button
               className="btn-secondary"
-              onClick={() => router.push("/aiml/tests")}
+              onClick={() => router.push(`/aiml/tests?testId=${encodeURIComponent(String(id))}`)}
               style={{ marginTop: 0 }}
             >
               Cancel

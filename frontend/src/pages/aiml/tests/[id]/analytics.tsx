@@ -238,20 +238,9 @@ export default function AnalyticsPage() {
     if (!testId || typeof testId !== 'string') return
     
     try {
-      const candidate = candidates.find(c => c.email === email)
-      if (!candidate) {
-        alert("Candidate not found")
-        return
-      }
-      
-      const response = await aimlApi.post(`/tests/${testId}/add-candidate`, {
-        name: candidate.name,
-        email: candidate.email,
-      })
-      
+      const response = await aimlApi.post(`/tests/${testId}/send-invitation`, { email })
       if (response.data) {
-        alert("Invitation resent successfully!")
-        // Refresh candidates list
+        alert("Invitation sent successfully!")
         const candidatesResponse = await aimlApi.get(`/tests/${testId}/candidates`)
         setCandidates(candidatesResponse.data || [])
       }
