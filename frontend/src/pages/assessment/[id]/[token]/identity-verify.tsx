@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/router";
 import IdentityVerification from "@/proctoring/components/IdentityVerification";
+import { getGateContext } from "@/lib/gateContext";
 
 interface VerificationStep {
   id: string;
@@ -38,7 +39,8 @@ export default function IdentityVerificationPage() {
     
     if (!storedEmail || !storedName) {
       if (id && token) {
-        router.replace(`/assessment/${id}/${token}`);
+        const ctx = getGateContext(id as string);
+        router.replace(ctx?.entryUrl || `/assessment/${id}/${token}`);
       }
       return;
     }
@@ -276,8 +278,9 @@ export default function IdentityVerificationPage() {
         console.log('[Identity] Screen stream stored globally for take.tsx');
       }
       
-      // Navigate to exam
-      router.push(`/assessment/${id}/${token}/take`);
+      // Navigate to exam (flow-aware)
+      const ctx = getGateContext(id as string);
+      router.push(ctx?.finalTakeUrl || `/assessment/${id}/${token}/take`);
     }
   };
   
@@ -342,6 +345,7 @@ export default function IdentityVerificationPage() {
                   assessmentId={id as string}
                   token={token as string}
                   candidateEmail={email || ""}
+                  skipBackendSave={getGateContext(id as string)?.flowType !== "ai"}
                   onCaptureComplete={handleCaptureComplete}
                   onError={handleCaptureError}
                 />

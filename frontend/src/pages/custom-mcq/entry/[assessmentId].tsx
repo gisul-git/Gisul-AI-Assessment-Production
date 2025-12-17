@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import { customMCQApi } from "../../../lib/custom-mcq/api";
+import { setGateContext } from "../../../lib/gateContext";
 
 export default function CustomMCQEntryPage() {
   const router = useRouter();
@@ -36,12 +37,27 @@ export default function CustomMCQEntryPage() {
       );
 
       if (result.verified) {
-        // Store candidate info in sessionStorage
+        // Store candidate info in sessionStorage (shared gate + legacy custom-mcq take)
+        sessionStorage.setItem("candidateEmail", email.trim().toLowerCase());
+        sessionStorage.setItem("candidateName", name.trim());
         sessionStorage.setItem(
           `custom_mcq_${assessmentId}`,
           JSON.stringify({ name: name.trim(), email: email.trim().toLowerCase(), token: token as string })
         );
-        router.push(`/custom-mcq/take/${assessmentId}?token=${token}`);
+
+        // Store gate routing context so shared gate can route to Custom MCQ take page
+        setGateContext({
+          flowType: "custom-mcq",
+          assessmentId: assessmentId as string,
+          token: token as string,
+          candidateEmail: email.trim().toLowerCase(),
+          candidateName: name.trim(),
+          entryUrl: `/custom-mcq/entry/${assessmentId}?token=${encodeURIComponent(token as string)}`,
+          finalTakeUrl: `/custom-mcq/take/${assessmentId}?token=${encodeURIComponent(token as string)}`,
+        });
+
+        // Redirect into unified gate
+        router.push(`/precheck/${assessmentId}/${encodeURIComponent(token as string)}`);
       }
     } catch (err: any) {
       console.error("Verification error:", err);

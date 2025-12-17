@@ -355,6 +355,7 @@ async def create_custom_mcq_assessment(
             "submissions": {},  # Store candidate submissions
             "totalMarks": total_marks,
             "currentStation": request.currentStation or 1,  # Track current station
+            "proctoringSettings": request.proctoringSettings.model_dump() if getattr(request, "proctoringSettings", None) else None,
         }
         
         # Only add token and URL for scheduled assessments
@@ -572,12 +573,12 @@ async def update_custom_mcq_assessment(
         if request.passPercentage is not None:
             update_doc["passPercentage"] = request.passPercentage
         
-        # Handle status update (draft -> scheduled)
+        # Handle status update (draft -> scheduled/active)
         if request.status is not None:
             update_doc["status"] = request.status
-            # If changing from draft to scheduled, validate and generate token if needed
-            if request.status == "scheduled":
-                # Validate required fields for scheduled
+            # If publishing (scheduled/active), validate and generate token if needed
+            if request.status in ("scheduled", "active"):
+                # Validate required fields for published assessments
                 current_title = update_doc.get("title") or assessment.get("title", "")
                 current_questions = update_doc.get("questions") or assessment.get("questions", [])
                 
@@ -603,6 +604,10 @@ async def update_custom_mcq_assessment(
         # Update current station if provided
         if request.currentStation is not None:
             update_doc["currentStation"] = request.currentStation
+
+        # Update proctoring settings if provided
+        if getattr(request, "proctoringSettings", None) is not None:
+            update_doc["proctoringSettings"] = request.proctoringSettings.model_dump() if request.proctoringSettings else None
         
         await db.custom_mcq_assessments.update_one(
             {"_id": assessment_oid},
@@ -613,8 +618,8 @@ async def update_custom_mcq_assessment(
         updated_assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
         response_data = {"message": "Assessment updated successfully"}
         
-        # If status changed to scheduled and token was generated, include it
-        if request.status == "scheduled" and updated_assessment and updated_assessment.get("assessmentToken"):
+        # If status changed to scheduled/active and token exists, include it
+        if request.status in ("scheduled", "active") and updated_assessment and updated_assessment.get("assessmentToken"):
             assessment_id = str(updated_assessment["_id"])
             assessment_token = updated_assessment["assessmentToken"]
             response_data["assessmentToken"] = assessment_token

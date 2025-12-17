@@ -526,7 +526,9 @@ async def get_test_for_candidate(
         "title": test.get("title", ""),
         "description": test.get("description", ""),
         "duration_minutes": test.get("duration_minutes", 0),
-        "questions": questions
+        "questions": questions,
+        # Include proctoring settings for candidate runtime toggle (backward compatible)
+        "proctoringSettings": test.get("proctoringSettings"),
     }
     
     # Add timing information if test has been started

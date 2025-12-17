@@ -5,6 +5,7 @@ import { Button } from '../../components/dsa/ui/button'
 import { Input } from '../../components/dsa/ui/input'
 import dsaApi from '../../lib/dsa/api'
 import { AlertCircle } from 'lucide-react'
+import { setGateContext } from '../../lib/gateContext'
 
 export default function TestPage() {
   const router = useRouter()
@@ -90,8 +91,20 @@ export default function TestPage() {
       sessionStorage.setItem("candidateName", name.trim())
       sessionStorage.setItem("candidateUserId", candidateInfo.user_id)
       
-      // Redirect to precheck page first (don't start test yet - will start after instructions)
-      router.push(`/test/${testId}/precheck?token=${encodeURIComponent(token!)}&user_id=${encodeURIComponent(candidateInfo.user_id)}`)
+      // Store gate routing context so shared gate can route to DSA take page
+      setGateContext({
+        flowType: "dsa",
+        assessmentId: String(testId),
+        token: token!,
+        candidateEmail: email.trim(),
+        candidateName: name.trim(),
+        candidateUserId: candidateInfo.user_id,
+        entryUrl: `/test/${testId}?token=${encodeURIComponent(token!)}`,
+        finalTakeUrl: `/test/${testId}/take?token=${encodeURIComponent(token!)}&user_id=${encodeURIComponent(candidateInfo.user_id)}`,
+      })
+      
+      // Redirect into unified gate
+      router.push(`/precheck/${testId}/${encodeURIComponent(token!)}`)
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to verify candidate. Please check your name and email.')
       setVerifying(false)

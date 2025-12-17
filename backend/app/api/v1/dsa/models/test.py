@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Literal
+from typing import List, Optional, Dict, Literal, Any
 from datetime import datetime
 from bson import ObjectId
 from .question import PyObjectId
@@ -13,6 +13,10 @@ class QuestionTiming(BaseModel):
     """Timing configuration for a single question in PER_QUESTION mode"""
     question_id: str
     duration_minutes: int  # Time allocated for this specific question
+
+
+class ProctoringSettings(BaseModel):
+    aiProctoringEnabled: Optional[bool] = None
 
 
 class Test(BaseModel):
@@ -34,6 +38,9 @@ class Test(BaseModel):
     timer_mode: TimerMode = "GLOBAL"  # GLOBAL = single timer, PER_QUESTION = individual timers
     question_timings: Optional[List[QuestionTiming]] = None  # Only used when timer_mode = PER_QUESTION
 
+    # Proctoring (optional, backward compatible)
+    proctoringSettings: Optional[ProctoringSettings] = None
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -53,6 +60,9 @@ class TestCreate(BaseModel):
     # Timer configuration (new fields - backward compatible with defaults)
     timer_mode: TimerMode = "GLOBAL"
     question_timings: Optional[List[QuestionTiming]] = None  # Only used when timer_mode = PER_QUESTION
+
+    # Proctoring (optional, backward compatible)
+    proctoringSettings: Optional[ProctoringSettings] = None
 
 class TestInviteRequest(BaseModel):
     test_id: str

@@ -79,6 +79,10 @@ export default function AnalyticsPage() {
   const [analytics, setAnalytics] = useState<CandidateAnalytics | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingAnalytics, setLoadingAnalytics] = useState(false)
+  const [proctorLogs, setProctorLogs] = useState<any[]>([])
+  const [eventTypeLabels, setEventTypeLabels] = useState<Record<string, string>>({})
+  const [loadingProctorLogs, setLoadingProctorLogs] = useState(false)
+  const [showProctorLogs, setShowProctorLogs] = useState(false)
   const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
   const [newCandidateName, setNewCandidateName] = useState("")
   const [newCandidateEmail, setNewCandidateEmail] = useState("")
@@ -96,6 +100,37 @@ export default function AnalyticsPage() {
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
 
+  const fetchProctorLogs = async (userKey: string) => {
+    if (!testId || typeof testId !== 'string') return
+    if (!userKey) return
+
+    setLoadingProctorLogs(true)
+    try {
+      const response = await fetch(
+        `/api/proctor/logs?assessmentId=${encodeURIComponent(testId)}&userId=${encodeURIComponent(userKey)}`
+      )
+      const data = await response.json()
+
+      if (data.success && data.data) {
+        setProctorLogs(data.data.logs || [])
+        setEventTypeLabels(data.data.eventTypeLabels || {})
+        // Auto-show logs when available (candidate expects to see violations without extra click)
+        if ((data.data.logs || []).length > 0) {
+          setShowProctorLogs(true)
+        }
+      } else {
+        setProctorLogs([])
+        setEventTypeLabels({})
+      }
+    } catch (error) {
+      console.error('Error fetching proctor logs:', error)
+      setProctorLogs([])
+      setEventTypeLabels({})
+    } finally {
+      setLoadingProctorLogs(false)
+    }
+  }
+
   const fetchAnalytics = async (userId: string) => {
     if (!testId || typeof testId !== 'string') return
     
@@ -103,6 +138,12 @@ export default function AnalyticsPage() {
     try {
       const response = await aimlApi.get(`/tests/${testId}/candidates/${userId}/analytics`)
       setAnalytics(response.data)
+      // Proctor logs are keyed by the same identifier used by /api/proctor/record.
+      // For AIML we record with candidate email (preferred) and fall back to userId.
+      const email = response.data?.candidate?.email
+      await fetchProctorLogs(email || userId)
+      // Ensure UI is ready to display logs for newly selected candidate
+      setShowProctorLogs(true)
     } catch (error) {
       console.error('Error fetching analytics:', error)
       alert('Failed to load analytics')
@@ -185,6 +226,20 @@ export default function AnalyticsPage() {
       hour12: true
     }
     return date.toLocaleString('en-US', options)
+  }
+
+  const formatViolationDate = (dateString: string | null) => {
+    if (!dateString) return 'N/A'
+    const date = new Date(dateString)
+    return date.toLocaleString('en-US', {
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    })
   }
 
   const validateEmail = (email: string): boolean => {
@@ -824,6 +879,98 @@ export default function AnalyticsPage() {
                       <div style={{ fontSize: "1rem" }}>{formatDate(analytics.submission.submitted_at)}</div>
                     </div>
                   </div>
+                </div>
+
+                {/* Proctoring Logs Section */}
+                <div style={{
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "0.75rem",
+                  padding: "1.5rem",
+                  backgroundColor: "#ffffff",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                      <AlertTriangle style={{ width: "20px", height: "20px", color: "#f59e0b" }} />
+                      <h2 style={{ fontSize: "1.25rem", fontWeight: 600 }}>Proctoring Logs</h2>
+                      {proctorLogs.length > 0 && (
+                        <span style={{ padding: "0.25rem 0.75rem", fontSize: "0.75rem", fontWeight: 600, backgroundColor: "#fee2e2", color: "#991b1b", borderRadius: "9999px" }}>
+                          {proctorLogs.length} {proctorLogs.length === 1 ? 'violation' : 'violations'}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => setShowProctorLogs(!showProctorLogs)}
+                      disabled={loadingProctorLogs}
+                      style={{ marginTop: 0 }}
+                    >
+                      {loadingProctorLogs ? 'Loading...' : showProctorLogs ? 'Hide Logs' : 'Show Logs'}
+                    </button>
+                  </div>
+
+                  {loadingProctorLogs ? (
+                    <div style={{ textAlign: "center", padding: "1rem", color: "#64748b" }}>
+                      Loading proctoring logs...
+                    </div>
+                  ) : proctorLogs.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: "1rem", color: "#64748b" }}>
+                      No proctoring violations detected
+                    </div>
+                  ) : showProctorLogs ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "600px", overflowY: "auto" }}>
+                      {proctorLogs.map((log, index) => (
+                        <div
+                          key={log._id || index}
+                          style={{ border: "1px solid #fca5a5", borderRadius: "0.5rem", padding: "1rem", backgroundColor: "#fef2f2" }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "0.5rem" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                              <AlertTriangle style={{ width: "16px", height: "16px", color: "#ef4444", flexShrink: 0 }} />
+                              <span style={{ fontWeight: 600, color: "#991b1b" }}>
+                                {eventTypeLabels[log.eventType] || log.eventType || 'Unknown Violation'}
+                              </span>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", color: "#64748b" }}>
+                              <Clock style={{ width: "12px", height: "12px" }} />
+                              <span>{formatViolationDate(log.timestamp)}</span>
+                            </div>
+                          </div>
+
+                          {log.metadata && Object.keys(log.metadata).length > 0 && (
+                            <div style={{ marginTop: "0.5rem", fontSize: "0.875rem" }}>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Details:</div>
+                              <div style={{ backgroundColor: "#1e293b", borderRadius: "0.375rem", padding: "0.5rem", fontFamily: "monospace", fontSize: "0.75rem" }}>
+                                {Object.entries(log.metadata).map(([key, value]: any) => (
+                                  <div key={key} style={{ marginBottom: "0.25rem" }}>
+                                    <span style={{ color: "#94a3b8" }}>{key}:</span>{' '}
+                                    <span style={{ color: "#e2e8f0" }}>
+                                      {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {log.snapshotBase64 && (
+                            <div style={{ marginTop: "0.75rem" }}>
+                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.5rem" }}>Evidence Snapshot:</div>
+                              <img
+                                src={log.snapshotBase64.startsWith("data:") ? log.snapshotBase64 : `data:image/png;base64,${log.snapshotBase64}`}
+                                alt="Violation snapshot"
+                                style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #475569", maxHeight: "200px" }}
+                                onError={(e) => {
+                                  console.error("Error loading snapshot image:", e);
+                                  (e.target as HTMLImageElement).style.display = "none";
+                                }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Question Analytics */}

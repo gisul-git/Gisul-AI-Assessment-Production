@@ -457,6 +457,8 @@ async def get_test_public(
         # Include timer mode and question timings if set
         "timer_mode": test.get("timer_mode", "GLOBAL"),
         "question_timings": test.get("question_timings", []),
+        # Include proctoring settings for candidate runtime toggle (backward compatible)
+        "proctoringSettings": test.get("proctoringSettings"),
     }
     
     logger.info(f"[get_test_public] Returning test {test_id} for user {user_id}, duration_minutes={test_dict['duration_minutes']}")

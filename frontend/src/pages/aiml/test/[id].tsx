@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
+import { setGateContext } from "../../../lib/gateContext";
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -65,11 +66,25 @@ export default function AIMLTestVerifyPage() {
       
       const candidateInfo = verifyResponse.data;
 
-      // Start the test
-      await axios.post(`${apiUrl}/api/v1/aiml/tests/${testId}/start?user_id=${candidateInfo.user_id}`);
-      
-      // Redirect directly to test taking interface (no prechecks for AIML)
-      router.push(`/aiml/test/${testId}/take?token=${encodeURIComponent(token)}&user_id=${encodeURIComponent(candidateInfo.user_id)}`);
+      // Store candidate info for shared gate pages
+      sessionStorage.setItem("candidateEmail", email.trim());
+      sessionStorage.setItem("candidateName", name.trim());
+      sessionStorage.setItem("candidateUserId", candidateInfo.user_id);
+
+      // Store gate routing context so shared gate can route to AIML take page
+      setGateContext({
+        flowType: "aiml",
+        assessmentId: String(testId),
+        token,
+        candidateEmail: email.trim(),
+        candidateName: name.trim(),
+        candidateUserId: candidateInfo.user_id,
+        entryUrl: `/aiml/test/${testId}?token=${encodeURIComponent(token)}`,
+        finalTakeUrl: `/aiml/test/${testId}/take?token=${encodeURIComponent(token)}&user_id=${encodeURIComponent(candidateInfo.user_id)}`,
+      });
+
+      // Redirect into unified gate (do NOT start test before gate)
+      router.push(`/precheck/${testId}/${encodeURIComponent(token)}`);
     } catch (err: any) {
       setError(err.response?.data?.detail || "Failed to verify. Please check your name and email.");
       setVerifying(false);

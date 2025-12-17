@@ -1,7 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/router";
 import { customMCQApi } from "../../../lib/custom-mcq/api";
 import { CustomMCQAssessment, MCQQuestion, SubjectiveQuestion, Question } from "../../../types/custom-mcq";
+import { useCameraProctor } from "../../../hooks/useCameraProctor";
+import WebcamPreview from "../../../components/WebcamPreview";
+import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
+import { useProctorUpload } from "@/hooks/useProctorUpload";
+// (import kept intentionally for future gateContext-based routing; currently enforced via sessionStorage flags)
 
 export default function CustomMCQTakePage() {
   const router = useRouter();
@@ -20,6 +25,109 @@ export default function CustomMCQTakePage() {
   const [waitingForStart, setWaitingForStart] = useState(false);
   const [startTime, setStartTime] = useState<Date | null>(null);
   const [examStarted, setExamStarted] = useState(false); // Track if exam has been manually started (for flexible mode)
+  const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true);
+  const [proctoringEnabled, setProctoringEnabled] = useState(false);
+  const cameraStartRequestedRef = useRef(false);
+
+  const getViolationMessage = (eventType: string): string => {
+    const messages: Record<string, string> = {
+      GAZE_AWAY: "Please keep your eyes on the screen",
+      MULTIPLE_FACES_DETECTED: "Multiple faces detected in frame",
+      NO_FACE_DETECTED: "Please stay in front of the camera",
+      TAB_SWITCH: "Tab switch detected",
+      FOCUS_LOST: "Window focus lost",
+      FULLSCREEN_EXIT: "Exited fullscreen mode",
+    };
+    return messages[eventType] || "Violation detected";
+  };
+
+  const { recordViolation: recordProctorViolation } = useProctorUpload({
+    assessmentId: String(assessmentId || ""),
+    candidateId: candidateInfo?.email || "",
+  });
+
+  const {
+    isCameraOn,
+    isModelLoaded,
+    facesCount,
+    errors: cameraErrors,
+    startCamera,
+    stopCamera,
+    videoRef,
+    canvasRef,
+  } = useCameraProctor({
+    userId: candidateInfo?.email || "",
+    assessmentId: String(assessmentId || ""),
+    enabled: cameraProctorEnabled,
+    debugMode: false,
+    onViolation: (violation) => {
+      pushViolationToast({
+        id: `${violation.eventType}-${Date.now()}`,
+        eventType: violation.eventType,
+        message: getViolationMessage(violation.eventType),
+        timestamp: violation.timestamp || new Date().toISOString(),
+      });
+    },
+  });
+
+  // Enable proctoring (tab switch / focus lost) only once exam has started
+  useEffect(() => {
+    if (!assessmentId) return;
+    if (candidateInfo && examStarted && !submitting) {
+      setProctoringEnabled(true);
+    }
+  }, [assessmentId, candidateInfo, examStarted, submitting]);
+
+  // Tab visibility + focus detection (same as AI take page)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!proctoringEnabled) return;
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        recordProctorViolation(
+          {
+            eventType: "TAB_SWITCH",
+            timestamp: new Date().toISOString(),
+            assessmentId: String(assessmentId || ""),
+            candidateId: candidateInfo?.email || "",
+          },
+          null
+        );
+        pushViolationToast({
+          id: `TAB_SWITCH-${Date.now()}`,
+          eventType: "TAB_SWITCH",
+          message: getViolationMessage("TAB_SWITCH"),
+          timestamp: new Date().toISOString(),
+        });
+      }
+    };
+
+    const handleBlur = () => {
+      recordProctorViolation(
+        {
+          eventType: "FOCUS_LOST",
+          timestamp: new Date().toISOString(),
+          assessmentId: String(assessmentId || ""),
+          candidateId: candidateInfo?.email || "",
+        },
+        null
+      );
+      pushViolationToast({
+        id: `FOCUS_LOST-${Date.now()}`,
+        eventType: "FOCUS_LOST",
+        message: getViolationMessage("FOCUS_LOST"),
+        timestamp: new Date().toISOString(),
+      });
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, [proctoringEnabled, recordProctorViolation, assessmentId, candidateInfo?.email]);
 
   // Format date and time for display
   const formatDateTime = (date: Date) => {
@@ -39,6 +147,18 @@ export default function CustomMCQTakePage() {
       if (!assessmentId || !token) return;
 
       try {
+        // Enforce unified gate completion (deep-link safety)
+        const id = String(assessmentId);
+        const precheckCompleted = sessionStorage.getItem(`precheckCompleted_${id}`);
+        const instructionsAcknowledged = sessionStorage.getItem(`instructionsAcknowledged_${id}`);
+        const candidateRequirementsCompleted = sessionStorage.getItem(`candidateRequirementsCompleted_${id}`);
+        const identityVerificationCompleted = sessionStorage.getItem(`identityVerificationCompleted_${id}`);
+
+        if (!precheckCompleted || !instructionsAcknowledged || !candidateRequirementsCompleted || !identityVerificationCompleted) {
+          router.replace(`/precheck/${id}/${encodeURIComponent(String(token))}`);
+          return;
+        }
+
         // Load candidate info from sessionStorage
         const stored = sessionStorage.getItem(`custom_mcq_${assessmentId}`);
         if (!stored) {
@@ -49,12 +169,21 @@ export default function CustomMCQTakePage() {
         const info = JSON.parse(stored);
         setCandidateInfo(info);
 
+        // Ensure shared gate pages have access to candidate info (if user refreshes mid-flow)
+        if (info?.email) sessionStorage.setItem("candidateEmail", String(info.email));
+        if (info?.name) sessionStorage.setItem("candidateName", String(info.name));
+
         // Verify access
         await customMCQApi.verifyCandidate(assessmentId as string, token as string, info.email, info.name);
 
         // Load assessment (don't mark as started yet for flexible mode)
         const assessmentData = await customMCQApi.getAssessmentForTaking(assessmentId as string, token as string);
         setAssessment(assessmentData);
+
+        // Apply runtime camera toggle based on admin proctoring setting:
+        // Only explicit true enables camera/model; missing/false => OFF (per PROCTORING_AI_TOGGLE_NOTES.md)
+        const aiEnabled = (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled === true;
+        setCameraProctorEnabled(aiEnabled);
 
         // Calculate timer based on exam mode
         const now = new Date();
@@ -141,6 +270,23 @@ export default function CustomMCQTakePage() {
 
     loadAssessment();
   }, [assessmentId, token, router]);
+
+  // Start/stop camera only after the exam actually starts (avoids "Camera OFF" pre-start states)
+  useEffect(() => {
+    if (!assessmentId) return;
+    if (!cameraProctorEnabled) {
+      stopCamera();
+      cameraStartRequestedRef.current = false;
+      return;
+    }
+    if (assessment && candidateInfo && examStarted && !submitting) {
+      if (!cameraStartRequestedRef.current) {
+        cameraStartRequestedRef.current = true;
+        setTimeout(() => startCamera(), 200);
+      }
+      return;
+    }
+  }, [assessmentId, cameraProctorEnabled, assessment, candidateInfo, examStarted, submitting, startCamera, stopCamera]);
 
   // Auto-transition when exam time arrives (for both strict and flexible modes)
   useEffect(() => {
@@ -503,6 +649,17 @@ export default function CustomMCQTakePage() {
 
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#ffffff", padding: "2rem" }}>
+      <ViolationToast />
+      {/* Hidden canvas used by useCameraProctor to capture snapshots */}
+      <canvas ref={canvasRef} style={{ display: "none" }} />
+      {cameraProctorEnabled && (
+        <WebcamPreview
+          ref={videoRef}
+          cameraOn={isCameraOn}
+          faceMeshStatus={cameraErrors?.length ? "error" : isModelLoaded ? "loaded" : "loading"}
+          facesCount={facesCount}
+        />
+      )}
       <div style={{ maxWidth: "1000px", margin: "0 auto", display: "flex", gap: "2rem" }}>
         {/* Question Type Selector (Left Panel) - Only show if both types exist */}
         {hasBothTypes && examStarted && (

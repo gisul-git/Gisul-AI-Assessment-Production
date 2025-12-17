@@ -56,6 +56,9 @@ export interface CustomMCQAssessment {
     endTime?: string;
     duration?: number;
   };
+  proctoringSettings?: {
+    aiProctoringEnabled?: boolean;
+  };
 }
 
 export interface AssessmentSubmission {

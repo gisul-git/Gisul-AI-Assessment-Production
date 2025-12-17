@@ -42,6 +42,10 @@ class Candidate(BaseModel):
     email: str
 
 
+class ProctoringSettings(BaseModel):
+    aiProctoringEnabled: Optional[bool] = None
+
+
 class CreateCustomMCQAssessmentRequest(BaseModel):
     """Request to create a custom MCQ assessment"""
     title: Optional[str] = None  # Optional for drafts
@@ -56,6 +60,7 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     passPercentage: int = Field(default=50, ge=0, le=100)
     status: Optional[str] = Field(default="draft", pattern=r"^(draft|scheduled)$")  # Draft or scheduled
     currentStation: Optional[int] = Field(default=1, ge=1, le=5)  # Track which station user is on
+    proctoringSettings: Optional[ProctoringSettings] = None
 
 
 class UpdateCustomMCQAssessmentRequest(BaseModel):
@@ -72,6 +77,7 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     passPercentage: Optional[int] = Field(default=None, ge=0, le=100)
     status: Optional[str] = Field(default=None, pattern=r"^(draft|scheduled)$")  # Allow status updates
     currentStation: Optional[int] = Field(default=None, ge=1, le=5)  # Track which station user is on
+    proctoringSettings: Optional[ProctoringSettings] = None
 
 
 class ValidateCSVRequest(BaseModel):
@@ -168,6 +174,7 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     passPercentage: float = Field(50.0, ge=0, le=100, description="Passing percentage")
     status: Optional[str] = Field("draft", description="Assessment status")
     currentStation: Optional[int] = Field(1, description="Current station/step")
+    proctoringSettings: Optional[ProctoringSettings] = None
 
 
 class UpdateCustomMCQAssessmentRequest(BaseModel):
@@ -184,6 +191,7 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     passPercentage: Optional[float] = Field(None, ge=0, le=100, description="Passing percentage")
     status: Optional[str] = Field(None, description="Assessment status")
     currentStation: Optional[int] = Field(None, description="Current station/step")
+    proctoringSettings: Optional[ProctoringSettings] = None
 
 
 class ValidateCSVRequest(BaseModel):

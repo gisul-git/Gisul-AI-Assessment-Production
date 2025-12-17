@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
+import { getGateContext } from "@/lib/gateContext";
 
 export default function AssessmentInstructionsPage() {
   const router = useRouter();
@@ -21,7 +22,8 @@ export default function AssessmentInstructionsPage() {
     
     if (!storedEmail || !storedName) {
       if (id && token) {
-        router.replace(`/assessment/${id}/${token}`);
+        const ctx = getGateContext(id as string);
+        router.replace(ctx?.entryUrl || `/assessment/${id}/${token}`);
       }
       return;
     }
@@ -33,13 +35,22 @@ export default function AssessmentInstructionsPage() {
       return;
     }
     
-    // Fetch assessment info
+    const ctx = getGateContext(id as string);
+    const isAIFlow = !ctx || ctx.flowType === "ai";
+
+    // AI: fetch schedule; non-AI: skip fetch and show defaults
+    if (!isAIFlow) {
+      setAssessmentInfo(null);
+      setIsLoading(false);
+      return;
+    }
+
     const fetchAssessment = async () => {
       try {
         const response = await axios.get(
           `/api/assessment/get-schedule?assessmentId=${id}&token=${token}`
         );
-        
+
         if (response.data?.success) {
           setAssessmentInfo(response.data.data);
         }
@@ -49,10 +60,8 @@ export default function AssessmentInstructionsPage() {
         setIsLoading(false);
       }
     };
-    
-    if (id && token) {
-      fetchAssessment();
-    }
+
+    if (id && token) fetchAssessment();
   }, [id, token, router]);
   
   const handleAcknowledge = useCallback(() => {

@@ -4,6 +4,10 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/router'
 import dynamic from 'next/dynamic'
 import axios from 'axios'
+import { useCameraProctor } from '../../../../hooks/useCameraProctor'
+import WebcamPreview from '../../../../components/WebcamPreview'
+import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
+import { useProctorUpload } from '@/hooks/useProctorUpload'
 
 const AIMLCompetencyNotebook = dynamic(
   () => import('../../../../components/aiml/competency/AIMLCompetencyNotebook'),
@@ -63,6 +67,27 @@ export default function AIMLTestTakePage() {
   const [lastSaved, setLastSaved] = useState<Date | null>(null)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const autoSaveRef = useRef<NodeJS.Timeout | null>(null)
+  const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true)
+  const [candidateEmail, setCandidateEmail] = useState<string | null>(null)
+  const [proctoringEnabled, setProctoringEnabled] = useState(false)
+  const cameraStartRequestedRef = useRef(false)
+
+  const getViolationMessage = (eventType: string): string => {
+    const messages: Record<string, string> = {
+      GAZE_AWAY: 'Please keep your eyes on the screen',
+      MULTIPLE_FACES_DETECTED: 'Multiple faces detected in frame',
+      NO_FACE_DETECTED: 'Please stay in front of the camera',
+      TAB_SWITCH: 'Tab switch detected',
+      FOCUS_LOST: 'Window focus lost',
+      FULLSCREEN_EXIT: 'Exited fullscreen mode',
+    }
+    return messages[eventType] || 'Violation detected'
+  }
+
+  const { recordViolation: recordProctorViolation } = useProctorUpload({
+    assessmentId: String(testId || ''),
+    candidateId: candidateEmail || userId || '',
+  })
 
   useEffect(() => {
     if (!testId) return
@@ -70,6 +95,18 @@ export default function AIMLTestTakePage() {
     const urlParams = new URLSearchParams(window.location.search)
     const urlToken = urlParams.get('token')
     const urlUserId = urlParams.get('user_id')
+
+    // Enforce unified gate completion (deep-link safety)
+    const id = String(testId)
+    const precheckCompleted = sessionStorage.getItem(`precheckCompleted_${id}`)
+    const instructionsAcknowledged = sessionStorage.getItem(`instructionsAcknowledged_${id}`)
+    const candidateRequirementsCompleted = sessionStorage.getItem(`candidateRequirementsCompleted_${id}`)
+    const identityVerificationCompleted = sessionStorage.getItem(`identityVerificationCompleted_${id}`)
+
+    if (urlToken && (!precheckCompleted || !instructionsAcknowledged || !candidateRequirementsCompleted || !identityVerificationCompleted)) {
+      router.replace(`/precheck/${id}/${encodeURIComponent(urlToken)}`)
+      return
+    }
     
     if (!urlToken || !urlUserId) {
       alert('Invalid test link')
@@ -79,9 +116,95 @@ export default function AIMLTestTakePage() {
     
     setToken(urlToken)
     setUserId(urlUserId)
+    setCandidateEmail(sessionStorage.getItem("candidateEmail"))
     
     fetchTestData(urlToken, urlUserId)
   }, [testId])
+
+  const {
+    isCameraOn,
+    isModelLoaded,
+    facesCount,
+    errors: cameraErrors,
+    startCamera,
+    stopCamera,
+    videoRef,
+    canvasRef,
+  } = useCameraProctor({
+    userId: candidateEmail || userId || "",
+    assessmentId: String(testId || ""),
+    enabled: cameraProctorEnabled,
+    debugMode: false,
+    onViolation: (violation) => {
+      pushViolationToast({
+        id: `${violation.eventType}-${Date.now()}`,
+        eventType: violation.eventType,
+        message: getViolationMessage(violation.eventType),
+        timestamp: violation.timestamp || new Date().toISOString(),
+      })
+    },
+  })
+
+  // Enable proctoring (tab switch / focus lost) once exam is in progress
+  useEffect(() => {
+    if (!testId) return
+    if ((candidateEmail || userId) && questions.length > 0 && !submitted) {
+      setProctoringEnabled(true)
+    }
+  }, [testId, candidateEmail, userId, questions.length, submitted])
+
+  // Tab visibility + focus detection (same as AI take page)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!proctoringEnabled) return
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Persist to admin analytics
+        recordProctorViolation(
+          {
+            eventType: 'TAB_SWITCH',
+            timestamp: new Date().toISOString(),
+            assessmentId: String(testId || ''),
+            candidateId: candidateEmail || userId || '',
+          },
+          null
+        )
+        pushViolationToast({
+          id: `TAB_SWITCH-${Date.now()}`,
+          eventType: 'TAB_SWITCH',
+          message: getViolationMessage('TAB_SWITCH'),
+          timestamp: new Date().toISOString(),
+        })
+      }
+    }
+
+    const handleBlur = () => {
+      // Persist to admin analytics
+      recordProctorViolation(
+        {
+          eventType: 'FOCUS_LOST',
+          timestamp: new Date().toISOString(),
+          assessmentId: String(testId || ''),
+          candidateId: candidateEmail || userId || '',
+        },
+        null
+      )
+      pushViolationToast({
+        id: `FOCUS_LOST-${Date.now()}`,
+        eventType: 'FOCUS_LOST',
+        message: getViolationMessage('FOCUS_LOST'),
+        timestamp: new Date().toISOString(),
+      })
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('blur', handleBlur)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('blur', handleBlur)
+    }
+  }, [proctoringEnabled, recordProctorViolation, testId, candidateEmail, userId])
 
   // Timer
   useEffect(() => {
@@ -113,6 +236,11 @@ export default function AIMLTestTakePage() {
       const testData = response.data
       setTest(testData)
       setQuestions(testData.questions || [])
+
+      // Apply runtime camera toggle based on admin proctoring setting:
+      // Only explicit true enables camera/model; missing/false => OFF (per PROCTORING_AI_TOGGLE_NOTES.md)
+      const aiEnabled = testData?.proctoringSettings?.aiProctoringEnabled === true
+      setCameraProctorEnabled(aiEnabled)
       
       // Use time_remaining_seconds from backend if available (test already started)
       // Otherwise, auto-start the test and use full duration
@@ -156,7 +284,35 @@ export default function AIMLTestTakePage() {
     }
   }
 
+  // Start/stop camera once test data is ready
+  useEffect(() => {
+    if (!testId) return
+    if (!cameraProctorEnabled) {
+      stopCamera()
+      cameraStartRequestedRef.current = false
+      return
+    }
+    if (questions.length > 0 && (candidateEmail || userId) && !submitted) {
+      if (!cameraStartRequestedRef.current) {
+        cameraStartRequestedRef.current = true
+        setTimeout(() => startCamera(), 200)
+      }
+      return
+    }
+  }, [testId, cameraProctorEnabled, questions.length, candidateEmail, userId, submitted, startCamera, stopCamera])
+
   const currentQuestion = questions[currentQuestionIndex]
+
+  // Webcam preview tile (same as AI/DSA when enabled)
+  // Rendered at the top-level so it overlays the notebook IDE.
+  const webcamTile = cameraProctorEnabled ? (
+    <WebcamPreview
+      ref={videoRef}
+      cameraOn={isCameraOn}
+      faceMeshStatus={cameraErrors?.length ? "error" : isModelLoaded ? "loaded" : "loading"}
+      facesCount={facesCount}
+    />
+  ) : null
 
   const autoSaveAnswer = useCallback(async (questionId: string, code: string) => {
     if (!token || !userId || !testId) return
@@ -324,6 +480,10 @@ export default function AIMLTestTakePage() {
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50">
+      <ViolationToast />
+      {/* Hidden canvas used by useCameraProctor to capture snapshots */}
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+      {webcamTile}
       {/* Header with Timer and Navigation */}
       <header className="bg-white border-b border-emerald-200 shadow-sm">
         <div className="px-4 py-3 flex items-center justify-between">
