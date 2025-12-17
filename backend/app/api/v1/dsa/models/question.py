@@ -66,6 +66,17 @@ class Example(BaseModel):
     output: str             # e.g., "[0,1]"
     explanation: Optional[str] = None  # e.g., "Because nums[0] + nums[1] == 9"
 
+# SQL-specific models
+class TableSchema(BaseModel):
+    """Schema definition for a SQL table"""
+    columns: Dict[str, str]  # column_name: data_type (e.g., {"id": "INT PRIMARY KEY"})
+
+class SQLEvaluation(BaseModel):
+    """Evaluation configuration for SQL questions"""
+    engine: str = "postgres"  # Database engine
+    comparison: str = "result_set"  # Comparison method
+    order_sensitive: bool = False  # Whether row order matters
+
 class Question(BaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     title: str
@@ -104,14 +115,24 @@ class QuestionCreate(BaseModel):
     constraints: List[str] = []         # Constraints like "1 <= n <= 10^5"
     
     difficulty: str
-    languages: List[str]  # Any language Judge0 supports
-    public_testcases: List[TestCase]
-    hidden_testcases: List[TestCase]
-    starter_code: Dict[str, str]
+    languages: List[str] = []  # Any language Judge0 supports (optional for SQL)
+    public_testcases: List[TestCase] = []  # Optional for SQL questions
+    hidden_testcases: List[TestCase] = []  # Optional for SQL questions
+    starter_code: Dict[str, str] = {}  # Optional for SQL questions
     function_signature: Optional[FunctionSignature] = None
     secure_mode: bool = False
     wrapper_template: Optional[str] = None
     is_published: bool = False
+    
+    # SQL-specific fields (optional - only used for question_type="SQL")
+    question_type: Optional[str] = None  # "coding" or "SQL"
+    sql_category: Optional[str] = None  # select, join, aggregation, subquery, window
+    schemas: Optional[Dict[str, Any]] = None  # Table schemas {table_name: {columns: {...}}}
+    sample_data: Optional[Dict[str, List[List[Any]]]] = None  # Sample data per table
+    starter_query: Optional[str] = None  # SQL starter template
+    reference_query: Optional[str] = None  # Correct SQL query for evaluation
+    hints: Optional[List[str]] = None  # Optional hints for SQL questions
+    evaluation: Optional[Dict[str, Any]] = None  # SQL evaluation config
 
 class QuestionUpdate(BaseModel):
     title: Optional[str] = None
@@ -129,5 +150,15 @@ class QuestionUpdate(BaseModel):
     secure_mode: Optional[bool] = None
     wrapper_template: Optional[str] = None
     is_published: Optional[bool] = None
+    
+    # SQL-specific fields
+    question_type: Optional[str] = None
+    sql_category: Optional[str] = None
+    schemas: Optional[Dict[str, Any]] = None
+    sample_data: Optional[Dict[str, List[List[Any]]]] = None
+    starter_query: Optional[str] = None
+    reference_query: Optional[str] = None  # Correct SQL query for evaluation
+    hints: Optional[List[str]] = None
+    evaluation: Optional[Dict[str, Any]] = None
 
 

@@ -13,16 +13,15 @@ export default function Station2UploadCSV({ assessmentData, updateAssessmentData
   const [validating, setValidating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [questionType, setQuestionType] = useState<"mcq" | "subjective">("mcq");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleDownloadSample = async () => {
     try {
-      const blob = await customMCQApi.downloadSampleCSV(questionType);
+      const blob = await customMCQApi.downloadSampleCSV();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = questionType === "subjective" ? "sample_subjective.csv" : "sample_mcq.csv";
+      a.download = "sample_mcq.csv";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -38,13 +37,10 @@ export default function Station2UploadCSV({ assessmentData, updateAssessmentData
       setError(null);
       setSuccess(null);
 
-      const result = await customMCQApi.uploadCSV(file, questionType);
+      const result = await customMCQApi.uploadCSV(file);
       
-      // Merge with existing questions instead of replacing
-      const existingQuestions = assessmentData.questions || [];
-      const updatedQuestions = [...existingQuestions, ...result.questions];
-      updateAssessmentData({ questions: updatedQuestions });
-      setSuccess(`Successfully uploaded! Found ${result.totalQuestions} valid ${questionType} questions.`);
+      updateAssessmentData({ questions: result.questions });
+      setSuccess(`Successfully uploaded! Found ${result.totalQuestions} valid questions.`);
       setUploadedFile(file);
     } catch (err: any) {
       setError(err.message || "Failed to upload CSV");
@@ -108,50 +104,6 @@ export default function Station2UploadCSV({ assessmentData, updateAssessmentData
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-        {/* Question Type Selector */}
-        <div
-          style={{
-            padding: "1.5rem",
-            border: "2px solid #A8E8BC",
-            borderRadius: "0.5rem",
-            backgroundColor: "#ffffff",
-          }}
-        >
-          <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Question Type</h3>
-          <div style={{ display: "flex", gap: "1rem" }}>
-            <button
-              type="button"
-              onClick={() => setQuestionType("mcq")}
-              style={{
-                padding: "0.75rem 1.5rem",
-                border: questionType === "mcq" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
-                borderRadius: "0.5rem",
-                backgroundColor: questionType === "mcq" ? "#E8FAF0" : "#ffffff",
-                color: questionType === "mcq" ? "#1E5A3B" : "#2D7A52",
-                fontWeight: questionType === "mcq" ? 600 : 400,
-                cursor: "pointer",
-              }}
-            >
-              MCQ Questions
-            </button>
-            <button
-              type="button"
-              onClick={() => setQuestionType("subjective")}
-              style={{
-                padding: "0.75rem 1.5rem",
-                border: questionType === "subjective" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
-                borderRadius: "0.5rem",
-                backgroundColor: questionType === "subjective" ? "#E8FAF0" : "#ffffff",
-                color: questionType === "subjective" ? "#1E5A3B" : "#2D7A52",
-                fontWeight: questionType === "subjective" ? 600 : 400,
-                cursor: "pointer",
-              }}
-            >
-              Subjective Questions
-            </button>
-          </div>
-        </div>
-
         {/* Download Sample */}
         <div
           style={{
@@ -163,9 +115,7 @@ export default function Station2UploadCSV({ assessmentData, updateAssessmentData
         >
           <h3 style={{ marginBottom: "0.5rem", color: "#1E5A3B" }}>Sample CSV File</h3>
           <p style={{ marginBottom: "1rem", color: "#2D7A52", fontSize: "0.875rem" }}>
-            {questionType === "subjective" 
-              ? "Download the sample CSV file for subjective questions with columns: section, question, marks"
-              : "Download the sample CSV file for MCQ questions with columns: section, question, optionA, optionB, optionC, optionD, correctAn, answerType, marks"}
+            Download the sample CSV file to see the expected format with columns: section, question, optionA, optionB, optionC, optionD, correctAn, answerType, marks
           </p>
           <button
             type="button"
@@ -173,7 +123,7 @@ export default function Station2UploadCSV({ assessmentData, updateAssessmentData
             className="btn-secondary"
             style={{ width: "fit-content" }}
           >
-            📥 Download Sample CSV ({questionType === "subjective" ? "Subjective" : "MCQ"})
+            📥 Download Sample CSV
           </button>
         </div>
 

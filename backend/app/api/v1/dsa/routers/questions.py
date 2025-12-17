@@ -134,6 +134,11 @@ async def get_questions(
         }
         if "function_signature" in q and q.get("function_signature"):
             question_dict["function_signature"] = q["function_signature"]
+        # Include question_type to identify SQL vs coding questions
+        if q.get("question_type"):
+            question_dict["question_type"] = q.get("question_type")
+        if q.get("sql_category"):
+            question_dict["sql_category"] = q.get("sql_category")
         if "created_at" in q:
             question_dict["created_at"] = q["created_at"].isoformat() if isinstance(q.get("created_at"), datetime) else q.get("created_at")
         if "updated_at" in q:
@@ -193,6 +198,42 @@ async def get_question(
     # Add function_signature if it exists
     if "function_signature" in question and question.get("function_signature"):
         question_dict["function_signature"] = question["function_signature"]
+    
+    # Detect question type - explicit or inferred from SQL-specific fields
+    question_type = question.get("question_type")
+    
+    # Infer SQL type if not explicitly set but has SQL-specific fields
+    if not question_type:
+        has_schemas = question.get("schemas") and len(question.get("schemas", {})) > 0
+        has_sql_category = question.get("sql_category") is not None
+        has_starter_query = question.get("starter_query") is not None
+        has_evaluation = question.get("evaluation") and question.get("evaluation", {}).get("engine")
+        
+        if has_schemas or has_sql_category or has_starter_query or has_evaluation:
+            question_type = "SQL"
+            logger.info(f"[get_question] Inferred question_type=SQL for question {question_id}")
+    
+    # Add question_type to response
+    if question_type:
+        question_dict["question_type"] = question_type
+    
+    # Add SQL-specific fields
+    if question.get("sql_category"):
+        question_dict["sql_category"] = question.get("sql_category")
+    if question.get("schemas"):
+        question_dict["schemas"] = question.get("schemas")
+    if question.get("sample_data"):
+        question_dict["sample_data"] = question.get("sample_data")
+    if question.get("starter_query"):
+        question_dict["starter_query"] = question.get("starter_query")
+    if question.get("hints"):
+        question_dict["hints"] = question.get("hints")
+    if question.get("evaluation"):
+        question_dict["evaluation"] = question.get("evaluation")
+    if question.get("constraints"):
+        question_dict["constraints"] = question.get("constraints")
+    if question.get("examples"):
+        question_dict["examples"] = question.get("examples")
     
     # Add optional fields if they exist
     if "created_at" in question:
