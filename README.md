@@ -1,1 +1,0 @@
-# Gisul-AI-Assessment-Production
