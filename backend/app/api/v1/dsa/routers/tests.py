@@ -111,7 +111,66 @@ async def create_test(
                 if not q_created_by or str(q_created_by).strip() != user_id.strip():
                     raise HTTPException(status_code=403, detail=f"Question {question.get('title', 'Unknown')} does not belong to you")
     
+    # -------------------------------
+    # Exam window configuration (mirrors Custom MCQ)
+    # -------------------------------
+    def _coalesce(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    exam_mode = getattr(test, "examMode", None) or "strict"
+    # Support both nested schedule and top-level startTime/endTime/duration
+    schedule_obj = getattr(test, "schedule", None)
+    start_dt = _coalesce(
+        getattr(schedule_obj, "startTime", None) if schedule_obj else None,
+        getattr(test, "startTime", None),
+        getattr(test, "start_time", None),
+    )
+    end_dt = _coalesce(
+        getattr(schedule_obj, "endTime", None) if schedule_obj else None,
+        getattr(test, "endTime", None),
+        getattr(test, "end_time", None),
+    )
+    duration_minutes = _coalesce(
+        getattr(schedule_obj, "duration", None) if schedule_obj else None,
+        getattr(test, "duration", None),
+        getattr(test, "duration_minutes", None),
+    )
+
+    # Validate exam window rules
+    if exam_mode not in ("strict", "flexible"):
+        raise HTTPException(status_code=400, detail="Invalid examMode. Must be 'strict' or 'flexible'.")
+    if not start_dt or not end_dt:
+        raise HTTPException(status_code=400, detail="Start time and end time are required.")
+    if start_dt >= end_dt:
+        raise HTTPException(status_code=400, detail="End time must be after start time.")
+    if exam_mode == "flexible":
+        if not duration_minutes or int(duration_minutes) <= 0:
+            raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
+
+    # For strict mode, duration in schedule is null; but we keep legacy duration_minutes for compatibility:
+    # - GLOBAL timer: derive from window length
+    # - PER_QUESTION: duration_minutes may be overridden later by per-question sum
+    schedule_payload = {
+        "startTime": start_dt,
+        "endTime": end_dt,
+        "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
+    }
+
     test_dict = test.model_dump()
+    test_dict["examMode"] = exam_mode
+    test_dict["schedule"] = schedule_payload
+    # Ensure legacy fields are set (backward compatible)
+    test_dict["start_time"] = start_dt
+    test_dict["end_time"] = end_dt
+    if test.timer_mode == "GLOBAL":
+        if exam_mode == "strict":
+            window_minutes = int((end_dt - start_dt).total_seconds() // 60)
+            test_dict["duration_minutes"] = max(window_minutes, 1)
+        else:
+            test_dict["duration_minutes"] = int(duration_minutes)
     # Store the actual user ID who created the test - CRITICAL: Must be string, no whitespace
     # user_id is already normalized above
     test_dict["created_by"] = user_id
@@ -147,6 +206,8 @@ async def create_test(
             "duration_minutes": created_test.get("duration_minutes", 0),
             "start_time": created_test.get("start_time").isoformat() if created_test.get("start_time") else None,
             "end_time": created_test.get("end_time").isoformat() if created_test.get("end_time") else None,
+            "examMode": created_test.get("examMode", "strict"),
+            "schedule": created_test.get("schedule"),
             "is_active": created_test.get("is_active", False),
             "is_published": created_test.get("is_published", False),
             "invited_users": created_test.get("invited_users", []),
@@ -511,6 +572,8 @@ async def get_test(
         "duration_minutes": test.get("duration_minutes", 0),
         "start_time": test.get("start_time").isoformat() if test.get("start_time") else None,
         "end_time": test.get("end_time").isoformat() if test.get("end_time") else None,
+        "examMode": test.get("examMode", "strict"),
+        "schedule": test.get("schedule"),
         "is_active": test.get("is_active", False),
         "is_published": test.get("is_published", False),
         "invited_users": test.get("invited_users", []),
@@ -645,8 +708,67 @@ async def update_test(
                 if not q_created_by or str(q_created_by).strip() != user_id.strip():
                     raise HTTPException(status_code=403, detail=f"Question {question.get('title', 'Unknown')} does not belong to you")
     
+    # -------------------------------
+    # Exam window configuration (mirrors Custom MCQ)
+    # -------------------------------
+    def _coalesce(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    exam_mode = getattr(test, "examMode", None) or existing_test.get("examMode") or "strict"
+    schedule_obj = getattr(test, "schedule", None)
+    start_dt = _coalesce(
+        getattr(schedule_obj, "startTime", None) if schedule_obj else None,
+        getattr(test, "startTime", None),
+        getattr(test, "start_time", None),
+        existing_test.get("start_time"),
+        (existing_test.get("schedule") or {}).get("startTime"),
+    )
+    end_dt = _coalesce(
+        getattr(schedule_obj, "endTime", None) if schedule_obj else None,
+        getattr(test, "endTime", None),
+        getattr(test, "end_time", None),
+        existing_test.get("end_time"),
+        (existing_test.get("schedule") or {}).get("endTime"),
+    )
+    duration_minutes = _coalesce(
+        getattr(schedule_obj, "duration", None) if schedule_obj else None,
+        getattr(test, "duration", None),
+        getattr(test, "duration_minutes", None),
+        (existing_test.get("schedule") or {}).get("duration"),
+        existing_test.get("duration_minutes"),
+    )
+
+    if exam_mode not in ("strict", "flexible"):
+        raise HTTPException(status_code=400, detail="Invalid examMode. Must be 'strict' or 'flexible'.")
+    if not start_dt or not end_dt:
+        raise HTTPException(status_code=400, detail="Start time and end time are required.")
+    if start_dt >= end_dt:
+        raise HTTPException(status_code=400, detail="End time must be after start time.")
+    if exam_mode == "flexible":
+        if not duration_minutes or int(duration_minutes) <= 0:
+            raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
+
+    schedule_payload = {
+        "startTime": start_dt,
+        "endTime": end_dt,
+        "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
+    }
+
     # Prepare update data
     test_dict = test.model_dump()
+    test_dict["examMode"] = exam_mode
+    test_dict["schedule"] = schedule_payload
+    test_dict["start_time"] = start_dt
+    test_dict["end_time"] = end_dt
+    if test.timer_mode == "GLOBAL":
+        if exam_mode == "strict":
+            window_minutes = int((end_dt - start_dt).total_seconds() // 60)
+            test_dict["duration_minutes"] = max(window_minutes, 1)
+        else:
+            test_dict["duration_minutes"] = int(duration_minutes)
     # Preserve existing fields that shouldn't be updated
     test_dict["is_active"] = existing_test.get("is_active", True)
     test_dict["is_published"] = existing_test.get("is_published", False)
@@ -672,6 +794,8 @@ async def update_test(
             "duration_minutes": updated_test.get("duration_minutes", 0),
             "start_time": updated_test.get("start_time").isoformat() if updated_test.get("start_time") else None,
             "end_time": updated_test.get("end_time").isoformat() if updated_test.get("end_time") else None,
+            "examMode": updated_test.get("examMode", "strict"),
+            "schedule": updated_test.get("schedule"),
             "is_active": updated_test.get("is_active", False),
             "is_published": updated_test.get("is_published", False),
             "invited_users": updated_test.get("invited_users", []),
@@ -709,6 +833,22 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     # Only check if test is active flag is set
     if not test.get("is_active", True):
         raise HTTPException(status_code=400, detail="Test is not active")
+
+    # Resolve candidate email from user_id (email is the unique real-world identifier)
+    user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+    candidate_email = (user_doc or {}).get("email")
+    if not candidate_email:
+        raise HTTPException(status_code=400, detail="Candidate email not found")
+    candidate_email = str(candidate_email).strip().lower()
+
+    # Enforce single attempt per candidate email for this test (name can be same)
+    existing_completed_by_email = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "candidate_email": candidate_email,
+        "is_completed": True
+    })
+    if existing_completed_by_email:
+        raise HTTPException(status_code=400, detail="Test already completed for this email. A candidate can attempt the test only once.")
     
     # Check if user already started
     existing = await db.test_submissions.find_one({
@@ -717,6 +857,9 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     })
     
     if existing:
+        # Enforce single attempt per candidate: if completed, do not allow restart.
+        if existing.get("is_completed", False):
+            raise HTTPException(status_code=400, detail="Test already completed. A candidate can attempt the test only once.")
         return {
             "test_submission_id": str(existing["_id"]),
             "started_at": existing["started_at"].isoformat() if isinstance(existing.get("started_at"), datetime) else existing.get("started_at"),
@@ -727,6 +870,7 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     test_submission = {
         "test_id": test_id,
         "user_id": user_id,
+        "candidate_email": candidate_email,
         "submissions": [],
         "score": 0,
         "started_at": datetime.utcnow(),
@@ -1000,7 +1144,7 @@ async def process_ai_feedback_background(
                 {"$set": {"score": score}}
             )
         
-        # Recalculate total score for test submission
+        # Recalculate overall score for test submission (out of 100) after this question's feedback is ready
         test_submission = await db.test_submissions.find_one({
             "test_id": test_id,
             "user_id": user_id
@@ -1013,11 +1157,13 @@ async def process_ai_feedback_background(
                 "is_final_submission": True
             }).to_list(length=100)
             
-            # Calculate total score from submissions that have AI feedback or are marked as starter code only
-            new_total_score = sum(
-                s.get("score", 0) for s in all_submissions 
+            scored = [
+                s.get("score", 0) for s in all_submissions
                 if s.get("ai_feedback") is not None or s.get("status") == "no_code_written"
-            )
+            ]
+            question_count = max(len(test_submission.get("submissions") or []), 1)
+            # submissions array stores submission IDs, one per question; average keeps overall out of 100
+            new_total_score = int(round(sum(scored) / question_count))
             
             await db.test_submissions.update_one(
                 {"test_id": test_id, "user_id": user_id},
@@ -1084,6 +1230,24 @@ async def final_submit_test(
     
     if not test_submission:
         raise HTTPException(status_code=404, detail="Test submission not found. Please start the test first.")
+
+    # Enforce single attempt per candidate: final submit only once.
+    if test_submission.get("is_completed", False):
+        raise HTTPException(status_code=400, detail="Test already submitted. A candidate can submit the test only once.")
+
+    # Enforce single attempt per candidate email for this test (backward compatible: older submissions may not have candidate_email)
+    candidate_email = (test_submission.get("candidate_email") or "").strip().lower()
+    if not candidate_email:
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+        candidate_email = str((user_doc or {}).get("email") or "").strip().lower()
+    if candidate_email:
+        existing_completed_by_email = await db.test_submissions.find_one({
+            "test_id": test_id,
+            "candidate_email": candidate_email,
+            "is_completed": True
+        })
+        if existing_completed_by_email:
+            raise HTTPException(status_code=400, detail="Test already submitted for this email. A candidate can submit the test only once.")
     
     # Process each question submission
     # Use asyncio.gather to run test cases in parallel for faster execution
@@ -1313,26 +1477,27 @@ async def final_submit_test(
     submission_ids = await asyncio.gather(*submission_tasks)
     final_submissions = [sid for sid in submission_ids if sid is not None]
     
-    # Calculate initial total score (including starter code only submissions which have score 0)
-    # This ensures the score is accurate even before AI feedback completes
+    # Calculate initial overall score out of 100 (including starter code only submissions which have score 0).
+    # Normalize across questions so multi-question tests still score out of 100.
     initial_total_score = 0
     if final_submissions:
         all_submissions = await db.submissions.find({
             "_id": {"$in": [ObjectId(sid) for sid in final_submissions]}
         }).to_list(length=100)
         
-        # Sum scores from all submissions (starter code only already have score 0 and ai_feedback)
-        initial_total_score = sum(
-            s.get("score", 0) for s in all_submissions 
+        scored = [
+            s.get("score", 0) for s in all_submissions
             if s.get("ai_feedback") is not None or s.get("status") == "no_code_written"
-        )
+        ]
+        question_count = max(len(request.question_submissions), 1)
+        initial_total_score = int(round(sum(scored) / question_count))
     
     # Update test submission with final data (without activity logs - will be added in background)
     update_data = {
         "is_completed": True,
         "submitted_at": datetime.utcnow(),
         "submissions": final_submissions,
-        "score": initial_total_score,  # Include starter code only submissions (score 0) immediately
+        "score": initial_total_score,  # Overall score out of 100
         "final_submission_data": {
             "question_submissions": [
                 {
@@ -1366,7 +1531,7 @@ async def final_submit_test(
         "test_id": test_id,
         "user_id": user_id,
         "submissions_count": len(final_submissions),
-        "total_score": initial_total_score,  # Includes starter code only submissions (score 0) immediately
+        "total_score": initial_total_score,  # out of 100
         "submitted_at": update_data["submitted_at"].isoformat(),
         "ai_feedback_status": "processing",  # Indicates AI feedback is being generated
     }

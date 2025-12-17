@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from ..services.ai_generator import generate_question
 from ..services.ai_sql_generator import generate_sql_question
 from typing import Optional
+from ..services.expected_output import compute_expected_outputs_from_code
+from ..utils.judge0 import LANGUAGE_IDS
 
 router = APIRouter(prefix="/api/v1/dsa/admin", tags=["dsa"])
 
@@ -45,6 +47,36 @@ async def generate_question_endpoint(
             concepts=request.concepts,
             languages=all_languages
         )
+        # If AI generator returned stdin-only testcases, compute expected_output by executing
+        # a trusted reference solution program (no AI guessing of outputs).
+        public_tcs = question_data.get("public_testcases") or []
+        hidden_tcs = question_data.get("hidden_testcases") or []
+
+        # Detect stdin-only testcases (no expected_output anywhere)
+        all_tcs = public_tcs + hidden_tcs
+        has_any_expected = any(((tc or {}).get("expected_output") or "").strip() for tc in all_tcs)
+        if not has_any_expected and all_tcs:
+            # Prefer explicit python reference_solution (full working program) if provided by AI generator.
+            ref_code = (question_data.get("reference_solution") or "").strip()
+            ref_lang = "python"
+            lang_id = LANGUAGE_IDS.get(ref_lang)
+            if not ref_code:
+                # Fallback to python starter_code only if it is a full runnable solution (rare).
+                starter_code = question_data.get("starter_code") or {}
+                ref_code = (starter_code.get("python") or "").strip()
+                if not ref_code:
+                    raise HTTPException(status_code=500, detail="Cannot compute expected outputs: missing reference_solution")
+            if not lang_id:
+                raise HTTPException(status_code=500, detail="Cannot compute expected outputs: python language_id missing")
+
+            question_data["public_testcases"] = await compute_expected_outputs_from_code(ref_code, lang_id, public_tcs)
+            question_data["hidden_testcases"] = await compute_expected_outputs_from_code(ref_code, lang_id, hidden_tcs)
+            question_data["ai_generated"] = True
+
+            # Never expose reference_solution to frontend
+            if "reference_solution" in question_data:
+                del question_data["reference_solution"]
+
         return question_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

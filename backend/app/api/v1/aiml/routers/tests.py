@@ -53,7 +53,81 @@ async def create_test(
                 if not q_created_by or str(q_created_by).strip() != user_id.strip():
                     raise HTTPException(status_code=403, detail=f"Question {question.get('title', 'Unknown')} does not belong to you")
     
+    # -------------------------------
+    # Exam window configuration (mirrors Custom MCQ)
+    # -------------------------------
+    def _coalesce(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    exam_mode = getattr(test, "examMode", None) or "strict"
+    schedule_obj = getattr(test, "schedule", None)
+    start_dt = _coalesce(
+        getattr(schedule_obj, "startTime", None) if schedule_obj else None,
+        getattr(test, "startTime", None),
+        getattr(test, "start_time", None),
+    )
+    end_dt = _coalesce(
+        getattr(schedule_obj, "endTime", None) if schedule_obj else None,
+        getattr(test, "endTime", None),
+        getattr(test, "end_time", None),
+    )
+    duration_minutes = _coalesce(
+        getattr(schedule_obj, "duration", None) if schedule_obj else None,
+        getattr(test, "duration", None),
+        getattr(test, "duration_minutes", None),
+    )
+
+    if exam_mode not in ("strict", "flexible"):
+        raise HTTPException(status_code=400, detail="Invalid examMode. Must be 'strict' or 'flexible'.")
+    if not start_dt or not end_dt:
+        raise HTTPException(status_code=400, detail="Start time and end time are required.")
+    if start_dt >= end_dt:
+        raise HTTPException(status_code=400, detail="End time must be after start time.")
+    if exam_mode == "flexible":
+        if not duration_minutes or int(duration_minutes) <= 0:
+            raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
+
+    schedule_payload = {
+        "startTime": start_dt,
+        "endTime": end_dt,
+        "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
+    }
+
     test_dict = test.model_dump()
+    test_dict["examMode"] = exam_mode
+    test_dict["schedule"] = schedule_payload
+    # Ensure legacy fields are set (backward compatible)
+    test_dict["start_time"] = start_dt
+    test_dict["end_time"] = end_dt
+
+    # -------------------------------
+    # Timer configuration (mirrors DSA)
+    # -------------------------------
+    timer_mode = test_dict.get("timer_mode", "GLOBAL")
+    if timer_mode not in ("GLOBAL", "PER_QUESTION"):
+        raise HTTPException(status_code=400, detail="Invalid timer_mode. Must be 'GLOBAL' or 'PER_QUESTION'.")
+
+    if timer_mode == "PER_QUESTION":
+        qt = test_dict.get("question_timings") or []
+        if not qt:
+            raise HTTPException(status_code=400, detail="question_timings is required for PER_QUESTION timer_mode.")
+        total = 0
+        for item in qt:
+            mins = int(item.get("duration_minutes", 0) or 0)
+            if mins < 1:
+                raise HTTPException(status_code=400, detail="All question timings must be at least 1 minute.")
+            total += mins
+        test_dict["duration_minutes"] = total
+    else:
+        # GLOBAL timer
+        if exam_mode == "strict":
+            window_minutes = int((end_dt - start_dt).total_seconds() // 60)
+            test_dict["duration_minutes"] = max(window_minutes, 1)
+        else:
+            test_dict["duration_minutes"] = int(duration_minutes)
     test_dict["created_by"] = user_id
     test_dict["is_active"] = True
     test_dict["is_published"] = False
@@ -73,6 +147,10 @@ async def create_test(
             "duration_minutes": created_test.get("duration_minutes", 0),
             "start_time": created_test.get("start_time").isoformat() if created_test.get("start_time") else None,
             "end_time": created_test.get("end_time").isoformat() if created_test.get("end_time") else None,
+            "timer_mode": created_test.get("timer_mode", "GLOBAL"),
+            "question_timings": created_test.get("question_timings"),
+            "examMode": created_test.get("examMode", "strict"),
+            "schedule": created_test.get("schedule"),
             "is_active": created_test.get("is_active", False),
             "is_published": created_test.get("is_published", False),
             "question_ids": [str(qid) for qid in created_test.get("question_ids", [])],
@@ -107,6 +185,10 @@ async def get_tests(
             "duration_minutes": test.get("duration_minutes", 0),
             "start_time": test.get("start_time").isoformat() if test.get("start_time") else None,
             "end_time": test.get("end_time").isoformat() if test.get("end_time") else None,
+            "timer_mode": test.get("timer_mode", "GLOBAL"),
+            "question_timings": test.get("question_timings"),
+            "examMode": test.get("examMode", "strict"),
+            "schedule": test.get("schedule"),
             "is_active": test.get("is_active", False),
             "is_published": test.get("is_published", False),
             "question_ids": [str(qid) for qid in test.get("question_ids", [])],
@@ -276,6 +358,10 @@ async def get_test(
         "duration_minutes": test.get("duration_minutes", 0),
         "start_time": test.get("start_time").isoformat() if test.get("start_time") else None,
         "end_time": test.get("end_time").isoformat() if test.get("end_time") else None,
+        "timer_mode": test.get("timer_mode", "GLOBAL"),
+        "question_timings": test.get("question_timings"),
+        "examMode": test.get("examMode", "strict"),
+        "schedule": test.get("schedule"),
         "is_active": test.get("is_active", False),
         "is_published": test.get("is_published", False),
         "question_ids": [str(qid) for qid in test.get("question_ids", [])],
@@ -368,6 +454,32 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     
     if not test.get("is_active", True):
         raise HTTPException(status_code=400, detail="Test is not active")
+
+    # Enforce schedule window (strict/flexible both require start/end window)
+    schedule = test.get("schedule") or {}
+    start_time = schedule.get("startTime") or test.get("start_time")
+    end_time = schedule.get("endTime") or test.get("end_time")
+    now = datetime.utcnow()
+    if start_time and isinstance(start_time, datetime) and now < start_time:
+        raise HTTPException(status_code=403, detail="Test has not started yet.")
+    if end_time and isinstance(end_time, datetime) and now > end_time:
+        raise HTTPException(status_code=403, detail="Test window has ended.")
+
+    # Resolve candidate email (email is unique identity)
+    user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+    candidate_email = (user_doc or {}).get("email")
+    if not candidate_email:
+        raise HTTPException(status_code=400, detail="Candidate email not found")
+    candidate_email = str(candidate_email).strip().lower()
+
+    # Enforce one attempt per email per test
+    existing_completed_by_email = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "candidate_email": candidate_email,
+        "is_completed": True
+    })
+    if existing_completed_by_email:
+        raise HTTPException(status_code=400, detail="Test already completed for this email. A candidate can attempt the test only once.")
     
     # Check if user already started
     existing = await db.test_submissions.find_one({
@@ -386,6 +498,7 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     test_submission = {
         "test_id": test_id,
         "user_id": user_id,
+        "candidate_email": candidate_email,
         "submissions": [],
         "score": 0,
         "started_at": datetime.utcnow(),
@@ -470,11 +583,26 @@ async def get_test_for_candidate(
                     except:
                         started_datetime = None
             
-            if started_datetime:
-                duration_minutes = test.get("duration_minutes", 0)
-                duration_seconds = duration_minutes * 60
+        if started_datetime:
+            # Compute remaining time based on examMode semantics (without changing candidate UI):
+            # - strict: ends at scheduled endTime (fixed window)
+            # - flexible: fixed duration from schedule.duration but cannot exceed endTime
+            schedule = test.get("schedule") or {}
+            exam_mode = test.get("examMode", "strict")
+            end_time = schedule.get("endTime") or test.get("end_time")
+            end_remaining = None
+            if isinstance(end_time, datetime):
+                end_remaining = max(0, int((end_time - datetime.utcnow()).total_seconds()))
+
+            if exam_mode == "flexible":
+                dur = schedule.get("duration") or test.get("duration_minutes", 0)
+                duration_seconds = int(dur) * 60
                 elapsed_seconds = (datetime.utcnow() - started_datetime).total_seconds()
-                time_remaining_seconds = max(0, int(duration_seconds - elapsed_seconds))
+                remaining = max(0, int(duration_seconds - elapsed_seconds))
+                time_remaining_seconds = min(remaining, end_remaining) if end_remaining is not None else remaining
+            else:
+                # strict: remaining is until end of window
+                time_remaining_seconds = end_remaining
     
     # Get questions (without hidden testcases for candidate view)
     question_ids = test.get("question_ids", [])
@@ -680,14 +808,23 @@ async def submit_test(
         result = await db.test_submissions.insert_one(test_submission)
         test_submission["_id"] = result.inserted_id
     
-    # Check if already completed
-    if test_submission.get("is_completed"):
-        return {
-            "message": "Test already submitted",
+    # Enforce one attempt per email per test (email is unique)
+    candidate_email = (test_submission.get("candidate_email") or "").strip().lower()
+    if not candidate_email:
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+        candidate_email = str((user_doc or {}).get("email") or "").strip().lower()
+    if candidate_email:
+        existing_completed_by_email = await db.test_submissions.find_one({
             "test_id": test_id,
-            "score": test_submission.get("score", 0),
+            "candidate_email": candidate_email,
             "is_completed": True
-        }
+        })
+        if existing_completed_by_email:
+            raise HTTPException(status_code=400, detail="Test already submitted for this email. A candidate can attempt the test only once.")
+
+    # Check if already completed for this user_id
+    if test_submission.get("is_completed"):
+        raise HTTPException(status_code=400, detail="Test already submitted. A candidate can attempt the test only once.")
     
     # Get existing submissions from database
     existing_submissions = {sub.get("question_id"): sub for sub in test_submission.get("submissions", [])}
