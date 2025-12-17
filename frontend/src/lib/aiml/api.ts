@@ -20,7 +20,7 @@ aimlApi.interceptors.request.use(
       if (config.headers?.Authorization) return config
 
       let token: string | null = null
-      
+      // Use cached token first (fast path)
       try {
         if (cachedBackendToken) token = cachedBackendToken
 
