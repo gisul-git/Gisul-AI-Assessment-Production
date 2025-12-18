@@ -1064,6 +1064,9 @@ function getDefaultScore(questionType: string, difficulty: string): number {
     Subjective: { Easy: 4, Medium: 6, Hard: 8 },
     PseudoCode: { Easy: 6, Medium: 8, Hard: 10 },
     Coding: { Easy: 10, Medium: 15, Hard: 20 },
+    // SQL/AIML are execution-oriented environments, typically heavier than Subjective
+    SQL: { Easy: 8, Medium: 10, Hard: 12 },
+    AIML: { Easy: 10, Medium: 12, Hard: 15 },
   };
   
   const typeScores = baseScores[questionType] || { Easy: 1, Medium: 2, Hard: 3 };
@@ -1269,11 +1272,15 @@ export default function CreateNewAssessmentPage() {
     Subjective: number;
     PseudoCode: number;
     Coding: number;
+    SQL: number;
+    AIML: number;
   }>({
     MCQ: 0,
     Subjective: 0,
     PseudoCode: 0,
     Coding: 0,
+    SQL: 0,
+    AIML: 0,
   });
   // Scoring system - per question type (all questions of same type have same score)
   const [scoringRules, setScoringRules] = useState<{
@@ -1281,11 +1288,15 @@ export default function CreateNewAssessmentPage() {
     Subjective: number;
     PseudoCode: number;
     Coding: number;
+    SQL: number;
+    AIML: number;
   }>({
     MCQ: 1,
     Subjective: 4,
     PseudoCode: 6,
     Coding: 10,
+    SQL: 8,
+    AIML: 10,
   });
   const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null);
   const [editingReviewQuestion, setEditingReviewQuestion] = useState<any | null>(null);
@@ -1459,11 +1470,15 @@ export default function CreateNewAssessmentPage() {
       Subjective: Array<{ timer: number }>;
       PseudoCode: Array<{ timer: number }>;
       Coding: Array<{ timer: number }>;
+      SQL: Array<{ timer: number }>;
+      AIML: Array<{ timer: number }>;
     } = {
       MCQ: [],
       Subjective: [],
       PseudoCode: [],
       Coding: [],
+      SQL: [],
+      AIML: [],
     };
     
     // Aggregate questions from ALL topics including custom topics
@@ -1500,6 +1515,8 @@ export default function CreateNewAssessmentPage() {
       Subjective: questionsByType.Subjective.reduce((sum, q) => sum + q.timer, 0),
       PseudoCode: questionsByType.PseudoCode.reduce((sum, q) => sum + q.timer, 0),
       Coding: questionsByType.Coding.reduce((sum, q) => sum + q.timer, 0),
+      SQL: questionsByType.SQL.reduce((sum, q) => sum + q.timer, 0),
+      AIML: questionsByType.AIML.reduce((sum, q) => sum + q.timer, 0),
     };
     
     // Update section timers
@@ -1516,6 +1533,8 @@ export default function CreateNewAssessmentPage() {
       Subjective: [],
       PseudoCode: [],
       Coding: [],
+      SQL: [],
+      AIML: [],
     };
     
     // Aggregate questions from ALL topics including custom topics
@@ -1541,7 +1560,7 @@ export default function CreateNewAssessmentPage() {
       const newScoringRules = { ...prev };
       let hasChanges = false;
       
-      (["MCQ", "Subjective", "PseudoCode", "Coding"] as const).forEach((questionType) => {
+      (["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"] as const).forEach((questionType) => {
         const typeQuestions = questionsByType[questionType];
         if (typeQuestions.length > 0) {
           // Get difficulty of first question
@@ -8220,18 +8239,21 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   Subjective: typeof allReviewQuestions;
                   PseudoCode: typeof allReviewQuestions;
                   Coding: typeof allReviewQuestions;
+                  SQL: typeof allReviewQuestions;
+                  AIML: typeof allReviewQuestions;
                 } = {
                   MCQ: [],
                   Subjective: [],
                   PseudoCode: [],
                   Coding: [],
+                  SQL: [],
+                  AIML: [],
                 };
                 
                 allReviewQuestions.forEach((q) => {
                   const type = q.questionType as keyof typeof questionsByType;
-                  if (questionsByType[type]) {
-                    questionsByType[type].push(q);
-                  }
+                  // Unknown types are ignored, but SQL/AIML must be supported to avoid dropping them.
+                  questionsByType[type]?.push(q);
                 });
                 
                 // Calculate AI estimated total time (sum of all question times)
@@ -8306,8 +8328,8 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                     )}
                     
                     {/* Question Type Sections */}
-                    {(["MCQ", "Subjective", "PseudoCode", "Coding"] as const).map((questionType) => {
-                      const typeQuestions = questionsByType[questionType];
+                    {(["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"] as const).map((questionType) => {
+                      const typeQuestions = questionsByType[questionType] || [];
                       if (typeQuestions.length === 0) return null;
                       
                       const sectionTimer = sectionTimers[questionType];

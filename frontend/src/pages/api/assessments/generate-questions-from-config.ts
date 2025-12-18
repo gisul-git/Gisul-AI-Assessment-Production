@@ -8,6 +8,11 @@ interface TopicConfig {
   questionType: string;
   difficulty: string;
   numQuestions: number;
+  // Optional fields supported by the v2 backend endpoint
+  isAptitude?: boolean;
+  subTopic?: string;
+  language?: string;
+  judge0_enabled?: boolean;
 }
 
 interface GenerateQuestionsFromConfigPayload {
@@ -36,7 +41,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const token = (session as any)?.backendToken;
     const response = await fastApiClient.post(
-      "/api/v1/assessments/generate-questions-from-config",
+      // v1 endpoint was removed; use v2 which supports SQL/AIML (preserving requestedType) and v2 flows.
+      "/api/v2/assessments/generate-questions-from-config",
       payload,
       {
         headers: {
