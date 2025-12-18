@@ -35,15 +35,28 @@ from .services import _get_experience_level_corporate, _get_experience_level_stu
 # From app/api/v1/assessments/ we go up one level (..) to v1, then into dsa
 DSA_AVAILABLE = False
 dsa_generate_question = None
+dsa_generate_sql_question = None
 generate_boilerplate = None
 
 try:
     from ..dsa.services.ai_generator import generate_question as dsa_generate_question
+    from ..dsa.services.ai_sql_generator import generate_sql_question as dsa_generate_sql_question
     from ..dsa.services.code_wrapper import generate_boilerplate
     DSA_AVAILABLE = True
 except (ImportError, ModuleNotFoundError) as e:
     import logging
-    logging.getLogger(__name__).warning(f"DSA module not available. Coding questions will use basic generation. Error: {e}")
+    logging.getLogger(__name__).warning(f"DSA module not available. Coding/SQL questions will use basic generation. Error: {e}")
+
+# Import AIML module utilities for AIML questions
+AIML_AVAILABLE = False
+aiml_generate_question = None
+
+try:
+    from ..aiml.services.ai_question_generator import generate_aiml_question as aiml_generate_question
+    AIML_AVAILABLE = True
+except (ImportError, ModuleNotFoundError) as e:
+    import logging
+    logging.getLogger(__name__).warning(f"AIML module not available. AIML questions will use basic generation. Error: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -1562,9 +1575,109 @@ async def _process_requirements_for_subjective(requirements: Optional[str]) -> O
 
 async def _generate_sql_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Generate SQL questions.
-    Output is compatible with the existing review UI (uses 'question' field).
+    Generate SQL questions using structured format from DSA SQL generator.
+    Returns questions with schemas, sample_data, constraints, starter_query, etc.
+    Similar to how coding questions use DSA generator.
     """
+    # Normalize difficulty format (Easy/Medium/Hard to easy/medium/hard)
+    difficulty_map = {
+        "Easy": "easy",
+        "Medium": "medium",
+        "Hard": "hard"
+    }
+    difficulty_lower = difficulty_map.get(difficulty, difficulty.lower())
+
+    # Use DSA SQL generator if available
+    if DSA_AVAILABLE and dsa_generate_sql_question is not None:
+        try:
+            questions = []
+            for i in range(count):
+                # Generate using DSA SQL generator
+                sql_question_data = await dsa_generate_sql_question(
+                    difficulty=difficulty_lower,
+                    topic=topic,
+                    concepts=additional_requirements  # Pass additional requirements as concepts
+                )
+                
+                # Validate that we got valid data
+                if not sql_question_data or not isinstance(sql_question_data, dict):
+                    logger.warning(f"Invalid SQL question data returned from DSA generator: {type(sql_question_data)}")
+                    continue
+                
+                # Build questionText from description, schemas, and sample_data
+                question_text_parts = [sql_question_data.get("description", "")]
+                
+                # Add schemas section
+                schemas = sql_question_data.get("schemas", {})
+                if schemas:
+                    question_text_parts.append("\n\nDatabase Schema:")
+                    for table_name, table_info in schemas.items():
+                        columns = table_info.get("columns", {})
+                        if columns:
+                            question_text_parts.append(f"\n{table_name}:")
+                            for col_name, col_type in columns.items():
+                                question_text_parts.append(f"  - {col_name}: {col_type}")
+                
+                # Add sample data section
+                sample_data = sql_question_data.get("sample_data", {})
+                if sample_data:
+                    question_text_parts.append("\n\nSample Data:")
+                    for table_name, rows in sample_data.items():
+                        if rows:
+                            question_text_parts.append(f"\n{table_name}:")
+                            # Show first few rows as examples
+                            for row_idx, row in enumerate(rows[:3], 1):
+                                question_text_parts.append(f"  Row {row_idx}: {row}")
+                            if len(rows) > 3:
+                                question_text_parts.append(f"  ... ({len(rows) - 3} more rows)")
+                
+                # Add constraints
+                constraints = sql_question_data.get("constraints", [])
+                if constraints:
+                    question_text_parts.append("\n\nRequirements:")
+                    for constraint in constraints:
+                        question_text_parts.append(f"- {constraint}")
+                
+                question_text = "\n".join(question_text_parts)
+                
+                # Build the question object in assessment format
+                question = {
+                    "question": question_text,  # For backward compatibility with existing UI
+                    "questionText": question_text,  # Alternative field name
+                    "type": "SQL",
+                    "difficulty": difficulty,
+                    # Store full SQL-specific structured data for later use
+                    "sql_data": {
+                        "title": sql_question_data.get("title", ""),
+                        "description": sql_question_data.get("description", ""),
+                        "difficulty": sql_question_data.get("difficulty", difficulty_lower),
+                        "sql_category": sql_question_data.get("sql_category", "select"),
+                        "schemas": schemas,
+                        "sample_data": sample_data,
+                        "constraints": constraints,
+                        "starter_query": sql_question_data.get("starter_query", "-- Write your SQL query here\n\nSELECT "),
+                        "hints": sql_question_data.get("hints", []),
+                        "evaluation": sql_question_data.get("evaluation", {
+                            "engine": "postgres",
+                            "comparison": "result_set",
+                            "order_sensitive": False
+                        })
+                    }
+                }
+                
+                questions.append(question)
+            
+            if not questions:
+                raise HTTPException(status_code=500, detail="Failed to generate any SQL questions")
+            
+            return questions
+            
+        except Exception as exc:
+            logger.error(f"Error generating SQL questions using DSA generator: {exc}", exc_info=True)
+            # Fall through to basic generation if DSA generator fails
+    
+    # Fallback to basic generation if DSA SQL generator not available
+    logger.warning("DSA SQL generator not available, using basic SQL question generation")
     # Normalize experience mode
     if not experience_mode or experience_mode.lower() in ["student", "college"]:
         experience_mode = "college"
@@ -1627,9 +1740,131 @@ Return ONLY the JSON array. No markdown, no explanations."""
 
 async def _generate_aiml_questions(topic: str, difficulty: str, count: int, experience_mode: str = "corporate", additional_requirements: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Generate AIML (AI/ML + data science) questions intended for notebook-style work.
-    Output is compatible with the existing review UI (uses 'question' field).
+    Generate AIML (AI/ML + data science) questions using structured format from AIML generator.
+    Returns questions with datasets (schema + rows), tasks, constraints, etc.
+    Similar to how coding questions use DSA generator.
     """
+    # Normalize difficulty format (Easy/Medium/Hard to easy/medium/hard)
+    difficulty_map = {
+        "Easy": "easy",
+        "Medium": "medium",
+        "Hard": "hard"
+    }
+    difficulty_lower = difficulty_map.get(difficulty, difficulty.lower())
+
+    # Use AIML generator if available
+    if AIML_AVAILABLE and aiml_generate_question is not None:
+        try:
+            questions = []
+            for i in range(count):
+                # Generate using AIML generator
+                # Build a title from the topic
+                title = f"AIML Assessment - {topic}"
+                
+                # Determine skill from topic (default to Machine Learning)
+                skill = "Machine Learning"
+                topic_lower = topic.lower()
+                if "python" in topic_lower or "numpy" in topic_lower:
+                    skill = "Python"
+                elif "deep learning" in topic_lower or "neural" in topic_lower or "tensorflow" in topic_lower or "pytorch" in topic_lower:
+                    skill = "Deep Learning"
+                elif "data science" in topic_lower or "pandas" in topic_lower or "data analysis" in topic_lower:
+                    skill = "Data Science"
+                elif "ai" in topic_lower and "machine learning" not in topic_lower:
+                    skill = "AI"
+                
+                aiml_question_data = await aiml_generate_question(
+                    title=title,
+                    skill=skill,
+                    topic=topic if topic else None,
+                    difficulty=difficulty_lower,
+                    dataset_format="csv"  # Default format, backend will handle conversion
+                )
+                
+                # Validate that we got valid data
+                if not aiml_question_data or not isinstance(aiml_question_data, dict):
+                    logger.warning(f"Invalid AIML question data returned from AIML generator: {type(aiml_question_data)}")
+                    continue
+                
+                # Extract question and dataset from response
+                question_info = aiml_question_data.get("question", {})
+                dataset_info = aiml_question_data.get("dataset")
+                
+                # Build questionText from description, tasks, constraints, and dataset info
+                question_text_parts = [question_info.get("description", "")]
+                
+                # Add tasks
+                tasks = question_info.get("tasks", [])
+                if tasks:
+                    question_text_parts.append("\n\nTasks:")
+                    for task_idx, task in enumerate(tasks, 1):
+                        question_text_parts.append(f"{task_idx}. {task}")
+                
+                # Add dataset info if present
+                if dataset_info:
+                    schema = dataset_info.get("schema", [])
+                    rows = dataset_info.get("rows", [])
+                    
+                    if schema:
+                        question_text_parts.append("\n\nDataset Schema:")
+                        for col in schema:
+                            col_name = col.get("name", "")
+                            col_type = col.get("type", "")
+                            question_text_parts.append(f"  - {col_name}: {col_type}")
+                    
+                    if rows:
+                        question_text_parts.append("\n\nSample Data (first few rows):")
+                        # Show first 5 rows as examples
+                        for row_idx, row in enumerate(rows[:5], 1):
+                            question_text_parts.append(f"  Row {row_idx}: {row}")
+                        if len(rows) > 5:
+                            question_text_parts.append(f"  ... ({len(rows) - 5} more rows)")
+                
+                # Add constraints
+                constraints = question_info.get("constraints", [])
+                if constraints:
+                    question_text_parts.append("\n\nConstraints:")
+                    for constraint in constraints:
+                        question_text_parts.append(f"- {constraint}")
+                
+                question_text = "\n".join(question_text_parts)
+                
+                # Build the question object in assessment format
+                question = {
+                    "question": question_text,  # For backward compatibility with existing UI
+                    "questionText": question_text,  # Alternative field name
+                    "type": "AIML",
+                    "difficulty": difficulty,
+                    # Store full AIML-specific structured data for later use
+                    "aiml_data": {
+                        "title": aiml_question_data.get("assessment", {}).get("title", title),
+                        "description": question_info.get("description", ""),
+                        "difficulty": difficulty_lower,
+                        "skill": aiml_question_data.get("assessment", {}).get("skill", skill),
+                        "topic": aiml_question_data.get("assessment", {}).get("topic", topic),
+                        "libraries": aiml_question_data.get("assessment", {}).get("libraries", []),
+                        "type": question_info.get("type", "aiml_coding"),
+                        "execution_environment": question_info.get("execution_environment", "jupyter_notebook"),
+                        "tasks": tasks,
+                        "constraints": constraints,
+                        "dataset": dataset_info,  # Full dataset with schema and rows
+                        "requires_dataset": dataset_info is not None
+                    }
+                }
+                
+                questions.append(question)
+            
+            if not questions:
+                raise HTTPException(status_code=500, detail="Failed to generate any AIML questions")
+            
+            return questions
+            
+        except Exception as exc:
+            logger.error(f"Error generating AIML questions using AIML generator: {exc}", exc_info=True)
+            # Fall through to basic generation if AIML generator fails
+    
+    # Fallback to basic generation if AIML generator not available
+    logger.warning("AIML generator not available, using basic AIML question generation")
     # Normalize experience mode
     if not experience_mode or experience_mode.lower() in ["student", "college"]:
         experience_mode = "college"
