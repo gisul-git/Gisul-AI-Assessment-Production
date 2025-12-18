@@ -13,7 +13,29 @@ import { Sparkles, Loader2 } from 'lucide-react'
 
 type Testcase = {
   input: string
-  expected_output: string
+  expected_output?: string  // Optional for AI-generated questions
+}
+
+const getExpectedOutputPlaceholder = (returnType: string) => {
+  const rt = (returnType || '').trim()
+  switch (rt) {
+    case 'int':
+    case 'long':
+      return 'e.g., 5'
+    case 'int[]':
+    case 'long[]':
+      return 'e.g., 0 1'
+    case 'boolean':
+      return 'e.g., true'
+    case 'string':
+      return 'e.g., hello'
+    default:
+      return 'e.g., 5'
+  }
+}
+
+const getStdinPlaceholder = () => {
+  return 'Raw stdin only (no variable names, no JSON arrays like [1,2,3])'
 }
 
 // DSA (Data Structures & Algorithms) supported languages
@@ -167,7 +189,7 @@ export default function QuestionEditPage() {
         setPublicTestcases(
           data.public_testcases.map((tc: any) => ({
             input: tc.input || '',
-            expected_output: tc.expected_output || '',
+            expected_output: tc.expected_output ?? undefined,
           }))
         )
       } else {
@@ -178,11 +200,16 @@ export default function QuestionEditPage() {
         setHiddenTestcases(
           data.hidden_testcases.map((tc: any) => ({
             input: tc.input || '',
-            expected_output: tc.expected_output || '',
+            expected_output: tc.expected_output ?? undefined,
           }))
         )
       } else {
         setHiddenTestcases([{ input: '', expected_output: '' }])
+      }
+
+      // Backend can explicitly mark AI-generated questions once it computes expected_output
+      if (data.ai_generated === true) {
+        setIsAiGenerated(true)
       }
     } catch (err: any) {
       console.error('Error loading question:', err)
@@ -382,17 +409,17 @@ export default function QuestionEditPage() {
         languages,
         starter_code: starterCode,
         public_testcases: publicTestcases
-          .filter((tc) => tc.input.trim() || tc.expected_output.trim())
+          .filter((tc) => tc.input.trim() || (tc.expected_output && tc.expected_output.trim()))
           .map((tc) => ({
             input: tc.input,
-            expected_output: tc.expected_output,
+            ...(tc.expected_output ? { expected_output: tc.expected_output } : {}),
             is_hidden: false,
           })),
         hidden_testcases: hiddenTestcases
-          .filter((tc) => tc.input.trim() || tc.expected_output.trim())
+          .filter((tc) => tc.input.trim() || (tc.expected_output && tc.expected_output.trim()))
           .map((tc) => ({
             input: tc.input,
-            expected_output: tc.expected_output,
+            ...(tc.expected_output ? { expected_output: tc.expected_output } : {}),
             is_hidden: true,
           })),
         function_signature: functionSignature,
@@ -985,7 +1012,7 @@ export default function QuestionEditPage() {
                       onChange={(e) =>
                         updateTestcase(idx, 'public', 'input', e.target.value)
                       }
-                      placeholder="e.g., [2, 7, 11, 15]&#10;9"
+                      placeholder={getStdinPlaceholder()}
                     />
                   </div>
                   <div>
@@ -993,11 +1020,12 @@ export default function QuestionEditPage() {
                     <Textarea
                       rows={3}
                       className="font-mono text-sm"
-                      value={tc.expected_output}
+                      value={tc.expected_output ?? ''}
                       onChange={(e) =>
                         updateTestcase(idx, 'public', 'expected_output', e.target.value)
                       }
-                      placeholder="e.g., [0, 1]"
+                      placeholder={getExpectedOutputPlaceholder(returnType)}
+                      disabled={isAiGenerated}
                     />
                   </div>
                 </div>
@@ -1057,7 +1085,7 @@ export default function QuestionEditPage() {
                       onChange={(e) =>
                         updateTestcase(idx, 'hidden', 'input', e.target.value)
                       }
-                      placeholder="Edge case input..."
+                      placeholder={getStdinPlaceholder()}
                     />
                   </div>
                   <div>
@@ -1065,11 +1093,12 @@ export default function QuestionEditPage() {
                     <Textarea
                       rows={3}
                       className="font-mono text-sm"
-                      value={tc.expected_output}
+                      value={tc.expected_output ?? ''}
                       onChange={(e) =>
                         updateTestcase(idx, 'hidden', 'expected_output', e.target.value)
                       }
-                      placeholder="Expected output..."
+                      placeholder={getExpectedOutputPlaceholder(returnType)}
+                      disabled={isAiGenerated}
                     />
                   </div>
                 </div>

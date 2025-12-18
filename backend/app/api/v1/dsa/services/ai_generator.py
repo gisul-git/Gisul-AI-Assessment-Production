@@ -278,7 +278,9 @@ Generate a JSON object with this structure:
     
     "starter_code": {{
         "<language>": "complete starter code with stdin parsing"
-    }}
+    }},
+
+    "reference_solution": "A COMPLETE, CORRECT Python 3 program that reads stdin in the declared stdin_format and prints the correct output. This MUST solve the problem. It MUST NOT be a placeholder."
 }}
 
 === CRITICAL REQUIREMENTS (NON-NEGOTIABLE) ===
@@ -324,6 +326,12 @@ Generate a JSON object with this structure:
    - Generate for ALL languages in the languages list
    - Include stdin parsing that matches your stdin_format
    - Use the function_signature
+
+9. REFERENCE SOLUTION (PYTHON ONLY):
+   - Provide "reference_solution" as a full working Python 3 program
+   - It MUST read stdin matching stdin_format
+   - It MUST compute and print the correct output
+   - It MUST NOT include any network calls or randomness
 
 IMPORTANT: Return ONLY valid JSON. No markdown, no explanations."""
 

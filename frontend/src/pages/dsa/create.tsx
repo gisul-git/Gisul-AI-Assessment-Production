@@ -14,6 +14,9 @@ interface Question {
 // Timer mode types
 type TimerMode = "GLOBAL" | "PER_QUESTION";
 
+// Exam window mode (mirrors Custom MCQ scheduling semantics)
+type ExamMode = "strict" | "flexible";
+
 // Question timing for per-question mode
 interface QuestionTiming {
   question_id: string;
@@ -29,6 +32,9 @@ export default function CreateDSACompetencyPage() {
   // Timer mode state
   const [timerMode, setTimerMode] = useState<TimerMode>("GLOBAL");
   const [questionTimings, setQuestionTimings] = useState<Record<string, number>>({});
+
+  // Exam window configuration (mirrors Custom MCQ)
+  const [examMode, setExamMode] = useState<ExamMode>("strict");
   
   const [formData, setFormData] = useState({
     title: "",
@@ -77,6 +83,24 @@ export default function CreateDSACompetencyPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Exam window validation (mirrors Custom MCQ meaning)
+    if (!formData.start_time || !formData.end_time) {
+      alert("Start time and end time are required.");
+      return;
+    }
+    if (new Date(formData.start_time) >= new Date(formData.end_time)) {
+      alert("End time must be after start time.");
+      return;
+    }
+    if (examMode === "flexible") {
+      const durationForSchedule =
+        timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes;
+      if (!durationForSchedule || durationForSchedule < 1) {
+        alert("Duration is required for flexible exam mode.");
+        return;
+      }
+    }
     
     // Validation for per-question mode
     if (timerMode === "PER_QUESTION") {
@@ -99,6 +123,23 @@ export default function CreateDSACompetencyPage() {
         end_time: new Date(formData.end_time).toISOString(),
         timer_mode: timerMode,
         proctoringSettings: { aiProctoringEnabled },
+        // New scheduling payload (mirrors Custom MCQ)
+        examMode,
+        schedule: {
+          startTime: new Date(formData.start_time).toISOString(),
+          endTime: new Date(formData.end_time).toISOString(),
+          duration:
+            examMode === "flexible"
+              ? (timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes)
+              : null,
+        },
+        // Also include top-level fields (requested shape)
+        startTime: new Date(formData.start_time).toISOString(),
+        endTime: new Date(formData.end_time).toISOString(),
+        duration:
+          examMode === "flexible"
+            ? (timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes)
+            : null,
       };
       
       if (timerMode === "PER_QUESTION") {
@@ -115,22 +156,15 @@ export default function CreateDSACompetencyPage() {
       const response = await dsaApi.post("/tests/", payload);
       
       const testId = response.data?.id || response.data?._id;
-      
-      // Automatically publish the test
+
+      // New tests should start unpublished; editor will publish from Test Management.
+      alert("Test created successfully!");
+      // After creating, land on Test Management filtered to this test only.
       if (testId) {
-        try {
-          await dsaApi.patch(`/tests/${testId}/publish`, {
-            is_published: true
-          });
-        } catch (publishError: any) {
-          console.error("Error publishing test:", publishError);
-          // Continue even if publish fails - test is still created
-        }
+        router.push(`/dsa/tests?testId=${encodeURIComponent(String(testId))}`);
+      } else {
+        router.push("/dsa/tests");
       }
-      
-      // Redirect to dashboard
-      alert("Test created and published successfully!");
-      router.push("/dashboard");
     } catch (error: any) {
       alert(error.response?.data?.detail || error.response?.data?.message || "Failed to create DSA competency test");
       setLoading(false);
@@ -294,41 +328,114 @@ export default function CreateDSACompetencyPage() {
             </div>
 
             {/* Start and End Time */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
-              <div>
-                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
-                  Start Time *
-                </label>
-                <input
-                  type="datetime-local"
-                  required
-                  value={formData.start_time}
-                  onChange={(e) => setFormData({ ...formData, start_time: e.target.value })}
+            <div style={{ marginBottom: "1.5rem", padding: "1.25rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}>
+              <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Exam Window Configuration</h3>
+              <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem" }}>
+                <label
                   style={{
-                    width: "100%",
-                    padding: "0.75rem",
-                    border: "1px solid #A8E8BC",
-                    borderRadius: "0.375rem",
+                    flex: 1,
+                    padding: "1rem",
+                    border: examMode === "strict" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    cursor: "pointer",
+                    backgroundColor: examMode === "strict" ? "#E8FAF0" : "#ffffff",
                   }}
-                />
-              </div>
-              <div>
-                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
-                  End Time *
+                >
+                  <input
+                    type="radio"
+                    name="examMode"
+                    value="strict"
+                    checked={examMode === "strict"}
+                    onChange={(e) => setExamMode(e.target.value as ExamMode)}
+                    style={{ marginRight: "0.5rem" }}
+                  />
+                  <strong style={{ color: "#1E5A3B" }}>Fixed Window (Strict)</strong>
                 </label>
-                <input
-                  type="datetime-local"
-                  required
-                  value={formData.end_time}
-                  onChange={(e) => setFormData({ ...formData, end_time: e.target.value })}
+                <label
                   style={{
-                    width: "100%",
-                    padding: "0.75rem",
-                    border: "1px solid #A8E8BC",
-                    borderRadius: "0.375rem",
+                    flex: 1,
+                    padding: "1rem",
+                    border: examMode === "flexible" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    cursor: "pointer",
+                    backgroundColor: examMode === "flexible" ? "#E8FAF0" : "#ffffff",
                   }}
-                />
+                >
+                  <input
+                    type="radio"
+                    name="examMode"
+                    value="flexible"
+                    checked={examMode === "flexible"}
+                    onChange={(e) => setExamMode(e.target.value as ExamMode)}
+                    style={{ marginRight: "0.5rem" }}
+                  />
+                  <strong style={{ color: "#1E5A3B" }}>Flexible Window</strong>
+                </label>
               </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+                <div>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+                    Start Time *
+                  </label>
+                  <input
+                    type="datetime-local"
+                    required
+                    value={formData.start_time}
+                    onChange={(e) => setFormData({ ...formData, start_time: e.target.value })}
+                    style={{
+                      width: "100%",
+                      padding: "0.75rem",
+                      border: "1px solid #A8E8BC",
+                      borderRadius: "0.375rem",
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+                    End Time *
+                  </label>
+                  <input
+                    type="datetime-local"
+                    required
+                    value={formData.end_time}
+                    onChange={(e) => setFormData({ ...formData, end_time: e.target.value })}
+                    style={{
+                      width: "100%",
+                      padding: "0.75rem",
+                      border: "1px solid #A8E8BC",
+                      borderRadius: "0.375rem",
+                    }}
+                  />
+                </div>
+              </div>
+
+              {examMode === "flexible" && (
+                <div style={{ marginTop: "1rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+                    Duration (minutes) *
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes}
+                    disabled={timerMode === "PER_QUESTION"}
+                    onChange={(e) => {
+                      const numValue = parseInt(e.target.value, 10);
+                      if (!isNaN(numValue) && numValue >= 1) {
+                        setFormData({ ...formData, duration_minutes: numValue });
+                      }
+                    }}
+                    style={{
+                      width: "200px",
+                      padding: "0.75rem",
+                      border: "1px solid #A8E8BC",
+                      borderRadius: "0.375rem",
+                      backgroundColor: timerMode === "PER_QUESTION" ? "#F3F4F6" : "#ffffff",
+                    }}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Timer Configuration - Show mode selector only when 2+ questions selected */}
@@ -559,7 +666,7 @@ export default function CreateDSACompetencyPage() {
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() => router.push("/dashboard")}
+                onClick={() => router.push("/dsa")}
                 style={{ flex: 1 }}
               >
                 Cancel

@@ -3,6 +3,9 @@ import { getSession } from 'next-auth/react'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+// Cache the last known good token so we don't depend on NextAuth timing on every request.
+let cachedBackendToken: string | null = null
+
 export const dsaApi = axios.create({
   baseURL: `${API_URL}/api/v1/dsa`,
   headers: {
@@ -14,14 +17,27 @@ export const dsaApi = axios.create({
 dsaApi.interceptors.request.use(
   async (config) => {
     if (typeof window !== 'undefined') {
+      // If Authorization already set by caller, respect it.
+      if (config.headers?.Authorization) return config
+
       // Try to get token from NextAuth session first, fallback to localStorage
       let token: string | null = null
       
       try {
-        // Get session synchronously if possible, or use localStorage
-        const session = await getSession()
-        if (session?.backendToken) {
-          token = session.backendToken
+        // Use cached token first (fast path)
+        if (cachedBackendToken) token = cachedBackendToken
+
+        // For editor/admin pages we should wait a bit longer for NextAuth to hydrate.
+        // Candidate public flows typically pass their own token in the URL and don't rely on NextAuth.
+        if (!token) {
+          const session = await Promise.race([
+            getSession(),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+          ])
+          if (session?.backendToken) {
+            token = session.backendToken
+            cachedBackendToken = token
+          }
         }
       } catch (e) {
         // NextAuth not available or error, use localStorage
@@ -47,6 +63,7 @@ dsaApi.interceptors.request.use(
       }
       
       if (token) {
+        cachedBackendToken = token
         config.headers.Authorization = `Bearer ${token}`
         console.debug('[dsaApi] Authorization token added to request:', config.url)
       } else {

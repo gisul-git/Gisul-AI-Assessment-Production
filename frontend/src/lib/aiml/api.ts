@@ -3,6 +3,9 @@ import { getSession } from 'next-auth/react'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+// Cache the last known good token so we don't depend on NextAuth timing on every request.
+let cachedBackendToken: string | null = null
+
 export const aimlApi = axios.create({
   baseURL: `${API_URL}/api/v1/aiml`,
   headers: {
@@ -14,12 +17,22 @@ export const aimlApi = axios.create({
 aimlApi.interceptors.request.use(
   async (config) => {
     if (typeof window !== 'undefined') {
+      if (config.headers?.Authorization) return config
+
       let token: string | null = null
-      
+      // Use cached token first (fast path)
       try {
-        const session = await getSession()
-        if (session?.backendToken) {
-          token = session.backendToken
+        if (cachedBackendToken) token = cachedBackendToken
+
+        if (!token) {
+          const session = await Promise.race([
+            getSession(),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+          ])
+          if (session?.backendToken) {
+            token = session.backendToken
+            cachedBackendToken = token
+          }
         }
       } catch (e) {
         console.warn('[aimlApi] NextAuth session not available, using localStorage fallback')
@@ -42,6 +55,7 @@ aimlApi.interceptors.request.use(
       }
       
       if (token) {
+        cachedBackendToken = token
         config.headers.Authorization = `Bearer ${token}`
         console.debug('[aimlApi] Authorization token added to request:', config.url)
       } else {

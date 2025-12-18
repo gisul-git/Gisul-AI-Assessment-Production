@@ -42,7 +42,9 @@ class PyObjectId(ObjectId):
 
 class TestCase(BaseModel):
     input: str
-    expected_output: str
+    # Optional because AI-generated questions intentionally omit expected_output.
+    # Manual questions must provide expected_output; this is validated in routers/questions.py.
+    expected_output: Optional[str] = None
     is_hidden: bool = False
 
 class StarterCode(BaseModel):

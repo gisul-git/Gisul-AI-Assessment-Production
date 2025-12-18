@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Depends, status, BackgroundTasks
 from typing import List, Dict, Any, Optional
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timedelta
+import re
 import secrets
 import csv
 import io
@@ -111,7 +112,66 @@ async def create_test(
                 if not q_created_by or str(q_created_by).strip() != user_id.strip():
                     raise HTTPException(status_code=403, detail=f"Question {question.get('title', 'Unknown')} does not belong to you")
     
+    # -------------------------------
+    # Exam window configuration (mirrors Custom MCQ)
+    # -------------------------------
+    def _coalesce(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    exam_mode = getattr(test, "examMode", None) or "strict"
+    # Support both nested schedule and top-level startTime/endTime/duration
+    schedule_obj = getattr(test, "schedule", None)
+    start_dt = _coalesce(
+        getattr(schedule_obj, "startTime", None) if schedule_obj else None,
+        getattr(test, "startTime", None),
+        getattr(test, "start_time", None),
+    )
+    end_dt = _coalesce(
+        getattr(schedule_obj, "endTime", None) if schedule_obj else None,
+        getattr(test, "endTime", None),
+        getattr(test, "end_time", None),
+    )
+    duration_minutes = _coalesce(
+        getattr(schedule_obj, "duration", None) if schedule_obj else None,
+        getattr(test, "duration", None),
+        getattr(test, "duration_minutes", None),
+    )
+
+    # Validate exam window rules
+    if exam_mode not in ("strict", "flexible"):
+        raise HTTPException(status_code=400, detail="Invalid examMode. Must be 'strict' or 'flexible'.")
+    if not start_dt or not end_dt:
+        raise HTTPException(status_code=400, detail="Start time and end time are required.")
+    if start_dt >= end_dt:
+        raise HTTPException(status_code=400, detail="End time must be after start time.")
+    if exam_mode == "flexible":
+        if not duration_minutes or int(duration_minutes) <= 0:
+            raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
+
+    # For strict mode, duration in schedule is null; but we keep legacy duration_minutes for compatibility:
+    # - GLOBAL timer: derive from window length
+    # - PER_QUESTION: duration_minutes may be overridden later by per-question sum
+    schedule_payload = {
+        "startTime": start_dt,
+        "endTime": end_dt,
+        "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
+    }
+
     test_dict = test.model_dump()
+    test_dict["examMode"] = exam_mode
+    test_dict["schedule"] = schedule_payload
+    # Ensure legacy fields are set (backward compatible)
+    test_dict["start_time"] = start_dt
+    test_dict["end_time"] = end_dt
+    if test.timer_mode == "GLOBAL":
+        if exam_mode == "strict":
+            window_minutes = int((end_dt - start_dt).total_seconds() // 60)
+            test_dict["duration_minutes"] = max(window_minutes, 1)
+        else:
+            test_dict["duration_minutes"] = int(duration_minutes)
     # Store the actual user ID who created the test - CRITICAL: Must be string, no whitespace
     # user_id is already normalized above
     test_dict["created_by"] = user_id
@@ -147,6 +207,8 @@ async def create_test(
             "duration_minutes": created_test.get("duration_minutes", 0),
             "start_time": created_test.get("start_time").isoformat() if created_test.get("start_time") else None,
             "end_time": created_test.get("end_time").isoformat() if created_test.get("end_time") else None,
+            "examMode": created_test.get("examMode", "strict"),
+            "schedule": created_test.get("schedule"),
             "is_active": created_test.get("is_active", False),
             "is_published": created_test.get("is_published", False),
             "invited_users": created_test.get("invited_users", []),
@@ -411,6 +473,9 @@ async def get_tests(
             "test_token": test.get("test_token"),
             "created_by": str(test.get("created_by", "")),  # CRITICAL: Include for client-side verification
         }
+        if test.get("pausedAt"):
+            paused_val = test.get("pausedAt")
+            test_dict["pausedAt"] = paused_val.isoformat() if isinstance(paused_val, datetime) else paused_val
         # Add created_at if it exists
         if "created_at" in test and test.get("created_at"):
             test_dict["created_at"] = test.get("created_at").isoformat() if isinstance(test.get("created_at"), datetime) else test.get("created_at")
@@ -434,13 +499,19 @@ async def get_test_public(
     if not ObjectId.is_valid(test_id):
         raise HTTPException(status_code=400, detail="Invalid test ID")
     
-    # Verify user has a submission for this test (meaning they're authorized)
-    test_submission = await db.test_submissions.find_one({
-        "test_id": test_id,
-        "user_id": user_id
-    })
+    # Verify user is authorized for this test.
+    # Allow access if they are a registered candidate (before starting) OR already have a submission.
+    test_submission = await db.test_submissions.find_one({"test_id": test_id, "user_id": user_id})
     if not test_submission:
-        raise HTTPException(status_code=403, detail="User not authorized for this test")
+        # Fall back to candidate list check (covers "added candidate but not started yet")
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+        candidate_email = (user_doc or {}).get("email")
+        candidate_email = str(candidate_email).strip().lower() if candidate_email else ""
+        if not candidate_email:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
+        candidate = await db.test_candidates.find_one({"test_id": test_id, "email": candidate_email})
+        if not candidate:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
     
     # Get test data
     test = await db.tests.find_one({"_id": ObjectId(test_id)})
@@ -513,6 +584,8 @@ async def get_test(
         "duration_minutes": test.get("duration_minutes", 0),
         "start_time": test.get("start_time").isoformat() if test.get("start_time") else None,
         "end_time": test.get("end_time").isoformat() if test.get("end_time") else None,
+        "examMode": test.get("examMode", "strict"),
+        "schedule": test.get("schedule"),
         "is_active": test.get("is_active", False),
         "is_published": test.get("is_published", False),
         "invited_users": test.get("invited_users", []),
@@ -647,8 +720,67 @@ async def update_test(
                 if not q_created_by or str(q_created_by).strip() != user_id.strip():
                     raise HTTPException(status_code=403, detail=f"Question {question.get('title', 'Unknown')} does not belong to you")
     
+    # -------------------------------
+    # Exam window configuration (mirrors Custom MCQ)
+    # -------------------------------
+    def _coalesce(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    exam_mode = getattr(test, "examMode", None) or existing_test.get("examMode") or "strict"
+    schedule_obj = getattr(test, "schedule", None)
+    start_dt = _coalesce(
+        getattr(schedule_obj, "startTime", None) if schedule_obj else None,
+        getattr(test, "startTime", None),
+        getattr(test, "start_time", None),
+        existing_test.get("start_time"),
+        (existing_test.get("schedule") or {}).get("startTime"),
+    )
+    end_dt = _coalesce(
+        getattr(schedule_obj, "endTime", None) if schedule_obj else None,
+        getattr(test, "endTime", None),
+        getattr(test, "end_time", None),
+        existing_test.get("end_time"),
+        (existing_test.get("schedule") or {}).get("endTime"),
+    )
+    duration_minutes = _coalesce(
+        getattr(schedule_obj, "duration", None) if schedule_obj else None,
+        getattr(test, "duration", None),
+        getattr(test, "duration_minutes", None),
+        (existing_test.get("schedule") or {}).get("duration"),
+        existing_test.get("duration_minutes"),
+    )
+
+    if exam_mode not in ("strict", "flexible"):
+        raise HTTPException(status_code=400, detail="Invalid examMode. Must be 'strict' or 'flexible'.")
+    if not start_dt or not end_dt:
+        raise HTTPException(status_code=400, detail="Start time and end time are required.")
+    if start_dt >= end_dt:
+        raise HTTPException(status_code=400, detail="End time must be after start time.")
+    if exam_mode == "flexible":
+        if not duration_minutes or int(duration_minutes) <= 0:
+            raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
+
+    schedule_payload = {
+        "startTime": start_dt,
+        "endTime": end_dt,
+        "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
+    }
+
     # Prepare update data
     test_dict = test.model_dump()
+    test_dict["examMode"] = exam_mode
+    test_dict["schedule"] = schedule_payload
+    test_dict["start_time"] = start_dt
+    test_dict["end_time"] = end_dt
+    if test.timer_mode == "GLOBAL":
+        if exam_mode == "strict":
+            window_minutes = int((end_dt - start_dt).total_seconds() // 60)
+            test_dict["duration_minutes"] = max(window_minutes, 1)
+        else:
+            test_dict["duration_minutes"] = int(duration_minutes)
     # Preserve existing fields that shouldn't be updated
     test_dict["is_active"] = existing_test.get("is_active", True)
     test_dict["is_published"] = existing_test.get("is_published", False)
@@ -674,6 +806,8 @@ async def update_test(
             "duration_minutes": updated_test.get("duration_minutes", 0),
             "start_time": updated_test.get("start_time").isoformat() if updated_test.get("start_time") else None,
             "end_time": updated_test.get("end_time").isoformat() if updated_test.get("end_time") else None,
+            "examMode": updated_test.get("examMode", "strict"),
+            "schedule": updated_test.get("schedule"),
             "is_active": updated_test.get("is_active", False),
             "is_published": updated_test.get("is_published", False),
             "invited_users": updated_test.get("invited_users", []),
@@ -711,6 +845,22 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     # Only check if test is active flag is set
     if not test.get("is_active", True):
         raise HTTPException(status_code=400, detail="Test is not active")
+
+    # Resolve candidate email from user_id (email is the unique real-world identifier)
+    user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+    candidate_email = (user_doc or {}).get("email")
+    if not candidate_email:
+        raise HTTPException(status_code=400, detail="Candidate email not found")
+    candidate_email = str(candidate_email).strip().lower()
+
+    # Enforce single attempt per candidate email for this test (name can be same)
+    existing_completed_by_email = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "candidate_email": candidate_email,
+        "is_completed": True
+    })
+    if existing_completed_by_email:
+        raise HTTPException(status_code=400, detail="Test already completed for this email. A candidate can attempt the test only once.")
     
     # Check if user already started
     existing = await db.test_submissions.find_one({
@@ -719,16 +869,43 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     })
     
     if existing:
+        # Enforce single attempt per candidate: if completed, do not allow restart.
+        if existing.get("is_completed", False):
+            raise HTTPException(status_code=400, detail="Test already completed. A candidate can attempt the test only once.")
         return {
             "test_submission_id": str(existing["_id"]),
             "started_at": existing["started_at"].isoformat() if isinstance(existing.get("started_at"), datetime) else existing.get("started_at"),
             "is_completed": existing.get("is_completed", False)
         }
+
+    # If paused, allow ONLY candidates who were added before the pause time.
+    paused_at = test.get("pausedAt")
+    if paused_at:
+        # Resolve candidate email from user_id and check candidate record timestamp
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+        candidate_email = str((user_doc or {}).get("email") or "").strip().lower()
+        if not candidate_email:
+            raise HTTPException(status_code=403, detail="Test is currently paused")
+
+        # Case-insensitive match (older records may store mixed-case emails)
+        candidate_doc = await db.test_candidates.find_one({
+            "test_id": test_id,
+            "email": {"$regex": f"^{re.escape(candidate_email)}$", "$options": "i"}
+        })
+        if not candidate_doc:
+            raise HTTPException(status_code=403, detail="Test is currently paused")
+
+        created_at = candidate_doc.get("created_at")
+        # If we can compare timestamps, block only if candidate was added after pause.
+        if isinstance(paused_at, datetime) and isinstance(created_at, datetime):
+            if created_at > paused_at:
+                raise HTTPException(status_code=403, detail="Test is currently paused")
     
     # Create test submission
     test_submission = {
         "test_id": test_id,
         "user_id": user_id,
+        "candidate_email": candidate_email,
         "submissions": [],
         "score": 0,
         "started_at": datetime.utcnow(),
@@ -816,13 +993,18 @@ async def get_test_question(
     if question_id not in test.get("question_ids", []):
         raise HTTPException(status_code=403, detail="Question not part of this test")
     
-    # Verify user has a submission for this test (meaning they're authorized)
-    test_submission = await db.test_submissions.find_one({
-        "test_id": test_id,
-        "user_id": user_id
-    })
+    # Verify user is authorized for this test.
+    # Allow access if they are a registered candidate (before starting) OR already have a submission.
+    test_submission = await db.test_submissions.find_one({"test_id": test_id, "user_id": user_id})
     if not test_submission:
-        raise HTTPException(status_code=403, detail="User not authorized for this test")
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+        candidate_email = (user_doc or {}).get("email")
+        candidate_email = str(candidate_email).strip().lower() if candidate_email else ""
+        if not candidate_email:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
+        candidate = await db.test_candidates.find_one({"test_id": test_id, "email": candidate_email})
+        if not candidate:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
     
     # Check if test submission is completed
     if test_submission.get("is_completed", False):
@@ -1002,7 +1184,7 @@ async def process_ai_feedback_background(
                 {"$set": {"score": score}}
             )
         
-        # Recalculate total score for test submission
+        # Recalculate overall score for test submission (out of 100) after this question's feedback is ready
         test_submission = await db.test_submissions.find_one({
             "test_id": test_id,
             "user_id": user_id
@@ -1015,11 +1197,13 @@ async def process_ai_feedback_background(
                 "is_final_submission": True
             }).to_list(length=100)
             
-            # Calculate total score from submissions that have AI feedback or are marked as starter code only
-            new_total_score = sum(
-                s.get("score", 0) for s in all_submissions 
+            scored = [
+                s.get("score", 0) for s in all_submissions
                 if s.get("ai_feedback") is not None or s.get("status") == "no_code_written"
-            )
+            ]
+            question_count = max(len(test_submission.get("submissions") or []), 1)
+            # submissions array stores submission IDs, one per question; average keeps overall out of 100
+            new_total_score = int(round(sum(scored) / question_count))
             
             await db.test_submissions.update_one(
                 {"test_id": test_id, "user_id": user_id},
@@ -1086,6 +1270,24 @@ async def final_submit_test(
     
     if not test_submission:
         raise HTTPException(status_code=404, detail="Test submission not found. Please start the test first.")
+
+    # Enforce single attempt per candidate: final submit only once.
+    if test_submission.get("is_completed", False):
+        raise HTTPException(status_code=400, detail="Test already submitted. A candidate can submit the test only once.")
+
+    # Enforce single attempt per candidate email for this test (backward compatible: older submissions may not have candidate_email)
+    candidate_email = (test_submission.get("candidate_email") or "").strip().lower()
+    if not candidate_email:
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+        candidate_email = str((user_doc or {}).get("email") or "").strip().lower()
+    if candidate_email:
+        existing_completed_by_email = await db.test_submissions.find_one({
+            "test_id": test_id,
+            "candidate_email": candidate_email,
+            "is_completed": True
+        })
+        if existing_completed_by_email:
+            raise HTTPException(status_code=400, detail="Test already submitted for this email. A candidate can submit the test only once.")
     
     # Process each question submission
     # Use asyncio.gather to run test cases in parallel for faster execution
@@ -1315,26 +1517,27 @@ async def final_submit_test(
     submission_ids = await asyncio.gather(*submission_tasks)
     final_submissions = [sid for sid in submission_ids if sid is not None]
     
-    # Calculate initial total score (including starter code only submissions which have score 0)
-    # This ensures the score is accurate even before AI feedback completes
+    # Calculate initial overall score out of 100 (including starter code only submissions which have score 0).
+    # Normalize across questions so multi-question tests still score out of 100.
     initial_total_score = 0
     if final_submissions:
         all_submissions = await db.submissions.find({
             "_id": {"$in": [ObjectId(sid) for sid in final_submissions]}
         }).to_list(length=100)
         
-        # Sum scores from all submissions (starter code only already have score 0 and ai_feedback)
-        initial_total_score = sum(
-            s.get("score", 0) for s in all_submissions 
+        scored = [
+            s.get("score", 0) for s in all_submissions
             if s.get("ai_feedback") is not None or s.get("status") == "no_code_written"
-        )
+        ]
+        question_count = max(len(request.question_submissions), 1)
+        initial_total_score = int(round(sum(scored) / question_count))
     
     # Update test submission with final data (without activity logs - will be added in background)
     update_data = {
         "is_completed": True,
         "submitted_at": datetime.utcnow(),
         "submissions": final_submissions,
-        "score": initial_total_score,  # Include starter code only submissions (score 0) immediately
+        "score": initial_total_score,  # Overall score out of 100
         "final_submission_data": {
             "question_submissions": [
                 {
@@ -1368,7 +1571,7 @@ async def final_submit_test(
         "test_id": test_id,
         "user_id": user_id,
         "submissions_count": len(final_submissions),
-        "total_score": initial_total_score,  # Includes starter code only submissions (score 0) immediately
+        "total_score": initial_total_score,  # out of 100
         "submitted_at": update_data["submitted_at"].isoformat(),
         "ai_feedback_status": "processing",  # Indicates AI feedback is being generated
     }
@@ -1394,6 +1597,9 @@ async def add_candidate(
     if not test.get("is_published", False):
         raise HTTPException(status_code=400, detail="Test must be published before adding candidates")
     
+    # Normalize email for consistent lookups
+    candidate.email = candidate.email.strip().lower()
+
     # Check if candidate already exists for this test
     existing_candidate = await db.test_candidates.find_one({
         "test_id": test_id,
@@ -1433,7 +1639,7 @@ async def add_candidate(
     await db.test_candidates.insert_one(candidate_record)
     
     # Add email to invited_users if not already there
-    current_invited = set(test.get("invited_users", []))
+    current_invited = set([str(e).strip().lower() for e in test.get("invited_users", [])])
     current_invited.add(candidate.email)
     await db.tests.update_one(
         {"_id": ObjectId(test_id)},
@@ -1456,7 +1662,66 @@ async def add_candidate(
     cors_origins = settings.cors_origins.split(",")[0].strip() if settings.cors_origins else "http://localhost:3000"
     test_link = f"{cors_origins}/test/{test_id}?token={test_token}"
     
-    # Get email template
+    # IMPORTANT: Do NOT send emails on add-candidate.
+    # Invitations are sent only when explicitly triggered from Analytics/Test Management (Send Email buttons).
+
+    return {
+        "candidate_id": user_id,
+        "test_link": test_link,
+        "name": candidate.name,
+        "email": candidate.email,
+    }
+
+
+@router.post("/{test_id}/send-invitation", response_model=dict)
+async def send_invitation(
+    test_id: str,
+    email: str = Body(..., embed=True),
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Send invitation email to a single candidate (explicit action only).
+    Uses test.invitationTemplate if configured, otherwise system default template.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    test_created_by = test.get("created_by")
+    if not test_created_by or str(test_created_by).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to send invitations for this test")
+
+    if not test.get("is_published", False):
+        raise HTTPException(status_code=400, detail="Test must be published before sending invitations")
+
+    candidate_email = str(email or "").strip().lower()
+    if not candidate_email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    candidate = await db.test_candidates.find_one({"test_id": test_id, "email": candidate_email})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found for this test")
+
+    candidate_name = candidate.get("name") or "Candidate"
+
+    # Ensure shared token exists
+    test_token = test.get("test_token")
+    if not test_token:
+        test_token = secrets.token_urlsafe(32)
+        await db.tests.update_one({"_id": ObjectId(test_id)}, {"$set": {"test_token": test_token}})
+
+    settings = get_settings()
+    cors_origins = settings.cors_origins.split(",")[0].strip() if settings.cors_origins else "http://localhost:3000"
+    test_link = f"{cors_origins}/test/{test_id}?token={test_token}"
+
     stored_template = test.get("invitationTemplate", {})
     default_template = {
         "logoUrl": "",
@@ -1466,118 +1731,74 @@ async def add_candidate(
         "sentBy": "AI Assessment Platform"
     }
     template_to_use = stored_template if stored_template else default_template
-    
-    # Send invitation email
-    try:
-        settings = get_settings()
-        if settings.sendgrid_api_key and settings.sendgrid_from_email:
-            email_service = get_email_service()
-            
-            # Build exam URL with candidate params
-            encoded_email = urllib.parse.quote(candidate.email)
-            encoded_name = urllib.parse.quote(candidate.name)
-            exam_url_with_params = f"{test_link}&email={encoded_email}&name={encoded_name}"
-            
-            # Replace placeholders
-            message = template_to_use.get("message", default_template["message"])
-            email_body = message
-            email_body = email_body.replace("{{candidate_name}}", candidate.name)
-            email_body = email_body.replace("{{candidate_email}}", candidate.email)
-            email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
-            email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
-            
-            # Build HTML email
-            logo_url = template_to_use.get("logoUrl", "")
-            company_name = template_to_use.get("companyName", "")
-            footer = template_to_use.get("footer", "")
-            sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
-            
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ text-align: center; margin-bottom: 30px; }}
-                    .logo {{ max-width: 200px; margin-bottom: 20px; }}
-                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
-                    .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
-                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
-                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
-                        {f'<h1>{company_name}</h1>' if company_name else ''}
-                    </div>
-                    <div class="content">
-                        <p>Dear {candidate.name},</p>
-                        <p>{email_body}</p>
-                        <div class="candidate-info">
-                            <p><strong>Your Details:</strong></p>
-                            <p><strong>Name:</strong> {candidate.name}</p>
-                            <p><strong>Email:</strong> {candidate.email}</p>
-                        </div>
-                        <div style="text-align: center;">
-                            <a href="{exam_url_with_params}" class="button">Start Test</a>
-                        </div>
-                    </div>
-                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
-                    <div class="footer">
-                        <p>Sent by {sent_by}</p>
-                    </div>
+
+    if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+        raise HTTPException(status_code=500, detail="Email service is not configured")
+
+    email_service = get_email_service()
+
+    encoded_email = urllib.parse.quote(candidate_email)
+    encoded_name = urllib.parse.quote(candidate_name)
+    exam_url_with_params = f"{test_link}&email={encoded_email}&name={encoded_name}"
+
+    message = template_to_use.get("message", default_template["message"])
+    email_body = message
+    email_body = email_body.replace("{{candidate_name}}", candidate_name)
+    email_body = email_body.replace("{{candidate_email}}", candidate_email)
+    email_body = email_body.replace("{{exam_url}}", exam_url_with_params)
+    email_body = email_body.replace("{{company_name}}", template_to_use.get("companyName", ""))
+
+    logo_url = template_to_use.get("logoUrl", "")
+    company_name = template_to_use.get("companyName", "")
+    footer = template_to_use.get("footer", "")
+    sent_by = template_to_use.get("sentBy", "AI Assessment Platform")
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .logo {{ max-width: 200px; margin-bottom: 20px; }}
+            .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+            .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                {f'<h1>{company_name}</h1>' if company_name else ''}
+            </div>
+            <div class="content">
+                <p>Dear {candidate_name},</p>
+                <p>{email_body}</p>
+                <div style="text-align: center;">
+                    <a href="{exam_url_with_params}" class="button">Start Test</a>
                 </div>
-            </body>
-            </html>
-            """
-            
-            subject = f"DSA Test Invitation - {company_name if company_name else 'AI Assessment Platform'}"
-            
-            await email_service.send_email(candidate.email, subject, html_content)
-            logger.info(f"Invitation email sent successfully to {candidate.email}")
-        else:
-            logger.warning("SendGrid is not configured. Email not sent.")
-        
-        # Update candidate status to "invited" regardless of email success
-        # (Email might fail but we still want to mark as invited if we attempted to send)
-        try:
-            await db.test_candidates.update_one(
-                {"test_id": test_id, "email": candidate.email},
-                {"$set": {
-                    "status": "invited",
-                    "invited": True,
-                    "invited_at": datetime.utcnow()
-                }}
-            )
-            logger.info(f"Updated candidate status to 'invited' for {candidate.email}")
-        except Exception as update_error:
-            logger.error(f"Failed to update candidate status for {candidate.email}: {str(update_error)}")
-    except Exception as e:
-        logger.error(f"Failed to send invitation email to {candidate.email}: {str(e)}")
-        # Still try to update status even if email failed
-        try:
-            await db.test_candidates.update_one(
-                {"test_id": test_id, "email": candidate.email},
-                {"$set": {
-                    "status": "invited",
-                    "invited": True,
-                    "invited_at": datetime.utcnow()
-                }}
-            )
-        except Exception as update_error:
-            logger.error(f"Failed to update candidate status after email error: {str(update_error)}")
-        # Don't fail the request if email fails - candidate is still added
-    
-    return {
-        "candidate_id": user_id,
-        "test_link": test_link,
-        "name": candidate.name,
-        "email": candidate.email,
-    }
+            </div>
+            {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+            <div class="footer">
+                <p>Sent by {sent_by}</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    subject = f"DSA Test Invitation - {company_name if company_name else 'AI Assessment Platform'}"
+    await email_service.send_email(candidate_email, subject, html_content)
+
+    await db.test_candidates.update_one(
+        {"test_id": test_id, "email": candidate_email},
+        {"$set": {"status": "invited", "invited": True, "invited_at": datetime.utcnow()}}
+    )
+
+    return {"message": "Invitation sent", "email": candidate_email}
 
 
 @router.post("/{test_id}/send-invitations-to-all")
@@ -2533,6 +2754,180 @@ async def publish_test(
         "test_token": test.get("test_token"),
     }
     return test_dict
+
+
+@router.post("/{test_id}/pause", response_model=dict)
+async def pause_test(
+    test_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Pause a DSA test.
+    Keeps the test published (is_published stays True) but records pausedAt.
+    Candidates can still be added; new test starts should be blocked while paused.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    if str(test.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to pause this test")
+
+    # If already paused, return idempotently
+    if test.get("pausedAt"):
+        return {"message": "Test is already paused", "test_id": test_id, "is_published": test.get("is_published", False), "pausedAt": test.get("pausedAt").isoformat() if test.get("pausedAt") else None}
+
+    now = datetime.utcnow()
+    await db.tests.update_one(
+        {"_id": ObjectId(test_id)},
+        {"$set": {"pausedAt": now, "statusBeforePause": "published" if test.get("is_published", False) else "draft"}}
+    )
+
+    return {"message": "Test paused successfully", "test_id": test_id, "is_published": test.get("is_published", False), "pausedAt": now.isoformat()}
+
+
+@router.post("/{test_id}/resume", response_model=dict)
+async def resume_test(
+    test_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Resume a paused DSA test.
+    Mirrors AIML: sets is_published back to True and records resumeAt timestamp.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    if str(test.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to resume this test")
+
+    # If not paused, return idempotently
+    if not test.get("pausedAt"):
+        return {"message": "Test is already active", "test_id": test_id, "is_published": test.get("is_published", False)}
+
+    now = datetime.utcnow()
+    await db.tests.update_one(
+        {"_id": ObjectId(test_id)},
+        {"$set": {"resumeAt": now, "pausedAt": None, "statusBeforePause": None}}
+    )
+
+    return {"message": "Test resumed successfully", "test_id": test_id, "is_published": test.get("is_published", False), "resumeAt": now.isoformat()}
+
+
+@router.post("/{test_id}/clone", response_model=dict)
+async def clone_test(
+    test_id: str,
+    payload: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Clone a DSA test for the current editor (creates a new test document with a new ID).
+    Payload:
+      - newTitle: str (required)
+      - keepSchedule: bool (optional, default False)
+      - keepCandidates: bool (optional, default False)
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    original = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not original:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    # Ensure DSA test (legacy may not have test_type)
+    if original.get("test_type") not in (None, "dsa"):
+        raise HTTPException(status_code=400, detail="Not a DSA test")
+
+    if str(original.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to clone this test")
+
+    new_title = (payload.get("newTitle") or "").strip()
+    if len(new_title) < 3:
+        raise HTTPException(status_code=400, detail="newTitle must be at least 3 characters")
+
+    keep_schedule = bool(payload.get("keepSchedule", False))
+    keep_candidates = bool(payload.get("keepCandidates", False))
+
+    now = datetime.utcnow()
+    duration_minutes = int(original.get("duration_minutes") or 60)
+
+    cloned = {k: v for k, v in original.items() if k != "_id"}
+    cloned["title"] = new_title
+    cloned["created_by"] = user_id
+    cloned["created_at"] = now
+    cloned["updated_at"] = now
+    cloned["is_published"] = False
+    cloned["is_active"] = False
+    cloned["pausedAt"] = None
+    cloned["statusBeforePause"] = None
+    cloned["resumeAt"] = None
+    cloned["test_token"] = None
+    cloned["test_type"] = "dsa"
+
+    if not keep_candidates:
+        cloned["invited_users"] = []
+
+    if keep_schedule:
+        if not cloned.get("start_time"):
+            cloned["start_time"] = now
+        if not cloned.get("end_time"):
+            cloned["end_time"] = now + timedelta(minutes=duration_minutes)
+    else:
+        cloned["examMode"] = "strict"
+        cloned["schedule"] = None
+        cloned["start_time"] = now
+        cloned["end_time"] = now + timedelta(minutes=duration_minutes)
+
+    res = await db.tests.insert_one(cloned)
+    created = await db.tests.find_one({"_id": res.inserted_id})
+    if not created:
+        raise HTTPException(status_code=500, detail="Failed to clone test")
+
+    return {
+        "message": "Test cloned successfully",
+        "data": {
+            "id": str(created["_id"]),
+            "title": created.get("title", ""),
+            "description": created.get("description", ""),
+            "duration_minutes": created.get("duration_minutes", 0),
+            "start_time": created.get("start_time").isoformat() if created.get("start_time") else None,
+            "end_time": created.get("end_time").isoformat() if created.get("end_time") else None,
+            "examMode": created.get("examMode", "strict"),
+            "schedule": created.get("schedule"),
+            "is_active": created.get("is_active", False),
+            "is_published": created.get("is_published", False),
+            "invited_users": created.get("invited_users", []),
+            "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in created.get("question_ids", [])],
+            "question_time_limits": created.get("question_time_limits"),
+            "test_token": created.get("test_token"),
+            "pausedAt": created.get("pausedAt"),
+        }
+    }
 
 @router.delete("/{test_id}")
 async def delete_test(

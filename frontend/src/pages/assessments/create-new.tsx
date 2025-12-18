@@ -962,6 +962,10 @@ const renderQuestionByType = (question: any, questionType: string, isEditing: bo
       return renderPseudoCodeQuestion(question, isEditing, onEditChange);
     case "Coding":
       return renderCodingQuestion(question, isEditing, onEditChange);
+    case "SQL":
+      return renderSubjectiveQuestion(question, isEditing, onEditChange);
+    case "AIML":
+      return renderSubjectiveQuestion(question, isEditing, onEditChange);
     default:
       return (
         <div style={{ padding: "1rem", backgroundColor: "#fef3c7", borderRadius: "0.5rem", color: "#92400e" }}>
@@ -1003,6 +1007,10 @@ function getQuestionText(question: any, questionType: string): string {
       return question.question || question.questionText || "";
     case "Coding":
       return question.problemStatement || question.title || "";
+    case "SQL":
+      return question.question || question.questionText || "";
+    case "AIML":
+      return question.question || question.questionText || "";
     default:
       return JSON.stringify(question);
   }
@@ -1025,6 +1033,10 @@ function getBaseTimePerQuestion(questionType: string): number {
       return 390; // 6.5 minutes (5-8 min range)
     case "Coding":
       return 960; // 16 minutes (12-20 min range)
+    case "SQL":
+      return 600; // 10 minutes baseline
+    case "AIML":
+      return 720; // 12 minutes baseline
     default:
       return 120; // 2 minutes default
   }
@@ -1052,6 +1064,9 @@ function getDefaultScore(questionType: string, difficulty: string): number {
     Subjective: { Easy: 4, Medium: 6, Hard: 8 },
     PseudoCode: { Easy: 6, Medium: 8, Hard: 10 },
     Coding: { Easy: 10, Medium: 15, Hard: 20 },
+    // SQL/AIML are execution-oriented environments, typically heavier than Subjective
+    SQL: { Easy: 8, Medium: 10, Hard: 12 },
+    AIML: { Easy: 10, Medium: 12, Hard: 15 },
   };
   
   const typeScores = baseScores[questionType] || { Easy: 1, Medium: 2, Hard: 3 };
@@ -1257,11 +1272,15 @@ export default function CreateNewAssessmentPage() {
     Subjective: number;
     PseudoCode: number;
     Coding: number;
+    SQL: number;
+    AIML: number;
   }>({
     MCQ: 0,
     Subjective: 0,
     PseudoCode: 0,
     Coding: 0,
+    SQL: 0,
+    AIML: 0,
   });
   // Scoring system - per question type (all questions of same type have same score)
   const [scoringRules, setScoringRules] = useState<{
@@ -1269,11 +1288,15 @@ export default function CreateNewAssessmentPage() {
     Subjective: number;
     PseudoCode: number;
     Coding: number;
+    SQL: number;
+    AIML: number;
   }>({
     MCQ: 1,
     Subjective: 4,
     PseudoCode: 6,
     Coding: 10,
+    SQL: 8,
+    AIML: 10,
   });
   const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null);
   const [editingReviewQuestion, setEditingReviewQuestion] = useState<any | null>(null);
@@ -1447,11 +1470,15 @@ export default function CreateNewAssessmentPage() {
       Subjective: Array<{ timer: number }>;
       PseudoCode: Array<{ timer: number }>;
       Coding: Array<{ timer: number }>;
+      SQL: Array<{ timer: number }>;
+      AIML: Array<{ timer: number }>;
     } = {
       MCQ: [],
       Subjective: [],
       PseudoCode: [],
       Coding: [],
+      SQL: [],
+      AIML: [],
     };
     
     // Aggregate questions from ALL topics including custom topics
@@ -1488,6 +1515,8 @@ export default function CreateNewAssessmentPage() {
       Subjective: questionsByType.Subjective.reduce((sum, q) => sum + q.timer, 0),
       PseudoCode: questionsByType.PseudoCode.reduce((sum, q) => sum + q.timer, 0),
       Coding: questionsByType.Coding.reduce((sum, q) => sum + q.timer, 0),
+      SQL: questionsByType.SQL.reduce((sum, q) => sum + q.timer, 0),
+      AIML: questionsByType.AIML.reduce((sum, q) => sum + q.timer, 0),
     };
     
     // Update section timers
@@ -1504,6 +1533,8 @@ export default function CreateNewAssessmentPage() {
       Subjective: [],
       PseudoCode: [],
       Coding: [],
+      SQL: [],
+      AIML: [],
     };
     
     // Aggregate questions from ALL topics including custom topics
@@ -1529,7 +1560,7 @@ export default function CreateNewAssessmentPage() {
       const newScoringRules = { ...prev };
       let hasChanges = false;
       
-      (["MCQ", "Subjective", "PseudoCode", "Coding"] as const).forEach((questionType) => {
+      (["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"] as const).forEach((questionType) => {
         const typeQuestions = questionsByType[questionType];
         if (typeQuestions.length > 0) {
           // Get difficulty of first question
@@ -6840,6 +6871,52 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   </div>
                 )}
 
+                {/* Selected Skills Display */}
+                {selectedSkills.length > 0 && (
+                  <div style={{ marginBottom: "2rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
+                      Selected Skills *
+                    </label>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
+                      {selectedSkills.map((skill) => (
+                        <div
+                          key={skill}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "0.5rem",
+                            backgroundColor: "#eff6ff",
+                            color: "#1e40af",
+                            padding: "0.5rem 1rem",
+                            borderRadius: "0.5rem",
+                            fontSize: "0.875rem",
+                            fontWeight: 500,
+                          }}
+                        >
+                          {skill}
+                          {(isEditMode || !hasVisitedConfigureStation) && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveSkill(skill)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                color: "#1e40af",
+                                cursor: "pointer",
+                                padding: 0,
+                                fontSize: "1.125rem",
+                                lineHeight: 1,
+                              }}
+                            >
+                              ×
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* CSV Upload Section */}
                 <div style={{ marginBottom: "2rem" }}>
                   <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
@@ -7064,52 +7141,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 </div>
               </div>
 
-              {/* Selected Skills Display */}
-              {selectedSkills.length > 0 && (
-                <div style={{ marginBottom: "2rem" }}>
-                  <label style={{ display: "block", marginBottom: "0.75rem", fontWeight: 600, color: "#1e293b" }}>
-                    Selected Skills *
-                  </label>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
-                    {selectedSkills.map((skill) => (
-                      <div
-                        key={skill}
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: "0.5rem",
-                          backgroundColor: "#eff6ff",
-                          color: "#1e40af",
-                          padding: "0.5rem 1rem",
-                          borderRadius: "0.5rem",
-                          fontSize: "0.875rem",
-                          fontWeight: 500,
-                        }}
-                      >
-                        {skill}
-                        {(isEditMode || !hasVisitedConfigureStation) && (
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveSkill(skill)}
-                            style={{
-                              background: "none",
-                              border: "none",
-                              color: "#1e40af",
-                              cursor: "pointer",
-                              padding: 0,
-                              fontSize: "1.125rem",
-                              lineHeight: 1,
-                            }}
-                          >
-                            ×
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               <div style={{ display: "flex", justifyContent: "center", gap: "1rem", marginTop: "2rem" }}>
                 {/* Check if topics have been generated (either in edit mode or after generating topics) */}
                 {(() => {
@@ -7297,7 +7328,9 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                   "MCQ", 
                                   "Subjective", 
                                   "PseudoCode", 
-                                  ...(row.canUseJudge0 ? ["Coding"] : [])
+                                  "SQL",
+                                  "AIML",
+                                  ...((topic.coding_supported !== false && row.canUseJudge0) ? ["Coding"] : [])
                                 ];
                           
                           return [
@@ -7438,7 +7471,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                     name={`question-type-${topic.id}-${row.rowId}`}
                                     value={row.questionType}
                                     onChange={(e) => {
-                                      const newType = e.target.value as "MCQ" | "Subjective" | "PseudoCode" | "Coding";
+                                      const newType = e.target.value as "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML";
                                       handleUpdateRow(topic.id, row.rowId, "questionType", newType);
                                       
                                       // If changing to Coding and canUseJudge0 is false, update it
@@ -8206,18 +8239,21 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   Subjective: typeof allReviewQuestions;
                   PseudoCode: typeof allReviewQuestions;
                   Coding: typeof allReviewQuestions;
+                  SQL: typeof allReviewQuestions;
+                  AIML: typeof allReviewQuestions;
                 } = {
                   MCQ: [],
                   Subjective: [],
                   PseudoCode: [],
                   Coding: [],
+                  SQL: [],
+                  AIML: [],
                 };
                 
                 allReviewQuestions.forEach((q) => {
                   const type = q.questionType as keyof typeof questionsByType;
-                  if (questionsByType[type]) {
-                    questionsByType[type].push(q);
-                  }
+                  // Unknown types are ignored, but SQL/AIML must be supported to avoid dropping them.
+                  questionsByType[type]?.push(q);
                 });
                 
                 // Calculate AI estimated total time (sum of all question times)
@@ -8292,8 +8328,8 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                     )}
                     
                     {/* Question Type Sections */}
-                    {(["MCQ", "Subjective", "PseudoCode", "Coding"] as const).map((questionType) => {
-                      const typeQuestions = questionsByType[questionType];
+                    {(["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"] as const).map((questionType) => {
+                      const typeQuestions = questionsByType[questionType] || [];
                       if (typeQuestions.length === 0) return null;
                       
                       const sectionTimer = sectionTimers[questionType];

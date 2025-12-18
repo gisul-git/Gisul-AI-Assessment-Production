@@ -7,7 +7,7 @@ interface GenerateQuestionPayload {
   assessmentId: string;
   topicId: string;
   topicLabel: string;
-  questionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding";
+  questionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML";
   difficulty: "Easy" | "Medium" | "Hard";
   questionsCount: number;
   canUseJudge0: boolean;

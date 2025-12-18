@@ -341,6 +341,3 @@ export function createFaceDetectionModule(): FaceDetectionModule {
     isInitialized: isFaceDetectionInitialized,
   };
 }
-
-
-

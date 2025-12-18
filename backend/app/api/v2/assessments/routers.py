@@ -112,13 +112,18 @@ async def generate_questions_from_config(
             
             # Build question configs for this question type
             for i in range(topic_config.numQuestions):
+                # Question generation engine doesn't have dedicated SQL/AIML generators in this endpoint.
+                # Generate them as Subjective prompts but preserve the original type for UI/review.
+                requested_type = topic_config.questionType
+                engine_type = "Subjective" if requested_type in ["SQL", "AIML"] else requested_type
                 q_config = {
                     "questionNumber": len(topic_question_configs[topic_config.topic]) + 1,
-                    "type": topic_config.questionType,
+                    "type": engine_type,
+                    "requestedType": requested_type,
                     "difficulty": topic_config.difficulty,
                 }
                 # Add coding-specific fields if question type is coding
-                if topic_config.questionType == "coding":
+                if engine_type == "coding":
                     # Always enable Judge0 for coding questions
                     q_config["judge0_enabled"] = True
                     # Set language if specified
@@ -146,8 +151,11 @@ async def generate_questions_from_config(
         if not topic_obj:
             continue
         
+        requested_type = topic_config.questionType
+        engine_type = "Subjective" if requested_type in ["SQL", "AIML"] else requested_type
+
         # Validate: Reject coding questions for topics that don't support coding
-        if topic_config.questionType == "coding":
+        if engine_type == "coding":
             # Dynamically determine coding support (don't rely on stored value which might be outdated)
             coding_supported = await determine_topic_coding_support(topic_config.topic)
             if not coding_supported:
@@ -162,10 +170,10 @@ async def generate_questions_from_config(
             "numQuestions": topic_config.numQuestions,
         }
         for i in range(1, topic_config.numQuestions + 1):
-            config[f"Q{i}type"] = topic_config.questionType
+            config[f"Q{i}type"] = engine_type
             config[f"Q{i}difficulty"] = topic_config.difficulty
         # Add coding-specific fields if question type is coding
-        if topic_config.questionType == "coding":
+        if engine_type == "coding":
             # Always enable Judge0 for coding questions
             config["judge0_enabled"] = True
             # Set language if specified
@@ -188,8 +196,11 @@ async def generate_questions_from_config(
                 # Auto-generate time and score for each question
                 for q in questions:
                     q["topic"] = topic_config.topic
+                    # Preserve requested type for SQL/AIML so UI/review sees the right category
+                    if requested_type in ["SQL", "AIML"]:
+                        q["type"] = requested_type
                     # Ensure coding-specific fields are set for coding questions
-                    if topic_config.questionType == "coding":
+                    if engine_type == "coding":
                         # Always enable Judge0 for coding questions
                         q["judge0_enabled"] = True
                         # Set language if specified

@@ -133,7 +133,8 @@ class UpdateAssessmentRequest(BaseModel):
 class QuestionRowModel(BaseModel):
     """Model for a single question type row within a topic."""
     rowId: str = Field(..., description="Unique row identifier")
-    questionType: str = Field(..., pattern=r"^(MCQ|Subjective|PseudoCode|Coding)$")
+    # Include SQL/AIML to support execution-environment question types in v2 topic flows
+    questionType: str = Field(..., pattern=r"^(MCQ|Subjective|PseudoCode|Coding|SQL|AIML)$")
     difficulty: str = Field(..., pattern=r"^(Easy|Medium|Hard)$")
     questionsCount: int = Field(..., ge=1, le=20)
     questions: List[Dict[str, Any]] = Field(default_factory=list, description="Generated questions for this row")
@@ -224,7 +225,8 @@ class GenerateQuestionRequest(BaseModel):
     topicId: str
     rowId: str = Field(..., description="ID of the question row to generate questions for")
     topicLabel: str
-    questionType: str = Field(..., pattern=r"^(MCQ|Subjective|PseudoCode|Coding)$")
+    # Include SQL/AIML to support execution-environment question types
+    questionType: str = Field(..., pattern=r"^(MCQ|Subjective|PseudoCode|Coding|SQL|AIML)$")
     difficulty: str = Field(..., pattern=r"^(Easy|Medium|Hard)$")
     questionsCount: int = Field(..., ge=1, le=20)
     canUseJudge0: bool = Field(default=False)
@@ -504,7 +506,7 @@ class RegenerateQuestionRequest(BaseModel):
     rowId: str
     questionIndex: int
     oldQuestion: str = Field(..., description="The current question text")
-    questionType: str = Field(..., description="Type of question (MCQ, Subjective, PseudoCode, Coding)")
+    questionType: str = Field(..., description="Type of question (MCQ, Subjective, PseudoCode, Coding, SQL, AIML)")
     difficulty: str = Field(..., description="Difficulty level (Easy, Medium, Hard)")
     experienceMode: Optional[str] = Field(default="corporate", pattern=r"^(corporate|student|college)$")
     experienceMin: Optional[int] = Field(default=0, ge=0, le=20)

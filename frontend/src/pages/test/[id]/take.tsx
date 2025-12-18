@@ -866,6 +866,23 @@ export default function TestTakePage() {
         // Check if we need to start the test (from instructions page)
         const shouldStartTest = sessionStorage.getItem("shouldStartTest") === "true"
         let submissionData = null
+
+        const handleStartForbidden = (err: any) => {
+          const detail =
+            err?.response?.data?.detail ||
+            err?.response?.data?.message ||
+            'You are not allowed to start this test right now.'
+          console.error('[Test Load] Start forbidden:', err?.response?.status, detail)
+          // Prevent retry loop
+          fetchDataRef.current = false
+          sessionStorage.removeItem("shouldStartTest")
+          if (isMounted) {
+            setCheckingParams(false)
+            alert(detail)
+            // Go back to entry flow (precheck / instructions) with token
+            router.replace(`/test/${testId}?token=${encodeURIComponent(String(token))}`)
+          }
+        }
         
         console.log('[Test Load] shouldStartTest:', shouldStartTest)
         
@@ -884,6 +901,10 @@ export default function TestTakePage() {
             console.log('[Test Load] Test session started - timer will begin when fullscreen is entered and editor is visible', submissionData)
           } catch (error: any) {
             console.error('[Test Load] Error starting test:', error)
+            if (error?.response?.status === 403) {
+              handleStartForbidden(error)
+              return
+            }
             // Try to get existing submission
             try {
               const subRes = await dsaApi.get(`/tests/${testId}/submission?user_id=${userId}`)
@@ -931,6 +952,10 @@ export default function TestTakePage() {
                 console.log('[Test Load] Test started (no existing submission) - timer begins now', submissionData)
               } catch (e: any) {
                 console.error('[Test Load] Error starting test:', e.response?.status, e.message)
+                if (e?.response?.status === 403) {
+                  handleStartForbidden(e)
+                  return
+                }
                 if (isMounted) {
                   alert('Failed to start test. Please try again.')
                   router.push('/dashboard')

@@ -1,14 +1,204 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 from bson import ObjectId
 import logging
 from ..database import get_dsa_database as get_database
 from ..models.question import Question, QuestionCreate, QuestionUpdate
+from ..services.expected_output import compute_expected_outputs_for_testcases
 from .....core.dependencies import get_current_user, require_editor
 
 logger = logging.getLogger("backend")
 router = APIRouter(prefix="/api/v1/dsa/questions", tags=["dsa"])
+
+# =====================================================================================
+# DSA Coding Validation Helpers (do NOT apply to SQL questions)
+# =====================================================================================
+
+def _normalize_str(v: Optional[str]) -> str:
+    return (v or "").strip()
+
+def _is_sql_question(payload: Dict[str, Any]) -> bool:
+    # Explicit SQL
+    if str(payload.get("question_type") or "").upper() == "SQL":
+        return True
+    # Inferred SQL (same logic as get_question)
+    has_schemas = payload.get("schemas") and len(payload.get("schemas", {})) > 0
+    has_sql_category = payload.get("sql_category") is not None
+    has_starter_query = payload.get("starter_query") is not None
+    has_evaluation = payload.get("evaluation") and payload.get("evaluation", {}).get("engine")
+    return bool(has_schemas or has_sql_category or has_starter_query or has_evaluation)
+
+def _get_return_type(payload: Dict[str, Any]) -> Optional[str]:
+    fs = payload.get("function_signature") or {}
+    rt = fs.get("return_type")
+    return _normalize_str(rt) or None
+
+def _validate_expected_output_for_return_type(return_type: Optional[str], expected_output: str) -> None:
+    """
+    Strict validation for machine-readable expected_output stored on testcases.
+    - int/long: single integer
+    - boolean: true/false
+    - int[]/long[]: space-separated integers (no brackets)
+    - string/string[]: allow any (string[] expects space-separated tokens; keep permissive)
+    """
+    import re
+
+    rt = (return_type or "").strip()
+    out = expected_output.strip()
+
+    if out == "":
+        raise ValueError("expected_output cannot be empty")
+
+    if rt in ("int", "long"):
+        if not re.fullmatch(r"-?\d+", out):
+            raise ValueError(f"expected_output must be a single integer for return_type={rt}")
+        return
+
+    if rt == "boolean":
+        if out.lower() not in ("true", "false"):
+            raise ValueError("expected_output must be 'true' or 'false' for return_type=boolean")
+        return
+
+    if rt in ("int[]", "long[]"):
+        if "[" in out or "]" in out or "," in out:
+            raise ValueError(f"expected_output for return_type={rt} must be space-separated values (no brackets/commas)")
+        parts = [p for p in out.split() if p != ""]
+        if not parts:
+            raise ValueError(f"expected_output must contain at least one value for return_type={rt}")
+        for p in parts:
+            if not re.fullmatch(r"-?\d+", p):
+                raise ValueError(f"expected_output contains non-integer value '{p}' for return_type={rt}")
+        return
+
+    # For other return types, keep permissive (string, string[], double, etc.)
+    return
+
+def _validate_example_output_for_return_type(return_type: Optional[str], example_output: str) -> None:
+    """
+    Looser validation for human-readable examples.
+    Accepts bracketed arrays for int[] (e.g., [0,1]) in addition to space-separated.
+    """
+    import re
+
+    rt = (return_type or "").strip()
+    out = (example_output or "").strip()
+    if out == "":
+        raise ValueError("example output cannot be empty")
+
+    if rt in ("int", "long"):
+        if not re.fullmatch(r"-?\d+", out):
+            raise ValueError(f"example output must be a single integer for return_type={rt}")
+        return
+
+    if rt == "boolean":
+        if out.lower() not in ("true", "false"):
+            raise ValueError("example output must be 'true' or 'false' for return_type=boolean")
+        return
+
+    if rt in ("int[]", "long[]"):
+        # Allow either "[0,1]" or "0 1"
+        if re.fullmatch(r"\[\s*-?\d+(\s*,\s*-?\d+)*\s*\]", out):
+            return
+        # else validate as space-separated ints
+        if "[" in out or "]" in out:
+            raise ValueError(f"example output for return_type={rt} must be like '[0, 1]' or '0 1'")
+        parts = [p for p in out.split() if p != ""]
+        if not parts:
+            raise ValueError(f"example output must contain at least one value for return_type={rt}")
+        for p in parts:
+            if not re.fullmatch(r"-?\d+", p):
+                raise ValueError(f"example output contains non-integer value '{p}' for return_type={rt}")
+        return
+
+    return
+
+def _validate_stdin_only_input(stdin: str) -> None:
+    """
+    Enforce 'machine-readable stdin' constraints for DSA testcases:
+    - No variable names (reject '=')
+    - No JSON-style arrays (reject '[' or ']')
+    This is intentionally minimal and conservative.
+    """
+    s = stdin or ""
+    if "=" in s:
+        raise ValueError("testcase input must be raw stdin only (no variable assignments like 'nums = ...')")
+    if "[" in s or "]" in s:
+        raise ValueError("testcase input must be raw stdin only (no JSON-style arrays like [1,2,3])")
+
+def _validate_dsa_coding_payload(payload: Dict[str, Any]) -> None:
+    """
+    Validate DSA coding question payload:
+    - Examples are human-readable; output should match return_type (loosely).
+    - Testcases are stdin-only; outputs:
+      - Manual: expected_output required + strict type match vs return_type.
+      - AI-generated: expected_output may be omitted for all testcases; must be consistently omitted (not mixed).
+    """
+    if _is_sql_question(payload):
+        return  # do not touch SQL
+
+    return_type = _get_return_type(payload)
+
+    # Validate examples output shape if return_type is known
+    examples = payload.get("examples") or []
+    for idx, ex in enumerate(examples):
+        try:
+            _validate_example_output_for_return_type(return_type, (ex or {}).get("output", ""))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid example output at examples[{idx}]: {str(e)}")
+
+    # Validate testcases
+    def classify_testcases(testcases: List[Dict[str, Any]]) -> Tuple[bool, bool]:
+        # returns (has_any_expected, has_any_missing)
+        has_any_expected = False
+        has_any_missing = False
+        for tc in testcases:
+            eo = _normalize_str((tc or {}).get("expected_output"))
+            if eo == "":
+                has_any_missing = True
+            else:
+                has_any_expected = True
+        return has_any_expected, has_any_missing
+
+    public_tcs = payload.get("public_testcases") or []
+    hidden_tcs = payload.get("hidden_testcases") or []
+    all_tcs = [("public_testcases", public_tcs), ("hidden_testcases", hidden_tcs)]
+
+    # Determine manual vs AI by presence of expected_output across all testcases (no mixing allowed)
+    has_expected_any = False
+    missing_expected_any = False
+    for _, tcs in all_tcs:
+        a, b = classify_testcases(tcs)
+        has_expected_any = has_expected_any or a
+        missing_expected_any = missing_expected_any or b
+
+    if has_expected_any and missing_expected_any:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid testcase data: expected_output must be provided for ALL manual testcases or omitted for ALL AI-generated testcases (do not mix).",
+        )
+
+    is_ai_generated = (not has_expected_any) and missing_expected_any
+
+    for tc_group_name, tcs in all_tcs:
+        for idx, tc in enumerate(tcs):
+            tc_input = (tc or {}).get("input", "")
+            try:
+                _validate_stdin_only_input(tc_input)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid testcase input at {tc_group_name}[{idx}]: {str(e)}")
+
+            if is_ai_generated:
+                # expected_output intentionally omitted; nothing else to validate
+                continue
+
+            eo = _normalize_str((tc or {}).get("expected_output"))
+            if eo == "":
+                raise HTTPException(status_code=400, detail=f"Missing expected_output at {tc_group_name}[{idx}] for manual question")
+            try:
+                _validate_expected_output_for_return_type(return_type, eo)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid expected_output at {tc_group_name}[{idx}]: {str(e)}")
 
 @router.get("/", response_model=List[dict])
 async def get_questions(
@@ -234,6 +424,24 @@ async def get_question(
         question_dict["constraints"] = question.get("constraints")
     if question.get("examples"):
         question_dict["examples"] = question.get("examples")
+
+    # For DSA coding questions, compute expected_output for AI-generated (stdin-only) testcases.
+    # This is done server-side using a trusted reference solution and is NOT persisted.
+    try:
+        if not _is_sql_question(question):
+            public_tc = question.get("public_testcases", []) or []
+            hidden_tc = question.get("hidden_testcases", []) or []
+            # Detect AI-generated if outputs are missing across all testcases (before compute)
+            all_tc = public_tc + hidden_tc
+            has_any_expected = any((_normalize_str((tc or {}).get("expected_output")) != "") for tc in all_tc)
+            has_any_missing = any((_normalize_str((tc or {}).get("expected_output")) == "") for tc in all_tc)
+            if (not has_any_expected) and has_any_missing:
+                question_dict["ai_generated"] = True
+                question_dict["public_testcases"] = await compute_expected_outputs_for_testcases(question, public_tc)
+                question_dict["hidden_testcases"] = await compute_expected_outputs_for_testcases(question, hidden_tc)
+    except Exception as e:
+        # Fail fast for admin UI: expected output computation must succeed if needed.
+        raise HTTPException(status_code=500, detail=f"Failed to compute expected outputs: {str(e)}")
     
     # Add optional fields if they exist
     if "created_at" in question:
@@ -253,6 +461,10 @@ async def create_question(
     """
     db = get_database()
     question_dict = question.model_dump()
+
+    # Validate DSA coding payload (skip SQL)
+    _validate_dsa_coding_payload(question_dict)
+
     # Store the actual user ID who created the question
     user_id = current_user.get("id") or current_user.get("_id")
     if not user_id:
@@ -334,6 +546,10 @@ async def update_question(
     update_data = {k: v for k, v in question_update.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Validate DSA coding payload using the merged view (skip SQL)
+    merged_payload = {**existing_question, **update_data}
+    _validate_dsa_coding_payload(merged_payload)
     
     update_data["updated_at"] = datetime.utcnow()
     
@@ -453,4 +669,59 @@ async def delete_question(
         raise HTTPException(status_code=404, detail="Question not found")
     
     return {"message": "Question deleted successfully"}
+
+
+@router.post("/{question_id}/clone", response_model=dict)
+async def clone_question(
+    question_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Clone (duplicate) a DSA question for the same owner.
+    Creates a new question document with a new _id and timestamps, and sets is_published=False.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(question_id):
+        raise HTTPException(status_code=400, detail="Invalid question ID")
+
+    user_id = current_user.get("id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_id = str(user_id).strip()
+
+    original = await db.questions.find_one({"_id": ObjectId(question_id)})
+    if not original:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if str(original.get("created_by", "")).strip() != user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to clone this question")
+
+    # Build clone doc (strip identity/timestamps)
+    clone_doc = {k: v for k, v in original.items() if k not in ("_id", "id", "created_at", "updated_at")}
+    clone_doc["title"] = f"{original.get('title', 'Untitled')} (Copy)"
+    clone_doc["is_published"] = False
+    clone_doc["created_at"] = datetime.utcnow()
+    clone_doc["updated_at"] = datetime.utcnow()
+    # Keep module isolation
+    clone_doc["module_type"] = original.get("module_type") or "dsa"
+    clone_doc["created_by"] = user_id
+
+    # Validate the cloned payload for DSA coding questions (skip SQL)
+    _validate_dsa_coding_payload(clone_doc)
+
+    result = await db.questions.insert_one(clone_doc)
+    created = await db.questions.find_one({"_id": result.inserted_id})
+    return {
+        "id": str(created["_id"]),
+        "title": created.get("title", ""),
+        "description": created.get("description", ""),
+        "difficulty": created.get("difficulty", ""),
+        "languages": created.get("languages", []),
+        "starter_code": created.get("starter_code", {}),
+        "public_testcases": created.get("public_testcases", []),
+        "hidden_testcases": created.get("hidden_testcases", []),
+        "is_published": created.get("is_published", False),
+        "created_at": created.get("created_at").isoformat() if created.get("created_at") else None,
+        "updated_at": created.get("updated_at").isoformat() if created.get("updated_at") else None,
+    }
 

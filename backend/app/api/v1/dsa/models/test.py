@@ -8,6 +8,16 @@ from .question import PyObjectId
 # Timer mode types
 TimerMode = Literal["GLOBAL", "PER_QUESTION"]
 
+# Exam window mode (mirrors Custom MCQ)
+ExamMode = Literal["strict", "flexible"]
+
+
+class Schedule(BaseModel):
+    """Exam window schedule configuration (mirrors Custom MCQ structure)."""
+    startTime: Optional[datetime] = None
+    endTime: Optional[datetime] = None
+    duration: Optional[int] = None  # minutes, required for flexible mode
+
 
 class QuestionTiming(BaseModel):
     """Timing configuration for a single question in PER_QUESTION mode"""
@@ -40,6 +50,9 @@ class Test(BaseModel):
 
     # Proctoring (optional, backward compatible)
     proctoringSettings: Optional[ProctoringSettings] = None
+    # Exam window configuration (mirrors Custom MCQ; backward compatible)
+    examMode: ExamMode = "strict"
+    schedule: Optional[Schedule] = None
 
     model_config = {
         "populate_by_name": True,
@@ -52,9 +65,10 @@ class TestCreate(BaseModel):
     title: str
     description: str
     question_ids: List[str]
-    duration_minutes: int  # Required for GLOBAL mode, auto-computed for PER_QUESTION
-    start_time: datetime
-    end_time: datetime
+    # Legacy fields (kept for backward compatibility). For new clients use examMode + schedule.
+    duration_minutes: Optional[int] = None  # Required for GLOBAL mode; may be derived from schedule
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
     invited_users: List[str] = []  # List of user emails to invite
     
     # Timer configuration (new fields - backward compatible with defaults)

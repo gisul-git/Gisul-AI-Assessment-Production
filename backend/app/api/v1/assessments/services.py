@@ -722,6 +722,150 @@ async def get_question_type_for_topic(topic: str) -> str:
         return "MCQ"
     
     topic_lower = topic.lower().strip()
+
+    # High-priority deterministic routing (no AI):
+    # 1) AIML topics
+    # AIML type is ONLY for topics requiring writing/executing ML/DS code (notebook).
+    aiml_keywords = [
+        "pandas", "numpy", "matplotlib", "seaborn", "plotly", "scipy",
+        "tensorflow", "keras", "pytorch", "torch", "scikit-learn", "sklearn",
+        "machine learning", "deep learning", "neural network", "random forest", "decision tree",
+        "regression", "classification", "clustering", "supervised learning", "unsupervised learning",
+        "gradient descent", "backpropagation",
+        "jupyter", "notebook", "colab", "anaconda",
+        "data preprocessing", "feature engineering", "model training", "dataframe", "series",
+        "model evaluation", "cross validation",
+    ]
+    aiml_theory_keywords = [
+        " vs ", " versus ", "compare", "comparison", "difference", "differences",
+        "advantages", "disadvantages", "benefits", "drawbacks",
+        "concept", "concepts", "principle", "principles", "fundamental", "fundamentals", "basic", "basics",
+        "theory", "explained", "explain", "explanation", "understanding", "overview", "introduction",
+        "what is", "why", "when", "how does",
+        "architecture", "design", "workflow", "process",
+    ]
+    aiml_execution_keywords = [
+        "implement", "implementation", "build", "train", "fit", "predict",
+        "write code", "coding", "notebook", "jupyter", "colab",
+        "using pandas", "with pandas", "using numpy", "with numpy",
+        "using sklearn", "with sklearn", "using scikit-learn", "with scikit-learn",
+        "using tensorflow", "with tensorflow", "using pytorch", "with pytorch",
+        "data preprocessing", "feature engineering", "model training",
+    ]
+    if any(k in topic_lower for k in aiml_keywords):
+        # If it's AIML-related but conceptual/comparison-focused, keep it Subjective (no notebook execution).
+        if any(k in topic_lower for k in aiml_theory_keywords) and not any(k in topic_lower for k in aiml_execution_keywords):
+            return "Subjective"
+        # Require explicit execution intent for AIML type
+        if any(k in topic_lower for k in aiml_execution_keywords):
+            return "AIML"
+        return "Subjective"
+
+    # 2) SQL topics
+    # SQL type is ONLY for topics requiring writing/executing SQL queries/procedures (sandbox).
+    # Use word-boundary + contextual patterns to avoid false positives like "selectors" -> "select" and "overview" -> "view".
+    import re
+
+    sql_theory_keywords = [
+        " vs ", " versus ", "compare", "comparison", "difference", "differences",
+        "advantages", "disadvantages", "benefits", "drawbacks",
+        "concept", "concepts", "principle", "principles", "fundamental", "fundamentals", "basic", "basics",
+        "explained", "explain", "explanation", "understanding", "overview", "introduction",
+        "types of", "what is", "why", "when",
+        "strategy", "strategies", "approach", "approaches", "technique", "techniques", "best practice", "best practices",
+        "design", "architecture", "modeling", "modelling",
+        "vulnerability", "vulnerabilities", "security", "prevention", "mitigation",
+        "injection",
+    ]
+    sql_execution_keywords = [
+        "write sql", "write a sql", "write query", "write a query", "construct query", "create query",
+        "sql query to", "query to", "using sql to",
+        "implement stored procedure", "write stored procedure", "create stored procedure", "stored procedure implementation",
+        "create procedure", "write procedure", "implement procedure",
+        "create trigger", "write trigger", "trigger implementation",
+        "optimize query", "optimizing query", "query optimization", "rewrite query", "improve query performance",
+        "recursive query", "writing recursive",
+    ]
+    sql_indicator_patterns = [
+        r"\bsql\b",
+        r"\bmysql\b",
+        r"\bpostgresql\b",
+        r"\bsqlite\b",
+        r"\boracle\b",
+        r"\bmssql\b",
+        r"\bdatabase\b",
+        r"\bdb\b",
+        r"\bschema\b",
+        r"\btable\b",
+        r"\btables\b",
+        r"\bquery\b",
+        r"\bqueries\b",
+        r"\bstored\s+procedure\b",
+        r"\btrigger\b",
+        r"\bview\b",
+        r"\bindex\b",
+        r"\bindexes\b",
+        r"\bindexing\b",
+        r"\btransaction\b",
+        r"\btransactions\b",
+        r"\bacid\b",
+        r"\bprimary\s+key\b",
+        r"\bforeign\s+key\b",
+        r"\bnormalization\b",
+        r"\bdenormalization\b",
+    ]
+    sql_op_patterns = [
+        r"\bselect\b.*\bfrom\b",
+        r"\bjoin\b.*\bon\b",
+        r"\bgroup\s+by\b",
+        r"\border\s+by\b",
+        r"\bwhere\b",
+        r"\bhaving\b",
+        r"\binsert\b.*\binto\b",
+        r"\bupdate\b.*\bset\b",
+        r"\bdelete\b.*\bfrom\b",
+        r"\bsubquery\b",
+        r"\bsubqueries\b",
+    ]
+
+    is_sql_related = any(re.search(p, topic_lower) for p in sql_indicator_patterns)
+    if not is_sql_related:
+        op_hits = sum(1 for p in sql_op_patterns if re.search(p, topic_lower))
+        is_sql_related = op_hits >= 2
+
+    if is_sql_related:
+        # SQL theory/security/comparison stays Subjective (no sandbox execution).
+        if any(k in topic_lower for k in sql_theory_keywords) and not any(k in topic_lower for k in sql_execution_keywords):
+            return "Subjective"
+        # Require explicit execution intent or strong SQL op context
+        if any(k in topic_lower for k in sql_execution_keywords) or any(re.search(p, topic_lower) for p in sql_op_patterns):
+            return "SQL"
+        return "Subjective"
+
+    # 3) Web technology topics are NEVER coding (platform doesn't support browser/web execution)
+    web_keywords = [
+        # Frontend frameworks
+        "react", "angular", "vue", "svelte", "nextjs", "next.js", "nuxt", "gatsby", "ember",
+        # Web technologies
+        "html", "css", "scss", "sass", "less", "tailwind", "bootstrap", "material ui", "chakra ui", "ant design",
+        # Browser/DOM
+        "dom", "browser", "document", "window", "event listener", "fetch api", "localstorage", "sessionstorage",
+        "cookie", "webstorage",
+        # Web frameworks (backend)
+        "express", "koa", "fastify", "nest", "nestjs", "meteor",
+        # Frontend build tools
+        "webpack", "vite", "rollup", "parcel", "babel",
+        # UI libraries
+        "jquery", "d3", "chart.js", "three.js", "gsap", "anime.js",
+        # Web concepts
+        "frontend", "web development", "responsive design", "web page", "website", "web app", "web application",
+        "spa", "single page", "ssr", "server side rendering", "csr", "client side rendering",
+        # Node.js web
+        "node server", "express server", "api endpoint", "http server", "rest api in node",
+    ]
+    if any(k in topic_lower for k in web_keywords):
+        implementation_keywords = ["build", "create", "implement", "design", "develop", "write"]
+        return "Subjective" if any(k in topic_lower for k in implementation_keywords) else "MCQ"
     
     # Fast keyword-based matching (no AI call needed)
     # Coding-related topics
@@ -907,8 +1051,12 @@ No explanation, just the type name."""
         result = result.strip('"\'')  # Remove quotes if present
         
         # Validate result and ensure "coding" is only returned if topic supports coding
-        valid_types = {"MCQ", "Subjective", "Pseudo Code", "Descriptive", "coding"}
+        valid_types = {"MCQ", "Subjective", "Pseudo Code", "Descriptive", "coding", "SQL", "AIML"}
         if result in valid_types:
+            # Sanity-check SQL returned from AI to avoid mislabeling non-SQL topics
+            if result == "SQL":
+                if not (any(k in topic_lower for k in sql_db_indicators) or any(re.search(p, topic_lower) for p in sql_op_patterns)):
+                    result = "Subjective" if any(k in topic_lower for k in ["vs", "versus", "difference", "compare", "comparison"]) else "MCQ"
             # If AI returned "coding" but topic doesn't support coding, change to safe default
             if result == "coding" and not coding_supported:
                 logger.warning(f"AI returned 'coding' for topic '{topic}' but topic doesn't support coding. Changing to 'Subjective'.")

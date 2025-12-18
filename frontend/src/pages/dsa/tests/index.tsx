@@ -5,7 +5,7 @@ import { useRouter } from 'next/router'
 import { Card, CardContent } from '../../../components/dsa/ui/card'
 import { Button } from '../../../components/dsa/ui/button'
 import dsaApi from '../../../lib/dsa/api'
-import { Clock, Eye, EyeOff, Users, Mail, Trash2, Edit, Upload, BarChart3, List } from 'lucide-react'
+import { Clock, Eye, EyeOff, Users, Mail, Edit, Upload, List } from 'lucide-react'
 import Link from 'next/link'
 // Helper function to format dates
 const formatDate = (dateString: string, formatStr: string) => {
@@ -35,6 +35,7 @@ interface Test {
   invited_users: string[]
   question_ids?: string[]
   test_token?: string
+  pausedAt?: string | null
 }
 
 export default function TestsListPage() {
@@ -42,7 +43,6 @@ export default function TestsListPage() {
   const [tests, setTests] = useState<Test[]>([])
   const [loading, setLoading] = useState(true)
   const [inviteModal, setInviteModal] = useState<{ testId: string; open: boolean }>({ testId: '', open: false })
-  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const fetchTests = async () => {
     try {
@@ -65,10 +65,20 @@ export default function TestsListPage() {
   useEffect(() => {
     if (router.query.refreshed === 'true') {
       fetchTests()
-      // Remove the query parameter
-      router.replace('/dsa/tests', undefined, { shallow: true })
+      // Remove refreshed=true but preserve testId filter (if present)
+      const testId = router.query.testId
+      const nextQuery: Record<string, any> = {}
+      if (testId) nextQuery.testId = testId
+      router.replace({ pathname: '/dsa/tests', query: nextQuery }, undefined, { shallow: true })
     }
   }, [router.query.refreshed])
+
+  const filteredTests = (() => {
+    const q = router.query.testId
+    const testId = typeof q === 'string' ? q : (Array.isArray(q) ? q[0] : undefined)
+    if (!testId) return tests
+    return tests.filter(t => String(t.id) === String(testId))
+  })()
 
   const handlePublish = async (testId: string, currentStatus: boolean) => {
     try {
@@ -86,22 +96,6 @@ export default function TestsListPage() {
     }
   }
 
-  const handleDelete = async (testId: string) => {
-    if (!confirm('Are you sure you want to delete this test? This action cannot be undone. Note: Associated submissions and candidate records will remain in the database.')) {
-      return
-    }
-
-    setDeletingId(testId)
-    try {
-      await dsaApi.delete(`/tests/${testId}`)
-      setTests(tests.filter((t) => t.id !== testId))
-      alert('Test deleted successfully!')
-    } catch (error: any) {
-      alert(error.response?.data?.detail || 'Failed to delete test')
-    } finally {
-      setDeletingId(null)
-    }
-  }
 
   const [candidateName, setCandidateName] = useState('')
   const [candidateEmail, setCandidateEmail] = useState('')
@@ -171,20 +165,31 @@ export default function TestsListPage() {
           </button>
         </div>
 
-        <div className="mb-6">
-          <h1 className="text-4xl font-bold">Test Management</h1>
-          <p className="text-muted-foreground mt-1">Publish tests and add candidates to published tests</p>
+        <div className="mb-6 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-4xl font-bold">Test Management</h1>
+            <p className="text-muted-foreground mt-1">Manage tests and candidates</p>
+          </div>
+          <Button
+            variant="default"
+            onClick={() => router.push("/dashboard")}
+            title="Save and go back to dashboard"
+          >
+            Save
+          </Button>
         </div>
 
-        {tests.length === 0 ? (
+        {filteredTests.length === 0 ? (
           <Card>
             <CardContent className="p-8 text-center">
-              <p className="text-muted-foreground">No tests available. Create tests from the dashboard.</p>
+              <p className="text-muted-foreground">
+                {router.query.testId ? 'Test not found.' : 'No tests available. Create tests from the dashboard.'}
+              </p>
             </CardContent>
           </Card>
         ) : (
           <div className="space-y-4">
-            {tests.map((test) => (
+            {filteredTests.map((test) => (
               <Card key={test.id}>
                 <CardContent className="p-4">
                   <div className="flex items-center justify-between">
@@ -220,6 +225,11 @@ export default function TestsListPage() {
                         >
                           {test.is_published ? 'Published' : 'Draft'}
                         </span>
+                        {test.pausedAt && (
+                          <span className="px-2 py-1 rounded text-xs bg-amber-500/20 text-amber-700">
+                            Paused
+                          </span>
+                        )}
                         <div className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Users className="h-3 w-3" />
                           {test.invited_users?.length || 0} candidates
@@ -297,12 +307,6 @@ export default function TestsListPage() {
                           Candidates
                         </Button>
                       </Link>
-                      <Link href={`/dsa/tests/${test.id}/analytics`}>
-                        <Button variant="outline" size="sm" disabled={!test.is_published}>
-                          <BarChart3 className="h-4 w-4 mr-2" />
-                          Analytics
-                        </Button>
-                      </Link>
                       <Button
                         variant="default"
                         size="sm"
@@ -313,20 +317,10 @@ export default function TestsListPage() {
                           setCandidateEmail('')
                         }}
                         disabled={!test.is_published}
-                        title={!test.is_published ? "Publish the test first before adding candidates" : "Add a candidate and generate a unique test link"}
+                        title={!test.is_published ? "Test must be published to add candidates" : "Add a candidate"}
                       >
                         <Mail className="h-4 w-4 mr-2" />
                         Add Candidate
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => handleDelete(test.id)}
-                        disabled={deletingId === test.id}
-                        title="Delete this test"
-                      >
-                        <Trash2 className="h-4 w-4 mr-2" />
-                        {deletingId === test.id ? 'Deleting...' : 'Delete'}
                       </Button>
                     </div>
                   </div>
