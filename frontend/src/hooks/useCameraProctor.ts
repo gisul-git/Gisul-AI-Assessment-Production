@@ -96,6 +96,11 @@ const INFERENCE_WIDTH = 320;
 const INFERENCE_HEIGHT = 240;
 const NO_FACE_CONSECUTIVE_THRESHOLD = 5; // Consecutive detections before NO_FACE_DETECTED
 
+// Optional: custom model URLs from environment variables
+// If not provided, models will use their default URLs from the TensorFlow.js libraries
+const FACE_DETECTION_MODEL_URL = process.env.NEXT_PUBLIC_FACE_DETECTION_MODEL_URL || "";
+const FACE_MESH_MODEL_URL = process.env.NEXT_PUBLIC_FACE_MESH_MODEL_URL || "";
+
 // Face comparison constants
 const FACE_COMPARISON_LANDMARKS = [
   // Key facial structure points
@@ -482,7 +487,12 @@ export function useCameraProctor({
       
       // Load BlazeFace for face detection
       const blazeface = await import("@tensorflow-models/blazeface");
-      faceDetectorRef.current = await blazeface.load();
+      // Use custom URL if provided, otherwise use library's default
+      faceDetectorRef.current = await (blazeface as any).load(
+        FACE_DETECTION_MODEL_URL
+          ? { modelUrl: FACE_DETECTION_MODEL_URL }
+          : undefined
+      );
       debugLog("BlazeFace model loaded");
       
       // Load FaceMesh for landmark detection (includes iris)
@@ -493,6 +503,11 @@ export function useCameraProctor({
           runtime: "tfjs",
           refineLandmarks: true, // Enable iris detection
           maxFaces: 3,
+          ...(FACE_MESH_MODEL_URL
+            ? ({
+                modelUrl: FACE_MESH_MODEL_URL,
+              } as any)
+            : {}),
         }
       );
       debugLog("FaceMesh model loaded");
