@@ -544,20 +544,40 @@ export default function PrecheckPage() {
     ));
     
     try {
-      // Always start a fresh stream for the check
-      // IMPORTANT: Enable echo cancellation and AGC for Bluetooth headset compatibility
+      // Detect if selected device is Bluetooth BEFORE creating constraints
+      // This is critical: Bluetooth devices need REQUIRED constraints, system mics can use OPTIONAL
+      const selectedDevice = audioDevices.find(d => d.deviceId === selectedAudioDeviceId);
+      const isBluetoothDevice = selectedDevice?.label.toLowerCase().includes('bluetooth') || 
+                               selectedDevice?.label.toLowerCase().includes('headset') ||
+                               false;
+      
+      // IMPORTANT: Use different constraints for Bluetooth vs system microphones
+      // Bluetooth NEEDS required constraints, system mics can be flexible
       const audioConstraints: MediaTrackConstraints = {
-        echoCancellation: true,  // Enable for Bluetooth compatibility
+        // For Bluetooth: REQUIRED (true), for system mics: OPTIONAL ({ ideal: true })
+        echoCancellation: isBluetoothDevice ? true : { ideal: true },
         noiseSuppression: false, // Keep disabled for accurate detection
-        autoGainControl: true,   // Enable for Bluetooth compatibility
-        // Try to force specific sample rate for Bluetooth (may not be supported by all browsers)
-        sampleRate: 16000,
+        // For Bluetooth: REQUIRED (true), for system mics: OPTIONAL ({ ideal: true })
+        autoGainControl: isBluetoothDevice ? true : { ideal: true },
+        // For Bluetooth: REQUIRED 16kHz, for system mics: OPTIONAL ({ ideal: 16000 })
+        sampleRate: isBluetoothDevice ? 16000 : { ideal: 16000 },
       };
       
-      // Use selected device if available
+      // For Bluetooth: EXACT device match (required), for system mics: IDEAL (allows fallback)
       if (selectedAudioDeviceId && selectedAudioDeviceId !== "default") {
-        audioConstraints.deviceId = { exact: selectedAudioDeviceId };
+        audioConstraints.deviceId = isBluetoothDevice 
+          ? { exact: selectedAudioDeviceId }  // Bluetooth: exact match required
+          : { ideal: selectedAudioDeviceId };   // System mic: allows fallback
       }
+      // When "default" is selected or empty, don't set deviceId at all - let browser choose default
+      
+      console.log("[Microphone] Requesting stream with constraints:", {
+        selectedDeviceId: selectedAudioDeviceId,
+        selectedDeviceLabel: selectedDevice?.label || "unknown",
+        isBluetoothDevice: isBluetoothDevice,
+        isDefault: selectedAudioDeviceId === "default" || !selectedAudioDeviceId,
+        constraints: audioConstraints
+      });
       
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints
@@ -573,13 +593,18 @@ export default function PrecheckPage() {
       
       const trackSettings = audioTracks[0].getSettings();
       const trackCapabilities = audioTracks[0].getCapabilities();
-      console.log("[Microphone] Stream:", {
+      const actualDeviceId = trackSettings.deviceId || "unknown";
+      
+      console.log("[Microphone] Stream obtained successfully:", {
+        requestedDeviceId: selectedAudioDeviceId,
+        actualDeviceId: actualDeviceId,
         active: stream.active,
         label: audioTracks[0].label,
         enabled: audioTracks[0].enabled,
         readyState: audioTracks[0].readyState,
         settings: trackSettings,
-        capabilities: trackCapabilities
+        capabilities: trackCapabilities,
+        sampleRate: trackSettings.sampleRate || "unknown"
       });
       
       // Check if this is a Bluetooth device
@@ -594,16 +619,30 @@ export default function PrecheckPage() {
         console.warn("  3. Try using built-in microphone instead");
       }
       
-      // Setup audio analysis with Bluetooth-compatible sample rate
+      // Setup audio analysis with appropriate sample rate
       // Use cross-browser AudioContext and resume it
       const AudioContextClass =
         (window as any).AudioContext || (window as any).webkitAudioContext;
       
-      // Force 16kHz sample rate for Bluetooth compatibility
-      const audioContext = new AudioContextClass({ 
-        sampleRate: 16000  // Bluetooth-compatible rate
-      });
+      // Use stream's actual sample rate for system mics, 16kHz for Bluetooth
+      // This prevents resampling issues that cause "no audio detected"
+      const streamSampleRate = trackSettings.sampleRate; // Store for use in workaround section
+      const audioContextSampleRate = isBluetooth 
+        ? 16000  // Bluetooth: force 16kHz (compatible rate)
+        : (streamSampleRate || undefined);  // System mic: use stream's native rate (or browser default)
+      
+      const audioContext = new AudioContextClass(
+        audioContextSampleRate ? { sampleRate: audioContextSampleRate } : {}
+      );
       audioContextRef.current = audioContext;
+      
+      console.log("[Microphone] AudioContext created:", {
+        requestedSampleRate: audioContextSampleRate,
+        actualSampleRate: audioContext.sampleRate,
+        streamSampleRate: streamSampleRate,
+        isBluetooth: isBluetooth,
+        state: audioContext.state
+      });
       
       console.log("[Microphone] AudioContext created with sample rate:", audioContext.sampleRate, "State:", audioContext.state);
       
@@ -703,16 +742,23 @@ export default function PrecheckPage() {
         }
         
         // If still no variance after 5 attempts, try recreating the audio context
-        if (dataCheckAttempts === 5 && variance === 0 && isBluetooth) {
-          console.log("[Microphone] Attempting to recreate AudioContext (Bluetooth workaround)");
+        // Apply to ALL devices (not just Bluetooth) - system mics also need this workaround
+        if (dataCheckAttempts === 5 && variance === 0) {
+          console.log("[Microphone] Attempting to recreate AudioContext (workaround for all devices)");
           try {
             // Close old context
             if (audioContextRef.current && audioContextRef.current.state !== "closed") {
               audioContextRef.current.close();
             }
             
-            // Create new context without forcing sample rate (let browser decide)
-            const newAudioContext = new AudioContextClass();
+            // Create new context with appropriate sample rate (match stream for system mics, 16kHz for Bluetooth)
+            const newAudioContextSampleRate = isBluetooth 
+              ? 16000  // Bluetooth: force 16kHz
+              : (streamSampleRate || undefined);  // System mic: use stream's native rate
+            
+            const newAudioContext = new AudioContextClass(
+              newAudioContextSampleRate ? { sampleRate: newAudioContextSampleRate } : {}
+            );
             audioContextRef.current = newAudioContext;
             
             if (newAudioContext.state === "suspended") {
@@ -1044,7 +1090,7 @@ export default function PrecheckPage() {
       ));
       return false;
     }
-  }, [selectedAudioDeviceId]);
+  }, [selectedAudioDeviceId, audioDevices]);
   
   // Run current step check
   const runCurrentStep = useCallback(async (forceRetry = false) => {
