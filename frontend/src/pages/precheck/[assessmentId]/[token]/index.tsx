@@ -158,61 +158,147 @@ export default function PrecheckPage() {
   // Step 2: Network Check
   const checkNetwork = useCallback(async (): Promise<boolean> => {
     setSteps(prev => prev.map((step, idx) => 
-      idx === 1 ? { ...step, status: "running", message: "Testing network..." } : step
+      idx === 1 ? { ...step, status: "running", message: "Warming up connection..." } : step
     ));
     
-    try {
-      // Ping test
-      const pingStart = Date.now();
-      await fetch("/api/health", { cache: "no-store" });
-      const ping = Date.now() - pingStart;
+    const runNetworkTest = async (attempt: number): Promise<{ ping: number; downloadSpeed: number; uploadSpeed: number } | null> => {
+      try {
+        // Warm-up request to establish connection (reduces cold start overhead)
+        if (attempt === 1) {
+          try {
+            await fetch("/api/health", { 
+              cache: "no-store",
+              method: "HEAD",
+            });
+            // Small delay to let connection stabilize
+            await new Promise(resolve => setTimeout(resolve, 300));
+          } catch (e) {
+            // Warm-up failure is okay, continue with test
+          }
+        }
+        
+        // Run multiple ping tests and take the best (lowest) result
+        setSteps(prev => prev.map((step, idx) => 
+          idx === 1 ? { ...step, status: "running", message: attempt > 1 ? "Retrying network test..." : "Testing ping..." } : step
+        ));
+        
+        const pingTests: number[] = [];
+        for (let i = 0; i < 3; i++) {
+          try {
+            const pingStart = Date.now();
+            await fetch("/api/health", { 
+              cache: "no-store",
+              method: "HEAD",
+            });
+            const ping = Date.now() - pingStart;
+            pingTests.push(ping);
+            // Small delay between tests
+            if (i < 2) await new Promise(resolve => setTimeout(resolve, 100));
+          } catch (e) {
+            // If one test fails, continue with others
+          }
+        }
+        
+        if (pingTests.length === 0) {
+          return null; // All ping tests failed
+        }
+        
+        // Use the best (lowest) ping from multiple tests
+        const ping = Math.min(...pingTests);
+        
+        // Speed test (simplified - measure download time)
+        setSteps(prev => prev.map((step, idx) => 
+          idx === 1 ? { ...step, status: "running", message: "Testing download speed..." } : step
+        ));
+        
+        const speedTests: number[] = [];
+        for (let i = 0; i < 2; i++) {
+          try {
+            const speedTestStart = Date.now();
+            const testSize = 512 * 1024; // 512KB (smaller for faster test)
+            const response = await fetch(`/api/health?size=${testSize}`, { cache: "no-store" });
+            await response.blob();
+            const speedTestTime = (Date.now() - speedTestStart) / 1000; // seconds
+            const downloadSpeed = (testSize * 8) / (speedTestTime * 1000000); // Mbps
+            speedTests.push(downloadSpeed);
+            // Small delay between tests
+            if (i < 1) await new Promise(resolve => setTimeout(resolve, 200));
+          } catch (e) {
+            // If one test fails, continue with others
+          }
+        }
+        
+        if (speedTests.length === 0) {
+          return null; // All speed tests failed
+        }
+        
+        // Average the speed tests for more accurate result
+        const downloadSpeed = speedTests.reduce((a, b) => a + b, 0) / speedTests.length;
+        
+        // Estimate upload (simplified)
+        const uploadSpeed = downloadSpeed * 0.5; // Conservative estimate
+        
+        return { ping, downloadSpeed, uploadSpeed };
+      } catch (error) {
+        return null;
+      }
+    };
+    
+    // Try the test up to 2 times
+    let result = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      result = await runNetworkTest(attempt);
+      if (result) break; // Success, exit retry loop
       
-      // Speed test (simplified - measure download time)
-      const speedTestStart = Date.now();
-      const testSize = 1024 * 1024; // 1MB
-      const response = await fetch(`/api/health?size=${testSize}`, { cache: "no-store" });
-      await response.blob();
-      const speedTestTime = (Date.now() - speedTestStart) / 1000; // seconds
-      const downloadSpeed = (testSize * 8) / (speedTestTime * 1000000); // Mbps
-      
-      // Estimate upload (simplified)
-      const uploadSpeed = downloadSpeed * 0.5; // Conservative estimate
-      
-      const metrics: NetworkMetrics = {
-        ping,
-        packetLoss: 0, // Would need WebRTC for accurate packet loss
-        uploadSpeed,
-        downloadSpeed,
-      };
-      
-      setNetworkMetrics(metrics);
-      
-      const passed = ping < 300 && downloadSpeed >= 2 && uploadSpeed >= 1;
-      const fair = ping < 500 && downloadSpeed >= 1 && uploadSpeed >= 0.5;
-      
-      setSteps(prev => prev.map((step, idx) => 
-        idx === 1 ? {
-          ...step,
-          status: passed ? "passed" : fair ? "passed" : "failed",
-          message: passed 
-            ? "Network connection is good" 
-            : fair 
-            ? "Network connection is fair (proceeding with warning)"
-            : "Network connection is poor. Please improve your connection."
-        } : step
-      ));
-      
-      return passed || fair; // Allow fair connections with warning
-    } catch (error) {
+      // If first attempt failed, wait a bit before retry
+      if (attempt === 1) {
+        setSteps(prev => prev.map((step, idx) => 
+          idx === 1 ? { ...step, status: "running", message: "First test had issues, retrying..." } : step
+        ));
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    
+    // If all attempts failed, return false
+    if (!result) {
       setSteps(prev => prev.map((step, idx) => 
         idx === 1 ? {
           ...step,
           status: "failed",
-          message: "Network test failed. Please check your connection."
+          message: "Network test failed. Please check your connection and try again."
         } : step
       ));
       return false;
     }
+    
+    const { ping, downloadSpeed, uploadSpeed } = result;
+    
+    const metrics: NetworkMetrics = {
+      ping,
+      packetLoss: 0, // Would need WebRTC for accurate packet loss
+      uploadSpeed,
+      downloadSpeed,
+    };
+    
+    setNetworkMetrics(metrics);
+    
+    // More lenient thresholds - allow fair connections to proceed
+    const passed = ping < 300 && downloadSpeed >= 2 && uploadSpeed >= 1;
+    const fair = ping < 1000 && downloadSpeed >= 0.5 && uploadSpeed >= 0.25; // More lenient fair threshold
+    
+    setSteps(prev => prev.map((step, idx) => 
+      idx === 1 ? {
+        ...step,
+        status: passed ? "passed" : fair ? "passed" : "failed",
+        message: passed 
+          ? "Network connection is good" 
+          : fair 
+          ? "Network connection is fair. You can proceed."
+          : "Network connection is poor. Please improve your connection."
+      } : step
+    ));
+    
+    return passed || fair; // Allow fair connections to proceed
   }, []);
   
   // Improved face detection using MediaPipe Face Detection API
@@ -458,20 +544,40 @@ export default function PrecheckPage() {
     ));
     
     try {
-      // Always start a fresh stream for the check
-      // IMPORTANT: Enable echo cancellation and AGC for Bluetooth headset compatibility
+      // Detect if selected device is Bluetooth BEFORE creating constraints
+      // This is critical: Bluetooth devices need REQUIRED constraints, system mics can use OPTIONAL
+      const selectedDevice = audioDevices.find(d => d.deviceId === selectedAudioDeviceId);
+      const isBluetoothDevice = selectedDevice?.label.toLowerCase().includes('bluetooth') || 
+                               selectedDevice?.label.toLowerCase().includes('headset') ||
+                               false;
+      
+      // IMPORTANT: Use different constraints for Bluetooth vs system microphones
+      // Bluetooth NEEDS required constraints, system mics can be flexible
       const audioConstraints: MediaTrackConstraints = {
-        echoCancellation: true,  // Enable for Bluetooth compatibility
+        // For Bluetooth: REQUIRED (true), for system mics: OPTIONAL ({ ideal: true })
+        echoCancellation: isBluetoothDevice ? true : { ideal: true },
         noiseSuppression: false, // Keep disabled for accurate detection
-        autoGainControl: true,   // Enable for Bluetooth compatibility
-        // Try to force specific sample rate for Bluetooth (may not be supported by all browsers)
-        sampleRate: 16000,
+        // For Bluetooth: REQUIRED (true), for system mics: OPTIONAL ({ ideal: true })
+        autoGainControl: isBluetoothDevice ? true : { ideal: true },
+        // For Bluetooth: REQUIRED 16kHz, for system mics: OPTIONAL ({ ideal: 16000 })
+        sampleRate: isBluetoothDevice ? 16000 : { ideal: 16000 },
       };
       
-      // Use selected device if available
+      // For Bluetooth: EXACT device match (required), for system mics: IDEAL (allows fallback)
       if (selectedAudioDeviceId && selectedAudioDeviceId !== "default") {
-        audioConstraints.deviceId = { exact: selectedAudioDeviceId };
+        audioConstraints.deviceId = isBluetoothDevice 
+          ? { exact: selectedAudioDeviceId }  // Bluetooth: exact match required
+          : { ideal: selectedAudioDeviceId };   // System mic: allows fallback
       }
+      // When "default" is selected or empty, don't set deviceId at all - let browser choose default
+      
+      console.log("[Microphone] Requesting stream with constraints:", {
+        selectedDeviceId: selectedAudioDeviceId,
+        selectedDeviceLabel: selectedDevice?.label || "unknown",
+        isBluetoothDevice: isBluetoothDevice,
+        isDefault: selectedAudioDeviceId === "default" || !selectedAudioDeviceId,
+        constraints: audioConstraints
+      });
       
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints
@@ -487,13 +593,18 @@ export default function PrecheckPage() {
       
       const trackSettings = audioTracks[0].getSettings();
       const trackCapabilities = audioTracks[0].getCapabilities();
-      console.log("[Microphone] Stream:", {
+      const actualDeviceId = trackSettings.deviceId || "unknown";
+      
+      console.log("[Microphone] Stream obtained successfully:", {
+        requestedDeviceId: selectedAudioDeviceId,
+        actualDeviceId: actualDeviceId,
         active: stream.active,
         label: audioTracks[0].label,
         enabled: audioTracks[0].enabled,
         readyState: audioTracks[0].readyState,
         settings: trackSettings,
-        capabilities: trackCapabilities
+        capabilities: trackCapabilities,
+        sampleRate: trackSettings.sampleRate || "unknown"
       });
       
       // Check if this is a Bluetooth device
@@ -508,16 +619,30 @@ export default function PrecheckPage() {
         console.warn("  3. Try using built-in microphone instead");
       }
       
-      // Setup audio analysis with Bluetooth-compatible sample rate
+      // Setup audio analysis with appropriate sample rate
       // Use cross-browser AudioContext and resume it
       const AudioContextClass =
         (window as any).AudioContext || (window as any).webkitAudioContext;
       
-      // Force 16kHz sample rate for Bluetooth compatibility
-      const audioContext = new AudioContextClass({ 
-        sampleRate: 16000  // Bluetooth-compatible rate
-      });
+      // Use stream's actual sample rate for system mics, 16kHz for Bluetooth
+      // This prevents resampling issues that cause "no audio detected"
+      const streamSampleRate = trackSettings.sampleRate; // Store for use in workaround section
+      const audioContextSampleRate = isBluetooth 
+        ? 16000  // Bluetooth: force 16kHz (compatible rate)
+        : (streamSampleRate || undefined);  // System mic: use stream's native rate (or browser default)
+      
+      const audioContext = new AudioContextClass(
+        audioContextSampleRate ? { sampleRate: audioContextSampleRate } : {}
+      );
       audioContextRef.current = audioContext;
+      
+      console.log("[Microphone] AudioContext created:", {
+        requestedSampleRate: audioContextSampleRate,
+        actualSampleRate: audioContext.sampleRate,
+        streamSampleRate: streamSampleRate,
+        isBluetooth: isBluetooth,
+        state: audioContext.state
+      });
       
       console.log("[Microphone] AudioContext created with sample rate:", audioContext.sampleRate, "State:", audioContext.state);
       
@@ -617,16 +742,23 @@ export default function PrecheckPage() {
         }
         
         // If still no variance after 5 attempts, try recreating the audio context
-        if (dataCheckAttempts === 5 && variance === 0 && isBluetooth) {
-          console.log("[Microphone] Attempting to recreate AudioContext (Bluetooth workaround)");
+        // Apply to ALL devices (not just Bluetooth) - system mics also need this workaround
+        if (dataCheckAttempts === 5 && variance === 0) {
+          console.log("[Microphone] Attempting to recreate AudioContext (workaround for all devices)");
           try {
             // Close old context
             if (audioContextRef.current && audioContextRef.current.state !== "closed") {
               audioContextRef.current.close();
             }
             
-            // Create new context without forcing sample rate (let browser decide)
-            const newAudioContext = new AudioContextClass();
+            // Create new context with appropriate sample rate (match stream for system mics, 16kHz for Bluetooth)
+            const newAudioContextSampleRate = isBluetooth 
+              ? 16000  // Bluetooth: force 16kHz
+              : (streamSampleRate || undefined);  // System mic: use stream's native rate
+            
+            const newAudioContext = new AudioContextClass(
+              newAudioContextSampleRate ? { sampleRate: newAudioContextSampleRate } : {}
+            );
             audioContextRef.current = newAudioContext;
             
             if (newAudioContext.state === "suspended") {
@@ -958,7 +1090,7 @@ export default function PrecheckPage() {
       ));
       return false;
     }
-  }, [selectedAudioDeviceId]);
+  }, [selectedAudioDeviceId, audioDevices]);
   
   // Run current step check
   const runCurrentStep = useCallback(async (forceRetry = false) => {
@@ -1787,7 +1919,7 @@ export default function PrecheckPage() {
                     fontWeight: 600,
                     fontSize: "0.875rem"
                   }}>
-                    {faceCount === 1 ? "✓ 1 Face Detected" : faceCount === 0 ? "✖ No Face Detected" : `⚠ ${faceCount} Faces Detected`}
+                    {faceCount === 1 ? "✓ Face Detected" : faceCount === 0 ? "✖ No Face Detected" : `⚠ ${faceCount} Faces Detected`}
                   </div>
                 )}
               </div>
