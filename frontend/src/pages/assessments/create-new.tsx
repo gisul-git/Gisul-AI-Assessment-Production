@@ -1107,6 +1107,154 @@ function formatTime(minutes: number): string {
   return `${hours} hour${hours !== 1 ? "s" : ""} ${mins} minute${mins !== 1 ? "s" : ""}`;
 }
 
+// Helper function to detect if a topic is SQL-related (for showing SQL option in dropdown)
+function isTopicSqlRelated(topicLabel: string): boolean {
+  const label = topicLabel.toLowerCase();
+  
+  // SQL execution keywords (indicates query/procedure writing)
+  const sqlExecutionKeywords = [
+    "write sql", "write query", "sql query", "implement query",
+    "optimize query", "query optimization", "recursive query",
+    "stored procedure", "sql procedure", "create procedure",
+    "sql to", "query to", "using sql", "sql with",
+  ];
+  
+  // SQL indicator keywords (database/SQL concepts)
+  const sqlIndicators = [
+    "sql", "mysql", "postgresql", "sqlite", "database query",
+    "sql query", "sql queries", "query", "joins", "subquery",
+    "stored procedure", "trigger", "sql injection", "sql optimization",
+  ];
+  
+  // Theory/comparison keywords (NOT execution - don't show SQL option for these)
+  const sqlTheoryKeywords = [
+    " vs ", " versus ", "compare", "comparison", "difference",
+    "advantages", "disadvantages", "explained", "explanation",
+    "concepts", "principles", "overview", "strategies", "design",
+    "vulnerabilities", "security", "prevention",
+  ];
+  
+  // If has theory keywords, it's NOT SQL execution (use Subjective instead)
+  if (sqlTheoryKeywords.some(kw => label.includes(kw))) {
+    return false;
+  }
+  
+  // Check for execution keywords or SQL indicators
+  return sqlExecutionKeywords.some(kw => label.includes(kw)) ||
+         sqlIndicators.some(ind => {
+           // Use word boundaries to avoid false positives (e.g., "overview" contains "view")
+           const regex = new RegExp(`\\b${ind.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+           return regex.test(label);
+         });
+}
+
+// Helper function to detect if a topic is AIML-related (for showing AIML option in dropdown)
+function isTopicAimlRelated(topicLabel: string): boolean {
+  const label = topicLabel.toLowerCase();
+  
+  // AIML execution keywords (indicates ML code writing)
+  const aimlExecutionKeywords = [
+    "implement", "implementation", "build model", "train model",
+    "using pandas", "using numpy", "using sklearn", "using tensorflow",
+    "using pytorch", "ml implementation", "ml task", "data preprocessing code",
+    "model training", "notebook", "jupyter", "colab",
+  ];
+  
+  // AIML indicator keywords
+  const aimlIndicators = [
+    "machine learning", "deep learning", "neural network", "ml model",
+    "pandas", "numpy", "sklearn", "tensorflow", "pytorch", "keras",
+    "data preprocessing", "feature engineering", "model training",
+    "random forest", "decision tree", "regression", "classification",
+    "clustering", "supervised learning", "unsupervised learning",
+  ];
+  
+  // Theory/comparison keywords (NOT execution - don't show AIML option for these)
+  const aimlTheoryKeywords = [
+    " vs ", " versus ", "compare", "comparison", "difference",
+    "advantages", "disadvantages", "explained", "explanation",
+    "concepts", "principles", "theory", "overview",
+    "architecture", "design", "workflow",
+  ];
+  
+  // If has theory keywords, it's NOT AIML execution (use Subjective instead)
+  if (aimlTheoryKeywords.some(kw => label.includes(kw))) {
+    return false;
+  }
+  
+  // Check for execution keywords or AIML indicators
+  return aimlExecutionKeywords.some(kw => label.includes(kw)) ||
+         aimlIndicators.some(ind => {
+           const regex = new RegExp(`\\b${ind.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+           return regex.test(label);
+         });
+}
+
+// Helper function to detect if a topic is web-related (for excluding Coding option)
+function isTopicWebRelated(topicLabel: string): boolean {
+  const label = topicLabel.toLowerCase();
+  
+  // Web technology keywords (platform doesn't support browser/web execution)
+  const webKeywords = [
+    // Frontend frameworks
+    "react", "angular", "vue", "svelte", "nextjs", "next.js", "nuxt", "gatsby", "ember",
+    // Web technologies
+    "html", "css", "scss", "sass", "less", "tailwind", "bootstrap", "material ui", "chakra ui", "ant design",
+    // Browser/DOM
+    "dom", "browser", "document", "window", "event listener", "fetch api", "localstorage", "sessionstorage",
+    "cookie", "webstorage",
+    // Web frameworks (backend)
+    "express", "koa", "fastify", "nest", "nestjs", "meteor",
+    // Frontend build tools
+    "webpack", "vite", "rollup", "parcel", "babel",
+    // UI libraries
+    "jquery", "d3", "chart.js", "three.js", "gsap", "anime.js",
+    // Web concepts
+    "frontend", "web development", "responsive design", "web page", "website", "web app", "web application",
+    "spa", "single page", "ssr", "server side rendering", "csr", "client side rendering",
+    "node server", "express server", "api endpoint", "http server", "rest api in node",
+  ];
+  
+  // Check if any web keyword appears in the topic label (using word boundaries to avoid false positives)
+  return webKeywords.some(keyword => {
+    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(label);
+  });
+}
+
+// Helper function to detect if a topic supports Judge0-compatible Coding (DSA/algorithmic in supported languages)
+function isTopicCodingSupported(topicLabel: string): boolean {
+  const label = topicLabel.toLowerCase();
+  
+  // Judge0 supported languages (must mention one of these)
+  const supportedLanguages = [
+    "javascript", "typescript", "java", "python", "c++", "cpp", "c#", "csharp",
+    "c", "go", "golang", "rust", "kotlin",
+  ];
+  
+  // DSA/algorithmic keywords
+  const dsaKeywords = [
+    "algorithm", "algorithms", "data structure", "data structures", "dsa", "problem solving",
+    "sorting", "searching", "binary search", "merge sort", "quick sort", "quicksort",
+    "two sum", "array", "arrays", "string", "strings", "hash", "hash table", "hashtable",
+    "stack", "queue", "linked list", "tree", "binary tree", "bst", "heap", "trie",
+    "graph", "bfs", "dfs", "dijkstra", "dynamic programming", "dp", "recursion",
+  ];
+  
+  // Must mention at least one supported language AND one DSA keyword
+  const hasSupportedLanguage = supportedLanguages.some(lang => {
+    const regex = new RegExp(`\\b${lang.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(label);
+  });
+  
+  const hasDsaKeyword = dsaKeywords.some(keyword => {
+    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(label);
+  });
+  
+  return hasSupportedLanguage && hasDsaKeyword;
+}
+
 interface QuestionTypeConfig {
   questionType: string;
   difficulty: string;
@@ -1212,7 +1360,7 @@ export default function CreateNewAssessmentPage() {
   // ============================================
   interface QuestionRow {
     rowId: string;
-    questionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding";
+    questionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML";
     difficulty: "Easy" | "Medium" | "Hard";
     questionsCount: number;
     canUseJudge0: boolean;
@@ -4288,10 +4436,12 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     setAddingTopic(true);
     
     let finalCategory: "aptitude" | "communication" | "logical_reasoning" | "technical";
-    let defaultQuestionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" = "MCQ";
+    let defaultQuestionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML" = "MCQ";
     let canUseJudge0 = false;
     let contextSummary: string | undefined = undefined;
-    let codingSupported = false; // NEW: Track coding support from classification
+    let codingSupported = false; // Track coding support from classification
+    let isSqlRelated = false; // Track if topic is SQL-related
+    let isAimlRelated = false; // Track if topic is AIML-related
     
     try {
     if (isTechnical) {
@@ -4306,25 +4456,45 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         
         if (response.data?.success && response.data?.data) {
           const classification = response.data.data;
-          defaultQuestionType = classification.questionType as "MCQ" | "Subjective" | "PseudoCode" | "Coding";
+          defaultQuestionType = classification.questionType as "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML";
           canUseJudge0 = classification.canUseJudge0 || false;
-          codingSupported = classification.coding_supported || false; // NEW: Get coding_supported from classification
+          codingSupported = classification.coding_supported || false; // Get coding_supported from classification
           contextSummary = classification.contextExplanation;
+          
+          // Detect if classification returned SQL or AIML, or if topic is SQL/AIML-related
+          const classifiedType = classification.questionType?.toUpperCase();
+          if (classifiedType === "SQL") {
+            isSqlRelated = true;
+          } else if (classifiedType === "AIML") {
+            isAimlRelated = true;
+          } else {
+            // Fallback: use frontend detection as backup
+            isSqlRelated = isTopicSqlRelated(topicName);
+            isAimlRelated = isTopicAimlRelated(topicName);
+          }
           
           // Ensure canUseJudge0 is false if question type is not Coding
           if (defaultQuestionType !== "Coding") {
             canUseJudge0 = false;
           }
+        } else {
+          // If classification fails, use frontend detection as fallback
+          isSqlRelated = isTopicSqlRelated(topicName);
+          isAimlRelated = isTopicAimlRelated(topicName);
         }
       } catch (err: any) {
         console.error("Error classifying technical topic:", err);
-          const errorMsg = err.response?.data?.message || err.response?.data?.data?.error || "Failed to classify topic. Please try again.";
-          setToastMessage(errorMsg);
-          setTimeout(() => setToastMessage(null), 5000);
-          setLoading(false);
-          // Exit early - the outer finally block will reset addingTopic
-          // The finally block executes even when returning from try block
-          return;
+        // On error, use frontend detection as fallback
+        isSqlRelated = isTopicSqlRelated(topicName);
+        isAimlRelated = isTopicAimlRelated(topicName);
+        
+        const errorMsg = err.response?.data?.message || err.response?.data?.data?.error || "Failed to classify topic. Please try again.";
+        setToastMessage(errorMsg);
+        setTimeout(() => setToastMessage(null), 5000);
+        setLoading(false);
+        // Exit early - the outer finally block will reset addingTopic
+        // The finally block executes even when returning from try block
+        return;
       } finally {
         setLoading(false);
       }
@@ -4334,15 +4504,36 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       return;
     }
     
-    // Determine allowed question types based on category and coding support
+    // Determine allowed question types based on category, coding support, and SQL/AIML detection
     // At this point, finalCategory is guaranteed to be "technical" (soft skills return early above)
     
-    // Determine allowed question types based on coding support
-    // If codingSupported = true: include mcq, subjective, pseudo, coding
-    // If codingSupported = false: include only mcq, subjective, pseudo
-    const allowedQuestionTypes: string[] = codingSupported 
-      ? ["MCQ", "Subjective", "PseudoCode", "Coding"]
-      : ["MCQ", "Subjective", "PseudoCode"];
+    // Build allowed question types dynamically based on classification results
+    const baseTypes = ["MCQ", "Subjective", "PseudoCode"];
+    
+    // Check for web-related topics (don't show Coding for web topics)
+    const isWebRelated = isTopicWebRelated(topicName);
+    
+    // Check if topic supports Judge0-compatible Coding (DSA/algorithmic in supported languages)
+    const isCodingCompatible = isTopicCodingSupported(topicName);
+    
+    // Add Coding only if:
+    // - codingSupported is true (from classification)
+    // - NOT SQL-related
+    // - NOT AIML-related
+    // - NOT web-related
+    // - Mentions Judge0-supported language and DSA concepts
+    const shouldIncludeCoding = codingSupported && 
+                                 !isSqlRelated && 
+                                 !isAimlRelated && 
+                                 !isWebRelated &&
+                                 isCodingCompatible;
+    
+    const allowedQuestionTypes: string[] = [
+      ...baseTypes,
+      ...(isSqlRelated ? ["SQL"] : []),
+      ...(isAimlRelated ? ["AIML"] : []),
+      ...(shouldIncludeCoding ? ["Coding"] : [])
+    ];
     
     // Check if questions have already been generated (any topic has generated questions)
     const hasGeneratedQuestions = topicsV2.some(topic => 
@@ -7320,18 +7511,48 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                           // Restrict question types for aptitude/communication/logical_reasoning
                           // Use allowedQuestionTypes if available (for soft skills), otherwise determine from category
                           const isSpecialCategory = topic.category && ["aptitude", "communication", "logical_reasoning"].includes(topic.category);
-                          const questionTypes = topic.allowedQuestionTypes && topic.allowedQuestionTypes.length > 0
-                            ? topic.allowedQuestionTypes // Use allowedQuestionTypes if defined
-                            : isSpecialCategory 
-                              ? ["MCQ", "Subjective"] 
-                              : [
-                                  "MCQ", 
-                                  "Subjective", 
-                                  "PseudoCode", 
-                                  "SQL",
-                                  "AIML",
-                                  ...((topic.coding_supported !== false && row.canUseJudge0) ? ["Coding"] : [])
-                                ];
+                          
+                          // Determine available question types based on topic relevance
+                          let questionTypes: string[];
+                          if (topic.allowedQuestionTypes && topic.allowedQuestionTypes.length > 0) {
+                            questionTypes = topic.allowedQuestionTypes; // Use allowedQuestionTypes if defined
+                          } else if (isSpecialCategory) {
+                            questionTypes = ["MCQ", "Subjective"]; // Soft skills only
+                          } else {
+                            // Base types available for all technical topics
+                            const baseTypes = ["MCQ", "Subjective", "PseudoCode"];
+                            
+                            // Add SQL only if topic is SQL-related
+                            const isSqlRelated = isTopicSqlRelated(topic.label);
+                            
+                            // Add AIML only if topic is AIML-related
+                            const isAimlRelated = isTopicAimlRelated(topic.label);
+                            
+                            // Add Coding ONLY if ALL conditions are met:
+                            // 1. Topic supports coding (coding_supported !== false)
+                            // 2. Row can use Judge0 (canUseJudge0 === true)
+                            // 3. Topic is NOT SQL-related (SQL topics use SQL type, not Coding)
+                            // 4. Topic is NOT AIML-related (AIML topics use AIML type, not Coding)
+                            // 5. Topic is NOT web-related (web topics don't support Judge0 execution)
+                            // 6. Topic mentions a Judge0-supported language (JavaScript, TypeScript, Java, Python, C++, C#, C, Go, Rust, Kotlin)
+                            // 7. Topic is DSA/algorithmic (sorting, searching, trees, graphs, etc.)
+                            const isWebRelated = isTopicWebRelated(topic.label);
+                            const isCodingCompatible = isTopicCodingSupported(topic.label);
+                            const supportsCoding = 
+                              topic.coding_supported !== false && 
+                              row.canUseJudge0 &&
+                              !isSqlRelated &&
+                              !isAimlRelated &&
+                              !isWebRelated &&
+                              isCodingCompatible;
+                            
+                            questionTypes = [
+                              ...baseTypes,
+                              ...(isSqlRelated ? ["SQL"] : []),
+                              ...(isAimlRelated ? ["AIML"] : []),
+                              ...(supportsCoding ? ["Coding"] : [])
+                            ];
+                          }
                           
                           return [
                             <tr key={`${topic.id}-${row.rowId}`} style={{ borderBottom: "1px solid #e2e8f0" }}>
