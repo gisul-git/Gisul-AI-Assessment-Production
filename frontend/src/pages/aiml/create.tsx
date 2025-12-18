@@ -112,7 +112,6 @@ export default function CreateAIMLCompetencyPage() {
         start_time: new Date(formData.start_time).toISOString(),
         end_time: new Date(formData.end_time).toISOString(),
         proctoringSettings: { aiProctoringEnabled },
-      });
         // Scheduling payload (mirrors Custom MCQ)
         examMode,
         schedule: {
@@ -290,10 +289,6 @@ export default function CreateAIMLCompetencyPage() {
               </label>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
-              <div>
-                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
-                  Duration (minutes) *
             {/* Exam Window Configuration */}
             <div style={{ marginBottom: "1.5rem", padding: "1.25rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}>
               <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Exam Window Configuration</h3>

@@ -2333,74 +2333,405 @@ async def generate_topics_unified(
 ) -> List[Dict[str, Any]]:
     """
     Generate topics from combined skills from multiple sources (role-based, manual, CSV).
+    ALL skills from all sources are combined with EQUAL PRIORITY and generate 8-12 topics total.
+    Distribution is based on role and skills - ensures all skills are covered.
     """
     if not combined_skills:
         return []
     
-    # Group skills by source
-    role_skills = [s for s in combined_skills if s.get("source") == "role"]
-    manual_skills = [s for s in combined_skills if s.get("source") == "manual"]
-    csv_skills = [s for s in combined_skills if s.get("source") == "csv"]
+    # Get experience level
+    if experience_mode == "corporate":
+        experience_level, _ = _get_experience_level_corporate(experience_min, experience_max)
+    else:
+        experience_level, _ = _get_experience_level_student(experience_min, experience_max)
     
-    all_topics = []
+    # Build comprehensive skills list with metadata for unified generation
+    # Combine ALL skills (role + manual + CSV) with equal priority
+    skills_with_metadata = []
+    all_skill_names = []
     
-    # Generate topics for role-based skills
-    if role_skills and job_designation:
-        role_skill_names = [s.get("skill_name", "") for s in role_skills]
-        role_topics = await generate_topics_v2(
-            assessment_title=assessment_title,
-            job_designation=job_designation,
-            selected_skills=role_skill_names,
-            experience_min=experience_min,
-            experience_max=experience_max,
-            experience_mode=experience_mode
+    for skill in combined_skills:
+        skill_name = skill.get("skill_name", "").strip()
+        if not skill_name:
+            continue
+        
+        skill_description = skill.get("skill_description") or skill.get("description", "")
+        importance_level = skill.get("importance_level", "Medium")
+        source = skill.get("source", "unknown")
+        
+        # Add to simple list for backward compatibility
+        all_skill_names.append(skill_name)
+        
+        # Build skill entry with metadata
+        skill_entry = {
+            "name": skill_name,
+            "description": skill_description,
+            "importance": importance_level,
+            "source": source
+        }
+        skills_with_metadata.append(skill_entry)
+    
+    if not all_skill_names:
+        return []
+    
+    # Build comprehensive prompt that includes all skills with their metadata
+    skills_text_list = []
+    has_sql_skill = False
+    has_aiml_skill = False
+    
+    for skill_entry in skills_with_metadata:
+        skill_line = f"- {skill_entry['name']}"
+        skill_name_lower = skill_entry['name'].lower()
+        
+        # Check for SQL skill
+        if "sql" in skill_name_lower:
+            has_sql_skill = True
+        # Check for AIML skill
+        if any(keyword in skill_name_lower for keyword in ["aiml", "ai/ml", "ai-ml", "machine learning", "ml", "data science", "ds"]):
+            has_aiml_skill = True
+        
+        if skill_entry.get("description"):
+            skill_line += f" ({skill_entry['description']})"
+            # Also check description for SQL/AIML keywords
+            desc_lower = skill_entry.get("description", "").lower()
+            if "sql" in desc_lower or "query" in desc_lower or "join" in desc_lower:
+                has_sql_skill = True
+            if any(keyword in desc_lower for keyword in ["machine learning", "ml", "pandas", "numpy", "sklearn", "tensorflow", "pytorch"]):
+                has_aiml_skill = True
+        if skill_entry.get("importance") and skill_entry.get("importance") != "Medium":
+            skill_line += f" [Importance: {skill_entry['importance']}]"
+        skills_text_list.append(skill_line)
+    
+    skills_text = "\n".join(skills_text_list)
+    skills_simple_text = ", ".join(all_skill_names)
+    title_text = assessment_title if assessment_title else "Not specified"
+    
+    # Use job_designation if available, otherwise use first skill or "General"
+    effective_job_designation = job_designation or all_skill_names[0] if all_skill_names else "General"
+    
+    # Build SQL/AIML requirement section
+    sql_aiml_requirements = ""
+    if has_sql_skill:
+        sql_aiml_requirements += f"""
+- **CRITICAL FOR SQL SKILL**: You MUST include at least ONE SQL execution topic (questionType='SQL') that requires WRITING/EXECUTING SQL queries or procedures. 
+  * SQL skills can have topics with ANY question type (MCQ, Subjective, PseudoCode, etc.) - that's allowed and encouraged.
+  * BUT you MUST have at least ONE topic with questionType='SQL' for query execution.
+  * Examples of SQL execution topics: "Write SQL Query to Join Multiple Tables", "Optimize SQL Query for Performance", "Implement Stored Procedure in SQL", "Create Complex SQL Query with Subqueries"
+  * SQL theory/conceptual topics (like "SQL vs NoSQL Comparison", "Indexing Strategies", "JOIN Types Explained") should use questionType='Subjective' or 'MCQ', NOT 'SQL'."""
+    if has_aiml_skill:
+        sql_aiml_requirements += f"""
+- **CRITICAL FOR AIML SKILL**: You MUST include at least ONE AIML execution topic (questionType='AIML') that requires WRITING/EXECUTING ML/DS code.
+  * AIML skills can have topics with ANY question type (MCQ, Subjective, PseudoCode, etc.) - that's allowed and encouraged.
+  * BUT you MUST have at least ONE topic with questionType='AIML' for ML/DS code execution.
+  * Examples of AIML execution topics: "Implement RandomForest Classifier", "Train Neural Network Model with TensorFlow", "Data Preprocessing with Pandas", "Model Training Using Scikit-learn"
+  * AIML theory/conceptual topics (like "Machine Learning Concepts", "Comparing ML Algorithms", "ML Advantages", "Neural Network Architecture Theory") should use questionType='Subjective' or 'MCQ', NOT 'AIML'."""
+    
+    # Build unified prompt that emphasizes covering ALL skills
+    prompt = f"""You are an expert assessment designer. Generate topics with UNIVERSAL, DOMAIN-AGNOSTIC question type assignment.
+
+CRITICAL CONSTRAINT: You MUST generate EXACTLY 8-12 topics. NO MORE, NO LESS. Count carefully before responding.
+
+Generate a list of highly relevant assessment topics using:
+- Job role/domain: {effective_job_designation}
+- Assessment title: {title_text}
+- Experience mode: {experience_mode}
+- Experience level: {experience_level}
+
+CRITICAL REQUIREMENTS:
+- You MUST generate EXACTLY 8-12 topics TOTAL (count: 8, 9, 10, 11, or 12 - no more, no less)
+- You must generate topics that cover ALL the following skills (do NOT skip any skill):
+{skills_text}
+
+- Distribution should be based on the role and the complexity/importance of each skill
+- Ensure that topics are distributed across all skills listed above
+- All skills have EQUAL PRIORITY - do not favor one source over another{sql_aiml_requirements}
+
+IMPORTANT NOTES:
+- SQL and AIML skills can have topics with ANY question type (MCQ, Subjective, PseudoCode, Coding, SQL, AIML)
+- However, when SQL or AIML skills are present, you MUST include at least ONE execution topic:
+  * For SQL: At least one topic with questionType='SQL' (for query execution)
+  * For AIML: At least one topic with questionType='AIML' (for ML/DS code execution)
+- All other topics for SQL/AIML skills can use any appropriate question type (MCQ for SQL basics, Subjective for SQL theory, etc.)
+
+For each topic, you must assign questionType based on SEMANTIC MEANING, not keywords:
+
+1. SUBJECTIVE (explanation-oriented):
+   Use for topics requiring:
+   - Conceptual understanding, theoretical explanation
+   - Architectural or design reasoning
+   - Describing principles, rules, or ideas
+   - Comparing and contrasting concepts
+   - Topics where factual recall is insufficient
+   
+   Semantic intent: "explain", "describe", "why", "impact", "advantages", "concepts", "principles", "paradigms"
+
+2. PSEUDOCODE (logic/algorithm-oriented):
+   Use for topics involving:
+   - Designing algorithms or workflows
+   - Explaining process flow or problem-solving steps
+   - Breaking down logic or structured thinking
+   - Topics where logic and structured thinking are central
+   
+   Semantic intent: "algorithm", "workflow", "logic", "steps", "process", "how it works", "flow", "sequence"
+
+3. CODING (implementation/execution-oriented):
+   Use ONLY if the topic implies:
+   - Writing functional, executable code
+   - Implementation of features, modules, or algorithms
+   - Tasks that can be executed with test cases
+   
+   Semantic intent: "implement", "build", "create", "write code", "solve", "program", "develop", "write function"
+   Set canUseJudge0 = true ONLY for Coding topics.
+
+4. MCQ (factual/basic/quick-assessment):
+   Use for topics involving:
+   - Terminology, facts, syntax-level understanding
+   - Straightforward objective recall
+   - Quick verification of knowledge
+   
+   Semantic intent: "basics", "fundamentals", "definition", "types", "components", "identify", "select", "choose"
+
+5. SQL (query execution-oriented):
+   Use ONLY for topics requiring writing/executing SQL queries or procedures in a sandbox environment.
+   ✅ CORRECT SQL execution topics: "Write SQL Query to Join Tables", "Optimize SQL Query for Performance", "Implement Stored Procedure", "Create Complex SQL Query with Subqueries"
+   ❌ WRONG - Use Subjective/MCQ instead: "SQL vs NoSQL Comparison", "Indexing Strategies", "JOIN Types Explained", "SQL Injection Prevention", "Normalization in Database Design"
+   Note: SQL-related topics can use ANY question type (MCQ, Subjective, PseudoCode), but SQL execution topics (query writing) MUST use questionType='SQL'
+   Semantic intent for SQL type: "write query", "implement procedure", "optimize query", "sql to", "query to", "create query", "write sql"
+
+6. AIML (ML/DS code execution-oriented):
+   Use ONLY for topics requiring writing/executing ML/DS code using pandas, numpy, sklearn, etc. in a Jupyter notebook.
+   ✅ CORRECT AIML execution topics: "Implement RandomForest Classifier", "Train Neural Network Model", "Data Preprocessing with Pandas", "Model Training Using Scikit-learn"
+   ❌ WRONG - Use Subjective/MCQ instead: "Machine Learning Concepts", "Comparing ML Algorithms", "ML Advantages", "Neural Network Architecture Theory"
+   Note: AIML-related topics can use ANY question type (MCQ, Subjective, PseudoCode), but AIML execution topics (ML code writing) MUST use questionType='AIML'
+   Semantic intent for AIML type: "implement", "train model", "using pandas", "ml implementation", "notebook", "build model", "data preprocessing code"
+
+CRITICAL RULES:
+- Assign questionType based on SEMANTIC MEANING, not keyword matching
+- Work for ANY domain: programming, cloud, DevOps, AI/ML, cybersecurity, databases, frameworks, etc.
+- Do NOT hardcode technology-specific rules
+- Ensure variety: aim for a balanced mix of question types across all topics
+- COVER ALL SKILLS: Make sure topics are distributed across all skills listed above
+
+For each topic:
+- Produce a topic label (specific, meaningful, assessment-ready)
+- Select questionType using semantic understanding (MCQ | Subjective | PseudoCode | Coding | SQL | AIML)
+- Assign difficulty: Easy | Medium | Hard
+- Set canUseJudge0 = true ONLY for Coding topics
+
+Return ONLY JSON:
+[
+  {{
+    "label": "",
+    "questionType": "",
+    "difficulty": "",
+    "canUseJudge0": true/false
+  }}
+]
+
+CRITICAL: Generate EXACTLY 8-12 topics (count: 8, 9, 10, 11, or 12). Count them before responding. Return only the JSON array, no explanations."""
+    
+    try:
+        client = _get_openai_client()
+    except ValueError as exc:
+        logger.error(f"OpenAI API key not configured: {exc}")
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured") from exc
+    
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert assessment designer. Always return valid JSON arrays. Never include markdown code blocks or explanations outside the JSON. Ensure all provided skills are covered in the topics. For SQL and AIML skills, you can generate topics with ANY question type (MCQ, Subjective, PseudoCode), but you MUST include at least ONE execution topic with questionType='SQL' or 'AIML' respectively."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
         )
-        for topic in role_topics:
-            topic["source"] = "ai"
-            topic["status"] = "pending"
-        all_topics.extend(role_topics)
-    
-    # Generate topics for manual skills
-    if manual_skills:
-        for skill in manual_skills:
-            skill_name = skill.get("skill_name", "")
-            if skill_name:
-                manual_topics = await generate_topics_v2(
-                    assessment_title=assessment_title,
-                    job_designation=skill_name,
-                    selected_skills=[skill_name],
-                    experience_min=experience_min,
-                    experience_max=experience_max,
-                    experience_mode=experience_mode
-                )
-                for topic in manual_topics:
-                    topic["source"] = "manual"
-                    topic["status"] = "pending"
-                all_topics.extend(manual_topics)
-    
-    # Generate topics for CSV skills
-    if csv_skills:
-        csv_topics = await generate_topics_from_requirements_v2(
-            requirements=csv_skills,
-            experience_min=experience_min,
-            experience_max=experience_max,
-            experience_mode=experience_mode
-        )
-        all_topics.extend(csv_topics)
-    
-    # Deduplicate topics by label
-    seen_labels = set()
-    unique_topics = []
-    for topic in all_topics:
-        label = topic.get("label", "").lower().strip()
-        if label and label not in seen_labels:
-            seen_labels.add(label)
-            unique_topics.append(topic)
-    
-    # Filter out topics that have coding questions but are not supported by Judge0
-    unique_topics = filter_topics_with_coding_unsupported(unique_topics)
-    
-    return unique_topics
+        
+        content = response.choices[0].message.content.strip()
+        # Remove markdown code blocks if present
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+        
+        topics_data = json.loads(content)
+        
+        # ENFORCE 8-12 TOPIC LIMIT - truncate if more than 12
+        if len(topics_data) > 12:
+            logger.warning(f"OpenAI generated {len(topics_data)} topics, truncating to 12")
+            topics_data = topics_data[:12]
+        elif len(topics_data) < 8:
+            logger.warning(f"OpenAI generated only {len(topics_data)} topics (expected 8-12)")
+        
+        # Validate SQL/AIML execution topics are present (warn but don't hardcode)
+        has_sql_execution_topic = False
+        has_aiml_execution_topic = False
+        
+        # Check existing topics for SQL/AIML execution topics
+        for topic_data in topics_data:
+            topic_label = (topic_data.get("label", "") or "").lower()
+            question_type = topic_data.get("questionType", "").upper()
+            if question_type == "SQL" and _v2_is_sql_execution_topic(topic_label):
+                has_sql_execution_topic = True
+            if question_type == "AIML" and _v2_is_aiml_execution_topic(topic_label):
+                has_aiml_execution_topic = True
+        
+        # Log warnings if required execution topics are missing (but don't hardcode - let AI decide)
+        if has_sql_skill and not has_sql_execution_topic:
+            logger.warning(f"SQL skill detected but no SQL execution topic found. Expected at least one topic with questionType='SQL' for query execution.")
+        if has_aiml_skill and not has_aiml_execution_topic:
+            logger.warning(f"AIML skill detected but no AIML execution topic found. Expected at least one topic with questionType='AIML' for ML/DS code execution.")
+        
+        # Note: We trust the AI prompt to generate the required execution topics.
+        # If missing, the prompt should be strong enough to ensure they're included on regeneration.
+        
+        # Transform to multi-row model format
+        topics = []
+        for idx, topic_data in enumerate(topics_data):
+            question_type = topic_data.get("questionType", "MCQ")
+            difficulty = topic_data.get("difficulty", "Medium")
+            can_use_judge0 = topic_data.get("canUseJudge0", False)
+            topic_label = topic_data.get("label", "")
+            topic_label_lower = (topic_label or "").lower()
+            
+            # Validate question type
+            if question_type not in ["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"]:
+                question_type = "MCQ"
+            
+            # Validate difficulty
+            if difficulty not in ["Easy", "Medium", "Hard"]:
+                difficulty = "Medium"
+            
+            # Deterministic overrides for AIML/SQL/web topics (SQL/AIML ONLY for execution topics)
+            if _v2_is_aiml_execution_topic(topic_label_lower):
+                question_type = "AIML"
+                can_use_judge0 = False
+            elif _v2_is_sql_execution_topic(topic_label_lower):
+                question_type = "SQL"
+                can_use_judge0 = False
+            elif _v2_contains_any(topic_label_lower, V2_WEB_KEYWORDS):
+                impl_keywords = ["build", "create", "implement", "design", "develop", "write"]
+                question_type = "Subjective" if _v2_contains_any(topic_label_lower, impl_keywords) else "MCQ"
+                can_use_judge0 = False
+            
+            # If model returned SQL but it's not an execution SQL topic, downgrade
+            if question_type == "SQL" and not _v2_is_sql_execution_topic(topic_label_lower):
+                question_type = "Subjective" if any(k in topic_label_lower for k in ["vs", "versus", "difference", "compare", "comparison", "overview", "explained", "explain", "injection", "security"]) else "MCQ"
+                can_use_judge0 = False
+            # If model returned AIML but it's not an execution AIML topic, downgrade
+            if question_type == "AIML" and not _v2_is_aiml_execution_topic(topic_label_lower):
+                question_type = "Subjective"
+                can_use_judge0 = False
+            
+            # CRITICAL: If question type is Coding, validate it's supported by Judge0
+            # Check both the topic label and the skills list
+            if question_type == "Coding":
+                # Use comprehensive framework detection
+                is_framework, framework_name = contains_unsupported_framework(topic_label, all_skill_names)
+                if is_framework:
+                    logger.warning(f"Topic '{topic_label}' was assigned Coding but contains framework '{framework_name}'. Converting to PseudoCode.")
+                    question_type = "PseudoCode"
+                    can_use_judge0 = False
+            
+            # Ensure canUseJudge0 is only True for Coding
+            if question_type != "Coding":
+                can_use_judge0 = False
+            
+            # Determine source based on which skill the topic most closely relates to
+            # Try to match topic label to skill names
+            source = "ai"  # Default
+            for skill_entry in skills_with_metadata:
+                skill_name_lower = skill_entry["name"].lower()
+                if skill_name_lower in topic_label_lower or topic_label_lower in skill_name_lower:
+                    source = skill_entry["source"]
+                    break
+            
+            # Create topic with first questionRow
+            topic = {
+                "id": str(uuid.uuid4()),
+                "label": topic_data.get("label", ""),
+                "locked": False,
+                "source": source,
+                "status": "pending",
+                "questionRows": [
+                    {
+                        "rowId": str(uuid.uuid4()),
+                        "questionType": question_type,
+                        "difficulty": difficulty,
+                        "questionsCount": 1,  # Default, can be updated by user
+                        "canUseJudge0": can_use_judge0,
+                        "status": "pending",
+                        "locked": False,
+                        "questions": []
+                    }
+                ]
+            }
+            
+            topics.append(topic)
+        
+        # Filter topics to ensure Judge0 compatibility
+        topics = filter_topics_with_coding_unsupported(topics)
+        
+        # Check if we need to ensure Coding topic exists (if Judge0-compatible skills present)
+        judge0_languages = ["python", "java", "javascript", "typescript", "c", "c++", "cpp", "go", "ruby", "php", "rust", "kotlin", "swift", "bash", "csharp", "cs"]
+        has_judge0_compatible_skill = False
+        for skill_name in all_skill_names:
+            skill_lower = skill_name.lower().strip()
+            if any(lang in skill_lower for lang in judge0_languages):
+                # Check if it's not a framework
+                if is_judge0_supported(skill_name):
+                    has_judge0_compatible_skill = True
+                    break
+        
+        if has_judge0_compatible_skill:
+            has_coding_topic = any(
+                topic.get("questionRows", [{}])[0].get("questionType") == "Coding"
+                for topic in topics
+            )
+            
+            if not has_coding_topic and topics:
+                # Find the most suitable topic to convert to Coding
+                coding_keywords = ["algorithm", "function", "implement", "code", "program", "solve", "write", "create", "build", "develop"]
+                best_topic_idx = None
+                best_score = 0
+                
+                for idx, topic in enumerate(topics):
+                    label = topic.get("label", "").lower()
+                    score = sum(1 for keyword in coding_keywords if keyword in label)
+                    if score > best_score:
+                        best_score = score
+                        best_topic_idx = idx
+                
+                # If no good match found, use the first topic
+                if best_topic_idx is None:
+                    best_topic_idx = 0
+                
+                # Convert the selected topic to Coding
+                if best_topic_idx < len(topics):
+                    topic = topics[best_topic_idx]
+                    topic_label = topic.get("label", "")
+                    question_rows = topic.get("questionRows", [])
+                    if question_rows:
+                        # Validate that topic doesn't contain frameworks before converting
+                        is_framework, framework_name = contains_unsupported_framework(topic_label, all_skill_names)
+                        if is_framework:
+                            logger.warning(f"Cannot convert topic '{topic_label}' to Coding - contains framework '{framework_name}'. Keeping original type.")
+                        else:
+                            question_rows[0]["questionType"] = "Coding"
+                            question_rows[0]["canUseJudge0"] = True
+                            logger.info(f"Converted topic '{topic.get('label')}' to Coding type to meet requirement")
+        
+        return topics
+        
+    except json.JSONDecodeError as exc:
+        logger.error(f"Failed to parse OpenAI response as JSON: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to parse topic generation response") from exc
+    except Exception as exc:
+        logger.error(f"Error generating topics: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate topics: {str(exc)}") from exc
 
 
 async def generate_topics_from_requirements_v2(
