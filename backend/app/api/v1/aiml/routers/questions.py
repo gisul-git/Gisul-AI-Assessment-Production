@@ -687,15 +687,22 @@ async def get_dataset_preview(
             }
         
         elif format_lower == "parquet":
-            parquet_buffer = io.BytesIO()
-            df.to_parquet(parquet_buffer, index=False)
-            import base64
-            return {
-                "format": "parquet",
-                "content": base64.b64encode(parquet_buffer.getvalue()).decode("utf-8"),
-                "mime_type": "application/octet-stream",
-                "is_binary": True
-            }
+            try:
+                parquet_buffer = io.BytesIO()
+                df.to_parquet(parquet_buffer, index=False)
+                import base64
+                return {
+                    "format": "parquet",
+                    "content": base64.b64encode(parquet_buffer.getvalue()).decode("utf-8"),
+                    "mime_type": "application/octet-stream",
+                    "is_binary": True
+                }
+            except ImportError as e:
+                raise HTTPException(status_code=500, detail="pyarrow library not installed for Parquet support. Please install pyarrow using: pip install pyarrow")
+            except Exception as e:
+                if "pyarrow" in str(e).lower() or "fastparquet" in str(e).lower():
+                    raise HTTPException(status_code=500, detail="Parquet support requires pyarrow. Please install using: pip install pyarrow")
+                raise
         
         elif format_lower == "avro":
             try:
