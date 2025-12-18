@@ -4,6 +4,7 @@ import { GetServerSideProps } from "next";
 import { requireAuth } from "../../lib/auth";
 import { customMCQApi } from "../../lib/custom-mcq/api";
 import { CustomMCQAssessment, AssessmentSubmission } from "../../types/custom-mcq";
+import ProctorSummaryCard from "../../components/admin/ProctorSummaryCard";
 
 interface CustomMCQDetailsPageProps {
   session: any;
@@ -15,6 +16,11 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [assessment, setAssessment] = useState<CustomMCQAssessment | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [proctorLogsByUser, setProctorLogsByUser] = useState<Record<string, any[]>>({});
+  const [proctorLabelsByUser, setProctorLabelsByUser] = useState<Record<string, Record<string, string>>>({});
+  const [proctorSummaryByUser, setProctorSummaryByUser] = useState<Record<string, { summary: Record<string, number>; totalViolations: number }>>({});
+  const [loadingProctorForUser, setLoadingProctorForUser] = useState<Record<string, boolean>>({});
+  const [expandedProctorUser, setExpandedProctorUser] = useState<string | null>(null);
 
   useEffect(() => {
     if (assessmentId) {
@@ -31,6 +37,43 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
       setError(err.message || "Failed to load assessment");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchProctorForUser = async (userEmail: string) => {
+    if (!assessmentId || typeof assessmentId !== "string") return;
+    if (!userEmail) return;
+
+    setLoadingProctorForUser((prev) => ({ ...prev, [userEmail]: true }));
+    try {
+      // Logs (includes eventTypeLabels)
+      const logsResp = await fetch(
+        `/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(userEmail)}`
+      );
+      const logsJson = await logsResp.json();
+      if (logsJson?.success && logsJson?.data) {
+        setProctorLogsByUser((prev) => ({ ...prev, [userEmail]: logsJson.data.logs || [] }));
+        setProctorLabelsByUser((prev) => ({ ...prev, [userEmail]: logsJson.data.eventTypeLabels || {} }));
+      }
+
+      // Summary (for counts)
+      const summaryResp = await fetch(
+        `/api/proctor/summary?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(userEmail)}`
+      );
+      const summaryJson = await summaryResp.json();
+      if (summaryJson?.success && summaryJson?.data) {
+        setProctorSummaryByUser((prev) => ({
+          ...prev,
+          [userEmail]: {
+            summary: summaryJson.data.summary || {},
+            totalViolations: summaryJson.data.totalViolations || 0,
+          },
+        }));
+      }
+    } catch (e) {
+      console.error("Failed to fetch proctor logs for user:", userEmail, e);
+    } finally {
+      setLoadingProctorForUser((prev) => ({ ...prev, [userEmail]: false }));
     }
   };
 
@@ -173,6 +216,12 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
             <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
               {submissions.map((submission: AssessmentSubmission & { candidateKey: string }, idx: number) => {
                 const candidateInfo = submission.candidateInfo || {};
+                const userEmail = String(candidateInfo.email || "").trim();
+                const isExpanded = expandedProctorUser === userEmail && !!userEmail;
+                const proctorLogs = (userEmail && proctorLogsByUser[userEmail]) ? proctorLogsByUser[userEmail] : [];
+                const proctorLabels = (userEmail && proctorLabelsByUser[userEmail]) ? proctorLabelsByUser[userEmail] : {};
+                const proctorSummary = (userEmail && proctorSummaryByUser[userEmail]) ? proctorSummaryByUser[userEmail] : null;
+                const isLoadingProctor = !!(userEmail && loadingProctorForUser[userEmail]);
                 return (
                   <div
                     key={idx}
@@ -222,7 +271,118 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                           </div>
                         )}
                       </div>
+
+                      {/* Proctoring Logs Toggle */}
+                      <div style={{ minWidth: "220px", display: "flex", justifyContent: "flex-end" }}>
+                        <button
+                          type="button"
+                          disabled={!userEmail}
+                          onClick={async () => {
+                            if (!userEmail) return;
+                            const nextExpanded = isExpanded ? null : userEmail;
+                            setExpandedProctorUser(nextExpanded);
+                            if (!isExpanded) {
+                              // Fetch only when opening
+                              await fetchProctorForUser(userEmail);
+                            }
+                          }}
+                          style={{
+                            padding: "0.6rem 1rem",
+                            borderRadius: "0.5rem",
+                            border: "1px solid #2D7A52",
+                            backgroundColor: isExpanded ? "#ffffff" : "#E8FAF0",
+                            color: "#1E5A3B",
+                            cursor: userEmail ? "pointer" : "not-allowed",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {isExpanded ? "Hide Proctoring Logs" : "View Proctoring Logs"}
+                        </button>
+                      </div>
                     </div>
+
+                    {/* Proctoring Logs Section */}
+                    {isExpanded && (
+                      <div style={{ marginTop: "1.25rem" }}>
+                        <div style={{ marginBottom: "0.75rem" }}>
+                          <h4 style={{ margin: 0, color: "#1E5A3B" }}>Proctoring Logs</h4>
+                        </div>
+
+                        {isLoadingProctor ? (
+                          <div style={{ padding: "1rem", color: "#4A9A6A" }}>Loading proctoring logs...</div>
+                        ) : (
+                          <>
+                            {proctorSummary && (
+                              <ProctorSummaryCard
+                                summary={proctorSummary.summary}
+                                totalViolations={proctorSummary.totalViolations}
+                                eventTypeLabels={proctorLabels}
+                              />
+                            )}
+
+                            {proctorLogs.length === 0 ? (
+                              <div style={{ padding: "1rem", color: "#4A9A6A", backgroundColor: "#E8FAF0", borderRadius: "0.5rem", border: "1px solid #A8E8BC" }}>
+                                No proctoring violations found for this candidate.
+                              </div>
+                            ) : (
+                              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "420px", overflowY: "auto" }}>
+                                {proctorLogs.map((log: any, index2: number) => (
+                                  <div
+                                    key={log._id || index2}
+                                    style={{
+                                      border: "1px solid #fecaca",
+                                      borderRadius: "0.5rem",
+                                      padding: "1rem",
+                                      backgroundColor: "#fef2f2",
+                                    }}
+                                  >
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+                                      <div style={{ fontWeight: 700, color: "#dc2626" }}>
+                                        {proctorLabels[log.eventType] || log.eventType || "Violation"}
+                                      </div>
+                                      <div style={{ fontSize: "0.8rem", color: "#64748b" }}>
+                                        {log.timestamp ? new Date(log.timestamp).toLocaleString() : ""}
+                                      </div>
+                                    </div>
+
+                                    {log.metadata && Object.keys(log.metadata).length > 0 && (
+                                      <div style={{ marginTop: "0.5rem", fontSize: "0.875rem" }}>
+                                        <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Details:</div>
+                                        <div style={{ backgroundColor: "#f8fafc", borderRadius: "0.375rem", padding: "0.5rem", fontFamily: "monospace", fontSize: "0.75rem" }}>
+                                          {Object.entries(log.metadata).map(([key, value]) => (
+                                            <div key={key} style={{ marginBottom: "0.25rem" }}>
+                                              <span style={{ color: "#64748b" }}>{key}:</span>{" "}
+                                              <span style={{ color: "#1e293b" }}>
+                                                {typeof value === "object" ? JSON.stringify(value) : String(value)}
+                                              </span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {log.snapshotBase64 && (
+                                      <div style={{ marginTop: "0.75rem" }}>
+                                        <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.5rem" }}>Evidence Snapshot:</div>
+                                        <img
+                                          src={String(log.snapshotBase64).startsWith("data:") ? log.snapshotBase64 : `data:image/png;base64,${log.snapshotBase64}`}
+                                          alt="Violation snapshot"
+                                          style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #e2e8f0", maxHeight: "220px" }}
+                                          onError={(e) => {
+                                            console.error("Error loading snapshot image:", e);
+                                            (e.target as HTMLImageElement).style.display = "none";
+                                          }}
+                                        />
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}

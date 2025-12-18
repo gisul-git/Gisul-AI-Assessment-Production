@@ -143,6 +143,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           passPercentage: assessmentData.passPercentage || 50,
           status: "draft",
           currentStation: currentStation,
+          proctoringSettings: (assessmentData as any).proctoringSettings,
         };
 
         const result = await customMCQApi.createAssessment(draftData as any);
@@ -183,6 +184,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           passPercentage: assessmentData.passPercentage || 50,
           status: "draft", // Always save as draft during editing
           currentStation: currentStation,
+          proctoringSettings: (assessmentData as any).proctoringSettings,
         };
 
         if (assessmentId) {
@@ -267,6 +269,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           passPercentage: assessmentData.passPercentage || 50,
           status: "draft",
           currentStation: currentStation,
+          proctoringSettings: (assessmentData as any).proctoringSettings,
         };
 
         if (idToSave) {
@@ -364,6 +367,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         passPercentage: assessmentData.passPercentage || 50,
         status: "active", // Change from draft to active
         currentStation: currentStation,
+        proctoringSettings: (assessmentData as any).proctoringSettings,
       };
 
       // Mark as activated to prevent auto-save from overwriting
@@ -388,11 +392,6 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
       // Clear localStorage draft
       localStorage.removeItem("custom_mcq_draft");
       
-      // Navigate back to dashboard after a short delay to show updated status
-      setTimeout(() => {
-        router.push('/dashboard');
-      }, 2000);
-
       // Store the assessment URL for display - always construct full URL
       const token = result.assessmentToken || (result as any).assessmentToken;
       const id = result.assessmentId || assessmentId;
@@ -655,6 +654,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
                   passPercentage: assessmentData.passPercentage || 50,
                   status: "draft",
                   currentStation: currentStation,
+                  proctoringSettings: (assessmentData as any).proctoringSettings,
                 };
 
                 if (assessmentId) {

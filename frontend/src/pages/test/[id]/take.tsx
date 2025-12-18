@@ -17,8 +17,9 @@ import { OutputConsole } from '../../../components/dsa/test/OutputConsole'
 import { useProctor } from '../../../hooks/useProctor'
 import { useCameraProctor } from '../../../hooks/useCameraProctor'
 import { normalizeProctorConfig, useProctorEngine } from '@/proctoring'
+import WebcamPreview from '@/components/WebcamPreview'
+import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
 import { 
-  ProctorStatusWidget, 
   FullscreenWarningBanner, 
   ProctorDebugPanel,
   CameraProctorModal,
@@ -160,13 +161,47 @@ export default function TestTakePage() {
   const [timerStarted, setTimerStarted] = useState(false)
   const [candidateEmail, setCandidateEmail] = useState<string | null>(null)
   const [candidateName, setCandidateName] = useState<string | null>(null)
-  const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true)
+  // Default OFF; only explicit `proctoringSettings.aiProctoringEnabled === true` enables camera/model
+  const [cameraProctorEnabled, setCameraProctorEnabled] = useState(false)
   const [showFullscreenWarning, setShowFullscreenWarning] = useState(false)
   const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false)
   const [tabSwitchCount, setTabSwitchCount] = useState(0)
   const [latestViolation, setLatestViolation] = useState<any>(null)
   const [debugMode, setDebugMode] = useState(false)
   const editorRef = useRef<HTMLDivElement>(null)
+  const cameraStartRequestedRef = useRef(false)
+  const cameraStartedRef = useRef(false)
+
+  const getViolationMessage = (eventType: string): string => {
+    const messages: Record<string, string> = {
+      GAZE_AWAY: 'Please keep your eyes on the screen',
+      MULTIPLE_FACES_DETECTED: 'Multiple faces detected in frame',
+      NO_FACE_DETECTED: 'Please stay in front of the camera',
+      TAB_SWITCH: 'Tab switch detected',
+      FOCUS_LOST: 'Window focus lost',
+      FULLSCREEN_EXIT: 'Exited fullscreen mode',
+    }
+    return messages[eventType] || 'Violation detected'
+  }
+
+  // Enforce unified gate completion (deep-link safety)
+  useEffect(() => {
+    if (!router.isReady) return
+    if (!testId) return
+    const id = String(testId)
+    const urlToken = getTokenFromUrl()
+    if (!urlToken) return
+
+    const precheckCompleted = sessionStorage.getItem(`precheckCompleted_${id}`)
+    const instructionsAcknowledged = sessionStorage.getItem(`instructionsAcknowledged_${id}`)
+    const candidateRequirementsCompleted = sessionStorage.getItem(`candidateRequirementsCompleted_${id}`)
+    const identityVerificationCompleted = sessionStorage.getItem(`identityVerificationCompleted_${id}`)
+
+    if (!precheckCompleted || !instructionsAcknowledged || !candidateRequirementsCompleted || !identityVerificationCompleted) {
+      router.replace(`/precheck/${id}/${encodeURIComponent(urlToken)}`)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady, testId])
   
   // Proctoring settings (simplified - DSA tests may have different proctoring configs)
   const [proctoringSettings, setProctoringSettings] = useState<any>({
@@ -423,6 +458,14 @@ export default function TestTakePage() {
       setTabSwitchCount((prev) => prev + 1)
       setLatestViolation(violation)
       console.log('[Proctor] Violation recorded and will be sent to backend:', violation)
+
+      // Candidate-side popup (same as AI take page)
+      pushViolationToast({
+        id: `${violation.eventType}-${Date.now()}`,
+        eventType: violation.eventType,
+        message: getViolationMessage(violation.eventType),
+        timestamp: violation.timestamp || new Date().toISOString(),
+      })
     },
     enableFullscreenDetection: true,
     enableDevToolsDetection: debugMode,
@@ -456,6 +499,14 @@ export default function TestTakePage() {
         userId: violation.userId,
         metadata: violation.metadata,
       })
+
+      // Candidate-side popup (same as AI take page)
+      pushViolationToast({
+        id: `${violation.eventType}-${Date.now()}`,
+        eventType: violation.eventType,
+        message: getViolationMessage(violation.eventType),
+        timestamp: violation.timestamp || new Date().toISOString(),
+      })
     },
     enabled: cameraProctorEnabled,
     debugMode,
@@ -476,6 +527,14 @@ export default function TestTakePage() {
       assessmentId: proctorAssessmentId,
       userId: proctorUserId,
       metadata,
+    })
+
+    // Candidate-side popup (same as AI take page)
+    pushViolationToast({
+      id: `${violationType}-${Date.now()}`,
+      eventType: violationType,
+      message: getViolationMessage(violationType),
+      timestamp: new Date().toISOString(),
     })
   }
 
@@ -504,26 +563,45 @@ export default function TestTakePage() {
   // This prevents blocking the initial page load with heavy TensorFlow.js model loading
   useEffect(() => {
     // Only start camera if:
-    // 1. Camera proctoring is enabled
+    // 1. Camera proctoring is enabled (from admin flag)
     // 2. We have user info
-    // 3. Test data is loaded (questions.length > 0)
-    // 4. Editor is visible (timerStarted = true means editor is visible)
-    // 5. Test is not submitted
-    if (cameraProctorEnabled && (candidateEmail || userId) && testId && questions.length > 0 && timerStarted && !submitted) {
-      // Delay camera start slightly to ensure UI is fully ready
-      const timer = setTimeout(() => {
+    // 3. Questions are loaded
+    // 4. Test is not submitted
+    //
+    // IMPORTANT: Start exactly once when conditions become true.
+    // The old logic used a 2s timer and cleaned up on every re-render,
+    // which repeatedly cancelled the timer before it fired (camera never started).
+    const shouldRun =
+      cameraProctorEnabled &&
+      (candidateEmail || userId) &&
+      !!testId &&
+      questions.length > 0 &&
+      !submitted
+
+    if (shouldRun) {
+      if (!cameraStartRequestedRef.current) {
+        cameraStartRequestedRef.current = true
+        console.log("[DSA Camera] startCamera() requested", { testId, candidateEmail, userId })
         startCamera()
-      }, 2000) // 2 second delay after editor is visible
-      
-      return () => {
-        clearTimeout(timer)
-        stopCamera()
+          .then((ok) => {
+            cameraStartedRef.current = ok
+            console.log("[DSA Camera] startCamera() result", { ok })
+          })
+          .catch((e) => {
+            cameraStartedRef.current = false
+            console.error("[DSA Camera] startCamera() threw", e)
+          })
       }
     } else {
-      // Stop camera if conditions not met
-      stopCamera()
+      // If conditions are no longer true, stop camera once (if it was started/requested)
+      if (cameraStartRequestedRef.current || cameraStartedRef.current) {
+        console.log("[DSA Camera] stopping camera (conditions false)")
+        stopCamera()
+      }
+      cameraStartRequestedRef.current = false
+      cameraStartedRef.current = false
     }
-  }, [cameraProctorEnabled, candidateEmail, userId, testId, questions.length, timerStarted, submitted, startCamera, stopCamera])
+  }, [cameraProctorEnabled, candidateEmail, userId, testId, questions.length, submitted, startCamera, stopCamera])
 
   // Check if fullscreen was refused
   useEffect(() => {
@@ -924,6 +1002,11 @@ export default function TestTakePage() {
         if (isMounted) {
           setTest(testData)
           setTestSubmission(submissionData)
+
+          // Apply runtime camera toggle based on admin proctoring setting:
+          // Only explicit true enables camera/model; missing/false => OFF (per PROCTORING_AI_TOGGLE_NOTES.md)
+          const aiEnabled = testData?.proctoringSettings?.aiProctoringEnabled === true
+          setCameraProctorEnabled(aiEnabled)
         }
 
         // Check if candidate has already submitted - prevent multiple attempts
@@ -2339,23 +2422,21 @@ export default function TestTakePage() {
     return (
       <div className="h-screen flex flex-col bg-slate-950 overflow-hidden">
         {/* Proctoring Components */}
+        <ViolationToast />
+        {/* Hidden canvas used by useCameraProctor to capture snapshots */}
+        <canvas ref={canvasRef} style={{ display: 'none' }} />
         <FullscreenWarningBanner
           isVisible={showFullscreenWarning}
           onEnterFullscreen={handleEnterFullscreenFromBanner}
         />
-        
-        <ProctorStatusWidget
-          isCameraOn={isCameraOn}
-          isModelLoaded={isModelLoaded}
-          facesCount={facesCount}
-          gazeDirection={gazeDirection}
-          lastViolation={lastCameraViolation}
-          errors={cameraErrors}
-          debugMode={debugMode}
-          debugInfo={debugInfo}
-          videoRef={videoRef}
-          canvasRef={canvasRef}
-        />
+        {cameraProctorEnabled && (
+          <WebcamPreview
+            ref={videoRef}
+            cameraOn={isCameraOn}
+            faceMeshStatus={cameraErrors?.length ? "error" : isModelLoaded ? "loaded" : "loading"}
+            facesCount={facesCount}
+          />
+        )}
         
         {debugMode && (
           <ProctorDebugPanel
@@ -2479,23 +2560,44 @@ export default function TestTakePage() {
   return (
     <div className="h-screen flex flex-col bg-slate-950 overflow-hidden">
       {/* Proctoring Components */}
+      <ViolationToast />
+      {/* Hidden canvas used by useCameraProctor to capture snapshots */}
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
       <FullscreenWarningBanner
         isVisible={showFullscreenWarning}
         onEnterFullscreen={handleEnterFullscreenFromBanner}
       />
-      
-      <ProctorStatusWidget
-        isCameraOn={isCameraOn}
-        isModelLoaded={isModelLoaded}
-        facesCount={facesCount}
-        gazeDirection={gazeDirection}
-        lastViolation={lastCameraViolation}
-        errors={cameraErrors}
-        debugMode={debugMode}
-        debugInfo={debugInfo}
-        videoRef={videoRef}
-        canvasRef={canvasRef}
-      />
+      {cameraProctorEnabled && (
+        <>
+          <WebcamPreview
+            ref={videoRef}
+            cameraOn={isCameraOn}
+            faceMeshStatus={cameraErrors?.length ? "error" : isModelLoaded ? "loaded" : "loading"}
+            facesCount={facesCount}
+          />
+          {/* If camera fails to start, surface the reason (permissions/device busy) */}
+          {cameraErrors?.length ? (
+            <div
+              style={{
+                position: "fixed",
+                bottom: 148,
+                right: 16,
+                width: 260,
+                background: "rgba(0,0,0,0.75)",
+                color: "#fff",
+                padding: "8px 10px",
+                borderRadius: 8,
+                zIndex: 9999,
+                fontSize: 12,
+                lineHeight: 1.3,
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>Camera error</div>
+              <div>{cameraErrors[cameraErrors.length - 1]}</div>
+            </div>
+          ) : null}
+        </>
+      )}
       
       {debugMode && (
         <ProctorDebugPanel

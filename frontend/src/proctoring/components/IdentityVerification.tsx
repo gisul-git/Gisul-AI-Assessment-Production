@@ -12,6 +12,11 @@ export interface IdentityVerificationProps {
   assessmentId: string;
   token: string;
   candidateEmail: string;
+  /**
+   * Only AI assessments have a matching backend "assessments" record for save-reference-face.
+   * For other flows (DSA/AIML/Custom MCQ) we should skip the backend call and store locally.
+   */
+  skipBackendSave?: boolean;
   onCaptureComplete: (photoDataUrl: string) => void;
   onError?: (error: string) => void;
 }
@@ -20,6 +25,7 @@ export default function IdentityVerification({
   assessmentId,
   token,
   candidateEmail,
+  skipBackendSave = false,
   onCaptureComplete,
   onError,
 }: IdentityVerificationProps) {
@@ -221,17 +227,19 @@ export default function IdentityVerification({
 
       // Save reference image to backend
       try {
-        await axios.post("/api/v1/candidate/save-reference-face", {
-          assessmentId,
-          candidateEmail,
-          referenceImage: photoData,
-        });
+        if (!skipBackendSave) {
+          await axios.post("/api/v1/candidate/save-reference-face", {
+            assessmentId,
+            candidateEmail,
+            referenceImage: photoData,
+          });
+        }
 
         // Store in sessionStorage for proctoring engine
         sessionStorage.setItem(`referenceFace_${assessmentId}`, photoData);
         sessionStorage.setItem(`capturedPhoto_${assessmentId}`, photoData);
 
-        setStatusMessage("Photo captured successfully!");
+        setStatusMessage(skipBackendSave ? "Photo captured (saved locally)" : "Photo captured successfully!");
         onCaptureComplete(photoData);
       } catch (error) {
         console.error("Error saving reference image:", error);

@@ -5,6 +5,7 @@ import { usePrecheckExtensions } from "@/hooks/usePrecheckExtensions";
 import { KNOWN_EXTENSIONS } from "@/lib/extensionDatabase";
 import { EXTENSION_DETECTION_CONFIG, formatMessage } from "@/config/precheckConfig";
 import USBDeviceCheck from "@/components/precheck/USBDeviceCheck";
+import { getGateContext } from "@/lib/gateContext";
 
 interface PrecheckStep {
   id: string;
@@ -95,7 +96,8 @@ export default function PrecheckPage() {
     
     if (!storedEmail || !storedName) {
       if (assessmentId && token) {
-        router.replace(`/assessment/${assessmentId}/${token}`);
+        const ctx = getGateContext(assessmentId as string);
+        router.replace(ctx?.entryUrl || `/assessment/${assessmentId}/${token}`);
       }
       return;
     }
@@ -1159,13 +1161,18 @@ export default function PrecheckPage() {
           microphone: steps[3].status === "passed",
         };
         
-        await axios.post("/api/assessment/precheck-complete", {
-          assessmentId,
-          token,
-          email,
-          name,
-          precheckResults,
-        });
+        const ctx = getGateContext(assessmentId as string);
+        const isAIFlow = !ctx || ctx.flowType === "ai";
+        // AI-only backend tracking (other flows just use sessionStorage gate flags)
+        if (isAIFlow) {
+          await axios.post("/api/assessment/precheck-complete", {
+            assessmentId,
+            token,
+            email,
+            name,
+            precheckResults,
+          });
+        }
         
         sessionStorage.setItem(`precheckCompleted_${assessmentId}`, "true");
         sessionStorage.setItem("capturedPhoto", capturedPhoto || "");

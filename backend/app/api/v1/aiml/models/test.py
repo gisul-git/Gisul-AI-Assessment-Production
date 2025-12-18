@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime
 
+class ProctoringSettings(BaseModel):
+    aiProctoringEnabled: Optional[bool] = None
 TimerMode = Literal["GLOBAL", "PER_QUESTION"]
 ExamMode = Literal["strict", "flexible"]
 
@@ -25,6 +27,7 @@ class TestCreate(BaseModel):
     duration_minutes: Optional[int] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
+    proctoringSettings: Optional[ProctoringSettings] = None
 
     # Timer configuration (mirrors DSA)
     timer_mode: TimerMode = "GLOBAL"
@@ -56,6 +59,7 @@ class Test(BaseModel):
     is_published: bool = False
     created_by: Optional[str] = None
     created_at: Optional[datetime] = None
+    proctoringSettings: Optional[ProctoringSettings] = None
 
 class AddCandidateRequest(BaseModel):
     test_id: Optional[str] = None  # Optional since it's in the path

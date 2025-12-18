@@ -5,8 +5,10 @@ import { useEffect, useRef, useState, useCallback } from "react";
 // ============================================================================
 
 export type CameraProctorEventType = 
-  | "MULTI_FACE" 
-  | "GAZE_AWAY" 
+  | "MULTI_FACE" // legacy
+  | "MULTIPLE_FACES_DETECTED"
+  | "NO_FACE_DETECTED"
+  | "GAZE_AWAY"
   | "SPOOF_DETECTED" 
   | "CAMERA_DENIED"
   | "CAMERA_ERROR"
@@ -92,6 +94,12 @@ const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
 const INFERENCE_WIDTH = 320;
 const INFERENCE_HEIGHT = 240;
+const NO_FACE_CONSECUTIVE_THRESHOLD = 5; // Consecutive detections before NO_FACE_DETECTED
+
+// Optional: custom model URLs from environment variables
+// If not provided, models will use their default URLs from the TensorFlow.js libraries
+const FACE_DETECTION_MODEL_URL = process.env.NEXT_PUBLIC_FACE_DETECTION_MODEL_URL || "";
+const FACE_MESH_MODEL_URL = process.env.NEXT_PUBLIC_FACE_MESH_MODEL_URL || "";
 
 // Face comparison constants
 const FACE_COMPARISON_LANDMARKS = [
@@ -307,6 +315,7 @@ export function useCameraProctor({
   const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const faceDetectorRef = useRef<any>(null);
   const faceMeshRef = useRef<any>(null);
+  const startInFlightRef = useRef<Promise<boolean> | null>(null);
   
   // Tracking refs
   const lastEventTimeRef = useRef<Record<string, number>>({});
@@ -320,6 +329,7 @@ export function useCameraProctor({
   // Face comparison refs
   const referenceFaceLandmarksRef = useRef<number[][] | null>(null);
   const faceMismatchCountRef = useRef(0);
+  const noFaceCountRef = useRef(0);
   const referencePhotoLoadedRef = useRef(false);
   
   // ============================================================================
@@ -477,7 +487,12 @@ export function useCameraProctor({
       
       // Load BlazeFace for face detection
       const blazeface = await import("@tensorflow-models/blazeface");
-      faceDetectorRef.current = await blazeface.load();
+      // Use custom URL if provided, otherwise use library's default
+      faceDetectorRef.current = await (blazeface as any).load(
+        FACE_DETECTION_MODEL_URL
+          ? { modelUrl: FACE_DETECTION_MODEL_URL }
+          : undefined
+      );
       debugLog("BlazeFace model loaded");
       
       // Load FaceMesh for landmark detection (includes iris)
@@ -488,6 +503,11 @@ export function useCameraProctor({
           runtime: "tfjs",
           refineLandmarks: true, // Enable iris detection
           maxFaces: 3,
+          ...(FACE_MESH_MODEL_URL
+            ? ({
+                modelUrl: FACE_MESH_MODEL_URL,
+              } as any)
+            : {}),
         }
       );
       debugLog("FaceMesh model loaded");
@@ -522,6 +542,20 @@ export function useCameraProctor({
       const validFaces = predictions.filter((p: any) => p.probability[0] > multiFaceConfidenceThreshold);
       
       setFacesCount(validFaces.length);
+
+      // No face detection (trigger after N consecutive checks)
+      if (validFaces.length === 0) {
+        noFaceCountRef.current += 1;
+        if (noFaceCountRef.current >= NO_FACE_CONSECUTIVE_THRESHOLD) {
+          await recordViolation("NO_FACE_DETECTED", {
+            facesCount: 0,
+            consecutiveChecks: noFaceCountRef.current,
+          });
+          noFaceCountRef.current = 0;
+        }
+      } else {
+        noFaceCountRef.current = 0;
+      }
       
       // Check for multiple faces
       if (validFaces.length > 1) {
@@ -533,7 +567,7 @@ export function useCameraProctor({
           confidence: p.probability[0],
         }));
         
-        await recordViolation("MULTI_FACE", {
+        await recordViolation("MULTIPLE_FACES_DETECTED", {
           facesCount: validFaces.length,
           boxes: faceBoxes,
         });
@@ -848,8 +882,21 @@ export function useCameraProctor({
       console.log("[CameraProctor] Camera proctoring is disabled");
       return false;
     }
+
+    // Prevent concurrent starts (causes AbortError on video.play due to srcObject resets)
+    if (startInFlightRef.current) {
+      console.log("[CameraProctor] startCamera already in-flight; reusing promise");
+      return await startInFlightRef.current;
+    }
+
+    // If already running, do nothing
+    if (streamRef.current?.active && isCameraOn) {
+      console.log("[CameraProctor] Camera already running; skipping start");
+      return true;
+    }
     
-    try {
+    startInFlightRef.current = (async () => {
+      try {
       console.log("[CameraProctor] Loading TensorFlow.js models...");
       
       // Load models first
@@ -884,7 +931,19 @@ export function useCameraProctor({
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        try {
+          await videoRef.current.play();
+        } catch (e) {
+          // AbortError happens when play() is interrupted by another srcObject load; retry briefly.
+          const err = e as any;
+          if (err?.name === "AbortError") {
+            console.warn("[CameraProctor] video.play() aborted; retrying once...", err);
+            await new Promise((r) => setTimeout(r, 200));
+            await videoRef.current.play();
+          } else {
+            throw e;
+          }
+        }
         console.log("[CameraProctor] Video element playing");
       }
       
@@ -896,7 +955,7 @@ export function useCameraProctor({
       
       console.log("[CameraProctor] Camera started successfully, detection loop running");
       return true;
-    } catch (error) {
+      } catch (error) {
       console.error("[CameraProctor] Failed to start camera:", error);
       
       await recordViolation("CAMERA_ERROR", {
@@ -906,8 +965,13 @@ export function useCameraProctor({
       
       setErrors(prev => [...prev, `Camera error: ${(error as Error).message}`]);
       return false;
-    }
-  }, [enabled, userId, assessmentId, loadModels, loadReferenceFace, runDetection, detectionIntervalMs, recordViolation]);
+      } finally {
+        startInFlightRef.current = null;
+      }
+    })();
+
+    return await startInFlightRef.current;
+  }, [enabled, userId, assessmentId, loadModels, loadReferenceFace, runDetection, detectionIntervalMs, recordViolation, isCameraOn]);
   
   const stopCamera = useCallback(() => {
     debugLog("Stopping camera...");

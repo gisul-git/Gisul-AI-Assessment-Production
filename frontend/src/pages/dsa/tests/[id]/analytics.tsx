@@ -263,7 +263,8 @@ export default function AnalyticsPage() {
     setSelectedCandidate(userId)
     fetchAnalytics(userId)
     fetchProctorLogs(userId)
-    setShowProctorLogs(false)
+    // Auto-show logs when candidate is selected (same expectation as AI assessment analytics)
+    setShowProctorLogs(true)
     // Scroll to top of analytics content when candidate is selected
     setTimeout(() => {
       const analyticsContent = document.querySelector('[data-analytics-content]')

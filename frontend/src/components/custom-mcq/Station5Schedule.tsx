@@ -24,6 +24,9 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   );
   const [duration, setDuration] = useState(assessmentData.duration?.toString() || "");
   const [passPercentage, setPassPercentage] = useState(assessmentData.passPercentage?.toString() || "50");
+  const [aiProctoringEnabled, setAiProctoringEnabled] = useState(
+    (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled ?? false
+  );
   const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
   const [sendingEmails, setSendingEmails] = useState(false);
 
@@ -35,8 +38,9 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       endTime: endTime ? new Date(endTime).toISOString() : undefined,
       duration: duration ? parseInt(duration) : undefined,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
+      proctoringSettings: { aiProctoringEnabled },
     });
-  }, [accessMode, examMode, startTime, endTime, duration, passPercentage]);
+  }, [accessMode, examMode, startTime, endTime, duration, passPercentage, aiProctoringEnabled]);
 
   const handleSendInvitations = async (template: {
     subject: string;
@@ -249,6 +253,27 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
             />
             <span style={{ fontSize: "1.25rem", color: "#1E5A3B" }}>%</span>
           </div>
+        </div>
+
+        {/* Proctoring Settings (single checkbox) */}
+        <div style={{ padding: "1.5rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
+          <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Proctoring Settings</h3>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={aiProctoringEnabled}
+              onChange={(e) => setAiProctoringEnabled(e.target.checked)}
+              style={{ marginTop: "0.25rem" }}
+            />
+            <span>
+              <div style={{ fontWeight: 600, color: "#1E5A3B" }}>
+                Enable AI Proctoring (camera-based: no face, multiple faces, gaze away)
+              </div>
+              <div style={{ fontSize: "0.875rem", color: "#2D7A52", marginTop: "0.25rem" }}>
+                Photo capture + fullscreen + screen share gate remain required regardless.
+              </div>
+            </span>
+          </label>
         </div>
 
         {/* Create Button */}

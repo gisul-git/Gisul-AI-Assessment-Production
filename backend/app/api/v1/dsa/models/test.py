@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Literal
+from typing import List, Optional, Dict, Literal, Any
 from datetime import datetime
 from bson import ObjectId
 from .question import PyObjectId
@@ -25,6 +25,10 @@ class QuestionTiming(BaseModel):
     duration_minutes: int  # Time allocated for this specific question
 
 
+class ProctoringSettings(BaseModel):
+    aiProctoringEnabled: Optional[bool] = None
+
+
 class Test(BaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     title: str
@@ -44,6 +48,8 @@ class Test(BaseModel):
     timer_mode: TimerMode = "GLOBAL"  # GLOBAL = single timer, PER_QUESTION = individual timers
     question_timings: Optional[List[QuestionTiming]] = None  # Only used when timer_mode = PER_QUESTION
 
+    # Proctoring (optional, backward compatible)
+    proctoringSettings: Optional[ProctoringSettings] = None
     # Exam window configuration (mirrors Custom MCQ; backward compatible)
     examMode: ExamMode = "strict"
     schedule: Optional[Schedule] = None
@@ -69,17 +75,8 @@ class TestCreate(BaseModel):
     timer_mode: TimerMode = "GLOBAL"
     question_timings: Optional[List[QuestionTiming]] = None  # Only used when timer_mode = PER_QUESTION
 
-    # Exam window configuration (new; mirrors Custom MCQ)
-    examMode: ExamMode = "strict"
-    schedule: Optional[Schedule] = None
-    # Frontend-compatible root fields (optional; mirror Custom MCQ payload shape)
-    startTime: Optional[datetime] = None
-    endTime: Optional[datetime] = None
-    duration: Optional[int] = None
-
-    model_config = {
-        "extra": "ignore"
-    }
+    # Proctoring (optional, backward compatible)
+    proctoringSettings: Optional[ProctoringSettings] = None
 
 class TestInviteRequest(BaseModel):
     test_id: str

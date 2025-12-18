@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
+import { getGateContext } from "@/lib/gateContext";
  
 /**
  * Default candidate requirements when assessment data is not available
@@ -42,7 +43,8 @@ export default function CandidateRequirementsPage() {
    
     if (!storedEmail || !storedName) {
       if (id && token) {
-        router.replace(`/assessment/${id}/${token}`);
+        const ctx = getGateContext(id as string);
+        router.replace(ctx?.entryUrl || `/assessment/${id}/${token}`);
       }
       return;
     }
@@ -61,7 +63,18 @@ export default function CandidateRequirementsPage() {
       return;
     }
    
-    // Fetch assessment info to get candidate requirements settings
+    const ctx = getGateContext(id as string);
+    const isAIFlow = !ctx || ctx.flowType === "ai";
+
+    // Non-AI flows: skip AI-only backend calls entirely and proceed
+    if (!isAIFlow && id && token) {
+      sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
+      router.replace(`/assessment/${id}/${token}/identity-verify`);
+      setFetchingAssessment(false);
+      return;
+    }
+
+    // AI: Fetch assessment info to get candidate requirements settings
     const fetchAssessment = async () => {
       if (!id || !token) {
         setFetchingAssessment(false);
