@@ -158,61 +158,147 @@ export default function PrecheckPage() {
   // Step 2: Network Check
   const checkNetwork = useCallback(async (): Promise<boolean> => {
     setSteps(prev => prev.map((step, idx) => 
-      idx === 1 ? { ...step, status: "running", message: "Testing network..." } : step
+      idx === 1 ? { ...step, status: "running", message: "Warming up connection..." } : step
     ));
     
-    try {
-      // Ping test
-      const pingStart = Date.now();
-      await fetch("/api/health", { cache: "no-store" });
-      const ping = Date.now() - pingStart;
+    const runNetworkTest = async (attempt: number): Promise<{ ping: number; downloadSpeed: number; uploadSpeed: number } | null> => {
+      try {
+        // Warm-up request to establish connection (reduces cold start overhead)
+        if (attempt === 1) {
+          try {
+            await fetch("/api/health", { 
+              cache: "no-store",
+              method: "HEAD",
+            });
+            // Small delay to let connection stabilize
+            await new Promise(resolve => setTimeout(resolve, 300));
+          } catch (e) {
+            // Warm-up failure is okay, continue with test
+          }
+        }
+        
+        // Run multiple ping tests and take the best (lowest) result
+        setSteps(prev => prev.map((step, idx) => 
+          idx === 1 ? { ...step, status: "running", message: attempt > 1 ? "Retrying network test..." : "Testing ping..." } : step
+        ));
+        
+        const pingTests: number[] = [];
+        for (let i = 0; i < 3; i++) {
+          try {
+            const pingStart = Date.now();
+            await fetch("/api/health", { 
+              cache: "no-store",
+              method: "HEAD",
+            });
+            const ping = Date.now() - pingStart;
+            pingTests.push(ping);
+            // Small delay between tests
+            if (i < 2) await new Promise(resolve => setTimeout(resolve, 100));
+          } catch (e) {
+            // If one test fails, continue with others
+          }
+        }
+        
+        if (pingTests.length === 0) {
+          return null; // All ping tests failed
+        }
+        
+        // Use the best (lowest) ping from multiple tests
+        const ping = Math.min(...pingTests);
+        
+        // Speed test (simplified - measure download time)
+        setSteps(prev => prev.map((step, idx) => 
+          idx === 1 ? { ...step, status: "running", message: "Testing download speed..." } : step
+        ));
+        
+        const speedTests: number[] = [];
+        for (let i = 0; i < 2; i++) {
+          try {
+            const speedTestStart = Date.now();
+            const testSize = 512 * 1024; // 512KB (smaller for faster test)
+            const response = await fetch(`/api/health?size=${testSize}`, { cache: "no-store" });
+            await response.blob();
+            const speedTestTime = (Date.now() - speedTestStart) / 1000; // seconds
+            const downloadSpeed = (testSize * 8) / (speedTestTime * 1000000); // Mbps
+            speedTests.push(downloadSpeed);
+            // Small delay between tests
+            if (i < 1) await new Promise(resolve => setTimeout(resolve, 200));
+          } catch (e) {
+            // If one test fails, continue with others
+          }
+        }
+        
+        if (speedTests.length === 0) {
+          return null; // All speed tests failed
+        }
+        
+        // Average the speed tests for more accurate result
+        const downloadSpeed = speedTests.reduce((a, b) => a + b, 0) / speedTests.length;
+        
+        // Estimate upload (simplified)
+        const uploadSpeed = downloadSpeed * 0.5; // Conservative estimate
+        
+        return { ping, downloadSpeed, uploadSpeed };
+      } catch (error) {
+        return null;
+      }
+    };
+    
+    // Try the test up to 2 times
+    let result = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      result = await runNetworkTest(attempt);
+      if (result) break; // Success, exit retry loop
       
-      // Speed test (simplified - measure download time)
-      const speedTestStart = Date.now();
-      const testSize = 1024 * 1024; // 1MB
-      const response = await fetch(`/api/health?size=${testSize}`, { cache: "no-store" });
-      await response.blob();
-      const speedTestTime = (Date.now() - speedTestStart) / 1000; // seconds
-      const downloadSpeed = (testSize * 8) / (speedTestTime * 1000000); // Mbps
-      
-      // Estimate upload (simplified)
-      const uploadSpeed = downloadSpeed * 0.5; // Conservative estimate
-      
-      const metrics: NetworkMetrics = {
-        ping,
-        packetLoss: 0, // Would need WebRTC for accurate packet loss
-        uploadSpeed,
-        downloadSpeed,
-      };
-      
-      setNetworkMetrics(metrics);
-      
-      const passed = ping < 300 && downloadSpeed >= 2 && uploadSpeed >= 1;
-      const fair = ping < 500 && downloadSpeed >= 1 && uploadSpeed >= 0.5;
-      
-      setSteps(prev => prev.map((step, idx) => 
-        idx === 1 ? {
-          ...step,
-          status: passed ? "passed" : fair ? "passed" : "failed",
-          message: passed 
-            ? "Network connection is good" 
-            : fair 
-            ? "Network connection is fair (proceeding with warning)"
-            : "Network connection is poor. Please improve your connection."
-        } : step
-      ));
-      
-      return passed || fair; // Allow fair connections with warning
-    } catch (error) {
+      // If first attempt failed, wait a bit before retry
+      if (attempt === 1) {
+        setSteps(prev => prev.map((step, idx) => 
+          idx === 1 ? { ...step, status: "running", message: "First test had issues, retrying..." } : step
+        ));
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    
+    // If all attempts failed, return false
+    if (!result) {
       setSteps(prev => prev.map((step, idx) => 
         idx === 1 ? {
           ...step,
           status: "failed",
-          message: "Network test failed. Please check your connection."
+          message: "Network test failed. Please check your connection and try again."
         } : step
       ));
       return false;
     }
+    
+    const { ping, downloadSpeed, uploadSpeed } = result;
+    
+    const metrics: NetworkMetrics = {
+      ping,
+      packetLoss: 0, // Would need WebRTC for accurate packet loss
+      uploadSpeed,
+      downloadSpeed,
+    };
+    
+    setNetworkMetrics(metrics);
+    
+    // More lenient thresholds - allow fair connections to proceed
+    const passed = ping < 300 && downloadSpeed >= 2 && uploadSpeed >= 1;
+    const fair = ping < 1000 && downloadSpeed >= 0.5 && uploadSpeed >= 0.25; // More lenient fair threshold
+    
+    setSteps(prev => prev.map((step, idx) => 
+      idx === 1 ? {
+        ...step,
+        status: passed ? "passed" : fair ? "passed" : "failed",
+        message: passed 
+          ? "Network connection is good" 
+          : fair 
+          ? "Network connection is fair. You can proceed."
+          : "Network connection is poor. Please improve your connection."
+      } : step
+    ));
+    
+    return passed || fair; // Allow fair connections to proceed
   }, []);
   
   // Improved face detection using MediaPipe Face Detection API
@@ -1787,7 +1873,7 @@ export default function PrecheckPage() {
                     fontWeight: 600,
                     fontSize: "0.875rem"
                   }}>
-                    {faceCount === 1 ? "✓ 1 Face Detected" : faceCount === 0 ? "✖ No Face Detected" : `⚠ ${faceCount} Faces Detected`}
+                    {faceCount === 1 ? "✓ Face Detected" : faceCount === 0 ? "✖ No Face Detected" : `⚠ ${faceCount} Faces Detected`}
                   </div>
                 )}
               </div>
