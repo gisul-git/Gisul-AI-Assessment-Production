@@ -162,6 +162,11 @@ export const customMCQApi = {
     percentage: number;
     passed: boolean;
     gradingStatus?: string;
+    mcqScore?: number;
+    mcqTotal?: number;
+    subjectiveScore?: number;
+    subjectiveTotal?: number;
+    showResultToCandidate?: boolean;
   }> => {
     const response = await fastApiClient.post(`${BASE_URL}/submit`, {
       assessmentId,
@@ -207,5 +212,30 @@ export const customMCQApi = {
       return response.data.data;
     }
     throw new Error(response.data.message || "Failed to send invitations");
+  },
+
+  // Save answer log for subjective questions
+  saveAnswerLog: async (
+    assessmentId: string,
+    token: string,
+    email: string,
+    name: string,
+    questionId: string,
+    answer: string
+  ): Promise<{ saved: boolean }> => {
+    const response = await fastApiClient.post(`${BASE_URL}/save-answer-log`, {
+      assessmentId,
+      token,
+      email,
+      name,
+      questionId,
+      answer,
+      timestamp: new Date().toISOString(),
+    });
+    
+    if (response.data.success) {
+      return response.data.data;
+    }
+    throw new Error(response.data.message || "Failed to save answer log");
   },
 };

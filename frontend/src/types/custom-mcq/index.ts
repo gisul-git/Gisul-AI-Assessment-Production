@@ -43,7 +43,8 @@ export interface CustomMCQAssessment {
   examMode: "strict" | "flexible";
   startTime?: string;
   endTime?: string;
-  duration?: number; // In minutes, for flexible mode
+  duration?: number; // In minutes, required for both modes
+  accessTimeBeforeStart?: number; // Minutes before start time candidates can access (strict mode only)
   passPercentage: number;
   status?: string;
   totalQuestions?: number;
@@ -59,6 +60,15 @@ export interface CustomMCQAssessment {
   proctoringSettings?: {
     aiProctoringEnabled?: boolean;
   };
+  showResultToCandidate?: boolean;
+  accessControl?: {
+    canAccess: boolean;
+    canStart: boolean;
+    waitingForStart: boolean;
+    examStarted: boolean;
+    timeRemaining: number | null;
+    errorMessage: string | null;
+  };
 }
 
 export interface AssessmentSubmission {
@@ -73,5 +83,9 @@ export interface AssessmentSubmission {
   status: string;
   startedAt?: string;
   submittedAt?: string;
-  gradingStatus?: "pending" | "grading" | "completed";
+  gradingStatus?: "pending" | "grading" | "completed" | "error";
+  mcqScore?: number;
+  mcqTotal?: number;
+  subjectiveScore?: number;
+  subjectiveTotal?: number;
 }
