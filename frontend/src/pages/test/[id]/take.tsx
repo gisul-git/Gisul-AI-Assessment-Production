@@ -16,6 +16,7 @@ import { SQLEditorContainer } from '../../../components/dsa/test/SQLEditorContai
 import { OutputConsole } from '../../../components/dsa/test/OutputConsole'
 import { useProctor } from '../../../hooks/useProctor'
 import { useCameraProctor } from '../../../hooks/useCameraProctor'
+import { useLiveProctoring } from '../../../hooks/useLiveProctoring'
 import { normalizeProctorConfig, useProctorEngine } from '@/proctoring'
 import WebcamPreview from '@/components/WebcamPreview'
 import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
@@ -512,6 +513,65 @@ export default function TestTakePage() {
     debugMode,
   })
 
+  // Live Proctoring hook (webcam + screen streaming)
+  const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
+  
+  // Get screen stream from window.__screenStream (set by identity-verify gate)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && (window as any).__screenStream) {
+      const stream = (window as any).__screenStream as MediaStream;
+      if (stream && stream.active && stream.getVideoTracks().length > 0) {
+        setLiveProctorScreenStream(stream);
+        console.log('[DSA Take] Found global screen stream for Live Proctoring');
+      }
+    }
+  }, []);
+
+  // Get webcam stream from useCameraProctor
+  const webcamStreamForLiveProctor = isCameraOn && videoRef.current?.srcObject 
+    ? (videoRef.current.srcObject as MediaStream)
+    : null;
+
+  const {
+    isStreaming: isLiveProctoringStreaming,
+    connectionState: liveProctoringConnectionState,
+    error: liveProctoringError,
+    sessionId: liveProctoringSessionId,
+    startStreaming: startLiveProctoring,
+    stopStreaming: stopLiveProctoring,
+  } = useLiveProctoring({
+    assessmentId: proctorAssessmentId,
+    candidateId: candidateEmail || proctorUserId || '',
+    enabled: proctoringSettings?.liveProctoringEnabled === true,
+    preScreenStream: liveProctorScreenStream,
+    onError: (error) => {
+      console.error('[DSA Take] Live Proctoring error:', error);
+    },
+    debugMode,
+  });
+
+  // Start Live Proctoring when candidate clicks "Start Assessment" (when timer starts)
+  useEffect(() => {
+    if (timerStarted && proctoringSettings?.liveProctoringEnabled === true && liveProctorScreenStream && webcamStreamForLiveProctor) {
+      console.log('[DSA Take] Starting Live Proctoring...');
+      startLiveProctoring().catch(err => {
+        console.error('[DSA Take] Failed to start Live Proctoring:', err);
+      });
+    }
+  }, [timerStarted, proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
+
+  // Stop Live Proctoring when assessment ends
+  useEffect(() => {
+    if (submitted) {
+      stopLiveProctoring();
+    }
+    return () => {
+      if (submitted) {
+        stopLiveProctoring();
+      }
+    };
+  }, [submitted, stopLiveProctoring]);
+
   // Unified Proctoring Engine (works alongside existing hooks)
   const proctorConfig = normalizeProctorConfig(proctoringSettings)
   const referenceImageUrl = typeof window !== 'undefined' 
@@ -552,12 +612,13 @@ export default function TestTakePage() {
   useEffect(() => {
     if (test && questions.length > 0 && candidateEmail && !submitted) {
       unifiedProctor.start()
+      
     }
     
     return () => {
       unifiedProctor.stop()
     }
-  }, [test, questions.length, candidateEmail, submitted])
+  }, [test, questions.length, candidateEmail, submitted, unifiedProctor])
 
   // Start camera AFTER test data is loaded AND editor is visible (not immediately on mount)
   // This prevents blocking the initial page load with heavy TensorFlow.js model loading
@@ -1685,6 +1746,7 @@ export default function TestTakePage() {
 
   const handleSubmit = async (isAuto: boolean = false) => {
     if (submitted || submitting) return
+
 
     // Confirmation alert removed - submit directly
     setSubmitting(true)

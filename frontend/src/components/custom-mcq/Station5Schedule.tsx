@@ -27,6 +27,9 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(
     (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled ?? false
   );
+  const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(
+    (assessmentData as any)?.proctoringSettings?.liveProctoringEnabled ?? false
+  );
   const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
   const [sendingEmails, setSendingEmails] = useState(false);
 
@@ -38,9 +41,12 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       endTime: endTime ? new Date(endTime).toISOString() : undefined,
       duration: duration ? parseInt(duration) : undefined,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
-      proctoringSettings: { aiProctoringEnabled },
+      proctoringSettings: { 
+        aiProctoringEnabled,
+        liveProctoringEnabled
+      } as CustomMCQAssessment['proctoringSettings'],
     });
-  }, [accessMode, examMode, startTime, endTime, duration, passPercentage, aiProctoringEnabled]);
+  }, [accessMode, examMode, startTime, endTime, duration, passPercentage, aiProctoringEnabled, liveProctoringEnabled]);
 
   const handleSendInvitations = async (template: {
     subject: string;
@@ -255,9 +261,11 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
           </div>
         </div>
 
-        {/* Proctoring Settings (single checkbox) */}
+        {/* Proctoring Settings */}
         <div style={{ padding: "1.5rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
           <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Proctoring Settings</h3>
+          
+          {/* AI Proctoring Checkbox */}
           <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer" }}>
             <input
               type="checkbox"

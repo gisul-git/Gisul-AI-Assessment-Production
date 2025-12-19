@@ -6,6 +6,7 @@ import { useCameraProctor } from "../../../hooks/useCameraProctor";
 import WebcamPreview from "../../../components/WebcamPreview";
 import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
 import { useProctorUpload } from "@/hooks/useProctorUpload";
+import { useLiveProctoring } from "../../../hooks/useLiveProctoring";
 // (import kept intentionally for future gateContext-based routing; currently enforced via sessionStorage flags)
 
 export default function CustomMCQTakePage() {
@@ -27,6 +28,7 @@ export default function CustomMCQTakePage() {
   const [examStarted, setExamStarted] = useState(false); // Track if exam has been manually started (for flexible mode)
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true);
   const [proctoringEnabled, setProctoringEnabled] = useState(false);
+  const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
   const cameraStartRequestedRef = useRef(false);
 
   const getViolationMessage = (eventType: string): string => {
@@ -70,12 +72,56 @@ export default function CustomMCQTakePage() {
     },
   });
 
+  // Get webcam stream from useCameraProctor
+  const webcamStreamForLiveProctor = isCameraOn && videoRef.current?.srcObject 
+    ? (videoRef.current.srcObject as MediaStream)
+    : null;
+
+  const {
+    isStreaming: isLiveProctoringStreaming,
+    connectionState: liveProctoringConnectionState,
+    error: liveProctoringError,
+    sessionId: liveProctoringSessionId,
+    startStreaming: startLiveProctoring,
+    stopStreaming: stopLiveProctoring,
+  } = useLiveProctoring({
+    assessmentId: String(assessmentId || ''),
+    candidateId: candidateInfo?.email || '',
+    enabled: proctoringEnabled,
+    preScreenStream: liveProctorScreenStream,
+    onError: (error) => {
+      console.error('[Custom MCQ Take] Live Proctoring error:', error);
+    },
+    debugMode: false,
+  });
+
+  // Start Live Proctoring when exam starts
+  useEffect(() => {
+    if (examStarted && proctoringEnabled && liveProctorScreenStream && webcamStreamForLiveProctor) {
+      console.log('[Custom MCQ Take] Starting Live Proctoring...');
+      startLiveProctoring().catch(err => {
+        console.error('[Custom MCQ Take] Failed to start Live Proctoring:', err);
+      });
+    }
+  }, [examStarted, proctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
+
+  // Stop Live Proctoring when assessment ends
+  useEffect(() => {
+    if (submitting) {
+      stopLiveProctoring();
+    }
+    return () => {
+      if (submitting) {
+        stopLiveProctoring();
+      }
+    };
+  }, [submitting, stopLiveProctoring]);
+
   // Enable proctoring (tab switch / focus lost) only once exam has started
+  // Note: proctoringEnabled is now set from liveProctoringEnabled in proctoringSettings
   useEffect(() => {
     if (!assessmentId) return;
-    if (candidateInfo && examStarted && !submitting) {
-      setProctoringEnabled(true);
-    }
+    // Keep existing logic for tab switch detection, but Live Proctoring is controlled separately
   }, [assessmentId, candidateInfo, examStarted, submitting]);
 
   // Tab visibility + focus detection (same as AI take page)
@@ -184,6 +230,9 @@ export default function CustomMCQTakePage() {
         // Only explicit true enables camera/model; missing/false => OFF (per PROCTORING_AI_TOGGLE_NOTES.md)
         const aiEnabled = (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled === true;
         setCameraProctorEnabled(aiEnabled);
+        // Set Live Proctoring enabled state
+        const liveEnabled = (assessmentData as any)?.proctoringSettings?.liveProctoringEnabled === true;
+        setProctoringEnabled(liveEnabled);
 
         // Calculate timer based on exam mode
         const now = new Date();
