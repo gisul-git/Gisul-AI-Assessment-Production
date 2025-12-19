@@ -59,4 +59,3 @@ __all__ = [
     'infer_language_from_skill',
     'suggest_time_and_score',
 ]
-
