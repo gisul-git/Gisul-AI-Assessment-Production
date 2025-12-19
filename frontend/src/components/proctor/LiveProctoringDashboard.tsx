@@ -24,6 +24,8 @@ interface CandidateCardProps {
   screenStream: MediaStream | null;
   error: string | null;
   onRefresh: () => void;
+  isExpanded: boolean;
+  onExpandToggle: () => void;
 }
 
 function CandidateCard({
@@ -34,10 +36,11 @@ function CandidateCard({
   screenStream,
   error,
   onRefresh,
+  isExpanded,
+  onExpandToggle,
 }: CandidateCardProps) {
   const webcamRef = useRef<HTMLVideoElement>(null);
   const screenRef = useRef<HTMLVideoElement>(null);
-  const [isExpanded, setIsExpanded] = useState(false);
 
   // Attach webcam stream
   useEffect(() => {
@@ -147,6 +150,9 @@ function CandidateCard({
         overflow: "hidden",
         display: "flex",
         flexDirection: "column",
+        width: isExpanded ? "100%" : "auto",
+        height: isExpanded ? "100%" : "auto",
+        minHeight: isExpanded ? "100%" : "auto",
       }}
     >
       {/* Header */}
@@ -215,10 +221,12 @@ function CandidateCard({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: isExpanded ? "1fr" : "1fr 1fr",
-          gap: "0.5rem",
-          padding: "0.5rem",
-          minHeight: isExpanded ? "400px" : "200px",
+          gridTemplateColumns: "1fr 1fr",
+          gap: isExpanded ? "1rem" : "0.5rem",
+          padding: isExpanded ? "1rem" : "0.5rem",
+          flex: isExpanded ? 1 : "none",
+          minHeight: isExpanded ? "0" : "200px",
+          height: isExpanded ? "100%" : "auto",
         }}
       >
         {/* Webcam */}
@@ -228,7 +236,9 @@ function CandidateCard({
             borderRadius: "0.5rem",
             overflow: "hidden",
             position: "relative",
-            aspectRatio: "16/9",
+            aspectRatio: isExpanded ? undefined : "16/9",
+            height: isExpanded ? "100%" : "auto",
+            minHeight: isExpanded ? "400px" : "auto",
           }}
         >
           <div
@@ -287,7 +297,9 @@ function CandidateCard({
             borderRadius: "0.5rem",
             overflow: "hidden",
             position: "relative",
-            aspectRatio: "16/9",
+            aspectRatio: isExpanded ? undefined : "16/9",
+            height: isExpanded ? "100%" : "auto",
+            minHeight: isExpanded ? "400px" : "auto",
           }}
         >
           <div
@@ -350,7 +362,7 @@ function CandidateCard({
         }}
       >
         <button
-          onClick={() => setIsExpanded(!isExpanded)}
+          onClick={onExpandToggle}
           style={{
             padding: "0.375rem 0.75rem",
             backgroundColor: "#f1f5f9",
@@ -361,7 +373,7 @@ function CandidateCard({
             color: "#475569",
           }}
         >
-          {isExpanded ? "Show Both" : "Expand View"}
+          {isExpanded ? "Show Grid" : "Expand View"}
         </button>
       </div>
     </div>
@@ -387,6 +399,9 @@ export function LiveProctoringDashboard({
     debugMode: true,
   });
 
+  // Track which candidate card is expanded
+  const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
+
   // Use refs to store stable function references
   const startMonitoringRef = useRef(startMonitoring);
   const stopMonitoringRef = useRef(stopMonitoring);
@@ -405,6 +420,8 @@ export function LiveProctoringDashboard({
       });
     } else {
       stopMonitoringRef.current();
+      // Reset expanded state when closing
+      setExpandedSessionId(null);
     }
 
     return () => {
@@ -416,6 +433,11 @@ export function LiveProctoringDashboard({
 
   // Convert Map to array for rendering
   const streamsArray = Array.from(candidateStreams.values());
+
+  // Handle expand toggle
+  const handleExpandToggle = (sessionId: string) => {
+    setExpandedSessionId(prev => prev === sessionId ? null : sessionId);
+  };
 
   if (!isOpen) {
     return null;
@@ -509,7 +531,9 @@ export function LiveProctoringDashboard({
           style={{
             flex: 1,
             overflow: "auto",
-            padding: "1.5rem",
+            padding: expandedSessionId ? "0" : "1.5rem",
+            display: "flex",
+            flexDirection: "column",
           }}
         >
           {isLoading ? (
@@ -576,7 +600,28 @@ export function LiveProctoringDashboard({
                 There are no active candidates taking the test. Candidates will appear here when they start their assessment.
               </p>
             </div>
+          ) : expandedSessionId ? (
+            // Expanded view - show only the expanded card in full screen
+            <div style={{ flex: 1, display: "flex", padding: "1.5rem" }}>
+              {streamsArray
+                .filter(stream => stream.sessionId === expandedSessionId)
+                .map((stream) => (
+                  <CandidateCard
+                    key={stream.sessionId}
+                    sessionId={stream.sessionId}
+                    candidateId={stream.candidateId}
+                    status={stream.status}
+                    webcamStream={stream.webcamStream}
+                    screenStream={stream.screenStream}
+                    error={stream.error}
+                    onRefresh={() => refreshCandidate(stream.sessionId)}
+                    isExpanded={true}
+                    onExpandToggle={() => handleExpandToggle(stream.sessionId)}
+                  />
+                ))}
+            </div>
           ) : (
+            // Grid view - show all cards
             <div
               style={{
                 display: "grid",
@@ -594,6 +639,8 @@ export function LiveProctoringDashboard({
                   screenStream={stream.screenStream}
                   error={stream.error}
                   onRefresh={() => refreshCandidate(stream.sessionId)}
+                  isExpanded={false}
+                  onExpandToggle={() => handleExpandToggle(stream.sessionId)}
                 />
               ))}
             </div>
