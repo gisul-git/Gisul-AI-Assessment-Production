@@ -141,6 +141,10 @@ export default function IdentityVerificationPage() {
         
         // Valid selection - proceed
         setScreenStream(stream);
+        // Expose screen stream globally so Live Proctoring can reuse it
+        if (typeof window !== "undefined") {
+          (window as any).__screenStream = stream;
+        }
         
         // Handle screen share end
         videoTrack.addEventListener("ended", () => {
