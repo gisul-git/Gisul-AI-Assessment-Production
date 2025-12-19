@@ -1341,6 +1341,338 @@ const renderSqlQuestion = (question: any, isEditing: boolean, onEditChange?: (va
   );
 };
 
+// AIML Question Renderer - pretty UI using dataset when available
+const renderAimlQuestion = (question: any, isEditing: boolean, onEditChange?: (value: string) => void) => {
+  // When editing, fall back to simple subjective-style text editing for now
+  if (isEditing && onEditChange) {
+    const questionText = question.question || question.questionText || "";
+    return (
+      <div>
+        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+          Question text (shown to candidates):
+        </label>
+        <textarea
+          value={questionText}
+          onChange={(e) =>
+            onEditChange(
+              JSON.stringify(
+                {
+                  ...question,
+                  question: e.target.value,
+                  questionText: e.target.value,
+                },
+                null,
+                2
+              )
+            )
+          }
+          style={{
+            width: "100%",
+            minHeight: "160px",
+            padding: "0.75rem",
+            border: "1px solid #e2e8f0",
+            borderRadius: "0.5rem",
+            fontSize: "0.875rem",
+            fontFamily: "monospace",
+          }}
+          placeholder="Edit the AIML question text..."
+        />
+      </div>
+    );
+  }
+
+  // Read structured AIML data if present
+  const aimlData = question.aiml_data || {};
+  const description = aimlData.description || question.question || question.questionText || "AIML question description not available.";
+  const tasks: string[] = aimlData.tasks || [];
+  const constraints: string[] = aimlData.constraints || [];
+  const libraries: string[] = aimlData.libraries || [];
+  const dataset = aimlData.dataset || null;
+  const schema = dataset?.schema || [];
+  const rows: any[] = dataset?.rows || [];
+
+  const hasTasks = tasks && tasks.length > 0;
+  const hasConstraints = constraints && constraints.length > 0;
+  const hasLibraries = libraries && libraries.length > 0;
+  const hasDataset = dataset && schema && rows && rows.length > 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      {/* Description */}
+      <div
+        style={{
+          padding: "1.25rem",
+          backgroundColor: "#ffffff",
+          borderRadius: "0.75rem",
+          border: "1px solid #e2e8f0",
+          boxShadow: "0 1px 3px rgba(15, 23, 42, 0.08)",
+        }}
+      >
+        <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
+          Problem
+        </div>
+        <div style={{ fontSize: "1rem", color: "#111827", lineHeight: "1.7", whiteSpace: "pre-wrap" }}>
+          {description}
+        </div>
+      </div>
+
+      {/* Tasks */}
+      {hasTasks && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#f0fdf4",
+            borderRadius: "0.75rem",
+            border: "1px solid #bbf7d0",
+          }}
+        >
+          <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#166534", marginBottom: "0.5rem" }}>
+            Tasks
+          </div>
+          <ol style={{ margin: 0, paddingLeft: "1.5rem", fontSize: "0.875rem", color: "#0f172a", lineHeight: 1.8 }}>
+            {tasks.map((task, idx) => (
+              <li key={idx} style={{ marginBottom: "0.25rem" }}>{task}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {/* Dataset Schema and Data - side by side layout */}
+      {hasDataset && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: schema.length > 0 ? "minmax(0, 1fr) minmax(0, 2fr)" : "minmax(0, 1fr)",
+            gap: "1.25rem",
+          }}
+        >
+          {/* Schema */}
+          {schema.length > 0 && (
+            <div
+              style={{
+                padding: "1rem",
+                backgroundColor: "#f8fafc",
+                borderRadius: "0.75rem",
+                border: "1px solid #e2e8f0",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                <span
+                  style={{
+                    width: "28px",
+                    height: "28px",
+                    borderRadius: "999px",
+                    backgroundColor: "#e0f2fe",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.75rem",
+                    color: "#0369a1",
+                    fontWeight: 700,
+                  }}
+                >
+                  📊
+                </span>
+                <div style={{ fontSize: "0.95rem", fontWeight: 600, color: "#0f172a" }}>Dataset Schema</div>
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+                  <thead>
+                    <tr style={{ backgroundColor: "#f9fafb" }}>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "0.4rem 0.6rem",
+                          borderBottom: "1px solid #e5e7eb",
+                          color: "#6b7280",
+                          fontWeight: 600,
+                        }}
+                      >
+                        Column
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "0.4rem 0.6rem",
+                          borderBottom: "1px solid #e5e7eb",
+                          color: "#6b7280",
+                          fontWeight: 600,
+                        }}
+                      >
+                        Type
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {schema.map((col: any, idx: number) => (
+                      <tr key={idx}>
+                        <td
+                          style={{
+                            padding: "0.4rem 0.6rem",
+                            borderTop: "1px solid #f3f4f6",
+                            fontFamily: "monospace",
+                            color: "#111827",
+                          }}
+                        >
+                          {col.name || `col_${idx + 1}`}
+                        </td>
+                        <td
+                          style={{
+                            padding: "0.4rem 0.6rem",
+                            borderTop: "1px solid #f3f4f6",
+                            color: "#4b5563",
+                          }}
+                        >
+                          {col.type || "string"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Sample Data - Show ALL rows */}
+          {rows.length > 0 && (
+            <div
+              style={{
+                padding: "1rem",
+                backgroundColor: "#f8fafc",
+                borderRadius: "0.75rem",
+                border: "1px solid #e2e8f0",
+                maxHeight: "600px",
+                overflowY: "auto",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                <span
+                  style={{
+                    width: "28px",
+                    height: "28px",
+                    borderRadius: "999px",
+                    backgroundColor: "#fef3c7",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.75rem",
+                    color: "#92400e",
+                    fontWeight: 700,
+                  }}
+                >
+                  📋
+                </span>
+                <div style={{ fontSize: "0.95rem", fontWeight: 600, color: "#0f172a" }}>
+                  Dataset ({rows.length} rows)
+                </div>
+              </div>
+              <div
+                style={{
+                  borderRadius: "0.5rem",
+                  border: "1px solid #e2e8f0",
+                  overflow: "hidden",
+                  backgroundColor: "#ffffff",
+                }}
+              >
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+                    <thead>
+                      <tr style={{ backgroundColor: "#f9fafb", position: "sticky", top: 0, zIndex: 10 }}>
+                        {schema.map((col: any, idx: number) => (
+                          <th
+                            key={idx}
+                            style={{
+                              textAlign: "left",
+                              padding: "0.5rem 0.75rem",
+                              borderBottom: "2px solid #e5e7eb",
+                              color: "#6b7280",
+                              fontWeight: 600,
+                              backgroundColor: "#f9fafb",
+                            }}
+                          >
+                            {col.name || `Column ${idx + 1}`}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row, rowIdx) => {
+                        const cells: any[] = Array.isArray(row) ? row : schema.map((col: any) => (row && typeof row === "object" ? row[col.name] : ""));
+                        return (
+                          <tr key={rowIdx} style={{ backgroundColor: rowIdx % 2 === 0 ? "#ffffff" : "#f9fafb" }}>
+                            {cells.map((cell, cellIdx) => (
+                              <td
+                                key={cellIdx}
+                                style={{
+                                  padding: "0.5rem 0.75rem",
+                                  borderTop: "1px solid #f3f4f6",
+                                  fontFamily: "monospace",
+                                  color: cell === null || cell === undefined || cell === "" ? "#9ca3af" : "#111827",
+                                  fontSize: "0.8rem",
+                                }}
+                              >
+                                {cell === null || cell === undefined || cell === "" ? (
+                                  <span style={{ fontStyle: "italic", color: "#9ca3af" }}>NULL</span>
+                                ) : (
+                                  String(cell)
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Constraints */}
+      {hasConstraints && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#ecfeff",
+            borderRadius: "0.75rem",
+            border: "1px solid #bae6fd",
+          }}
+        >
+          <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#075985", marginBottom: "0.5rem" }}>
+            Constraints
+          </div>
+          <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#0f172a", lineHeight: 1.6 }}>
+            {constraints.map((c, idx) => (
+              <li key={idx}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Required Libraries */}
+      {hasLibraries && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#fef3c7",
+            borderRadius: "0.75rem",
+            border: "1px solid #fbbf24",
+          }}
+        >
+          <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#92400e", marginBottom: "0.5rem" }}>
+            Required Libraries
+          </div>
+          <div style={{ fontSize: "0.875rem", color: "#78350f" }}>
+            {libraries.join(", ")}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const renderQuestionByType = (question: any, questionType: string, isEditing: boolean, onEditChange?: (value: string) => void) => {
   switch (questionType) {
     case "MCQ":
@@ -1354,7 +1686,7 @@ const renderQuestionByType = (question: any, questionType: string, isEditing: bo
     case "SQL":
       return renderSqlQuestion(question, isEditing, onEditChange);
     case "AIML":
-      return renderSubjectiveQuestion(question, isEditing, onEditChange);
+      return renderAimlQuestion(question, isEditing, onEditChange);
     default:
       return (
         <div style={{ padding: "1rem", backgroundColor: "#fef3c7", borderRadius: "0.5rem", color: "#92400e" }}>
