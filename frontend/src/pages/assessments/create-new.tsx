@@ -2192,6 +2192,7 @@ export default function CreateNewAssessmentPage() {
   // Simple AI proctoring toggle (controls camera-based proctoring on candidate side)
   const [proctoringSettings, setProctoringSettings] = useState({
     aiProctoringEnabled: false, // default OFF until explicitly enabled
+    liveProctoringEnabled: false, // default OFF until explicitly enabled
   });
 
   const sliderRef = useRef<HTMLDivElement>(null);
@@ -10226,7 +10227,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 );
               })()}
 
-              {/* Proctoring Settings - AI Camera Toggle */}
+              {/* Proctoring Settings */}
               <div
                 style={{
                   marginTop: "2rem",
@@ -10247,6 +10248,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   Proctoring Settings
                 </h3>
 
+                {/* AI Proctoring Checkbox */}
                 <label
                   style={{
                     display: "flex",
@@ -10260,17 +10262,59 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   <input
                     type="checkbox"
                     checked={proctoringSettings.aiProctoringEnabled}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const checked = e.target.checked;
                       setProctoringSettings((prev) => ({
                         ...prev,
-                        aiProctoringEnabled: e.target.checked,
-                      }))
-                    }
-                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                        aiProctoringEnabled: checked,
+                        // If Live Proctoring is enabled, AI Proctoring should also be enabled
+                        liveProctoringEnabled: prev.liveProctoringEnabled && checked ? prev.liveProctoringEnabled : (prev.liveProctoringEnabled && !checked ? false : prev.liveProctoringEnabled),
+                      }));
+                    }}
+                    style={{ 
+                      width: "18px", 
+                      height: "18px", 
+                      cursor: "pointer",
+                    }}
                   />
                   <span>
                     Enable AI Proctoring (camera-based: no face, multiple faces, gaze
                     away)
+                  </span>
+                </label>
+
+                {/* Live Proctoring Checkbox */}
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    cursor: "pointer",
+                    fontSize: "0.875rem",
+                    color: "#1e293b",
+                    marginTop: "1rem",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={proctoringSettings.liveProctoringEnabled}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setProctoringSettings((prev) => ({
+                        ...prev,
+                        liveProctoringEnabled: checked,
+                        // When Live Proctoring is enabled, AI Proctoring should also be enabled
+                        aiProctoringEnabled: checked ? true : prev.aiProctoringEnabled,
+                      }));
+                    }}
+                    style={{ 
+                      width: "18px", 
+                      height: "18px", 
+                      cursor: "pointer",
+                    }}
+                  />
+                  <span>
+                    Live Proctoring (webcam + screen streaming)
                   </span>
                 </label>
               </div>

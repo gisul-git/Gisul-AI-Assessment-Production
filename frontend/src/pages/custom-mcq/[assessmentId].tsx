@@ -5,6 +5,9 @@ import { requireAuth } from "../../lib/auth";
 import { customMCQApi } from "../../lib/custom-mcq/api";
 import { CustomMCQAssessment, AssessmentSubmission } from "../../types/custom-mcq";
 import ProctorSummaryCard from "../../components/admin/ProctorSummaryCard";
+import LiveProctoringDashboard from "../../components/proctor/LiveProctoringDashboard";
+import { useSession } from "next-auth/react";
+import { Eye } from "lucide-react";
 
 interface CustomMCQDetailsPageProps {
   session: any;
@@ -12,6 +15,7 @@ interface CustomMCQDetailsPageProps {
 
 export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPageProps) {
   const router = useRouter();
+  const { data: sessionData } = useSession();
   const { assessmentId } = router.query;
   const [assessment, setAssessment] = useState<CustomMCQAssessment | null>(null);
   const [loading, setLoading] = useState(true);
@@ -21,6 +25,7 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [proctorSummaryByUser, setProctorSummaryByUser] = useState<Record<string, { summary: Record<string, number>; totalViolations: number }>>({});
   const [loadingProctorForUser, setLoadingProctorForUser] = useState<Record<string, boolean>>({});
   const [expandedProctorUser, setExpandedProctorUser] = useState<string | null>(null);
+  const [showLiveProctoring, setShowLiveProctoring] = useState(false);
 
   useEffect(() => {
     if (assessmentId) {
@@ -125,6 +130,47 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
           <button type="button" onClick={() => router.push("/dashboard")} className="btn-secondary">
             ← Back to Dashboard
           </button>
+        </div>
+
+        {/* Live Proctoring Section */}
+        <div
+          style={{
+            padding: "1.5rem",
+            backgroundColor: "#ffffff",
+            border: "1px solid #e2e8f0",
+            borderRadius: "0.75rem",
+            marginBottom: "2rem",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
+              <h2 style={{ fontSize: "1.125rem", fontWeight: 600, margin: 0 }}>Live Proctoring</h2>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowLiveProctoring(true)}
+              style={{
+                padding: "0.5rem 1rem",
+                fontSize: "0.875rem",
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                backgroundColor: "#3b82f6",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "0.5rem",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              <Eye size={16} />
+              Open Live Proctoring
+            </button>
+          </div>
+          <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
+            Monitor candidates in real-time via webcam and screen sharing
+          </p>
         </div>
 
         {/* Assessment Info */}
@@ -411,6 +457,16 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
           </button>
         </div>
       </div>
+
+      {/* Live Proctoring Dashboard */}
+      {showLiveProctoring && assessmentId && typeof assessmentId === 'string' && sessionData?.user && (
+        <LiveProctoringDashboard
+          isOpen={showLiveProctoring}
+          onClose={() => setShowLiveProctoring(false)}
+          assessmentId={assessmentId}
+          adminId={sessionData.user.email || sessionData.user.id || 'admin'}
+        />
+      )}
     </div>
   );
 }
