@@ -154,24 +154,62 @@ async def grade_multiple_subjective_answers(
     """
     results = []
     
+    logger.info(f"Grading {len(questions_and_answers)} subjective answers")
+    
     for item in questions_and_answers:
         try:
+            question_id = item.get("questionId", "unknown")
+            question_text = item.get("question", "")
+            answer_text = item.get("answer", "")
+            max_marks_raw = item.get("max_marks", 1)
+            section = item.get("section", "")
+            
+            # Ensure max_marks is an integer
+            if isinstance(max_marks_raw, str):
+                try:
+                    max_marks = int(float(max_marks_raw))
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid max_marks for question {question_id}: {max_marks_raw}, defaulting to 1")
+                    max_marks = 1
+            elif isinstance(max_marks_raw, float):
+                max_marks = int(max_marks_raw)
+            else:
+                max_marks = int(max_marks_raw) if max_marks_raw else 1
+            
+            if max_marks < 1:
+                max_marks = 1
+            
+            logger.info(f"Grading question {question_id}: max_marks={max_marks}, answer_length={len(answer_text)}")
+            
+            if not answer_text or not answer_text.strip():
+                logger.warning(f"Question {question_id} has empty answer, awarding 0 marks")
+                results.append({
+                    "questionId": question_id,
+                    "score": 0.0,
+                    "percentage": 0.0,
+                    "feedback": "No answer provided",
+                    "reasoning": "Empty answer submitted",
+                })
+                continue
+            
             grade_result = await grade_subjective_answer(
-                question=item["question"],
-                answer=item["answer"],
-                max_marks=item["max_marks"],
-                section=item.get("section"),
+                question=question_text,
+                answer=answer_text,
+                max_marks=max_marks,
+                section=section,
             )
-            grade_result["questionId"] = item["questionId"]
+            grade_result["questionId"] = question_id
+            logger.info(f"Question {question_id} graded: {grade_result.get('score', 0)}/{max_marks}")
             results.append(grade_result)
         except Exception as e:
-            logger.error(f"Error grading question {item.get('questionId')}: {e}")
+            logger.exception(f"Error grading question {item.get('questionId')}: {e}")
             results.append({
-                "questionId": item["questionId"],
+                "questionId": item.get("questionId", "unknown"),
                 "score": 0.0,
                 "percentage": 0.0,
                 "feedback": f"Error: {str(e)}",
                 "reasoning": "Could not evaluate answer",
             })
     
+    logger.info(f"Completed grading {len(results)} answers")
     return results
