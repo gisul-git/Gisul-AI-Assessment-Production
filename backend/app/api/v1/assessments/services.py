@@ -25,7 +25,19 @@ try:
 except ImportError as exc:  # pragma: no cover - optional dependency guard
     raise RuntimeError("The openai package is required. Ensure it is installed.") from exc
 
-from ....core.config import get_settings
+# Use absolute import to work with both normal import and importlib loading
+try:
+    from app.core.config import get_settings
+except ImportError:
+    # Fallback to relative import if absolute doesn't work
+    from ....core.config import get_settings
+
+# Import experience level helpers from services package to avoid duplication
+# Using absolute import to avoid confusion with services.py file vs services/ package
+from app.api.v1.assessments.services.ai_utils import (
+    _get_experience_level_corporate,
+    _get_experience_level_student,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,50 +160,8 @@ Output only a simple list (no explanation).
     return topics[:num_topics]
 
 
-def _get_experience_level_corporate(experience_min: int, experience_max: int) -> tuple[str, str]:
-    """Get corporate experience level and guidance."""
-    if experience_min == 0 and experience_max <= 1:
-        return ("Junior", """For junior positions (0-1 years), focus on ROLE-SPECIFIC fundamental skills:
-        - Include the PRIMARY technology/language mentioned in the job designation (e.g., for "Java Developer" include Java, Spring, Maven, etc.)
-        - Include essential tools and frameworks directly related to the role
-        - Include fundamental concepts specific to that technology stack
-        - DO NOT include unrelated technologies (e.g., don't include Python/HTML/CSS for a Java Developer role unless it's a full-stack role)
-        - Only include technologies that are directly relevant to the specific job designation""")
-    elif experience_min <= 1 and experience_max <= 3:
-        return ("Mid-level", "Include role-specific technologies AND related intermediate-level frameworks, tools, and libraries. Focus on technologies actually used in this specific role, not general programming skills.")
-    elif experience_min <= 3 and experience_max <= 6:
-        return ("Senior", "Include advanced role-specific technologies, architectural patterns, enterprise tools, cloud platforms, and DevOps tools relevant to this specific role.")
-    else:
-        return ("Expert", "Include cutting-edge role-specific technologies, advanced architectural patterns, enterprise solutions, and technologies for building large-scale systems in this domain.")
-
-
-def _get_experience_level_student(experience_min: int, experience_max: int) -> tuple[str, str]:
-    """Get student experience level and guidance based on three stages: Beginner, Intermediate, Advanced."""
-
-    avg_level = (experience_min + experience_max) / 2
-
-    if avg_level < 1.5:
-        return ("Beginner",
-                "Beginner-level students should receive foundational and easy-to-learn skills. "
-                "Include basic programming concepts, introductory tools, and fundamental academic topics. "
-                "Skills should be simple, conceptual, and suitable for early academic progression. "
-                "Do NOT include any advanced frameworks, enterprise-level technologies, or production tools.")
-
-    elif avg_level < 3:
-        return ("Intermediate",
-                "Intermediate students should receive moderate-complexity academic skills. "
-                "Include technologies and concepts typically found in intermediate college courses. "
-                "Focus on bridging foundational concepts to applied skills. "
-                "Allow introductory frameworks only at a beginner-friendly level. "
-                "Avoid enterprise tools or production systems unless mentioned at a very basic conceptual level.")
-
-    else:
-        return ("Advanced",
-                "Advanced students should receive academically advanced and internship-ready skills. "
-                "Include deeper concepts, applied tools, and project-development capabilities. "
-                "Industry tools may be mentioned only at an academic or conceptual level. "
-                "Do NOT include enterprise-level or production-focused systems. "
-                "Focus on preparing students for internships, final-year projects, and practical applications.")
+# Experience level helpers are now imported from .services.ai_utils
+# Removed duplicate definitions to fix circular import issue
 
 
 async def generate_topic_cards_from_job_designation(
@@ -1055,7 +1025,11 @@ No explanation, just the type name."""
         if result in valid_types:
             # Sanity-check SQL returned from AI to avoid mislabeling non-SQL topics
             if result == "SQL":
-                if not (any(k in topic_lower for k in sql_db_indicators) or any(re.search(p, topic_lower) for p in sql_op_patterns)):
+                # Check if topic actually contains SQL-related patterns
+                # sql_indicator_patterns and sql_op_patterns are defined earlier in this function
+                has_sql_indicator = any(re.search(p, topic_lower) for p in sql_indicator_patterns)
+                has_sql_op = any(re.search(p, topic_lower) for p in sql_op_patterns)
+                if not (has_sql_indicator or has_sql_op):
                     result = "Subjective" if any(k in topic_lower for k in ["vs", "versus", "difference", "compare", "comparison"]) else "MCQ"
             # If AI returned "coding" but topic doesn't support coding, change to safe default
             if result == "coding" and not coding_supported:
