@@ -1790,42 +1790,82 @@ async def _generate_aiml_questions(topic: str, difficulty: str, count: int, expe
                 question_info = aiml_question_data.get("question", {})
                 dataset_info = aiml_question_data.get("dataset")
                 
-                # Build questionText from description, tasks, constraints, and dataset info
+                # Build questionText from description, tasks, constraints, and dataset info with formatted tables
                 question_text_parts = [question_info.get("description", "")]
                 
                 # Add tasks
                 tasks = question_info.get("tasks", [])
                 if tasks:
-                    question_text_parts.append("\n\nTasks:")
+                    question_text_parts.append("\n\n### 📝 Tasks")
                     for task_idx, task in enumerate(tasks, 1):
                         question_text_parts.append(f"{task_idx}. {task}")
                 
-                # Add dataset info if present
+                # Add dataset info if present with formatted tables
                 if dataset_info:
                     schema = dataset_info.get("schema", [])
                     rows = dataset_info.get("rows", [])
                     
                     if schema:
-                        question_text_parts.append("\n\nDataset Schema:")
+                        question_text_parts.append("\n\n### 📊 Dataset Schema")
+                        question_text_parts.append("\n| Column | Type |")
+                        question_text_parts.append("|--------|------|")
                         for col in schema:
                             col_name = col.get("name", "")
                             col_type = col.get("type", "")
-                            question_text_parts.append(f"  - {col_name}: {col_type}")
+                            question_text_parts.append(f"| `{col_name}` | `{col_type}` |")
                     
-                    if rows:
-                        question_text_parts.append("\n\nSample Data (first few rows):")
-                        # Show first 5 rows as examples
-                        for row_idx, row in enumerate(rows[:5], 1):
-                            question_text_parts.append(f"  Row {row_idx}: {row}")
-                        if len(rows) > 5:
-                            question_text_parts.append(f"  ... ({len(rows) - 5} more rows)")
+                    if rows and len(rows) > 0:
+                        question_text_parts.append(f"\n\n### 📋 Sample Data ({len(rows)} rows)")
+                        
+                        # Get column names from schema
+                        column_names = [col.get("name", f"Column_{i+1}") for i, col in enumerate(schema)] if schema else []
+                        if not column_names and len(rows) > 0:
+                            # Infer column names from first row length
+                            column_names = [f"Column_{i+1}" for i in range(len(rows[0]))]
+                        
+                        if column_names:
+                            # Create table header
+                            header_row = "| " + " | ".join([f"`{col}`" for col in column_names]) + " |"
+                            separator = "| " + " | ".join(["---" for _ in column_names]) + " |"
+                            question_text_parts.append(header_row)
+                            question_text_parts.append(separator)
+                            
+                            # Add data rows (show ALL rows for AIML questions - full dataset)
+                            for row in rows:
+                                if isinstance(row, list):
+                                    # Format values for display
+                                    formatted_values = []
+                                    for val in row:
+                                        val_str = str(val).strip()
+                                        if val_str == "None" or val_str == "" or val_str.lower() == "null":
+                                            formatted_values.append("*NULL*")
+                                        elif len(val_str) > 30:
+                                            # Truncate long values
+                                            formatted_values.append(f"`{val_str[:27]}...`")
+                                        else:
+                                            formatted_values.append(f"`{val_str}`")
+                                    
+                                    question_text_parts.append("| " + " | ".join(formatted_values) + " |")
+                        else:
+                            # Fallback: simple list format
+                            for row_idx, row in enumerate(rows[:3], 1):
+                                row_str = str(row) if not isinstance(row, list) else json.dumps(row)
+                                question_text_parts.append(f"  Row {row_idx}: `{row_str}`")
+                            if len(rows) > 3:
+                                question_text_parts.append(f"  *... ({len(rows) - 3} more rows)*")
                 
-                # Add constraints
+                # Add constraints/requirements
                 constraints = question_info.get("constraints", [])
                 if constraints:
-                    question_text_parts.append("\n\nConstraints:")
+                    question_text_parts.append("\n\n### ✅ Constraints")
                     for constraint in constraints:
                         question_text_parts.append(f"- {constraint}")
+                
+                # Add libraries info
+                libraries = aiml_question_data.get("assessment", {}).get("libraries", [])
+                if libraries:
+                    question_text_parts.append(f"\n\n### 📚 Required Libraries")
+                    question_text_parts.append(f"{', '.join(libraries)}")
                 
                 question_text = "\n".join(question_text_parts)
                 
