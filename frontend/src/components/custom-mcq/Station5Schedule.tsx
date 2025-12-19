@@ -32,6 +32,7 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   );
   const [showResultToCandidate, setShowResultToCandidate] = useState(
     (assessmentData as any)?.showResultToCandidate ?? true
+  );
   const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(
     (assessmentData as any)?.proctoringSettings?.liveProctoringEnabled ?? false
   );
@@ -47,16 +48,24 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       duration: duration ? parseInt(duration) : undefined,
       accessTimeBeforeStart: accessTimeBeforeStart ? parseInt(accessTimeBeforeStart) : 15,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
-      proctoringSettings: { aiProctoringEnabled },
+      proctoringSettings: {
+        aiProctoringEnabled,
+        liveProctoringEnabled,
+      } as CustomMCQAssessment["proctoringSettings"],
       showResultToCandidate,
     } as any);
-  }, [accessMode, examMode, startTime, endTime, duration, accessTimeBeforeStart, passPercentage, aiProctoringEnabled, showResultToCandidate]);
-      proctoringSettings: { 
-        aiProctoringEnabled,
-        liveProctoringEnabled
-      } as CustomMCQAssessment['proctoringSettings'],
-    });
-  }, [accessMode, examMode, startTime, endTime, duration, passPercentage, aiProctoringEnabled, liveProctoringEnabled]);
+  }, [
+    accessMode,
+    examMode,
+    startTime,
+    endTime,
+    duration,
+    accessTimeBeforeStart,
+    passPercentage,
+    aiProctoringEnabled,
+    liveProctoringEnabled,
+    showResultToCandidate,
+  ]);
 
   const handleSendInvitations = async (template: {
     subject: string;
