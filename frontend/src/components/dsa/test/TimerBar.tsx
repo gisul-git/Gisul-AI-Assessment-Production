@@ -35,16 +35,27 @@ export function TimerBar({
     : totalTime
   
   const percentage = displayTotalTime > 0 ? (displayTime / displayTotalTime) * 100 : 0
+  
+  // Always format time as HH:MM:SS
   const hours = Math.floor(displayTime / 3600)
   const minutes = Math.floor((displayTime % 3600) / 60)
   const seconds = displayTime % 60
-  const formattedTime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+  const formattedTime = `${hours.toString().padStart(2, '0')}:${minutes
+    .toString()
+    .padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
 
   // Color based on remaining time
   const getColor = () => {
     if (percentage > 50) return 'bg-green-500'
     if (percentage > 25) return 'bg-yellow-500'
     return 'bg-red-500'
+  }
+
+  // Icon color matching progress bar logic
+  const getIconColor = () => {
+    if (percentage > 50) return 'text-green-400'
+    if (percentage > 25) return 'text-yellow-400'
+    return 'text-red-400'
   }
 
   // Timer label based on mode
@@ -57,7 +68,7 @@ export function TimerBar({
         {/* Timer Display */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <TimerIcon className={`h-5 w-5 ${percentage > 25 ? 'text-green-400' : 'text-red-400'} animate-pulse`} />
+            <TimerIcon className={`h-5 w-5 ${getIconColor()} animate-pulse`} />
             <div className="flex flex-col">
               <span className="font-bold text-lg text-white">{timerLabel}: {formattedTime}</span>
               {isPerQuestionMode && currentQuestionTitle && (

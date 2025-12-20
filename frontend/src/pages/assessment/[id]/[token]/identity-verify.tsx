@@ -26,6 +26,9 @@ export default function IdentityVerificationPage() {
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showStartTimeModal, setShowStartTimeModal] = useState(false);
+  const [testStartTime, setTestStartTime] = useState<string | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
   
   useEffect(() => {
     // Wait for router to be ready before accessing query params
@@ -266,9 +269,138 @@ export default function IdentityVerificationPage() {
     };
   }, []);
   
-  const handleStartAssessment = () => {
+  const handleStartAssessment = async () => {
     // Verify all steps are passed
-    if (steps.every(step => step.status === "passed")) {
+    if (!steps.every(step => step.status === "passed")) {
+      return;
+    }
+    
+    // Prevent multiple clicks
+    if (isStarting) {
+      return;
+    }
+    
+    setIsStarting(true);
+    
+    try {
+      const userId = sessionStorage.getItem("candidateUserId") || email; // Use email as fallback
+      
+      if (!userId || !id) {
+        console.error("[Identity] Missing userId or assessment id");
+        return;
+      }
+      
+      // Determine which API endpoint to use based on assessment type
+      const ctx = getGateContext(id as string);
+      const isDSATest = ctx?.flowType === "dsa";
+      const apiBase = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1`;
+      const testEndpoint = isDSATest ? `/dsa/tests/${id}/public?user_id=${userId}` : `/aiml/tests/${id}/public?user_id=${userId}`;
+      
+      // CRITICAL: Always check test start time FIRST before attempting to start
+      // This ensures the popup shows on this page itself
+      let startTimeStr: string | null = null;
+      let testHasStarted = false;
+      
+      try {
+        const testResponse = await fetch(`${apiBase}${testEndpoint}`);
+        if (testResponse.ok) {
+          const testData = await testResponse.json();
+          startTimeStr = testData.schedule?.startTime || testData.start_time || null;
+          
+          if (startTimeStr) {
+            // Normalize timezone - ensure we parse as UTC if it has 'Z' or timezone info
+            let startTime: Date;
+            if (startTimeStr.endsWith('Z') || startTimeStr.includes('+') || startTimeStr.includes('-', 10)) {
+              // Has timezone info, parse as-is
+              startTime = new Date(startTimeStr);
+            } else {
+              // No timezone info, assume UTC and append 'Z'
+              startTime = new Date(startTimeStr + 'Z');
+            }
+            
+            const now = new Date();
+            
+            // Check if test start time has been reached
+            if (now < startTime) {
+              // Test hasn't started yet - show modal and STOP here (don't proceed)
+              console.log(`[Identity] Test not started yet. Current: ${now.toISOString()}, Start: ${startTime.toISOString()}`);
+              setTestStartTime(startTimeStr);
+              setShowStartTimeModal(true);
+              setIsStarting(false); // Reset loading state
+              return; // CRITICAL: Return early to prevent navigation
+            } else {
+              testHasStarted = true;
+            }
+          } else {
+            // No start time configured - allow to proceed
+            testHasStarted = true;
+          }
+        } else {
+          console.warn("[Identity] Could not fetch test details, proceeding with start attempt");
+          // If we can't fetch test details, proceed to backend validation
+        }
+      } catch (err) {
+        console.error("[Identity] Error fetching test details:", err);
+        // If fetch fails, proceed to backend validation as fallback
+      }
+      
+      // Only proceed to start test if we've confirmed it has started (or no start time configured)
+      // If test hasn't started, we should have already returned above
+      if (startTimeStr && !testHasStarted) {
+        // This shouldn't happen, but double-check
+        setTestStartTime(startTimeStr);
+        setShowStartTimeModal(true);
+        return;
+      }
+      
+      // Try to start the test - backend will also validate start time
+      const startEndpoint = isDSATest ? `/dsa/tests/${id}/start?user_id=${userId}` : `/aiml/tests/${id}/start?user_id=${userId}`;
+      const response = await fetch(`${apiBase}${startEndpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.detail || errorData.message || "Failed to start test";
+        
+        // Check if it's a "test not started yet" error (backend validation)
+        if (response.status === 403 && (
+          errorMessage.includes("will start at") || 
+          errorMessage.includes("not available yet") || 
+          errorMessage.includes("not started") || 
+          errorMessage.includes("Test will start") ||
+          errorMessage.includes("Test not available")
+        )) {
+          // Backend also says test hasn't started - show modal
+          if (!startTimeStr) {
+            // Try to fetch start time again if we don't have it
+            try {
+              const testResponse = await fetch(`${apiBase}${testEndpoint}`);
+              if (testResponse.ok) {
+                const testData = await testResponse.json();
+                startTimeStr = testData.schedule?.startTime || testData.start_time || null;
+              }
+            } catch (err) {
+              console.error("[Identity] Error fetching test details:", err);
+            }
+          }
+          
+          setTestStartTime(startTimeStr);
+          setShowStartTimeModal(true);
+          setIsStarting(false); // Reset loading state
+          return; // Stop here, don't navigate
+        }
+        
+        // For other errors, just log and don't navigate
+        console.error("[Identity] Error starting test:", errorMessage);
+        setIsStarting(false); // Reset loading state
+        return;
+      }
+      
+      // Test can start - proceed with navigation
       // Store verification completion
       sessionStorage.setItem(`identityVerificationCompleted_${id}`, "true");
       
@@ -279,19 +411,37 @@ export default function IdentityVerificationPage() {
       }
       
       // Navigate to exam (flow-aware)
-      const ctx = getGateContext(id as string);
-      router.push(ctx?.finalTakeUrl || `/assessment/${id}/${token}/take`);
+      // Note: Keep loading state true during navigation - it will reset when page changes
+      await router.push(ctx?.finalTakeUrl || `/assessment/${id}/${token}/take`);
+    } catch (error) {
+      console.error("[Identity] Error checking test start time:", error);
+      setIsStarting(false); // Reset loading state on error
     }
   };
   
   const allStepsPassed = steps.every(step => step.status === "passed");
   
+  // Add spinner animation style
+  useEffect(() => {
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    `;
+    document.head.appendChild(style);
+    return () => {
+      document.head.removeChild(style);
+    };
+  }, []);
+
   return (
     <div style={{ 
-      minHeight: "100vh", 
-      backgroundColor: "#f7f3e8",
-      padding: "2rem"
-    }}>
+        minHeight: "100vh", 
+        backgroundColor: "#f7f3e8",
+        padding: "2rem"
+      }}>
       <div style={{ maxWidth: "800px", margin: "0 auto" }}>
         <div style={{
           backgroundColor: "#ffffff",
@@ -547,24 +697,154 @@ export default function IdentityVerificationPage() {
           {allStepsPassed && (
             <button
               onClick={handleStartAssessment}
+              disabled={isStarting}
               style={{
                 width: "100%",
                 padding: "1rem 2rem",
-                backgroundColor: "#10b981",
+                backgroundColor: isStarting ? "#6ee7b7" : "#10b981",
                 color: "#ffffff",
                 border: "none",
                 borderRadius: "0.5rem",
                 fontSize: "1.125rem",
                 fontWeight: 600,
-                cursor: "pointer",
-                boxShadow: "0 4px 6px -1px rgba(16, 185, 129, 0.3)"
+                cursor: isStarting ? "wait" : "pointer",
+                boxShadow: "0 4px 6px -1px rgba(16, 185, 129, 0.3)",
+                opacity: isStarting ? 0.8 : 1,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "0.5rem",
+                transition: "all 0.2s ease"
               }}
             >
-              Start Assessment →
+              {isStarting ? (
+                <>
+                  <div
+                    style={{
+                      width: "20px",
+                      height: "20px",
+                      border: "3px solid rgba(255, 255, 255, 0.3)",
+                      borderTopColor: "#ffffff",
+                      borderRadius: "50%",
+                      animation: "spin 0.8s linear infinite"
+                    }}
+                  />
+                  <span>Starting Assessment...</span>
+                </>
+              ) : (
+                <span>Start Assessment →</span>
+              )}
             </button>
           )}
         </div>
       </div>
+      
+      {/* Test Start Time Modal */}
+      {showStartTimeModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+          onClick={() => setShowStartTimeModal(false)}
+        >
+          <div
+            style={{
+              backgroundColor: "#ffffff",
+              borderRadius: "1rem",
+              padding: "2rem",
+              maxWidth: "500px",
+              width: "90%",
+              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.1)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ textAlign: "center" }}>
+              <div
+                style={{
+                  width: "4rem",
+                  height: "4rem",
+                  borderRadius: "50%",
+                  backgroundColor: "#fef3c7",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  margin: "0 auto 1.5rem",
+                }}
+              >
+                <svg
+                  style={{ width: "2rem", height: "2rem", color: "#f59e0b" }}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+              </div>
+              
+              <h2
+                style={{
+                  fontSize: "1.5rem",
+                  fontWeight: 700,
+                  color: "#1e293b",
+                  marginBottom: "1rem",
+                }}
+              >
+                Test Not Started Yet
+              </h2>
+              
+              <p
+                style={{
+                  fontSize: "1rem",
+                  color: "#64748b",
+                  marginBottom: "1.5rem",
+                  lineHeight: "1.6",
+                }}
+              >
+                {testStartTime
+                  ? `The test will start at ${new Date(testStartTime).toLocaleString(undefined, {
+                      year: "numeric",
+                      month: "long",
+                      day: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      hour12: true,
+                    })}. Please wait until the start time.`
+                  : "The test has not started yet. Please wait until the scheduled start time."}
+              </p>
+              
+              <button
+                onClick={() => setShowStartTimeModal(false)}
+                style={{
+                  padding: "0.75rem 2rem",
+                  backgroundColor: "#10b981",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "0.5rem",
+                  fontSize: "1rem",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

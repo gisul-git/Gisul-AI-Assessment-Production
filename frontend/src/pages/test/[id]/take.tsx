@@ -19,6 +19,7 @@ import { useCameraProctor } from '../../../hooks/useCameraProctor'
 import { normalizeProctorConfig, useProctorEngine } from '@/proctoring'
 import WebcamPreview from '@/components/WebcamPreview'
 import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
+import { useDSTimer } from '../../../hooks/useDSTimer'
 import { 
   FullscreenWarningBanner, 
   ProctorDebugPanel,
@@ -140,27 +141,17 @@ export default function TestTakePage() {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [code, setCode] = useState<Record<string, string>>({})
   const [language, setLanguage] = useState<Record<string, string>>({})
-  const [timeRemaining, setTimeRemaining] = useState(0)
-  const [totalTime, setTotalTime] = useState(0)
   
-  // Per-question timer state (for PER_QUESTION mode)
-  const [questionTimeRemaining, setQuestionTimeRemaining] = useState<Record<string, number>>({})
-  const [questionTotalTime, setQuestionTotalTime] = useState<Record<string, number>>({})
-  const [activeQuestionTimer, setActiveQuestionTimer] = useState<string | null>(null)
-  
-  // Sequential question progression state
+  // Sequential question progression state (for PER_QUESTION mode only)
   const [submittedQuestions, setSubmittedQuestions] = useState<Record<string, boolean>>({})
-  const [questionTimerStarted, setQuestionTimerStarted] = useState<Record<string, boolean>>({})
   
   const [testSubmission, setTestSubmission] = useState<any>(null)
-  const [submitted, setSubmitted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [checkingParams, setCheckingParams] = useState(true)
   const [running, setRunning] = useState(false)
-  const [editorVisible, setEditorVisible] = useState(false)
-  const [timerStarted, setTimerStarted] = useState(false)
   const [candidateEmail, setCandidateEmail] = useState<string | null>(null)
   const [candidateName, setCandidateName] = useState<string | null>(null)
+  const [precheckMode, setPrecheckMode] = useState<{start_time: string, message: string} | null>(null)
   // Default OFF; only explicit `proctoringSettings.aiProctoringEnabled === true` enables camera/model
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(false)
   const [showFullscreenWarning, setShowFullscreenWarning] = useState(false)
@@ -183,6 +174,7 @@ export default function TestTakePage() {
     }
     return messages[eventType] || 'Violation detected'
   }
+
 
   // Enforce unified gate completion (deep-link safety)
   useEffect(() => {
@@ -401,8 +393,6 @@ export default function TestTakePage() {
   const [hiddenSummary, setHiddenSummary] = useState<Record<string, { total: number; passed: number } | null>>({})
   const [questionStartTimes, setQuestionStartTimes] = useState<Record<string, string>>({})
   const [testStartedAt, setTestStartedAt] = useState<string | null>(null)
-  const fetchDataRef = useRef(false) // Prevent multiple fetches
-  const pageLoadTimeRef = useRef<number | null>(null) // Track when page started loading
 
   // Check debug mode
   useEffect(() => {
@@ -550,14 +540,14 @@ export default function TestTakePage() {
 
   // Start unified proctor when test is ready
   useEffect(() => {
-    if (test && questions.length > 0 && candidateEmail && !submitted) {
+    if (test && questions.length > 0 && candidateEmail) {
       unifiedProctor.start()
     }
     
     return () => {
       unifiedProctor.stop()
     }
-  }, [test, questions.length, candidateEmail, submitted])
+  }, [test, questions.length, candidateEmail])
 
   // Start camera AFTER test data is loaded AND editor is visible (not immediately on mount)
   // This prevents blocking the initial page load with heavy TensorFlow.js model loading
@@ -566,17 +556,16 @@ export default function TestTakePage() {
     // 1. Camera proctoring is enabled (from admin flag)
     // 2. We have user info
     // 3. Questions are loaded
-    // 4. Test is not submitted
+    // 4. Test is in progress
     //
     // IMPORTANT: Start exactly once when conditions become true.
     // The old logic used a 2s timer and cleaned up on every re-render,
     // which repeatedly cancelled the timer before it fired (camera never started).
-    const shouldRun =
+    const shouldRun = 
       cameraProctorEnabled &&
       (candidateEmail || userId) &&
       !!testId &&
-      questions.length > 0 &&
-      !submitted
+      questions.length > 0
 
     if (shouldRun) {
       if (!cameraStartRequestedRef.current) {
@@ -601,7 +590,7 @@ export default function TestTakePage() {
       cameraStartRequestedRef.current = false
       cameraStartedRef.current = false
     }
-  }, [cameraProctorEnabled, candidateEmail, userId, testId, questions.length, submitted, startCamera, stopCamera])
+  }, [cameraProctorEnabled, candidateEmail, userId, testId, questions.length, startCamera, stopCamera])
 
   // Check if fullscreen was refused
   useEffect(() => {
@@ -611,57 +600,57 @@ export default function TestTakePage() {
     }
   }, [])
 
-  // Auto-refresh once immediately when page loads, then show fullscreen prompt after refresh
-  // Flow: Load page -> Auto-refresh immediately -> After refresh, show fullscreen prompt -> User clicks -> Enter fullscreen -> Start timer
+  // Auto-enter fullscreen after test data loads if test was already in progress (refresh case)
+  // Flow: Load page -> Load test data -> Auto-enter fullscreen if was already in progress -> Start timer
   useEffect(() => {
     if (typeof window === 'undefined') return
 
-    // Check if we should be in fullscreen (coming from instructions page)
-    const shouldBeFullscreen = sessionStorage.getItem('shouldStartTest') === 'true'
-    const hasRefreshed = sessionStorage.getItem('fullscreenRefreshed') === 'true'
+    // Check if fullscreen was already accepted (test was already in progress - refresh case)
+    const fullscreenAccepted = sessionStorage.getItem('fullscreenAccepted') === 'true'
+    const shouldStartTest = sessionStorage.getItem('shouldStartTest') === 'true'
     
-    if (shouldBeFullscreen && !hasRefreshed) {
-      // Auto-refresh immediately without waiting for data to load
-      console.log('[Fullscreen] Auto-refreshing immediately before showing fullscreen prompt...')
-      // Mark that we've refreshed to prevent infinite refresh loop
-      sessionStorage.setItem('fullscreenRefreshed', 'true')
-      // Refresh immediately (or with minimal delay to ensure sessionStorage is set)
-      setTimeout(() => {
-        window.location.reload()
-      }, 100)
-      return
-    } else if ((shouldBeFullscreen || hasRefreshed) && hasRefreshed) {
-      // After refresh, show fullscreen prompt when test and questions are loaded
-      // Use hasRefreshed as the primary indicator (backup to shouldBeFullscreen)
-      // Use a small delay to ensure state is ready
-      const checkAndShowPrompt = () => {
-        if (test && questions.length > 0 && !submitted) {
-          // Check if already in fullscreen (shouldn't be after refresh)
-          const isFullscreen = !!document.fullscreenElement || 
-                              !!(document as any).webkitFullscreenElement ||
-                              !!(document as any).mozFullScreenElement ||
-                              !!(document as any).msFullscreenElement
-          
-          if (!isFullscreen && !showFullscreenPrompt) {
-            // Show fullscreen prompt immediately
-            setShowFullscreenPrompt(true)
-            console.log('[Fullscreen] Showing fullscreen prompt after refresh', { 
-              hasTest: !!test, 
-              questionsCount: questions.length,
-              submitted,
-              isFullscreen,
-              shouldBeFullscreen,
-              hasRefreshed
-            })
+    // Only auto-enter fullscreen if test was already in progress (fullscreenAccepted is set)
+    // For first time entry (shouldStartTest), show prompt instead
+    if (!fullscreenAccepted && !shouldStartTest) return
+
+    // Only proceed after test and questions are loaded
+    if (test && questions.length > 0) {
+      // Check if already in fullscreen
+      const isFullscreen = !!document.fullscreenElement || 
+                          !!(document as any).webkitFullscreenElement ||
+                          !!(document as any).mozFullScreenElement ||
+                          !!(document as any).msFullscreenElement
+      
+      if (!isFullscreen) {
+        if (fullscreenAccepted) {
+          // Auto-enter fullscreen if test was already in progress (refresh case)
+          console.log('[Fullscreen] Auto-entering fullscreen after refresh (test was already in progress)')
+          const enterFullscreen = async () => {
+            try {
+              if (document.documentElement.requestFullscreen) {
+                await document.documentElement.requestFullscreen()
+              } else if ((document.documentElement as any).webkitRequestFullscreen) {
+                await (document.documentElement as any).webkitRequestFullscreen()
+              } else if ((document.documentElement as any).mozRequestFullScreen) {
+                await (document.documentElement as any).mozRequestFullScreen()
+              } else if ((document.documentElement as any).msRequestFullscreen) {
+                await (document.documentElement as any).msRequestFullscreen()
+              }
+            } catch (err) {
+              console.warn('[Fullscreen] Auto-enter failed, showing prompt instead:', err)
+              // If auto-enter fails, show prompt as fallback
+              setShowFullscreenPrompt(true)
+            }
           }
+          enterFullscreen()
+        } else if (shouldStartTest && !showFullscreenPrompt) {
+          // Show prompt only for first time entry (from instructions page)
+          setShowFullscreenPrompt(true)
+          console.log('[Fullscreen] Showing fullscreen prompt for first time entry')
         }
       }
-      
-      // Check immediately and also after a short delay
-      checkAndShowPrompt()
-      setTimeout(checkAndShowPrompt, 200)
     }
-  }, [submitted, test, questions.length, showFullscreenPrompt])
+  }, [test, questions.length, showFullscreenPrompt])
 
   // Handle fullscreen entry from prompt
   const handleEnterFullscreenFromPrompt = async () => {
@@ -686,6 +675,7 @@ export default function TestTakePage() {
       if (success) {
         console.log('[Fullscreen] Successfully entered fullscreen - timer will start when editor is visible')
         setShowFullscreenPrompt(false)
+        // Always set fullscreenAccepted flag (for both first entry and refresh re-entry)
         sessionStorage.setItem('fullscreenAccepted', 'true')
         // Now we can remove shouldStartTest since fullscreen is entered
         sessionStorage.removeItem('shouldStartTest')
@@ -697,10 +687,10 @@ export default function TestTakePage() {
   }
 
   // Listen for fullscreen exit and re-enter (to prevent accidental exits)
+  // Check both shouldStartTest and fullscreenAccepted to handle cases after fullscreen is entered
   useEffect(() => {
-    if (submitted) return
-
-    const shouldBeFullscreen = sessionStorage.getItem('shouldStartTest') === 'true'
+    const shouldBeFullscreen = sessionStorage.getItem('shouldStartTest') === 'true' || 
+                               sessionStorage.getItem('fullscreenAccepted') === 'true'
     if (!shouldBeFullscreen) return
 
     const handleFullscreenExit = () => {
@@ -709,8 +699,8 @@ export default function TestTakePage() {
                           !!(document as any).mozFullScreenElement ||
                           !!(document as any).msFullscreenElement
       
-      // If fullscreen is exited and test hasn't been submitted, show warning
-      if (!isFullscreen && !submitted) {
+      // If fullscreen is exited, show warning
+      if (!isFullscreen) {
         setShowFullscreenWarning(true)
         console.log('[Fullscreen] Detected fullscreen exit')
       } else if (isFullscreen) {
@@ -730,7 +720,7 @@ export default function TestTakePage() {
       document.removeEventListener('mozfullscreenchange', handleFullscreenExit)
       document.removeEventListener('MSFullscreenChange', handleFullscreenExit)
     }
-  }, [submitted])
+  }, [])
 
   // Handle fullscreen request from warning banner
   const handleEnterFullscreenFromBanner = async () => {
@@ -786,16 +776,6 @@ export default function TestTakePage() {
     return () => window.removeEventListener('resize', checkMobile)
   }, [])
 
-  // Debug logging for timer values (must be before any early returns)
-  useEffect(() => {
-    if (timerStarted && test) {
-      console.log('[Timer Debug] Current values:', {
-        timeRemaining,
-        totalTime,
-        percentage: totalTime > 0 ? (timeRemaining / totalTime) * 100 : 0
-      })
-    }
-  }, [timerStarted, timeRemaining, totalTime, test])
 
   useEffect(() => {
     const newToken = getTokenFromUrl()
@@ -832,859 +812,289 @@ export default function TestTakePage() {
     return () => clearTimeout(checkParams)
   }, [testId, token, userId, router])
 
+  // NEW: simple, from-scratch test + question loading flow
+  // 1) Ensure submission (existing or start)
+  // 2) Fetch public test data
+  // 3) Fetch all questions in parallel (Promise.allSettled)
   useEffect(() => {
-    console.log('[Test Load] useEffect triggered', { testId, token: token ? 'present' : 'missing', userId, fetchDataRef: fetchDataRef.current })
-    
-    if (!testId || typeof testId !== 'string' || !token || !userId) {
-      console.log('[Test Load] Missing required params, setting checkingParams to false')
+    if (!router.isReady) return
+
+    const safeTestId =
+      typeof testId === 'string'
+        ? testId
+        : Array.isArray(testId)
+        ? testId[0]
+        : undefined
+
+    if (!safeTestId || !token || !userId) {
+      console.warn('[Test Load] Missing required params, cannot load test', {
+        testId: safeTestId,
+        hasToken: !!token,
+        userId,
+      })
       setCheckingParams(false)
       return
     }
-    if (fetchDataRef.current) {
-      console.log('[Test Load] Fetch already in progress, skipping')
-      return // Prevent multiple fetches
-    }
-    fetchDataRef.current = true
-    console.log('[Test Load] Starting fetch...')
-    
-    // Record when page started loading to prevent premature auto-submit
-    pageLoadTimeRef.current = Date.now()
 
-    let isMounted = true
+    let cancelled = false
 
-    const fetchTestData = async () => {
+    const load = async () => {
       try {
-        console.log('[Test Load] Starting data fetch...', { testId, userId, token: token ? 'present' : 'missing' })
-        
-        // Set checkingParams to false once we start fetching (params are valid)
-        // This allows the page to render while data is loading
-        if (isMounted) {
-          setCheckingParams(false)
-          console.log('[Test Load] Params validated, starting data fetch')
-        }
-        
-        // Check if we need to start the test (from instructions page)
-        const shouldStartTest = sessionStorage.getItem("shouldStartTest") === "true"
-        let submissionData = null
+        setCheckingParams(false)
+        setQuestionsLoading(true)
 
-        const handleStartForbidden = (err: any) => {
-          const detail =
-            err?.response?.data?.detail ||
-            err?.response?.data?.message ||
-            'You are not allowed to start this test right now.'
-          console.error('[Test Load] Start forbidden:', err?.response?.status, detail)
-          // Prevent retry loop
-          fetchDataRef.current = false
-          sessionStorage.removeItem("shouldStartTest")
-          if (isMounted) {
-            setCheckingParams(false)
-            alert(detail)
-            // Go back to entry flow (precheck / instructions) with token
-            router.replace(`/test/${testId}?token=${encodeURIComponent(String(token))}`)
+        // --- Step 1: Ensure submission exists ---
+        let submissionData: any = null
+
+        try {
+          const subRes = await dsaApi.get(`/tests/${testId}/submission?user_id=${userId}`)
+          submissionData = subRes.data
+
+          if (submissionData.is_completed) {
+            if (!cancelled) {
+              alert('You have already submitted this test. You cannot attempt it again.')
+              router.push('/dashboard')
+            }
+            return
           }
-        }
-        
-        console.log('[Test Load] shouldStartTest:', shouldStartTest)
-        
-        if (shouldStartTest) {
-          // Start the test now (this sets started_at in backend)
-          // BUT timer will only start when fullscreen is entered and editor is visible
-          try {
-            console.log('[Test Load] Starting test session...')
-            const startRes = await dsaApi.post(`/tests/${testId}/start?user_id=${userId}`)
-            submissionData = {
-              started_at: startRes.data.started_at,
-              is_completed: false
-            }
-            // Don't remove shouldStartTest yet - need it for fullscreen prompt after refresh
-            // It will be removed when fullscreen is entered
-            console.log('[Test Load] Test session started - timer will begin when fullscreen is entered and editor is visible', submissionData)
-          } catch (error: any) {
-            console.error('[Test Load] Error starting test:', error)
-            if (error?.response?.status === 403) {
-              handleStartForbidden(error)
-              return
-            }
-            // Try to get existing submission
+        } catch (err: any) {
+          if (err?.response?.status === 404) {
+            // No submission yet -> start test
             try {
-              const subRes = await dsaApi.get(`/tests/${testId}/submission?user_id=${userId}`)
-              submissionData = subRes.data
-              console.log('[Test Load] Retrieved existing submission:', submissionData)
-            } catch (e) {
-              console.error('[Test Load] Error fetching submission:', e)
-            }
-          }
-        } else {
-          // Get existing submission
-          try {
-            console.log('[Test Load] Fetching existing submission...')
-            const subRes = await dsaApi.get(`/tests/${testId}/submission?user_id=${userId}`)
-            submissionData = subRes.data
-            console.log('[Test Load] Retrieved existing submission:', submissionData)
-            
-            // Check if candidate has already submitted - prevent multiple attempts
-            if (submissionData.is_completed) {
-              if (isMounted) {
-                alert('You have already submitted this test. You cannot attempt it again.')
+              const startRes = await dsaApi.post(`/tests/${testId}/start?user_id=${userId}`)
+              const data = startRes.data
+
+              if (data.precheck_mode === true) {
+                if (!cancelled) {
+                  setPrecheckMode({
+                    start_time: data.start_time,
+                    message:
+                      data.message ||
+                      'Test has not started yet. Please complete pre-checks and wait.',
+                  })
+                }
+
+                submissionData = {
+                  started_at: null,
+                  is_completed: false,
+                  precheck_mode: true,
+                }
+              } else {
+                submissionData = {
+                  started_at: data.started_at,
+                  is_completed: false,
+                  submissions: [],
+                }
+              }
+            } catch (startErr: any) {
+              if (!cancelled) {
+                const detail =
+                  startErr?.response?.data?.detail ||
+                  startErr?.response?.data?.message ||
+                  'Failed to start test. Please try again.'
+                alert(detail)
                 router.push('/dashboard')
               }
               return
             }
-            
-            // Check if candidate has already run code or submitted (has submissions)
-            // If they have submissions, they've already started - allow continuation
-            const hasSubmissions = submissionData.submissions && submissionData.submissions.length > 0
-            if (hasSubmissions) {
-              console.log('[Test Load] Candidate has existing submissions, allowing continuation')
+          } else {
+            if (!cancelled) {
+              console.error('[Test Load] Error fetching submission', err)
+              alert('Error loading test. Please try again.')
+              router.push('/dashboard')
             }
-          } catch (error: any) {
-            console.log('[Test Load] Submission fetch error:', error.response?.status, error.message)
-            if (error.response?.status === 404) {
-              // No submission exists - start the test
-              try {
-                console.log('[Test Load] No submission found, starting test...')
-                const startRes = await dsaApi.post(`/tests/${testId}/start?user_id=${userId}`)
-                submissionData = {
-                  started_at: startRes.data.started_at,
-                  is_completed: false,
-                  submissions: []
-                }
-                console.log('[Test Load] Test started (no existing submission) - timer begins now', submissionData)
-              } catch (e: any) {
-                console.error('[Test Load] Error starting test:', e.response?.status, e.message)
-                if (e?.response?.status === 403) {
-                  handleStartForbidden(e)
-                  return
-                }
-                if (isMounted) {
-                  alert('Failed to start test. Please try again.')
-                  router.push('/dashboard')
-                }
-              }
-            } else {
-              console.error('[Test Load] Unexpected error fetching submission:', error)
-              if (isMounted) {
-                alert('Error loading test. Please try again.')
-                router.push('/dashboard')
-              }
-            }
+            return
           }
         }
-        
-        // Fetch test data (use public endpoint for candidates)
-        console.log('[Test Load] Fetching test data...')
+
+        if (cancelled) return
+
+        // --- Step 2: Fetch public test data ---
         const testRes = await dsaApi.get(`/tests/${testId}/public?user_id=${userId}`)
         const testData = testRes.data
-        console.log('[Test Load] Test data fetched:', { 
-          id: testData.id, 
-          title: testData.title, 
-          questionCount: testData.question_ids?.length 
-        })
-        
-        if (!submissionData) {
-          console.error('[Test Load] No submission data available')
-          if (isMounted) {
-            alert('Error: Could not start or retrieve test session. Please refresh the page.')
-            setCheckingParams(false)
-          }
-          return
-        }
-        
+
         if (!testData) {
-          console.error('[Test Load] No test data available')
-          if (isMounted) {
+          if (!cancelled) {
             alert('Error: Could not load test data. Please refresh the page.')
-            setCheckingParams(false)
           }
           return
         }
 
-        if (isMounted) {
+        if (!cancelled) {
           setTest(testData)
           setTestSubmission(submissionData)
 
-          // Apply runtime camera toggle based on admin proctoring setting:
-          // Only explicit true enables camera/model; missing/false => OFF (per PROCTORING_AI_TOGGLE_NOTES.md)
           const aiEnabled = testData?.proctoringSettings?.aiProctoringEnabled === true
           setCameraProctorEnabled(aiEnabled)
         }
 
-        // Check if candidate has already submitted - prevent multiple attempts
-        if (submissionData.is_completed) {
-          if (isMounted) {
-            setSubmitted(true)
+        const isPrecheck = submissionData?.precheck_mode === true
+        if (!isPrecheck && submissionData?.is_completed) {
+          if (!cancelled) {
             alert('You have already submitted this test. You cannot attempt it again.')
             router.push('/dashboard')
           }
           return
         }
-        
-        // Check if candidate has already started the test (has submissions)
-        // If they have submissions but haven't completed, allow them to continue
-        // But prevent starting a new attempt if they've already run code or submitted
-        const hasExistingSubmissions = submissionData.submissions && submissionData.submissions.length > 0
-        if (hasExistingSubmissions && !submissionData.is_completed) {
-          // Allow them to continue their existing attempt
-          console.log('[Test Load] Candidate has existing submissions, allowing continuation')
-        }
 
-        // Calculate remaining time
-        const startedAtStr = submissionData.started_at
-        if (!startedAtStr) {
-          console.error('[Timer] No started_at timestamp found')
-          if (isMounted) {
-            alert('Error: Test start time not found. Please refresh the page.')
-          }
-          return
-        }
-        
-        const startedAt = new Date(startedAtStr)
-        if (isNaN(startedAt.getTime())) {
-          console.error('[Timer] Invalid started_at timestamp:', startedAtStr)
-          if (isMounted) {
-            alert('Error: Invalid test start time. Please contact support.')
-          }
-          return
-        }
-        
-        // Calculate remaining time based on when test was started in backend
-        const durationMs = testData.duration_minutes * 60 * 1000
-        const endTime = new Date(startedAt.getTime() + durationMs)
-        const now = new Date()
-        const rawRemaining = Math.floor((endTime.getTime() - now.getTime()) / 1000)
-        
-        // Calculate remaining time (can be negative if expired)
-        // We'll handle expired timers when editor becomes visible
-        const remaining = Math.max(0, rawRemaining)
-        const totalSeconds = testData.duration_minutes * 60
-        
-        // Log for debugging
-        console.log('[Timer] Calculation:', {
-          startedAt: startedAtStr,
-          startedAtDate: startedAt.toISOString(),
-          durationMinutes: testData.duration_minutes,
-          durationSeconds: totalSeconds,
-          endTime: endTime.toISOString(),
-          now: now.toISOString(),
-          rawRemaining,
-          remaining,
-          totalSeconds
-        })
-        
-        if (rawRemaining < 0) {
-          const expiredBy = Math.abs(rawRemaining)
-          console.warn(`[Timer] Test expired ${expiredBy}s ago (${Math.round(expiredBy/60)} minutes). Will wait for editor to be visible before auto-submitting.`)
-        } else {
-          console.log(`[Timer] ${remaining}s (${Math.round(remaining/60)} minutes) remaining out of ${totalSeconds}s total`)
-        }
-        
-        // Test window (start_time/end_time) is informational only - backend allows access regardless
-        // Don't block page load based on test window - just log for reference
-        const testEndTime = testData.end_time ? new Date(testData.end_time) : null
-        const testStartTime = testData.start_time ? new Date(testData.start_time) : null
-        
-        // Log test window info (non-blocking)
-        if (testEndTime && now > testEndTime) {
-          console.info('Test end time window has passed, but access is still allowed')
-        }
-        if (testStartTime && now < testStartTime) {
-          console.info('Test start time window has not yet arrived, but access is still allowed')
-        }
-        
-        if (isMounted) {
-          // Always set timer values, even if 0 (so UI can display correctly)
-          setTimeRemaining(remaining)
-          setTotalTime(totalSeconds)
-          console.log(`[Timer] State updated: timeRemaining=${remaining}, totalTime=${totalSeconds}`)
-          
-          // Don't auto-submit here - wait until questions are loaded
-          // The timer will handle auto-submission once questions are available
-        }
-
-        // Set test data immediately so UI can show test info while questions load
-        if (isMounted) {
-          setTest(testData)
-        }
-        
-        // Fetch all questions in parallel for much faster loading
-        // Preload Monaco Editor early (non-blocking) - start loading immediately
-        if (typeof window !== 'undefined') {
-          import('@monaco-editor/react').catch(() => {
-            // Ignore errors - will load when needed
-          })
-        }
-        
-        // Set loading state for questions
-        if (isMounted) {
-          setQuestionsLoading(true)
-        }
-        
-        // Fetch all questions in parallel with timeout (reduced to 3 seconds for faster failure)
-        // Use the public test question endpoint (no auth required, uses user_id)
-        const questionPromises = testData.question_ids.map(async (qId: string) => {
-          try {
-            const controller = new AbortController()
-            const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout per question
-            
-            try {
-              // Use public endpoint for test questions (includes SQL-specific fields)
-              const response = await dsaApi.get(`/tests/${testId}/question/${qId}?user_id=${userId}`, {
-                signal: controller.signal
-              })
-              clearTimeout(timeoutId)
-              return response.data
-            } catch (fetchError: any) {
-              clearTimeout(timeoutId)
-              if (fetchError.name === 'AbortError' || fetchError.code === 'ECONNABORTED') {
-                console.warn(`Question ${qId} request timed out after 5 seconds`)
-                return null
-              }
-              if (fetchError.response?.status === 404) {
-                console.warn(`Question ${qId} not found (404)`)
-                return null
-              }
-              throw fetchError
-            }
-          } catch (error: any) {
-            console.warn(`Question ${qId} fetch error:`, error.message)
-            return null
-          }
-        })
-        
-        // Wait for all questions to load (or timeout) - this is much faster than sequential
-        const questionResults = await Promise.all(questionPromises)
-        const questionsData = questionResults.filter((q): q is Question => q !== null)
-        
-        // Clear loading state
-        if (isMounted) {
-          setQuestionsLoading(false)
-        }
-        
-        // After all questions are loaded (or failed), update the full state
-        // Check if we have any valid questions
-        if (questionsData.length === 0) {
-          if (isMounted) {
-            alert('This test has no valid questions. Please contact the administrator.')
+        // --- Step 3: Fetch all questions in parallel ---
+        const questionIds: string[] = testData.question_ids || []
+        if (questionIds.length === 0) {
+          if (!cancelled) {
+            alert('This test has no questions configured. Please contact the administrator.')
             router.push('/dashboard')
           }
           return
         }
-        
-        // Log if some questions were missing (for debugging)
-        const missingCount = testData.question_ids.length - questionsData.length
-        if (missingCount > 0 && isMounted) {
-          console.warn(`${missingCount} question(s) were not found and have been skipped`)
-        }
-        
-        // Update state with all loaded questions
-        if (isMounted) {
-          // Set questions immediately
-          setQuestions(questionsData)
-          
-          // Initialize visible testcases for all questions
-          const visibleMap: Record<string, VisibleTestcase[]> = {}
-          questionsData.forEach((q) => {
-            visibleMap[q.id] =
-              q.public_testcases?.map((tc: { input: string; expected_output: string }, idx: number) => ({
-                id: `${q.id}-public-${idx}`,
-                input: tc.input,
-                expected: tc.expected_output,
-              })) || []
-          })
-          setVisibleTestcasesMap(visibleMap)
-          
-          // Initialize per-question timers if timer_mode is PER_QUESTION
-          if (testData.timer_mode === 'PER_QUESTION' && testData.question_timings) {
-            const qTimeRemaining: Record<string, number> = {}
-            const qTotalTime: Record<string, number> = {}
-            
-            // Initialize all questions with their full duration (from admin settings)
-            testData.question_timings.forEach((timing: QuestionTiming) => {
-              const durationSeconds = timing.duration_minutes * 60
-              qTimeRemaining[timing.question_id] = durationSeconds
-              qTotalTime[timing.question_id] = durationSeconds
+
+        const questionPromises = questionIds.map((qId: string) =>
+          dsaApi.get(`/tests/${testId}/question/${qId}?user_id=${userId}`).then((res) => res.data as Question)
+        )
+
+        const results = await Promise.allSettled(questionPromises)
+        const questionsData: Question[] = []
+
+        results.forEach((result, index) => {
+          const qId = questionIds[index]
+          if (result.status === 'fulfilled' && result.value) {
+            questionsData.push(result.value)
+          } else if (result.status === 'rejected') {
+            const err: any = result.reason
+            console.error('[Test Load] Question fetch failed', {
+              questionId: qId,
+              status: err?.response?.status,
+              data: err?.response?.data,
+              message: err?.message,
             })
-            
-            // Note: We don't load saved timers on initialization
-            // Each question will start from full duration when entered
-            // Timer state is saved as it counts down, but restored only for active questions
-            
-            setQuestionTimeRemaining(qTimeRemaining)
-            setQuestionTotalTime(qTotalTime)
-            
-            // Set the first question as active and mark its timer as started
-            // First question starts immediately with full duration
-            if (questionsData.length > 0) {
-              const firstQuestionId = questionsData[0].id
-              setActiveQuestionTimer(firstQuestionId)
-              setQuestionTimerStarted(prev => ({
-                ...prev,
-                [firstQuestionId]: true
-              }))
-              // Ensure first question has full duration
-              if (qTotalTime[firstQuestionId] !== undefined) {
-                setQuestionTimeRemaining(prev => ({
-                  ...prev,
-                  [firstQuestionId]: qTotalTime[firstQuestionId]
-                }))
-              }
-            }
-            
-            console.log('[Timer] Initialized per-question timers with full durations:', qTimeRemaining)
-            console.log('[Timer] Total times:', qTotalTime)
           }
-          
-          // Initialize code and language for all questions
-          const initialCode: Record<string, string> = {}
-          const initialLanguage: Record<string, string> = {}
-          questionsData.forEach((q: Question) => {
-            // Handle SQL questions differently (case-insensitive check)
-            if (q.question_type?.toUpperCase() === 'SQL') {
-              initialCode[q.id] = q.starter_query || '-- Write your SQL query here\n\nSELECT '
-              initialLanguage[q.id] = 'sql'
-            } else {
-              // Coding questions
-              const defaultLang = q.languages[0] || 'python'
-              let starterCode = ''
-              if (q.function_signature) {
-                starterCode = generateBoilerplate(defaultLang, q)
-              } else if (q.starter_code && q.starter_code[defaultLang]) {
-                starterCode = q.starter_code[defaultLang]
-              } else {
-                starterCode = generateBoilerplate(defaultLang, q)
-              }
-              initialCode[q.id] = starterCode
-              initialLanguage[q.id] = defaultLang
-            }
-          })
-          
-          // Use userId in localStorage key to ensure code isolation between candidates
-          const storageKeyCode = userId ? `test_${testId}_${userId}_code` : `test_${testId}_code`
-          const storageKeyLanguage = userId ? `test_${testId}_${userId}_language` : `test_${testId}_language`
-          
-          const savedCode = localStorage.getItem(storageKeyCode)
-          const savedLanguage = localStorage.getItem(storageKeyLanguage)
-          
-          if (savedCode) {
-            try {
-              const parsedCode = JSON.parse(savedCode)
-              setCode({ ...initialCode, ...parsedCode })
-            } catch {
-              setCode(initialCode)
-            }
-          } else {
-            setCode(initialCode)
-          }
-          
-          if (savedLanguage) {
-            try {
-              const parsedLanguage = JSON.parse(savedLanguage)
-              setLanguage({ ...initialLanguage, ...parsedLanguage })
-            } catch {
-              setLanguage(initialLanguage)
-            }
-          } else {
-            setLanguage(initialLanguage)
-          }
+        })
+
+        if (cancelled) return
+
+        if (questionsData.length === 0) {
+          alert('This test has no valid questions. Please contact the administrator.')
+          router.push('/dashboard')
+          return
         }
-        
-        if (isMounted) {
+
+        // Initialize visible testcases
+        const visibleMap: Record<string, VisibleTestcase[]> = {}
+        questionsData.forEach((q) => {
+          visibleMap[q.id] =
+            q.public_testcases?.map((tc: { input: string; expected_output: string }, idx: number) => ({
+              id: `${q.id}-public-${idx}`,
+              input: tc.input,
+              expected: tc.expected_output,
+            })) || []
+        })
+
+        // Initialize code and language (no preloading/localStorage merging)
+        const initialCode: Record<string, string> = {}
+        const initialLanguage: Record<string, string> = {}
+        questionsData.forEach((q) => {
+          if (q.question_type?.toUpperCase() === 'SQL') {
+            initialCode[q.id] = q.starter_query || '-- Write your SQL query here\n\nSELECT '
+            initialLanguage[q.id] = 'sql'
+          } else {
+            const defaultLang = q.languages[0] || 'python'
+            let starterCode = ''
+            if (q.function_signature) {
+              starterCode = generateBoilerplate(defaultLang, q)
+            } else if (q.starter_code && q.starter_code[defaultLang]) {
+              starterCode = q.starter_code[defaultLang]
+            } else {
+              starterCode = generateBoilerplate(defaultLang, q)
+            }
+            initialCode[q.id] = starterCode
+            initialLanguage[q.id] = defaultLang
+          }
+        })
+
+        if (!cancelled) {
+          setQuestions(questionsData)
+          setVisibleTestcasesMap(visibleMap)
+          setCode(initialCode)
+          setLanguage(initialLanguage)
+          setQuestionsLoading(false)
+
           const now = new Date().toISOString()
           setTestStartedAt(now)
-          if (questionsData.length > 0) {
-            setQuestionStartTimes({ [questionsData[0].id]: now })
-          }
-          
-          // Now check if time has expired AFTER questions are loaded
-          // Recalculate remaining time to ensure accuracy
-          const startedAtStr = submissionData.started_at
-          if (startedAtStr) {
-            const startedAt = new Date(startedAtStr)
-            
-            // Validate started_at is a valid date
-            if (isNaN(startedAt.getTime())) {
-              console.error('Invalid started_at timestamp:', startedAtStr)
-              if (isMounted) {
-                alert('Error: Invalid test start time. Please contact support.')
-              }
-              return
-            }
-            
-            const durationMs = testData.duration_minutes * 60 * 1000
-            const endTime = new Date(startedAt.getTime() + durationMs)
-            const currentTime = new Date()
-            const timeRemaining = Math.max(0, Math.floor((endTime.getTime() - currentTime.getTime()) / 1000))
-            
-            // Test window (start_time/end_time) is informational only - don't block auto-submit based on it
-            // Timer is based on when candidate started the test, not the test window
-            // IMPORTANT: Don't auto-submit here - wait for editor to be visible
-            // The timer will only start counting (and auto-submit) when editor becomes visible
-            if (isMounted) {
-              // Always update timer with calculated remaining time
-              // Also update totalTime if not set
-              setTimeRemaining(timeRemaining)
-              if (!totalTime || totalTime === 0) {
-                setTotalTime(testData.duration_minutes * 60)
-                console.log(`[Timer] Total time set: ${testData.duration_minutes} minutes (${testData.duration_minutes * 60}s)`)
-              }
-              
-              // Log for debugging
-              console.log(`[Timer] After questions loaded - timeRemaining: ${timeRemaining}s, totalTime: ${totalTime || testData.duration_minutes * 60}s`)
-              if (timeRemaining <= 0) {
-                console.warn(`[Timer] Timer shows expired (${timeRemaining}s), but waiting for editor to be visible before auto-submitting`)
-              } else {
-                console.log(`[Timer] Timer initialized with ${timeRemaining}s remaining out of ${totalTime || testData.duration_minutes * 60}s total`)
-              }
-            }
-          }
+          setQuestionStartTimes({ [questionsData[0].id]: now })
         }
-
-        // Code and language initialization is now handled above for progressive loading
-      } catch (error: any) {
-        console.error('[Test Load] Error fetching test data:', error)
-        console.error('[Test Load] Error details:', {
-          status: error.response?.status,
-          statusText: error.response?.statusText,
-          message: error.message,
-          url: error.config?.url,
-          method: error.config?.method,
-          data: error.response?.data
-        })
-        
-        if (isMounted) {
-          setCheckingParams(false) // Ensure we stop showing loading
-        }
-        
-        // Only try to start test if submission doesn't exist (404 on submission)
-        // Don't reload if it's just a question fetch error
-        if (error.response?.status === 404 && error.config?.url?.includes('/submission')) {
-          console.log('[Test Load] Submission 404, attempting to start test...')
-          try {
-            const startRes = await dsaApi.post(`/tests/${testId}/start?user_id=${userId}`)
-            console.log('[Test Load] Test started after 404, reloading...')
-            if (isMounted) {
-              // Reset fetchDataRef to allow retry
-              fetchDataRef.current = false
-              // Reload only once, not in a loop
-              setTimeout(() => {
-                window.location.reload()
-              }, 500)
-            }
-          } catch (err: any) {
-            console.error('[Test Load] Error starting test:', err)
-            if (isMounted) {
-              setCheckingParams(false)
-              alert(`Failed to start test: ${err.response?.data?.detail || err.message || 'Unknown error'}. Please contact support.`)
-            }
-          }
-        } else if (error.response?.status === 404 && error.config?.url?.includes('/tests/')) {
-          // Test not found
-          console.error('[Test Load] Test not found (404)')
-          if (isMounted) {
-            setCheckingParams(false)
-            alert('Test not found. Please check the test link.')
-            router.push('/dashboard')
-          }
-        } else {
-          // Other errors - show message but don't reload
-          console.error('[Test Load] Unexpected error:', error)
-          if (isMounted) {
-            setCheckingParams(false)
-            const errorMsg = error.response?.data?.detail || error.message || 'Error loading test data. Please refresh the page.'
-            alert(errorMsg)
-            // Reset fetchDataRef to allow retry on manual refresh
-            fetchDataRef.current = false
-          }
+      } catch (err) {
+        console.error('[Test Load] Fatal error while loading test', err)
+        if (!cancelled) {
+          alert('An error occurred while loading the test. Please try again.')
+          router.push('/dashboard')
         }
       } finally {
-        // Always ensure checkingParams is false after fetch completes
-        if (isMounted) {
-          setCheckingParams(false)
-          console.log('[Test Load] Fetch completed (finally block), checkingParams set to false')
-        }
+        // nothing to reset; effect can safely re-run if params change
       }
     }
 
-    fetchTestData()
-    
-    return () => {
-      isMounted = false
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [testId, token, userId]) // Only run when these change, not on every render
-
-  // Detect when editor becomes visible AND fullscreen is active - then start timer
-  // Timer only starts when BOTH conditions are met: fullscreen is active AND editor is visible
-  useEffect(() => {
-    if (timerStarted || !editorRef.current || questions.length === 0) return
-    
-    const checkAndStartTimer = () => {
-      // Check if we're in fullscreen (required before starting timer)
-      const isFullscreen = !!document.fullscreenElement || 
-                          !!(document as any).webkitFullscreenElement ||
-                          !!(document as any).mozFullScreenElement ||
-                          !!(document as any).msFullscreenElement
-      
-      if (!isFullscreen) {
-        // Not in fullscreen yet - timer will not start
-        console.log('[Timer] Waiting for fullscreen before starting timer')
-        return
-      }
-      
-      // Check if editor is visible
-      if (!editorRef.current) return
-      
-      const rect = editorRef.current.getBoundingClientRect()
-      const isVisible = rect.top < window.innerHeight && rect.bottom > 0 && rect.width > 0 && rect.height > 0
-      
-      if (isVisible && !timerStarted) {
-        setEditorVisible(true)
-        setTimerStarted(true)
-        console.log('[Timer] Fullscreen active and editor visible - starting timer now')
-      }
-    }
-    
-    // Use Intersection Observer to detect when editor becomes visible
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting && entry.intersectionRatio > 0.1) {
-            checkAndStartTimer()
-          }
-        })
-      },
-      { threshold: 0.1 }
-    )
-    
-    observer.observe(editorRef.current)
-    
-    // Check immediately and periodically (in case fullscreen is entered after editor is visible)
-    checkAndStartTimer()
-    const intervalId = setInterval(checkAndStartTimer, 500)
-    
-    // Also listen for fullscreen changes
-    const handleFullscreenChange = () => {
-      setTimeout(checkAndStartTimer, 100)
-    }
-    
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    document.addEventListener('webkitfullscreenchange', handleFullscreenChange)
-    document.addEventListener('mozfullscreenchange', handleFullscreenChange)
-    document.addEventListener('MSFullscreenChange', handleFullscreenChange)
-    
-    return () => {
-      observer.disconnect()
-      clearInterval(intervalId)
-      document.removeEventListener('fullscreenchange', handleFullscreenChange)
-      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange)
-      document.removeEventListener('mozfullscreenchange', handleFullscreenChange)
-      document.removeEventListener('MSFullscreenChange', handleFullscreenChange)
-    }
-  }, [timerStarted, questions.length])
-
-  // Timer countdown - only runs after editor is visible and timer is started
-  useEffect(() => {
-    if (!timerStarted || submitted || !testSubmission || !test) {
-      console.log('[Timer] Not starting countdown:', { timerStarted, submitted, hasSubmission: !!testSubmission, hasTest: !!test })
-      return
-    }
-    
-    console.log('[Timer] Starting countdown effect', { timeRemaining, testDuration: test.duration_minutes })
-    
-    // Recalculate remaining time when timer starts to ensure accuracy
-    const startedAtStr = testSubmission.started_at
-    let calculatedRemaining = timeRemaining
-    
-    if (startedAtStr) {
-      const startedAt = new Date(startedAtStr)
-      if (!isNaN(startedAt.getTime())) {
-        const durationMs = test.duration_minutes * 60 * 1000
-        const endTime = new Date(startedAt.getTime() + durationMs)
-        const now = new Date()
-        calculatedRemaining = Math.floor((endTime.getTime() - now.getTime()) / 1000)
-        
-        console.log('[Timer] Calculated remaining time:', {
-          startedAt: startedAt.toISOString(),
-          endTime: endTime.toISOString(),
-          now: now.toISOString(),
-          calculatedRemaining,
-          currentTimeRemaining: timeRemaining
-        })
-        
-        // ALWAYS update timeRemaining when timer starts to ensure it's set correctly
-        // This is critical because the timer might start with timeRemaining = 0
-        console.log(`[Timer] Setting remaining time: ${calculatedRemaining}s (was ${timeRemaining}s)`)
-        setTimeRemaining(Math.max(0, calculatedRemaining))
-        setTotalTime(test.duration_minutes * 60)
-        // Update the local variable for immediate use
-        calculatedRemaining = Math.max(0, calculatedRemaining)
-      } else {
-        console.warn('[Timer] Invalid started_at date:', startedAtStr)
-      }
-    } else {
-      console.warn('[Timer] No started_at in testSubmission:', testSubmission)
-    }
-    
-    // Use calculated value for checks (state update is async)
-    const remainingToCheck = calculatedRemaining > 0 ? calculatedRemaining : timeRemaining
-    
-    // When timer starts (editor becomes visible), check if time has already expired
-    // IMPORTANT: Don't auto-submit immediately - the test might have just started
-    // Only auto-submit if time truly expired AND it's been a reasonable time since test start
-    if (remainingToCheck <= 0) {
-      const timeSincePageLoad = pageLoadTimeRef.current ? Date.now() - pageLoadTimeRef.current : Infinity
-      const gracePeriod = 10000 // 10 seconds grace period for page loading
-      
-      // Get test start time from submission
-      const testStartTime = testSubmission?.started_at ? new Date(testSubmission.started_at).getTime() : null
-      const timeSinceTestStart = testStartTime ? Date.now() - testStartTime : Infinity
-      const minTestDuration = 5000 // Minimum 5 seconds before considering auto-submit (prevents immediate auto-submit)
-      
-      console.log('[Timer] Checking auto-submit conditions:', {
-        timeRemaining,
-        timeSincePageLoad: Math.round(timeSincePageLoad / 1000),
-        timeSinceTestStart: Math.round(timeSinceTestStart / 1000),
-        gracePeriod: gracePeriod / 1000,
-        minTestDuration: minTestDuration / 1000
-      })
-      
-      // Only auto-submit if:
-      // 1. Page has been loaded for at least grace period (to account for loading delays)
-      // 2. Test has been running for at least minTestDuration (to prevent immediate auto-submit on fresh start)
-      if (timeSincePageLoad < gracePeriod || timeSinceTestStart < minTestDuration) {
-        const waitTime = Math.max(gracePeriod - timeSincePageLoad, minTestDuration - timeSinceTestStart, 1000)
-        console.log(`[Timer] Timer expired but conditions not met - waiting ${Math.round(waitTime/1000)}s before checking again`)
-        
-        // Wait before checking again
-        const graceTimer = setTimeout(() => {
-          // Recalculate remaining time
-          if (testStartTime && test) {
-            const durationMs = test.duration_minutes * 60 * 1000
-            const endTime = testStartTime + durationMs
-            const now = Date.now()
-            const newRemaining = Math.floor((endTime - now) / 1000)
-            
-            console.log('[Timer] Rechecking after grace period:', { newRemaining })
-            
-            if (newRemaining <= 0 && !submitted && timerStarted) {
-              console.log('[Timer] Time truly expired after grace period - auto-submitting')
-              // Trigger auto-submit by setting timeRemaining to 0, which will trigger the interval handler
-              setTimeRemaining(0)
-            } else if (newRemaining > 0) {
-              // Update timer with correct remaining time
-              setTimeRemaining(newRemaining)
-              console.log(`[Timer] Timer updated to ${newRemaining}s remaining`)
-            }
-          }
-        }, waitTime)
-        
-        return () => clearTimeout(graceTimer)
-      } else {
-        // Both conditions met - time truly expired
-        console.log('[Timer] Timer expired and conditions met - auto-submitting')
-        // Trigger auto-submit by setting timeRemaining to 0, which will trigger the interval handler
-        setTimeRemaining(0)
-        return
-      }
-    }
-
-    // Only start countdown if we have valid remaining time
-    if (remainingToCheck <= 0) {
-      console.log('[Timer] No time remaining, skipping countdown interval')
-      return
-    }
-    
-    console.log('[Timer] Starting countdown interval with', remainingToCheck, 'seconds remaining')
-    
-    const timer = setInterval(() => {
-      setTimeRemaining((prev) => {
-        const newValue = prev - 1
-        if (newValue <= 0) {
-          console.log('[Timer] Time expired, triggering auto-submit')
-          // Trigger auto-submit
-          handleAutoSubmit()
-          return 0
-        }
-        return newValue
-      })
-    }, 1000)
+    load()
 
     return () => {
-      console.log('[Timer] Cleaning up countdown interval')
-      clearInterval(timer)
+      cancelled = true
     }
-  }, [timerStarted, submitted, testSubmission, test]) // Don't include timeRemaining to avoid recreating interval
-
-  // Per-question timer countdown - only runs in PER_QUESTION mode and when question timer is started
-  useEffect(() => {
-    if (!timerStarted || submitted || test?.timer_mode !== 'PER_QUESTION' || !activeQuestionTimer) {
-      return
-    }
-    
-    // Only run countdown if this question's timer has been started (on first entry)
-    if (!questionTimerStarted[activeQuestionTimer]) {
-      console.log(`[Timer] Timer not started yet for question ${activeQuestionTimer}`)
-      return
-    }
-    
-    const currentQuestionTime = questionTimeRemaining[activeQuestionTimer]
-    if (currentQuestionTime === undefined || currentQuestionTime <= 0) {
-      // Question time expired - auto-submit this question and move to next
-      const currentIndex = questions.findIndex(q => q.id === activeQuestionTimer)
-      
-      // Mark current question as submitted (to unlock next)
-      setSubmittedQuestions(prev => ({
-        ...prev,
-        [activeQuestionTimer]: true
-      }))
-      
-      if (currentIndex < questions.length - 1) {
-        // Move to next question
-        console.log(`[Timer] Question ${activeQuestionTimer} time expired, moving to next question`)
-        handleQuestionChange(currentIndex + 1)
-      } else {
-        // Last question - auto-submit the test
-        console.log('[Timer] Last question time expired, auto-submitting')
-        handleAutoSubmit()
-      }
-      return
-    }
-    
-    console.log(`[Timer] Per-question countdown active for ${activeQuestionTimer}: ${currentQuestionTime}s remaining`)
-    
-    const timer = setInterval(() => {
-      setQuestionTimeRemaining(prev => {
-        const newTime = Math.max(0, (prev[activeQuestionTimer] || 0) - 1)
-        const updated = { ...prev, [activeQuestionTimer]: newTime }
-        
-        // Save to localStorage for persistence
-        if (userId && testId) {
-          const storageKey = `test_${testId}_${userId}_questionTimers`
-          localStorage.setItem(storageKey, JSON.stringify(updated))
-        }
-        
-        // Check if time expired
-        if (newTime <= 0) {
-          console.log(`[Timer] Question ${activeQuestionTimer} time expired`)
-          // The effect will handle auto-move/submit on next run
-        }
-        
-        return updated
-      })
-    }, 1000)
-    
-    return () => {
-      clearInterval(timer)
-    }
-  }, [timerStarted, submitted, test?.timer_mode, activeQuestionTimer, questions.length, questionTimerStarted])
+  }, [router, router.isReady, testId, token, userId])
 
   const handleAutoSubmit = async () => {
-    if (submitted || submitting) return
+    // Extra safety: only auto-submit when the test is fully in-progress and UI is ready.
+    if (submitting) return
+    if (precheckMode) return
+    if (!test || questions.length === 0) return
+
     await handleSubmit(true)
   }
 
+  // ============================================
+  // Timer hook - clean implementation
+  const timerCurrentQuestion = questions[currentQuestionIndex] || null
+  const timer = useDSTimer({
+    test: test ? {
+      timer_mode: test.timer_mode,
+      duration_minutes: test.duration_minutes,
+      question_timings: test.question_timings,
+      start_time: test.start_time,
+    } : null,
+    testSubmission,
+    questions,
+    currentQuestionId: timerCurrentQuestion?.id || null,
+    onExpire: handleAutoSubmit,
+    onQuestionExpire: (questionId: string) => {
+      // Mark question as submitted
+      setSubmittedQuestions(prev => ({ ...prev, [questionId]: true }))
+      
+      // Move to next question or submit if last
+      const currentIndex = questions.findIndex(q => q.id === questionId)
+      if (currentIndex < questions.length - 1) {
+        handleQuestionChange(currentIndex + 1)
+      } else {
+        handleAutoSubmit()
+      }
+    },
+    enabled: !precheckMode && questions.length > 0,
+  })
+
   const handleSubmit = async (isAuto: boolean = false) => {
-    if (submitted || submitting) return
+    if (submitting) {
+      console.log('[Submit] Already submitting, ignoring click')
+      return
+    }
+
+    // Validate required data
+    if (!testId || !userId) {
+      alert('Missing test ID or user ID. Please refresh the page and try again.')
+      console.error('[Submit] Missing testId or userId:', { testId, userId })
+      return
+    }
+
+    if (!questions || questions.length === 0) {
+      alert('No questions found. Please refresh the page and try again.')
+      console.error('[Submit] No questions found')
+      return
+    }
 
     // Confirmation alert removed - submit directly
     setSubmitting(true)
@@ -1725,16 +1135,30 @@ export default function TestTakePage() {
         }
       })
 
-      await dsaApi.post(`/tests/${testId}/final-submit?user_id=${userId}`, {
+      console.log('[Submit] Submitting test:', { testId, userId, questionCount: questionSubmissions.length })
+      
+      const response = await dsaApi.post(`/tests/${testId}/final-submit?user_id=${userId}`, {
         question_submissions: questionSubmissions,
         activity_logs: activityLogs,
       })
 
-      setSubmitted(true)
-      // Alerts removed - submission status is shown in the UI
+      console.log('[Submit] Submission successful:', response.data)
+
+      // Redirect to completed page
+      try {
+        await router.push(`/test/${testId}/completed`)
+      } catch (routerError: any) {
+        console.error('[Submit] Router push failed:', routerError)
+        // If router push fails, try window.location as fallback
+        window.location.href = `/test/${testId}/completed`
+      }
     } catch (error: any) {
-      console.error('Failed to submit test:', error.response?.data?.detail || error.message)
-      // Don't show alert on error - just log it
+      console.error('[Submit] Failed to submit test:', error)
+      const errorMessage = error.response?.data?.detail || error.response?.data?.message || error.message || 'Failed to submit test. Please try again.'
+      
+      // Show user-friendly error message
+      alert(`Submission failed: ${errorMessage}`)
+      
       // Don't set submitted to true on error - let user retry
     } finally {
       setSubmitting(false)
@@ -1746,21 +1170,15 @@ export default function TestTakePage() {
     const newQuestion = questions[index]
     
     // Check if navigation is allowed (sequential mode)
-    // First question is always accessible, others require previous question to be submitted
-    if (index > 0) {
+    // Only enforce sequential locking for PER_QUESTION mode
+    // For GLOBAL mode, all questions are accessible
+    if (test?.timer_mode === 'PER_QUESTION' && index > 0) {
       const previousQuestionId = questions[index - 1]?.id
       if (previousQuestionId && !submittedQuestions[previousQuestionId]) {
         // Previous question not submitted - block navigation
         alert(`Please submit Question ${index} before moving to Question ${index + 1}`)
         return
       }
-    }
-    
-    // Handle per-question timer mode - pause previous, resume new
-    if (test?.timer_mode === 'PER_QUESTION' && previousQuestion && newQuestion && previousQuestion.id !== newQuestion.id) {
-      // Set the new question as the active timer
-      setActiveQuestionTimer(newQuestion.id)
-      console.log(`[Timer] Switched from question ${previousQuestion.id} to ${newQuestion.id}`)
     }
     
     setCurrentQuestionIndex(index)
@@ -1772,53 +1190,6 @@ export default function TestTakePage() {
           ...prev,
           [newQuestion.id]: new Date().toISOString()
         }))
-      }
-      
-      // Start per-question timer - reset to full duration when entering question for first time
-      if (test?.timer_mode === 'PER_QUESTION') {
-        const fullDuration = questionTotalTime[newQuestion.id]
-        if (fullDuration !== undefined) {
-          // If timer hasn't been started for this question, reset to full duration
-          if (!questionTimerStarted[newQuestion.id]) {
-            console.log(`[Timer] Starting timer for question ${newQuestion.id} with full duration: ${fullDuration}s`)
-            setQuestionTimeRemaining(prev => {
-              const updated = { ...prev, [newQuestion.id]: fullDuration }
-              
-              // Save to localStorage for persistence
-              if (userId && testId) {
-                const storageKey = `test_${testId}_${userId}_questionTimers`
-                localStorage.setItem(storageKey, JSON.stringify(updated))
-              }
-              
-              return updated
-            })
-            
-            // Mark timer as started
-            setQuestionTimerStarted(prev => ({
-              ...prev,
-              [newQuestion.id]: true
-            }))
-          } else {
-            // Timer already started - preserve remaining time (user might be going back)
-            const currentRemaining = questionTimeRemaining[newQuestion.id]
-            if (currentRemaining === undefined || currentRemaining <= 0) {
-              // If somehow timer is missing or expired, reset to full duration
-              console.log(`[Timer] Timer was expired/missing for question ${newQuestion.id}, resetting to full duration`)
-              setQuestionTimeRemaining(prev => {
-                const updated = { ...prev, [newQuestion.id]: fullDuration }
-                if (userId && testId) {
-                  const storageKey = `test_${testId}_${userId}_questionTimers`
-                  localStorage.setItem(storageKey, JSON.stringify(updated))
-                }
-                return updated
-              })
-            } else {
-              console.log(`[Timer] Resuming timer for question ${newQuestion.id} with remaining time: ${currentRemaining}s`)
-            }
-          }
-          
-          setActiveQuestionTimer(newQuestion.id)
-        }
       }
     
       // Handle SQL questions differently (case-insensitive check)
@@ -1851,13 +1222,6 @@ export default function TestTakePage() {
 
   const handleRun = async () => {
     if (!userId) return
-    
-    // Prevent running code if test is already submitted
-    if (submitted) {
-      alert('You have already submitted this test. You cannot run code anymore.')
-      return
-    }
-    
     const currentQuestion = questions[currentQuestionIndex]
     if (!currentQuestion) return
 
@@ -1994,12 +1358,6 @@ export default function TestTakePage() {
 
   const handleCodeSubmit = async () => {
     if (!userId) return
-    
-    // Prevent submitting code if test is already submitted
-    if (submitted) {
-      alert('You have already submitted this test. You cannot submit code anymore.')
-      return
-    }
     
     const currentQuestion = questions[currentQuestionIndex]
     if (!currentQuestion) return
@@ -2294,56 +1652,14 @@ export default function TestTakePage() {
     }
   }, [code, testId, userId])
 
-  // Timeout fallback - if loading takes too long, show error (must be before early returns)
-  // Calculate isLoading inline to avoid dependency issues
-  useEffect(() => {
-    const isLoading = checkingParams || (token && userId && testId && !test)
-    if (isLoading && token && userId && testId) {
-      const timeout = setTimeout(() => {
-        console.error('[Test Load] Loading timeout - taking too long')
-        if (checkingParams || !test) {
-          setCheckingParams(false)
-          alert('Test is taking too long to load. Please refresh the page or contact support.')
-          // Reset fetch ref to allow retry
-          fetchDataRef.current = false
-          // Auto-refresh after alert
-          setTimeout(() => {
-            window.location.reload()
-          }, 2000)
-        }
-      }, 15000) // 15 second timeout (reduced from 30 for faster feedback)
-      
-      return () => clearTimeout(timeout)
-    }
-  }, [checkingParams, token, userId, testId, test])
-
   // Early returns must come AFTER all hooks
-  if (submitted) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
-        <Card className="w-full max-w-md">
-          <CardContent className="p-6 text-center">
-            <div className="mb-4">
-              <AlertCircle className="h-12 w-12 mx-auto text-green-500 mb-4" />
-              <h2 className="text-2xl font-bold mb-2 text-white">Test Submitted</h2>
-              <p className="text-slate-400">Your test has been submitted successfully.</p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    )
-  }
 
-  // Show loading only if we're checking params OR if we have valid params but no test data yet
-  // Separate check for questions loading
-  // Don't wait for camera to load - show UI as soon as questions are ready
-  // Show editor immediately when first question loads (progressive loading)
-  const isLoading = checkingParams || (token && userId && testId && !test)
-  // questionsLoading is now a state variable, not computed
-  const hasFirstQuestion = questions.length > 0 // Show editor as soon as first question is available
+  // Loading is based ONLY on questions length — as soon as we have any questions,
+  // we render the main UI (test metadata can finish loading in the background).
+  const isLoading = questions.length === 0
   
   // Show fullscreen prompt if needed (after refresh, before entering fullscreen)
-  // This should appear before the loading/editor UI
+  // This should appear before the editor UI
   if (showFullscreenPrompt && test && questions.length > 0) {
     return (
       <FullscreenPrompt
@@ -2370,45 +1686,58 @@ export default function TestTakePage() {
       questionsLoading
     })
   }
-  
-  if (isLoading) {
+
+  // Show pre-check mode message if applicable
+  if (precheckMode && test) {
+    const startTime = new Date(precheckMode.start_time)
+    const now = new Date()
+    const timeUntilStart = Math.max(0, Math.floor((startTime.getTime() - now.getTime()) / 1000))
+    const minutes = Math.floor(timeUntilStart / 60)
+    const seconds = timeUntilStart % 60
+    
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
-          <p className="text-slate-400">Loading test...</p>
-          {!checkingParams && token && userId && (
-            <p className="text-slate-500 text-sm mt-2">Please wait while we load your test...</p>
-          )}
-          <p className="text-slate-600 text-xs mt-4">If this takes too long, please refresh the page.</p>
-        </div>
-      </div>
-    )
-  }
-  
-  // Show partial UI while questions are loading (progressive loading)
-  // Don't block the entire page - show what we have
-  if (questionsLoading && test) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-950">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
-          <p className="text-slate-400">Loading questions...</p>
-          <p className="text-slate-500 text-sm mt-2">This may take a few moments...</p>
+        <div className="text-center max-w-md mx-auto p-6">
+          <div className="mb-4">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+            <h2 className="text-xl font-semibold text-slate-200 mb-2">Pre-Check Mode</h2>
+            <p className="text-slate-400 mb-4">{precheckMode.message}</p>
+            {timeUntilStart > 0 && (
+              <div className="text-2xl font-bold text-blue-400 mb-2">
+                {String(minutes).padStart(2, '0')}:{String(seconds).padStart(2, '0')}
+              </div>
+            )}
+            <p className="text-slate-500 text-sm">
+              Please complete pre-checks (screen sharing, camera access) while waiting for the test to start.
+            </p>
+          </div>
+          <p className="text-slate-600 text-xs mt-4">
+            The test will automatically start when the start time is reached.
+          </p>
         </div>
       </div>
     )
   }
 
-  // Type guard: at this point, test and at least one question should be loaded
-  if (!test || questions.length === 0) {
+  // If we have no questions yet, show loading screen
+  if (questions.length === 0) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950">
         <div className="text-center">
-          <p className="text-slate-400">No test data available. Please refresh the page.</p>
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
+          <p className="text-slate-400">Loading questions...</p>
         </div>
       </div>
     )
+  }
+  
+  // Create fallback test object if test data hasn't loaded yet (allows progressive rendering)
+  const testForRender = test || {
+    title: 'Test',
+    description: '',
+    timer_mode: 'GLOBAL' as const,
+    duration_minutes: 60,
+    question_ids: questions.map(q => q.id)
   }
 
   const currentQuestion = questions[currentQuestionIndex]
@@ -2452,16 +1781,16 @@ export default function TestTakePage() {
         )}
 
         <TimerBar
-          timeRemaining={timeRemaining} 
-          totalTime={totalTime}
-          timerMode={test?.timer_mode || 'GLOBAL'}
+          timeRemaining={timer.timeRemaining} 
+          totalTime={timer.totalTime}
+          timerMode={testForRender?.timer_mode || 'GLOBAL'}
           currentQuestionTitle={currentQuestion?.title}
-          questionTimeRemaining={currentQuestion ? questionTimeRemaining[currentQuestion.id] : undefined}
-          questionTotalTime={currentQuestion ? questionTotalTime[currentQuestion.id] : undefined}
+          questionTimeRemaining={currentQuestion ? timer.questionTimeRemaining[currentQuestion.id] : undefined}
+          questionTotalTime={currentQuestion ? timer.questionTotalTime[currentQuestion.id] : undefined}
         />
         <div className="flex-1 overflow-y-auto">
           <QuestionSidebar
-            testTitle={test.title}
+            testTitle={testForRender.title}
             questions={questions}
             currentQuestionIndex={currentQuestionIndex}
             onQuestionChange={handleQuestionChange}
@@ -2469,6 +1798,7 @@ export default function TestTakePage() {
             submitting={submitting}
             questionStatus={questionStatus}
             submittedQuestions={submittedQuestions}
+            timerMode={testForRender?.timer_mode || 'GLOBAL'}
           />
           <div className="border-t border-slate-700">
             <QuestionTabs question={currentQuestion} />
@@ -2530,9 +1860,15 @@ export default function TestTakePage() {
                   <span className="font-medium">All questions submitted! Ready to finish the test.</span>
                 </div>
                 <button
-                  onClick={() => handleSubmit(false)}
-                  disabled={submitting}
-                  className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors flex items-center gap-2 disabled:opacity-50"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    console.log('[Submit] Button clicked')
+                    handleSubmit(false)
+                  }}
+                  disabled={submitting || !testId || !userId}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  type="button"
                 >
                   {submitting ? 'Submitting...' : 'Submit Test'}
                 </button>
@@ -2613,13 +1949,43 @@ export default function TestTakePage() {
       )}
 
       <TimerBar 
-        timeRemaining={timeRemaining} 
-        totalTime={totalTime}
+        timeRemaining={timer.timeRemaining} 
+        totalTime={timer.totalTime}
         timerMode={test?.timer_mode || 'GLOBAL'}
         currentQuestionTitle={currentQuestion?.title}
-        questionTimeRemaining={currentQuestion ? questionTimeRemaining[currentQuestion.id] : undefined}
-        questionTotalTime={currentQuestion ? questionTotalTime[currentQuestion.id] : undefined}
+        questionTimeRemaining={currentQuestion ? timer.questionTimeRemaining[currentQuestion.id] : undefined}
+        questionTotalTime={currentQuestion ? timer.questionTotalTime[currentQuestion.id] : undefined}
       />
+
+      {/* Expired Test Message */}
+      {timer.isExpired && 
+       test?.timer_mode === 'GLOBAL' && 
+       testSubmission?.started_at && 
+       timer.timeRemaining === 0 &&
+       timer.totalTime > 0 && (
+        <div className="bg-red-900/50 border-b border-red-600 px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <AlertCircle className="h-5 w-5 text-red-400" />
+            <div>
+              <p className="text-red-300 font-semibold">Test Time Has Expired</p>
+              <p className="text-red-400 text-sm">The allocated time for this test has ended. Please submit your test now.</p>
+            </div>
+          </div>
+          <button
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              console.log('[Submit] Button clicked (expired timer)')
+              handleSubmit(false)
+            }}
+            disabled={submitting || !testId || !userId}
+            className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            type="button"
+          >
+            {submitting ? 'Submitting...' : 'Submit Test'}
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 overflow-hidden">
         <Split
@@ -2635,7 +2001,7 @@ export default function TestTakePage() {
         >
           <div className="h-full overflow-hidden">
             <QuestionSidebar
-              testTitle={test.title}
+              testTitle={testForRender.title}
               questions={questions}
               currentQuestionIndex={currentQuestionIndex}
               onQuestionChange={handleQuestionChange}
@@ -2643,6 +2009,7 @@ export default function TestTakePage() {
               submitting={submitting}
               questionStatus={questionStatus}
               submittedQuestions={submittedQuestions}
+              timerMode={testForRender?.timer_mode || 'GLOBAL'}
             />
           </div>
 
@@ -2714,9 +2081,15 @@ export default function TestTakePage() {
                   <span className="font-medium text-sm">All done!</span>
                 </div>
                 <button
-                  onClick={() => handleSubmit(false)}
-                  disabled={submitting}
-                  className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-colors disabled:opacity-50"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    console.log('[Submit] Button clicked (mobile)')
+                    handleSubmit(false)
+                  }}
+                  disabled={submitting || !testId || !userId}
+                  className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  type="button"
                 >
                   {submitting ? 'Submitting...' : 'Submit Test'}
                 </button>

@@ -29,6 +29,65 @@ export default function TestInstructionsPage() {
   });
 
   const fetchTestRef = useRef(false); // Prevent multiple fetches
+  const preloadQuestionsRef = useRef(false); // Prevent multiple question preloads
+
+  // Preload questions function - fetches all questions and stores in sessionStorage
+  // Defined before useEffect to ensure it's accessible
+  const preloadQuestions = useCallback(async (userId: string, testId: string, questionIds: string[]) => {
+    try {
+      console.log(`[Instructions] Preloading ${questionIds.length} questions for test ${testId}...`);
+      
+      // Fetch all questions in parallel
+      const questionPromises = questionIds.map(async (qId: string) => {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout per question
+          
+          try {
+            const response = await dsaApi.get(`/tests/${testId}/question/${qId}?user_id=${userId}`, {
+              signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            return response.data;
+          } catch (fetchError: any) {
+            clearTimeout(timeoutId);
+            if (fetchError.name === 'AbortError' || fetchError.code === 'ECONNABORTED') {
+              console.warn(`[Instructions] Question ${qId} request timed out`);
+              return null;
+            }
+            if (fetchError.response?.status === 404) {
+              console.warn(`[Instructions] Question ${qId} not found (404)`);
+              return null;
+            }
+            throw fetchError;
+          }
+        } catch (error: any) {
+          console.warn(`[Instructions] Question ${qId} fetch error:`, error.message);
+          return null;
+        }
+      });
+      
+      const questionResults = await Promise.all(questionPromises);
+      const questionsData = questionResults.filter((q): q is any => q !== null);
+      
+      // Store preloaded questions in sessionStorage
+      const storageKey = `preloaded_questions_${testId}_${userId}`;
+      const preloadData = {
+        questions: questionsData,
+        timestamp: Date.now(),
+        testId: testId,
+        userId: userId
+      };
+      
+      sessionStorage.setItem(storageKey, JSON.stringify(preloadData));
+      console.log(`[Instructions] Preloaded ${questionsData.length} questions successfully. Stored in sessionStorage as: ${storageKey}`);
+      
+      return questionsData;
+    } catch (error: any) {
+      console.error("[Instructions] Error preloading questions:", error);
+      throw error;
+    }
+  }, []);
 
   useEffect(() => {
     const storedEmail = sessionStorage.getItem("candidateEmail");
@@ -48,17 +107,45 @@ export default function TestInstructionsPage() {
     
     setIsCheckingSession(false);
     
-    // Fetch test info only once
-    if (testId && !fetchTestRef.current && !testInfo) {
+    // Fetch test info and preload questions
+    const finalUserId = storedUserId || (user_id as string);
+    if (testId && finalUserId && !fetchTestRef.current && !testInfo) {
       fetchTestRef.current = true;
       const fetchTest = async () => {
         try {
-          const response = await dsaApi.get(`/tests/${testId}`);
+          // Use public endpoint (no admin auth required) - same as take page
+          const response = await dsaApi.get(`/tests/${testId}/public?user_id=${finalUserId}`);
           if (response.data) {
+            const testData = response.data;
             setTestInfo({
-              title: response.data.title || "DSA Test",
-              description: response.data.description || "",
+              title: testData.title || "DSA Test",
+              description: testData.description || "",
             });
+            
+            // Preload questions in the background (Option 2: Preload on instructions page mount)
+            if (testData.question_ids && testData.question_ids.length > 0 && !preloadQuestionsRef.current) {
+              preloadQuestionsRef.current = true;
+              console.log(`[Instructions] Starting question preload for ${testData.question_ids.length} questions...`);
+              preloadQuestions(finalUserId, testId as string, testData.question_ids)
+                .then((questions) => {
+                  console.log(`[Instructions] Successfully preloaded ${questions?.length || 0} questions`);
+                })
+                .catch(err => {
+                  console.error("[Instructions] Error preloading questions:", err);
+                  console.error("[Instructions] Error details:", {
+                    message: err.message,
+                    response: err.response?.data,
+                    status: err.response?.status
+                  });
+                  preloadQuestionsRef.current = false; // Allow retry on error
+                });
+            } else {
+              console.log(`[Instructions] Skipping preload:`, {
+                hasQuestionIds: !!testData.question_ids,
+                questionCount: testData.question_ids?.length || 0,
+                alreadyPreloaded: preloadQuestionsRef.current
+              });
+            }
           }
         } catch (err) {
           console.error("Error fetching test:", err);
@@ -67,7 +154,7 @@ export default function TestInstructionsPage() {
       };
       fetchTest();
     }
-  }, [testId, token, user_id]); // Removed router from dependencies
+  }, [testId, token, user_id, preloadQuestions]); // Added preloadQuestions to dependencies
 
   // Record proctoring event
   const recordProctorEvent = useCallback(async (eventType: string, metadata?: Record<string, unknown>) => {
@@ -147,8 +234,6 @@ export default function TestInstructionsPage() {
       // Don't start the timer yet - wait for editor to be visible
       sessionStorage.setItem("shouldStartTest", "true");
       sessionStorage.setItem("testStartTime", new Date().toISOString());
-      // Clear refresh flag so page can auto-refresh once
-      sessionStorage.removeItem("fullscreenRefreshed");
       
       // Navigate to test page - it will load first, then auto-refresh, then enter fullscreen
       router.push(`/test/${testId}/take?token=${encodeURIComponent(token as string)}&user_id=${encodeURIComponent(userId || "")}`);
