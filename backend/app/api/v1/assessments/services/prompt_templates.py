@@ -111,6 +111,62 @@ JUDGE0_UNSUPPORTED_FRAMEWORKS = [
 
 
 # ============================================================================
+# JUDGE0 SUPPORTED PROGRAMMING LANGUAGES (FOR CODING QUESTIONS)
+# ============================================================================
+
+# CRITICAL: ONLY these 10 languages are supported by Judge0 platform
+# These are the ONLY languages that should generate Coding question types
+# Any other language/framework should be MCQ/Subjective
+JUDGE0_SUPPORTED_LANGUAGES = [
+    # 1. Python
+    "python",
+    
+    # 2. JavaScript
+    "javascript", "js", "node", "nodejs", "node.js",
+    
+    # 3. C++
+    "c++", "cpp", "cplusplus", "c plus plus",
+    
+    # 4. Java
+    "java",
+    
+    # 5. C
+    "c", "c programming",
+    
+    # 6. Go
+    "go", "golang",
+    
+    # 7. Rust
+    "rust",
+    
+    # 8. C# (C Sharp)
+    "csharp", "c#", "c sharp", "c-sharp",
+    
+    # 9. Kotlin
+    "kotlin",
+    
+    # 10. TypeScript
+    "typescript", "ts",
+]
+
+# Programming languages that require Coding questions (ONLY Judge0-supported)
+# When user adds these as custom skills, topics MUST be assigned "Coding" type
+# ⚠️ CRITICAL: Only these 10 languages - NO others
+CODING_LANGUAGES = [
+    "python",           # 1
+    "javascript",       # 2
+    "cpp",             # 3 (C++)
+    "java",            # 4
+    "c",               # 5
+    "go",              # 6
+    "rust",            # 7
+    "csharp",          # 8 (C#)
+    "kotlin",          # 9
+    "typescript",      # 10
+]
+
+
+# ============================================================================
 # AIML KEYWORDS
 # ============================================================================
 
