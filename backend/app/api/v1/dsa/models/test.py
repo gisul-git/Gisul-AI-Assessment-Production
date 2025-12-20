@@ -77,6 +77,14 @@ class TestCreate(BaseModel):
 
     # Proctoring (optional, backward compatible)
     proctoringSettings: Optional[ProctoringSettings] = None
+    
+    # Exam window configuration (mirrors Custom MCQ; backward compatible)
+    examMode: Optional[ExamMode] = "strict"
+    schedule: Optional[Schedule] = None
+    # Top-level fields for backward compatibility
+    startTime: Optional[datetime] = None
+    endTime: Optional[datetime] = None
+    duration: Optional[int] = None
 
 class TestInviteRequest(BaseModel):
     test_id: str

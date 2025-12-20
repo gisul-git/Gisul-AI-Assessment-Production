@@ -32,7 +32,7 @@ export default function AIMLMainPage() {
             AIML Competency Management
           </h1>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "2rem", marginBottom: "2rem" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "2rem", marginBottom: "2rem" }}>
             {/* Question Management Option */}
             <Link href="/aiml/questions" style={{ textDecoration: "none" }}>
               <div
@@ -158,47 +158,6 @@ export default function AIMLMainPage() {
               </div>
             </Link>
 
-            {/* Tests Management Option */}
-            <Link href="/aiml/tests" style={{ textDecoration: "none" }}>
-              <div
-                className="card"
-                style={{
-                  padding: "2.5rem",
-                  textAlign: "center",
-                  cursor: "pointer",
-                  transition: "all 0.3s ease",
-                  border: "2px solid #A8E8BC",
-                  height: "100%",
-                  display: "flex",
-                  flexDirection: "column",
-                  justifyContent: "center",
-                  alignItems: "center",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = "#2D7A52";
-                  e.currentTarget.style.transform = "translateY(-5px)";
-                  e.currentTarget.style.boxShadow = "0 10px 25px rgba(45, 122, 82, 0.2)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = "#A8E8BC";
-                  e.currentTarget.style.transform = "translateY(0)";
-                  e.currentTarget.style.boxShadow = "none";
-                }}
-              >
-                <div style={{ fontSize: "3rem", marginBottom: "1.5rem" }}>📊</div>
-                <h2 style={{ marginBottom: "1.5rem", color: "#1a1625", fontSize: "1.5rem" }}>
-                  Test Management
-                </h2>
-                <div style={{ display: "flex", gap: "0.5rem", justifyContent: "center", flexWrap: "wrap" }}>
-                  <span style={{ fontSize: "0.875rem", color: "#2D7A52", backgroundColor: "#E8FAF0", padding: "0.25rem 0.75rem", borderRadius: "0.375rem" }}>
-                    📈 Analytics
-                  </span>
-                  <span style={{ fontSize: "0.875rem", color: "#2D7A52", backgroundColor: "#E8FAF0", padding: "0.25rem 0.75rem", borderRadius: "0.375rem" }}>
-                    🔗 Test URLs
-                  </span>
-                </div>
-              </div>
-            </Link>
           </div>
         </div>
       </div>

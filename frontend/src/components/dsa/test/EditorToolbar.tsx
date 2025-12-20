@@ -3,6 +3,7 @@
 import { Button } from '../ui/button'
 import { Select } from '../ui/select'
 import { Play, Send, RotateCcw } from 'lucide-react'
+import { JUDGE0_ID_TO_LANG_NAME } from '../../../lib/dsa/judge0'
 
 interface EditorToolbarProps {
   language: string
@@ -17,9 +18,11 @@ interface EditorToolbarProps {
 
 // Language display names mapping
 const LANGUAGE_DISPLAY_NAMES: Record<string, string> = {
-  python: 'Python',
+  python: 'Python 3',
+  python2: 'Python 2',
   javascript: 'JavaScript',
   cpp: 'C++',
+  cpp17: 'C++17',
   java: 'Java',
   c: 'C',
   go: 'Go',
@@ -27,10 +30,36 @@ const LANGUAGE_DISPLAY_NAMES: Record<string, string> = {
   csharp: 'C#',
   kotlin: 'Kotlin',
   typescript: 'TypeScript',
+  php: 'PHP',
+  ruby: 'Ruby',
+  perl: 'Perl',
+  lua: 'Lua',
+  r: 'R',
+  bash: 'Bash',
+  groovy: 'Groovy',
+  swift: 'Swift',
+  scala: 'Scala',
+  pascal: 'Pascal',
+  fortran: 'Fortran',
+  cobol: 'COBOL',
+  assembly: 'Assembly',
 }
 
 function getLanguageDisplayName(lang: string): string {
-  return LANGUAGE_DISPLAY_NAMES[lang.toLowerCase()] || lang.charAt(0).toUpperCase() + lang.slice(1)
+  // Check if the input is a numeric ID (Judge0 language ID)
+  const isNumericId = /^\d+$/.test(lang);
+  
+  // If it's a numeric ID, convert it to language name first
+  let languageName = lang;
+  if (isNumericId) {
+    languageName = JUDGE0_ID_TO_LANG_NAME[lang] || lang;
+  }
+  
+  // Convert to lowercase for lookup
+  const langKey = languageName.toLowerCase();
+  
+  // Return the display name if available, otherwise capitalize the first letter
+  return LANGUAGE_DISPLAY_NAMES[langKey] || languageName.charAt(0).toUpperCase() + languageName.slice(1)
 }
 
 export function EditorToolbar({

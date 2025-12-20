@@ -85,14 +85,21 @@ export default function CreateDSACompetencyPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Exam window validation (mirrors Custom MCQ meaning)
-    if (!formData.start_time || !formData.end_time) {
-      alert("Start time and end time are required.");
+    // Exam window validation
+    if (!formData.start_time) {
+      alert("Start time is required.");
       return;
     }
-    if (new Date(formData.start_time) >= new Date(formData.end_time)) {
-      alert("End time must be after start time.");
-      return;
+    // For Flexible Window, end_time is required
+    if (examMode === "flexible") {
+      if (!formData.end_time) {
+        alert("End time is required for flexible exam mode.");
+        return;
+      }
+      if (new Date(formData.start_time) >= new Date(formData.end_time)) {
+        alert("End time must be after start time.");
+        return;
+      }
     }
     if (examMode === "flexible") {
       const durationForSchedule =
@@ -121,7 +128,6 @@ export default function CreateDSACompetencyPage() {
       const payload: any = {
         ...formData,
         start_time: new Date(formData.start_time).toISOString(),
-        end_time: new Date(formData.end_time).toISOString(),
         timer_mode: timerMode,
         proctoringSettings: { 
           aiProctoringEnabled,
@@ -131,7 +137,10 @@ export default function CreateDSACompetencyPage() {
         examMode,
         schedule: {
           startTime: new Date(formData.start_time).toISOString(),
-          endTime: new Date(formData.end_time).toISOString(),
+          // Only include endTime for flexible mode, omit it for strict mode
+          ...(examMode === "flexible" && formData.end_time && formData.end_time.trim() !== "" 
+            ? { endTime: new Date(formData.end_time).toISOString() }
+            : {}),
           duration:
             examMode === "flexible"
               ? (timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes)
@@ -139,12 +148,23 @@ export default function CreateDSACompetencyPage() {
         },
         // Also include top-level fields (requested shape)
         startTime: new Date(formData.start_time).toISOString(),
-        endTime: new Date(formData.end_time).toISOString(),
+        // Only include endTime for flexible mode, omit it for strict mode
+        ...(examMode === "flexible" && formData.end_time && formData.end_time.trim() !== ""
+          ? { endTime: new Date(formData.end_time).toISOString() }
+          : {}),
         duration:
           examMode === "flexible"
             ? (timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes)
             : null,
       };
+      
+      // Only include end_time in payload for flexible mode (and remove it if it's empty)
+      if (examMode === "flexible" && formData.end_time && formData.end_time.trim() !== "") {
+        payload.end_time = new Date(formData.end_time).toISOString();
+      } else {
+        // Explicitly remove end_time for strict mode to avoid sending empty string
+        delete payload.end_time;
+      }
       
       if (timerMode === "PER_QUESTION") {
         // Convert questionTimings record to array format expected by backend
@@ -379,7 +399,7 @@ export default function CreateDSACompetencyPage() {
                 </label>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+              <div style={{ display: "grid", gridTemplateColumns: examMode === "strict" ? "1fr" : "1fr 1fr", gap: "1rem" }}>
                 <div>
                   <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
                     Start Time *
@@ -396,52 +416,32 @@ export default function CreateDSACompetencyPage() {
                       borderRadius: "0.375rem",
                     }}
                   />
+                  {examMode === "strict" && (
+                    <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                      Test will automatically end after the configured test duration. Candidates can enter 15 minutes before start time for pre-checks.
+                    </p>
+                  )}
                 </div>
-                <div>
-                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
-                    End Time *
-                  </label>
-                  <input
-                    type="datetime-local"
-                    required
-                    value={formData.end_time}
-                    onChange={(e) => setFormData({ ...formData, end_time: e.target.value })}
-                    style={{
-                      width: "100%",
-                      padding: "0.75rem",
-                      border: "1px solid #A8E8BC",
-                      borderRadius: "0.375rem",
-                    }}
-                  />
-                </div>
+                {examMode === "flexible" && (
+                  <div>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+                      End Time *
+                    </label>
+                    <input
+                      type="datetime-local"
+                      required
+                      value={formData.end_time}
+                      onChange={(e) => setFormData({ ...formData, end_time: e.target.value })}
+                      style={{
+                        width: "100%",
+                        padding: "0.75rem",
+                        border: "1px solid #A8E8BC",
+                        borderRadius: "0.375rem",
+                      }}
+                    />
+                  </div>
+                )}
               </div>
-
-              {examMode === "flexible" && (
-                <div style={{ marginTop: "1rem" }}>
-                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
-                    Duration (minutes) *
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes}
-                    disabled={timerMode === "PER_QUESTION"}
-                    onChange={(e) => {
-                      const numValue = parseInt(e.target.value, 10);
-                      if (!isNaN(numValue) && numValue >= 1) {
-                        setFormData({ ...formData, duration_minutes: numValue });
-                      }
-                    }}
-                    style={{
-                      width: "200px",
-                      padding: "0.75rem",
-                      border: "1px solid #A8E8BC",
-                      borderRadius: "0.375rem",
-                      backgroundColor: timerMode === "PER_QUESTION" ? "#F3F4F6" : "#ffffff",
-                    }}
-                  />
-                </div>
-              )}
             </div>
 
             {/* Timer Configuration - Show mode selector only when 2+ questions selected */}
@@ -486,10 +486,11 @@ export default function CreateDSACompetencyPage() {
               )}
 
               {/* Global Duration Input - shown when GLOBAL mode or single question */}
+              {/* This field is used for both Fixed and Flexible windows */}
               {(timerMode === "GLOBAL" || formData.question_ids.length < 2) && (
                 <div>
                   <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 500, fontSize: "0.875rem", color: "#374151" }}>
-                    Duration (minutes)
+                    Duration (minutes){examMode === "flexible" ? " *" : ""}
                   </label>
                   <input
                     type="number"

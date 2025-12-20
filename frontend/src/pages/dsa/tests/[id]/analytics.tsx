@@ -129,18 +129,82 @@ export default function AnalyticsPage() {
   const [sendingInvitations, setSendingInvitations] = useState(false)
   const [showLiveProctoring, setShowLiveProctoring] = useState(false)
   
-  const fetchAnalytics = async (userId: string) => {
+  // Memoize proctorAssessmentId to prevent infinite loops
+  const proctorAssessmentId = useMemo(() => (testId as string) || "", [testId])
+  const proctorAdminId = useMemo(() => (session as any)?.user?.id || (session as any)?.user?.email || 'admin', [session])
+  
+  // Stable callback to prevent re-renders
+  const handleProctorError = useCallback((error: string) => {
+    console.error('Multi-proctor error:', error)
+  }, [])
+  
+  // Multi-proctor hook for viewing all candidates
+  const {
+    candidateStreams,
+    activeCandidates,
+    isLoading: isProctorLoading,
+    startMonitoring,
+    stopMonitoring,
+    refreshCandidate,
+    resumePollingIfPaused,
+  } = useMultiLiveProctorAdmin({
+    assessmentId: proctorAssessmentId,
+    adminId: proctorAdminId,
+    onError: handleProctorError,
+    debugMode: false, // Disable debug mode in production
+  })
+  
+  // Start monitoring when live proctor panel opens
+  // Note: startMonitoring/stopMonitoring are excluded from deps to prevent infinite loops
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (showLiveProctor && testId && typeof testId === 'string') {
+      startMonitoring()
+    } else {
+      stopMonitoring()
+    }
+    
+    return () => {
+      stopMonitoring()
+    }
+  }, [showLiveProctor, testId])
+
+  const fetchAnalytics = async (userId: string, showLoading: boolean = true) => {
     if (!testId || typeof testId !== 'string') return
     
-    setLoadingAnalytics(true)
+    if (showLoading) {
+      setLoadingAnalytics(true)
+    }
     try {
       const response = await dsaApi.get(`/tests/${testId}/candidates/${userId}/analytics`)
       setAnalytics(response.data)
+      
+      // Check if any AI feedback is still being processed
+      // AI feedback is pending if: it's null/undefined, or it exists but has no overall_score and no error
+      const hasPendingFeedback = response.data?.question_analytics?.some(
+        (qa: QuestionAnalytics) => {
+          if (!qa.ai_feedback) return true // No feedback yet
+          const feedback = qa.ai_feedback as any
+          // If it has an error, it's done (even if failed)
+          if (feedback.error) return false
+          // If it has overall_score, it's done
+          if (feedback.overall_score !== undefined && feedback.overall_score !== null) return false
+          // Otherwise, it's still pending
+          return true
+        }
+      )
+      
+      return hasPendingFeedback
     } catch (error) {
       console.error('Error fetching analytics:', error)
-      alert('Failed to load analytics')
+      if (showLoading) {
+        alert('Failed to load analytics')
+      }
+      return false
     } finally {
-      setLoadingAnalytics(false)
+      if (showLoading) {
+        setLoadingAnalytics(false)
+      }
     }
   }
 
@@ -217,6 +281,37 @@ export default function AnalyticsPage() {
 
     fetchData()
   }, [testId, candidateUserId])
+
+  // Polling for AI feedback updates
+  useEffect(() => {
+    if (!selectedCandidate || !testId || typeof testId !== 'string') return
+    
+    // Check if analytics has pending AI feedback
+    const hasPendingFeedback = analytics?.question_analytics?.some(
+      (qa: QuestionAnalytics) => {
+        if (!qa.ai_feedback) return true // No feedback yet
+        const feedback = qa.ai_feedback as any
+        // If it has an error, it's done (even if failed)
+        if (feedback.error) return false
+        // If it has overall_score, it's done
+        if (feedback.overall_score !== undefined && feedback.overall_score !== null) return false
+        // Otherwise, it's still pending
+        return true
+      }
+    )
+    
+    if (!hasPendingFeedback) return // No pending feedback, stop polling
+    
+    // Poll every 5 seconds for AI feedback updates
+    const pollInterval = setInterval(async () => {
+      const stillPending = await fetchAnalytics(selectedCandidate, false)
+      if (!stillPending) {
+        clearInterval(pollInterval)
+      }
+    }, 5000)
+    
+    return () => clearInterval(pollInterval)
+  }, [selectedCandidate, testId, analytics])
 
   const handleCandidateSelect = (userId: string) => {
     setSelectedCandidate(userId)
@@ -890,7 +985,7 @@ export default function AnalyticsPage() {
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
                       <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Score</div>
-                      <div style={{ fontSize: "2rem", fontWeight: 700 }}>{analytics.submission.score}</div>
+                      <div style={{ fontSize: "2rem", fontWeight: 700 }}>{analytics.submission.score} / 100</div>
                       </div>
                       <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Started</div>
@@ -904,7 +999,8 @@ export default function AnalyticsPage() {
 
                     {/* Overall Score Deduction Reasons */}
                     {(() => {
-                      const maxPossibleScore = analytics.question_analytics.length * 100
+                      // Score is already normalized to 100 in backend, so max is always 100
+                      const maxPossibleScore = 100
                       const actualScore = analytics.submission.score
                       const scoreDifference = maxPossibleScore - actualScore
                       
