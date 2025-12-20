@@ -1,13 +1,13 @@
 'use client'
 
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useRouter } from 'next/router'
 import { useSession } from 'next-auth/react'
 import { GetServerSideProps } from 'next'
 import { requireAuth } from '../../../../lib/auth'
 import Link from 'next/link'
 import dsaApi from '../../../../lib/dsa/api'
-import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video } from 'lucide-react'
+import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video, Loader2 } from 'lucide-react'
 import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
 import { useMultiLiveProctorAdmin } from '../../../../hooks/useMultiLiveProctorAdmin'
 
@@ -129,6 +129,7 @@ export default function AnalyticsPage() {
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
   const [showLiveProctoring, setShowLiveProctoring] = useState(false)
+  const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   
   // Memoize proctorAssessmentId to prevent infinite loops
   const proctorAssessmentId = useMemo(() => (testId as string) || "", [testId])
@@ -231,6 +232,22 @@ export default function AnalyticsPage() {
       setLoadingProctorLogs(false)
     }
   }
+
+  // Handle Live Proctoring cooldown when dashboard closes
+  const prevShowLiveProctoringRef = useRef(showLiveProctoring)
+  useEffect(() => {
+    // Check if dashboard was just closed (changed from true to false)
+    if (prevShowLiveProctoringRef.current === true && showLiveProctoring === false) {
+      // Dashboard was just closed, start 10-second cooldown
+      setIsLiveProctoringCooldown(true)
+      const timer = setTimeout(() => {
+        setIsLiveProctoringCooldown(false)
+        }, 8000) // 8 seconds
+
+      return () => clearTimeout(timer)
+    }
+    prevShowLiveProctoringRef.current = showLiveProctoring
+  }, [showLiveProctoring])
 
   useEffect(() => {
     if (!testId || typeof testId !== 'string') return
@@ -1127,22 +1144,33 @@ export default function AnalyticsPage() {
                     <button
                       type="button"
                       onClick={() => setShowLiveProctoring(true)}
+                      disabled={isLiveProctoringCooldown}
                       style={{
                         padding: "0.5rem 1rem",
                         fontSize: "0.875rem",
                         display: "flex",
                         alignItems: "center",
                         gap: "0.5rem",
-                        backgroundColor: "#3b82f6",
+                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
                         color: "#ffffff",
                         border: "none",
                         borderRadius: "0.5rem",
-                        cursor: "pointer",
+                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
                         fontWeight: 600,
+                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
                       }}
                     >
-                      <Eye size={16} />
-                      Open Live Proctoring
+                      {isLiveProctoringCooldown ? (
+                        <>
+                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+                          Please wait...
+                        </>
+                      ) : (
+                        <>
+                          <Eye size={16} />
+                          Open Live Proctoring
+                        </>
+                      )}
                     </button>
                   </div>
                   <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
@@ -1771,6 +1799,16 @@ export default function AnalyticsPage() {
           adminId={session.user.email || session.user.id || 'admin'}
         />
       )}
+      <style jsx>{`
+        @keyframes spin {
+          from {
+            transform: rotate(0deg);
+          }
+          to {
+            transform: rotate(360deg);
+          }
+        }
+      `}</style>
     </div>
   )
 }
