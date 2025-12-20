@@ -50,6 +50,21 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
+# SQL CATEGORIES AND CONSTANTS
+# ============================================================================
+
+# SQL categories for classification
+SQL_CATEGORIES = [
+    "select",       # Basic SELECT queries
+    "join",         # JOIN operations (INNER, LEFT, RIGHT, FULL)
+    "aggregation",  # GROUP BY, HAVING, COUNT, SUM, AVG
+    "subquery",     # Nested queries, EXISTS, IN
+    "window",       # Window functions (ROW_NUMBER, RANK, LAG, LEAD)
+    "manipulation", # INSERT, UPDATE, DELETE (less common for assessments)
+]
+
+
+# ============================================================================
 # SQL QUESTION GENERATION
 # ============================================================================
 
@@ -112,40 +127,152 @@ async def _generate_sql_questions(
         except Exception as exc:
             logger.warning(f"DSA SQL generator failed: {exc}. Falling back to basic generation")
     
-    # Fallback: Basic SQL question generation using OpenAI
-    logger.info("Using basic SQL question generation (OpenAI)")
+    # Fallback: Comprehensive SQL question generation using OpenAI
+    logger.info("Using comprehensive SQL question generation (OpenAI)")
     
-    prompt = f"""You are an expert SQL assessment writer. Generate {count} SQL question(s) for the topic: {topic}.
+    # Determine SQL category based on topic
+    topic_lower = topic.lower()
+    sql_category = "select"  # default
+    if any(kw in topic_lower for kw in ["join", "inner", "left", "right", "outer"]):
+        sql_category = "join"
+    elif any(kw in topic_lower for kw in ["group", "having", "count", "sum", "avg", "aggregate"]):
+        sql_category = "aggregation"
+    elif any(kw in topic_lower for kw in ["subquery", "nested", "exists", "in"]):
+        sql_category = "subquery"
+    elif any(kw in topic_lower for kw in ["window", "row_number", "rank", "lag", "lead", "partition"]):
+        sql_category = "window"
+    elif any(kw in topic_lower for kw in ["insert", "update", "delete", "manipulate"]):
+        sql_category = "manipulation"
+    
+    # Determine table count based on difficulty
+    if difficulty.lower() == "easy":
+        table_count = "1-2 tables"
+    elif difficulty.lower() == "medium":
+        table_count = "2-3 tables"
+    else:  # hard
+        table_count = "3-4 tables"
+    
+    prompt = f"""You are an expert SQL question generator for technical assessments.
+Generate {count} comprehensive SQL question(s) for the topic: {topic}.
 
+Topic: {topic}
 Difficulty: {difficulty}
+SQL Category: {sql_category}
 Experience Mode: {experience_mode}
+Recommended Tables: {table_count}
 {f"Additional Requirements: {additional_requirements}" if additional_requirements else ""}
 
-REQUIREMENTS:
-1. Each question must include:
-   - Clear problem statement
-   - Database schema (table names, columns, data types)
-   - Sample data (at least 3-5 rows per table)
-   - Expected query task
-2. Question complexity should match {difficulty} level:
-   - Easy: Single table SELECT with WHERE/ORDER BY
-   - Medium: JOIN operations, GROUP BY, subqueries
-   - Hard: Complex JOINs, window functions, CTEs, optimization
-3. Make questions realistic and practical
-4. Include sample data that demonstrates the expected result
+=== GENERATE JSON WITH THIS EXACT STRUCTURE ===
 
-Output format (JSON object with questions array):
 {{
   "questions": [
     {{
-      "question": "<Complete question text with schema and sample data>",
-      "type": "SQL",
-      "difficulty": "{difficulty}"
+      "title": "Problem Title",
+      
+      "description": "Clear problem statement explaining what data needs to be retrieved or manipulated. Describe the business scenario. NO table schemas here, NO sample data here. Just the problem description.",
+      
+      "difficulty": "{difficulty}",
+      
+      "sql_category": "{sql_category}",
+      
+      "schemas": {{
+        "employees": {{
+          "columns": {{
+            "id": "INT PRIMARY KEY",
+            "name": "VARCHAR(100)",
+            "department_id": "INT",
+            "salary": "DECIMAL(10,2)",
+            "hire_date": "DATE"
+          }}
+        }},
+        "departments": {{
+          "columns": {{
+            "id": "INT PRIMARY KEY",
+            "name": "VARCHAR(100)",
+            "manager_id": "INT"
+          }}
+        }}
+      }},
+      
+      "sample_data": {{
+        "employees": [
+          [1, "Alice", 1, 75000.00, "2020-01-15"],
+          [2, "Bob", 2, 65000.00, "2019-06-20"],
+          [3, "Charlie", 1, 80000.00, "2018-03-10"]
+        ],
+        "departments": [
+          [1, "Engineering", 3],
+          [2, "Marketing", 2]
+        ]
+      }},
+      
+      "constraints": [
+        "Return results ordered by salary descending",
+        "Include only employees hired after 2019-01-01",
+        "Handle NULL values appropriately"
+      ],
+      
+      "starter_query": "-- Write your SQL query here\\n\\nSELECT ",
+      
+      "hints": [
+        "Consider using a JOIN to combine employee and department data",
+        "Use WHERE clause for filtering"
+      ],
+      
+      "evaluation": {{
+        "engine": "postgres",
+        "comparison": "result_set",
+        "order_sensitive": true
+      }}
     }}
   ]
 }}
 
-Return ONLY a JSON object with questions array."""
+=== CRITICAL REQUIREMENTS ===
+
+1. SQL CATEGORY (required):
+   Must be one of: "select", "join", "aggregation", "subquery", "window", "manipulation"
+   Suggested category: {sql_category}
+
+2. SCHEMAS (required):
+   - Create realistic table structures for the problem
+   - Use appropriate data types: INT, VARCHAR, DECIMAL, DATE, TIMESTAMP, BOOLEAN
+   - Include PRIMARY KEY constraints
+   - Use foreign key relationships where appropriate
+   - Easy: 1-2 tables, Medium: 2-3 tables, Hard: 3-4 tables
+
+3. SAMPLE DATA (required):
+   - Provide 3-5 rows per table
+   - Data must be realistic and consistent with schemas
+   - Include edge cases in data (nulls, duplicates if relevant)
+   - Data should be small enough to understand but complete enough to test logic
+
+4. CONSTRAINTS (required):
+   - List specific requirements for the query output
+   - Include ordering, filtering, and formatting requirements
+   - Be explicit about edge cases to handle
+
+5. DESCRIPTION (required):
+   - Write a clear business problem
+   - Do NOT include table schemas in description
+   - Do NOT include sample data in description
+   - Focus on WHAT to retrieve, not HOW
+
+6. STARTER QUERY:
+   - Simple comment and SELECT starter
+   - Do NOT provide solution hints in starter
+
+7. DO NOT INCLUDE:
+   - expected_output (will be computed by running reference query)
+   - reference_solution (admin will provide separately)
+   - stdin/stdout testcases (SQL uses result set comparison)
+
+8. DIFFICULTY GUIDELINES:
+   - Easy: Single table, basic SELECT, WHERE, ORDER BY
+   - Medium: JOINs, GROUP BY, HAVING, basic subqueries
+   - Hard: Window functions, complex subqueries, CTEs, multiple JOINs
+
+IMPORTANT: Return ONLY valid JSON. No markdown code blocks, no explanations."""
 
     client = _get_openai_client()
     try:
@@ -168,27 +295,120 @@ Return ONLY a JSON object with questions array."""
         questions_list = data["questions"]
     elif isinstance(data, list):
         questions_list = data
+    elif isinstance(data, dict) and ("title" in data or "description" in data):
+        # Single question object (new comprehensive format)
+        questions_list = [data]
     elif isinstance(data, dict) and "question" in data:
-        # Single question object
+        # Single question object (old format)
         questions_list = [data]
     else:
         logger.error(f"Unexpected response format for SQL questions: {data}")
         raise HTTPException(status_code=500, detail="Invalid response format from AI")
     
-    # Format questions
+    # Format questions with comprehensive structure
     result = []
     for q in questions_list[:count]:
-        if isinstance(q, dict) and "question" in q:
-            result.append({
-                "question": q["question"],
-                "type": "SQL",
-                "difficulty": difficulty
-            })
+        if not isinstance(q, dict):
+            continue
+        
+        # Extract components
+        title = q.get("title", "SQL Query Challenge")
+        description = q.get("description", q.get("question", ""))
+        schemas = q.get("schemas", {})
+        sample_data = q.get("sample_data", {})
+        constraints = q.get("constraints", [])
+        starter_query = q.get("starter_query", "-- Write your SQL query here\n\nSELECT ")
+        hints = q.get("hints", [])
+        evaluation = q.get("evaluation", {
+            "engine": "postgres",
+            "comparison": "result_set",
+            "order_sensitive": False
+        })
+        question_sql_category = q.get("sql_category", sql_category)
+        
+        # Validate sql_category
+        if question_sql_category not in SQL_CATEGORIES:
+            logger.warning(f"Invalid sql_category: {question_sql_category}, defaulting to '{sql_category}'")
+            question_sql_category = sql_category
+        
+        # Validate required fields
+        if not schemas:
+            logger.warning("SQL question missing schemas, skipping")
+            continue
+        
+        # Remove any expected_output or reference_solution (should never be there)
+        if "expected_output" in q:
+            logger.warning("Removed unexpected 'expected_output' from AI response")
+        if "reference_solution" in q:
+            logger.warning("Removed unexpected 'reference_solution' from AI response")
+        
+        # Build formatted question text
+        question_text = f"**{title}**\n\n{description}"
+        
+        # Add schemas
+        if schemas:
+            question_text += "\n\n**Database Schema:**\n"
+            for table_name, table_def in schemas.items():
+                columns = table_def.get("columns", {})
+                question_text += f"\n**Table: `{table_name}`**\n"
+                for col_name, col_type in columns.items():
+                    question_text += f"- `{col_name}`: {col_type}\n"
+        
+        # Add sample data
+        if sample_data:
+            question_text += "\n**Sample Data:**\n"
+            for table_name, rows in sample_data.items():
+                if rows and len(rows) > 0:
+                    question_text += f"\n**{table_name}:**\n"
+                    # Get column names from schema
+                    if table_name in schemas:
+                        columns = list(schemas[table_name].get("columns", {}).keys())
+                        question_text += "| " + " | ".join(columns) + " |\n"
+                        question_text += "|" + "|".join("---" for _ in columns) + "|\n"
+                        
+                        # Add rows (show all rows since it's sample data)
+                        for row in rows[:5]:  # Limit to 5 rows for display
+                            question_text += "| " + " | ".join(str(val) for val in row) + " |\n"
+                        
+                        if len(rows) > 5:
+                            question_text += f"\n*(... and {len(rows) - 5} more rows)*\n"
+        
+        # Add constraints
+        if constraints:
+            question_text += "\n**Requirements:**\n"
+            for constraint in constraints:
+                question_text += f"- {constraint}\n"
+        
+        # Add hints if available
+        if hints:
+            question_text += "\n**Hints:**\n"
+            for hint in hints:
+                question_text += f"- {hint}\n"
+        
+        # Create question object
+        question_obj = {
+            "question": question_text,
+            "type": "SQL",
+            "difficulty": difficulty,
+            "sql_data": {
+                "title": title,
+                "description": description,
+                "sql_category": question_sql_category,
+                "schemas": schemas,
+                "sample_data": sample_data,
+                "constraints": constraints,
+                "starter_query": starter_query,
+                "hints": hints,
+                "evaluation": evaluation
+            }
+        }
+        
+        result.append(question_obj)
     
     if not result:
         raise HTTPException(status_code=500, detail="No valid SQL questions generated")
     
-    logger.info(f"Successfully generated {len(result)} SQL questions using basic generation")
+    logger.info(f"Successfully generated {len(result)} SQL questions with comprehensive structure")
     return result
 
 
