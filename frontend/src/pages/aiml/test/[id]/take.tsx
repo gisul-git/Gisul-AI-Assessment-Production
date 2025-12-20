@@ -8,6 +8,7 @@ import { useCameraProctor } from '../../../../hooks/useCameraProctor'
 import WebcamPreview from '../../../../components/WebcamPreview'
 import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
 import { useProctorUpload } from '@/hooks/useProctorUpload'
+import { useLiveProctoring } from '../../../../hooks/useLiveProctoring'
 
 const AIMLCompetencyNotebook = dynamic(
   () => import('../../../../components/aiml/competency/AIMLCompetencyNotebook'),
@@ -70,6 +71,8 @@ export default function AIMLTestTakePage() {
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true)
   const [candidateEmail, setCandidateEmail] = useState<string | null>(null)
   const [proctoringEnabled, setProctoringEnabled] = useState(false)
+  const [proctoringSettings, setProctoringSettings] = useState<any>({})
+  const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null)
   const cameraStartRequestedRef = useRef(false)
 
   const getViolationMessage = (eventType: string): string => {
@@ -144,6 +147,62 @@ export default function AIMLTestTakePage() {
       })
     },
   })
+
+  // Get screen stream from window.__screenStream (set by identity-verify gate)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && (window as any).__screenStream) {
+      const stream = (window as any).__screenStream as MediaStream;
+      if (stream && stream.active && stream.getVideoTracks().length > 0) {
+        setLiveProctorScreenStream(stream);
+        console.log('[AIML Take] Found global screen stream for Live Proctoring');
+      }
+    }
+  }, []);
+
+  // Get webcam stream from useCameraProctor
+  const webcamStreamForLiveProctor = isCameraOn && videoRef.current?.srcObject 
+    ? (videoRef.current.srcObject as MediaStream)
+    : null;
+
+  const {
+    isStreaming: isLiveProctoringStreaming,
+    connectionState: liveProctoringConnectionState,
+    error: liveProctoringError,
+    sessionId: liveProctoringSessionId,
+    startStreaming: startLiveProctoring,
+    stopStreaming: stopLiveProctoring,
+  } = useLiveProctoring({
+    assessmentId: String(testId || ''),
+    candidateId: candidateEmail || userId || '',
+    enabled: proctoringSettings?.liveProctoringEnabled === true,
+    preScreenStream: liveProctorScreenStream,
+    onError: (error) => {
+      console.error('[AIML Take] Live Proctoring error:', error);
+    },
+    debugMode: false,
+  });
+
+  // Start Live Proctoring when test starts
+  useEffect(() => {
+    if (timeRemaining > 0 && !submitted && proctoringSettings?.liveProctoringEnabled === true && liveProctorScreenStream && webcamStreamForLiveProctor) {
+      console.log('[AIML Take] Starting Live Proctoring...');
+      startLiveProctoring().catch(err => {
+        console.error('[AIML Take] Failed to start Live Proctoring:', err);
+      });
+    }
+  }, [timeRemaining, submitted, proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
+
+  // Stop Live Proctoring when assessment ends
+  useEffect(() => {
+    if (submitted) {
+      stopLiveProctoring();
+    }
+    return () => {
+      if (submitted) {
+        stopLiveProctoring();
+      }
+    };
+  }, [submitted, stopLiveProctoring]);
 
   // Enable proctoring (tab switch / focus lost) once exam is in progress
   useEffect(() => {
@@ -241,6 +300,7 @@ export default function AIMLTestTakePage() {
       // Only explicit true enables camera/model; missing/false => OFF (per PROCTORING_AI_TOGGLE_NOTES.md)
       const aiEnabled = testData?.proctoringSettings?.aiProctoringEnabled === true
       setCameraProctorEnabled(aiEnabled)
+      setProctoringSettings(testData?.proctoringSettings || {})
       
       // Use time_remaining_seconds from backend if available (test already started)
       // Otherwise, auto-start the test and use full duration

@@ -5,6 +5,8 @@ import { requireAuth } from '../../../../lib/auth'
 import Link from 'next/link'
 import aimlApi from '../../../../lib/aiml/api'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock } from 'lucide-react'
+import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
+import { useSession } from 'next-auth/react'
 
 interface AIFeedback {
   overall_score: number
@@ -73,6 +75,7 @@ interface Candidate {
 
 export default function AnalyticsPage() {
   const router = useRouter()
+  const { data: session } = useSession()
   const { id: testId, candidate: candidateUserId } = router.query
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null)
@@ -83,6 +86,7 @@ export default function AnalyticsPage() {
   const [eventTypeLabels, setEventTypeLabels] = useState<Record<string, string>>({})
   const [loadingProctorLogs, setLoadingProctorLogs] = useState(false)
   const [showProctorLogs, setShowProctorLogs] = useState(false)
+  const [showLiveProctoring, setShowLiveProctoring] = useState(false)
   const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
   const [newCandidateName, setNewCandidateName] = useState("")
   const [newCandidateEmail, setNewCandidateEmail] = useState("")
@@ -870,6 +874,45 @@ export default function AnalyticsPage() {
                   </div>
                 </div>
 
+                {/* Live Proctoring Section */}
+                <div style={{
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "0.75rem",
+                  padding: "1.5rem",
+                  backgroundColor: "#ffffff",
+                  marginBottom: "1.5rem",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
+                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowLiveProctoring(true)}
+                      style={{
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        backgroundColor: "#3b82f6",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: "0.5rem",
+                        cursor: "pointer",
+                        fontWeight: 600,
+                      }}
+                    >
+                      <Eye size={16} />
+                      Open Live Proctoring
+                    </button>
+                  </div>
+                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
+                    Monitor candidates in real-time via webcam and screen sharing
+                  </p>
+                </div>
+
                 {/* Proctoring Logs Section */}
                 <div style={{
                   border: "1px solid #e2e8f0",
@@ -1549,6 +1592,16 @@ export default function AnalyticsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Live Proctoring Dashboard */}
+      {showLiveProctoring && testId && typeof testId === 'string' && session?.user && (
+        <LiveProctoringDashboard
+          isOpen={showLiveProctoring}
+          onClose={() => setShowLiveProctoring(false)}
+          assessmentId={testId}
+          adminId={session.user.email || session.user.id || 'admin'}
+        />
       )}
     </div>
   )

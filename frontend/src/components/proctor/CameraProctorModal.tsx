@@ -203,11 +203,18 @@ export function CameraProctorModal({
       setScreenStream(stream);
       setScreenShareGranted(true);
       sessionStorage.setItem("screenShareGranted", "true");
+      // Expose screen stream globally so Live Proctoring can reuse it
+      if (typeof window !== "undefined") {
+        (window as any).__screenStream = stream;
+      }
       
       stream.getVideoTracks()[0].onended = () => {
         setScreenShareGranted(false);
         setScreenStream(null);
         sessionStorage.removeItem("screenShareGranted");
+        if (typeof window !== "undefined") {
+          (window as any).__screenStream = null;
+        }
       };
     } catch (error) {
       console.error("Screen share error:", error);

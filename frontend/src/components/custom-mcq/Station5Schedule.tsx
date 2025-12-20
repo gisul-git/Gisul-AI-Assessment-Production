@@ -23,9 +23,18 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     assessmentData.endTime ? new Date(assessmentData.endTime).toISOString().slice(0, 16) : ""
   );
   const [duration, setDuration] = useState(assessmentData.duration?.toString() || "");
+  const [accessTimeBeforeStart, setAccessTimeBeforeStart] = useState(
+    assessmentData.accessTimeBeforeStart?.toString() || "15"
+  );
   const [passPercentage, setPassPercentage] = useState(assessmentData.passPercentage?.toString() || "50");
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(
     (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled ?? false
+  );
+  const [showResultToCandidate, setShowResultToCandidate] = useState(
+    (assessmentData as any)?.showResultToCandidate ?? true
+  );
+  const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(
+    (assessmentData as any)?.proctoringSettings?.liveProctoringEnabled ?? false
   );
   const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
   const [sendingEmails, setSendingEmails] = useState(false);
@@ -37,10 +46,26 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       startTime: startTime ? new Date(startTime).toISOString() : undefined,
       endTime: endTime ? new Date(endTime).toISOString() : undefined,
       duration: duration ? parseInt(duration) : undefined,
+      accessTimeBeforeStart: accessTimeBeforeStart ? parseInt(accessTimeBeforeStart) : 15,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
-      proctoringSettings: { aiProctoringEnabled },
-    });
-  }, [accessMode, examMode, startTime, endTime, duration, passPercentage, aiProctoringEnabled]);
+      proctoringSettings: {
+        aiProctoringEnabled,
+        liveProctoringEnabled,
+      } as CustomMCQAssessment["proctoringSettings"],
+      showResultToCandidate,
+    } as any);
+  }, [
+    accessMode,
+    examMode,
+    startTime,
+    endTime,
+    duration,
+    accessTimeBeforeStart,
+    passPercentage,
+    aiProctoringEnabled,
+    liveProctoringEnabled,
+    showResultToCandidate,
+  ]);
 
   const handleSendInvitations = async (template: {
     subject: string;
@@ -156,7 +181,7 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
               />
               <strong style={{ color: "#1E5A3B" }}>Strict Window</strong>
               <p style={{ margin: "0.5rem 0 0 0", fontSize: "0.875rem", color: "#2D7A52" }}>
-                Exam starts and ends at scheduled times
+                Assessment starts at a fixed time. Candidates can access before start time for pre-checks.
               </p>
             </label>
             <label
@@ -179,59 +204,115 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
               />
               <strong style={{ color: "#1E5A3B" }}>Flexible Window</strong>
               <p style={{ margin: "0.5rem 0 0 0", fontSize: "0.875rem", color: "#2D7A52" }}>
-                Candidates can start anytime within the window, with a fixed duration
+                Candidates can start anytime within the schedule window. Each candidate gets the full duration from when they start.
               </p>
             </label>
           </div>
 
-          {/* Schedule Times */}
+          {/* Schedule Times - NEW IMPLEMENTATION */}
           <div style={{ display: "flex", flexDirection: "column", gap: "1rem", marginTop: "1.5rem" }}>
-            <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-              <div style={{ flex: 1, minWidth: "200px" }}>
-                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
-                  Start Time <span style={{ color: "#ef4444" }}>*</span>
-                </label>
-                <input
-                  type="datetime-local"
-                  value={startTime}
-                  onChange={(e) => setStartTime(e.target.value)}
-                  required
-                  style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
-                />
-              </div>
-              <div style={{ flex: 1, minWidth: "200px" }}>
-                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
-                  End Time <span style={{ color: "#ef4444" }}>*</span>
-                </label>
-                <input
-                  type="datetime-local"
-                  value={endTime}
-                  onChange={(e) => setEndTime(e.target.value)}
-                  required
-                  style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
-                />
-              </div>
-            </div>
-
-            {/* Duration (for flexible mode) */}
-            {examMode === "flexible" && (
-              <div>
-                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
-                  Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
-                </label>
-                <input
-                  type="number"
-                  value={duration}
-                  onChange={(e) => setDuration(e.target.value)}
-                  placeholder="e.g., 60"
-                  min={1}
-                  required
-                  style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
-                />
-                <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#2D7A52" }}>
-                  Candidates can start the test anytime between start and end time. Once started, they have this duration to complete.
-                </p>
-              </div>
+            {examMode === "strict" ? (
+              <>
+                {/* Strict Mode: Start Time + Duration */}
+                <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: "200px" }}>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
+                      Start Time <span style={{ color: "#ef4444" }}>*</span>
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={startTime}
+                      onChange={(e) => setStartTime(e.target.value)}
+                      required
+                      style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
+                    />
+                  </div>
+                  <div style={{ flex: 1, minWidth: "200px" }}>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
+                      Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
+                    </label>
+                    <input
+                      type="number"
+                      value={duration}
+                      onChange={(e) => setDuration(e.target.value)}
+                      placeholder="e.g., 80"
+                      min={1}
+                      required
+                      style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
+                    />
+                  </div>
+                </div>
+                <div style={{ flex: 1, minWidth: "200px" }}>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
+                    Access Time Before Start (minutes)
+                  </label>
+                  <input
+                    type="number"
+                    value={accessTimeBeforeStart}
+                    onChange={(e) => setAccessTimeBeforeStart(e.target.value)}
+                    placeholder="e.g., 15"
+                    min={0}
+                    style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
+                  />
+                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#2D7A52" }}>
+                    Candidates can access the assessment this many minutes before the start time to complete pre-checks. Questions will start automatically at the scheduled start time.
+                  </p>
+                </div>
+                {startTime && duration && (
+                  <div style={{ padding: "0.75rem", backgroundColor: "#E8FAF0", borderRadius: "0.5rem", fontSize: "0.875rem", color: "#2D7A52" }}>
+                    <strong>Assessment will end at:</strong> {
+                      new Date(new Date(startTime).getTime() + parseInt(duration || "0") * 60000).toLocaleString()
+                    }
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {/* Flexible Mode: Start Time + End Time + Duration */}
+                <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: "200px" }}>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
+                      Schedule Start Time <span style={{ color: "#ef4444" }}>*</span>
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={startTime}
+                      onChange={(e) => setStartTime(e.target.value)}
+                      required
+                      style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
+                    />
+                  </div>
+                  <div style={{ flex: 1, minWidth: "200px" }}>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
+                      Schedule End Time <span style={{ color: "#ef4444" }}>*</span>
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={endTime}
+                      onChange={(e) => setEndTime(e.target.value)}
+                      required
+                      style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
+                    />
+                  </div>
+                </div>
+                <div style={{ flex: 1, minWidth: "200px" }}>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
+                    Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={duration}
+                    onChange={(e) => setDuration(e.target.value)}
+                    placeholder="e.g., 70"
+                    min={1}
+                    required
+                    style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
+                  />
+                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#2D7A52" }}>
+                    Candidates can start the assessment anytime between the schedule start and end times. Once started, they have this duration to complete the assessment.
+                  </p>
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -255,9 +336,11 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
           </div>
         </div>
 
-        {/* Proctoring Settings (single checkbox) */}
+        {/* Proctoring Settings */}
         <div style={{ padding: "1.5rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
           <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Proctoring Settings</h3>
+          
+          {/* AI Proctoring Checkbox */}
           <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer" }}>
             <input
               type="checkbox"
@@ -271,6 +354,27 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
               </div>
               <div style={{ fontSize: "0.875rem", color: "#2D7A52", marginTop: "0.25rem" }}>
                 Photo capture + fullscreen + screen share gate remain required regardless.
+              </div>
+            </span>
+          </label>
+        </div>
+
+        {/* Result Visibility Settings */}
+        <div style={{ padding: "1.5rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
+          <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Result Visibility</h3>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={showResultToCandidate}
+              onChange={(e) => setShowResultToCandidate(e.target.checked)}
+              style={{ marginTop: "0.25rem" }}
+            />
+            <span>
+              <div style={{ fontWeight: 600, color: "#1E5A3B" }}>
+                Show result to candidate
+              </div>
+              <div style={{ fontSize: "0.875rem", color: "#2D7A52", marginTop: "0.25rem" }}>
+                If checked, candidates will see their results after submission. If unchecked, candidates will only see an "Assessment submitted" message.
               </div>
             </span>
           </label>

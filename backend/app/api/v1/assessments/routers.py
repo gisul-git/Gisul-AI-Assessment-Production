@@ -62,7 +62,9 @@ from .schemas import (
     AddCustomTopicRequest,
 )
 from .topic_suggestions import suggest_topic_contexts, generate_topic_context_summary, _detect_category_semantically, suggest_topics, classify_technical_topic
+# Import all assessment services from the new services package (single entry point)
 from .services import (
+    # Legacy compatibility functions (wrapped from services.py via legacy_compat)
     determine_topic_coding_support,
     generate_questions_for_topic_safe,
     generate_topics_from_input,
@@ -74,8 +76,7 @@ from .services import (
     get_relevant_question_types_from_domain,
     infer_language_from_skill,
     suggest_time_and_score,
-)
-from .topic_service_v2 import (
+    # V2 topic and question generation
     generate_questions_for_row_v2,
     generate_questions_for_topic_v2,
     generate_topics_v2,

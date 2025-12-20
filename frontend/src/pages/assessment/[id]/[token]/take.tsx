@@ -23,6 +23,7 @@ import { useFaceMesh, type DetectionResult } from "@/hooks/useFaceMesh";
 import { useProctorUpload } from "@/hooks/useProctorUpload";
 import WebcamPreview from "@/components/WebcamPreview";
 import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
+import { useLiveProctoring } from "@/hooks/useLiveProctoring";
 
 // Lazy load Monaco Editor
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
@@ -227,7 +228,8 @@ export default function CandidateAssessmentPage() {
   const [proctoringEnabled, setProctoringEnabled] = useState(false);
   // AI (camera-based) proctoring toggle from schedule.proctoringSettings
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(false);
-
+  const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(false);
+  const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
   // Proctoring refs
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
@@ -286,6 +288,62 @@ export default function CandidateAssessmentPage() {
     assessmentId: assessmentIdStr,
     candidateId: candidateIdStr,
   });
+
+  // Get screen stream from window.__screenStream (set by identity-verify gate)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && (window as any).__screenStream) {
+      const stream = (window as any).__screenStream as MediaStream;
+      if (stream && stream.active && stream.getVideoTracks().length > 0) {
+        setLiveProctorScreenStream(stream);
+        console.log('[AI Assessment Take] Found global screen stream for Live Proctoring');
+      }
+    }
+  }, []);
+
+  // Get webcam stream from webcamStreamRef
+  const webcamStreamForLiveProctor = webcamLive && webcamStreamRef.current 
+    ? webcamStreamRef.current
+    : null;
+
+  const {
+    isStreaming: isLiveProctoringStreaming,
+    connectionState: liveProctoringConnectionState,
+    error: liveProctoringError,
+    sessionId: liveProctoringSessionId,
+    startStreaming: startLiveProctoring,
+    stopStreaming: stopLiveProctoring,
+  } = useLiveProctoring({
+    assessmentId: assessmentIdStr,
+    candidateId: candidateIdStr,
+    enabled: liveProctoringEnabled,
+    preScreenStream: liveProctorScreenStream,
+    onError: (error) => {
+      console.error('[AI Assessment Take] Live Proctoring error:', error);
+    },
+    debugMode: false,
+  });
+
+  // Start Live Proctoring when assessment starts
+  useEffect(() => {
+    if (appState === 'ready' && liveProctoringEnabled && liveProctorScreenStream && webcamStreamForLiveProctor) {
+      console.log('[AI Assessment Take] Starting Live Proctoring...');
+      startLiveProctoring().catch(err => {
+        console.error('[AI Assessment Take] Failed to start Live Proctoring:', err);
+      });
+    }
+  }, [appState, liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
+
+  // Stop Live Proctoring when assessment ends
+  useEffect(() => {
+    if (appState === 'finished') {
+      stopLiveProctoring();
+    }
+    return () => {
+      if (appState === 'finished') {
+        stopLiveProctoring();
+      }
+    };
+  }, [appState, stopLiveProctoring]);
 
   // ============================================================================
   // PROCTORING FUNCTIONS
@@ -416,6 +474,7 @@ export default function CandidateAssessmentPage() {
     enabled: aiProctoringEnabled && webcamLive,
   });
 
+
   // Update FaceMesh status
   useEffect(() => {
     if (modelError) {
@@ -526,98 +585,10 @@ export default function CandidateAssessmentPage() {
     return null;
   }, []);
 
-  // Retrieve screen stream from global (set by identity-verify.tsx) for screen snapshots
-  useEffect(() => {
-    if (!isClient) return;
-    
-    const globalScreenStream = (window as any).__screenStream as MediaStream | undefined;
-    if (globalScreenStream && globalScreenStream.active) {
-      console.log('[Screen] Retrieved global screen stream for snapshots');
-      screenStreamRef.current = globalScreenStream;
-      
-      // Create a hidden video element to capture from
-      const video = document.createElement('video');
-      video.srcObject = globalScreenStream;
-      video.muted = true;
-      video.playsInline = true;
-      video.autoplay = true;
-      // Use small but visible size to ensure browser renders it
-      video.style.position = 'fixed';
-      video.style.left = '-9999px';
-      video.style.top = '-9999px';
-      video.style.width = '320px';
-      video.style.height = '240px';
-      video.style.opacity = '0.01';
-      video.style.pointerEvents = 'none';
-      document.body.appendChild(video);
-      
-      // Wait for video to be ready with valid dimensions
-      const waitForReady = () => {
-        return new Promise<void>((resolve) => {
-          const checkReady = () => {
-            if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
-              console.log('[Screen] Video ready:', video.videoWidth, 'x', video.videoHeight);
-              resolve();
-            } else {
-              setTimeout(checkReady, 100);
-            }
-          };
-          
-          video.onloadeddata = () => {
-            console.log('[Screen] Video loadeddata event');
-            checkReady();
-          };
-          
-          // Also check immediately in case already loaded
-          checkReady();
-        });
-      };
-      
-      video.play()
-        .then(() => {
-          console.log('[Screen] Video playing');
-          return waitForReady();
-        })
-        .then(() => {
-          screenVideoRef.current = video;
-          console.log('[Screen] ✓ Screen video ready for capture:', video.videoWidth, 'x', video.videoHeight);
-        })
-        .catch(err => {
-          console.warn('[Screen] Failed to play screen video:', err);
-        });
-      
-      // Listen for stream end
-      globalScreenStream.getVideoTracks()[0]?.addEventListener('ended', () => {
-        console.log('[Screen] Screen share ended');
-        screenStreamRef.current = null;
-        if (screenVideoRef.current) {
-          screenVideoRef.current.remove();
-          screenVideoRef.current = null;
-        }
-      });
-    } else {
-      console.log('[Screen] No global screen stream available');
-    }
-    
-    return () => {
-      // Cleanup hidden video element on unmount
-      if (screenVideoRef.current) {
-        screenVideoRef.current.remove();
-        screenVideoRef.current = null;
-      }
-      // Stop screen stream on unmount
-      if (screenStreamRef.current) {
-        screenStreamRef.current.getTracks().forEach(t => t.stop());
-        screenStreamRef.current = null;
-      }
-      // Clear global reference
-      if ((window as any).__screenStream) {
-        delete (window as any).__screenStream;
-      }
-    };
-  }, [isClient]);
+  // Screen stream is now managed by useLiveProctoring hook
+  // The old setup code has been removed as it's no longer needed
 
-  // Start proctoring when assessment is ready
+  // Start AI/tab proctoring when assessment is ready
   useEffect(() => {
     if (appState === 'ready' && !proctoringEnabled && isClient) {
       console.log('[Proctor] Starting proctoring...');
@@ -634,6 +605,7 @@ export default function CandidateAssessmentPage() {
       }
     }
   }, [appState, proctoringEnabled, isClient, aiProctoringEnabled, startWebcam]);
+
 
   // Safety: if proctoring is already enabled and we later discover AI flag is ON,
   // ensure webcam starts as soon as possible.
@@ -1341,6 +1313,7 @@ export default function CandidateAssessmentPage() {
 
     setAppState("submitting");
 
+
     try {
       // Step 1: Save all answers (force immediate save, clear debounce)
       if (saveTimeoutRef.current) {
@@ -1609,11 +1582,13 @@ export default function CandidateAssessmentPage() {
         };
         console.log("[take.tsx] Topics_v2 structure:", topics_v2);
 
-        // Read AI proctoring flag from schedule.proctoringSettings (if present)
-        const aiFlagFromSchedule =
-          assessment?.schedule?.proctoringSettings?.aiProctoringEnabled;
-        // Only explicit true enables AI camera proctoring; missing/false => OFF
+        // Read proctoring flags from schedule.proctoringSettings (if present)
+        const proctoringSettings = assessment?.schedule?.proctoringSettings;
+        const aiFlagFromSchedule = proctoringSettings?.aiProctoringEnabled;
+        const liveFlagFromSchedule = proctoringSettings?.liveProctoringEnabled;
+        // Only explicit true enables proctoring; missing/false => OFF
         setAiProctoringEnabled(aiFlagFromSchedule === true);
+        setLiveProctoringEnabled(liveFlagFromSchedule === true);
 
         // Transform topics_v2 into sections
         const transformed = transformTopicsV2ToSections(topics_v2);

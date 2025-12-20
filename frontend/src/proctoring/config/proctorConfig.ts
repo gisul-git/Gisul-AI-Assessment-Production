@@ -26,8 +26,6 @@ export interface ProctorConfig {
   // Extension Detection
   enableExtensionDetection: boolean;
   
-  // Human Camera Monitoring (Live Proctoring)
-  enableHumanCameraMonitoring: boolean;
   
   // External Device Detection
   enableExternalDeviceDetection: boolean;
@@ -45,7 +43,6 @@ export const defaultProctorConfig: ProctorConfig = {
   enableCopyPasteBlocking: false,
   enableScreenShareMonitoring: false,
   enableExtensionDetection: false,
-  enableHumanCameraMonitoring: false,
   enableExternalDeviceDetection: false,
 };
 
@@ -57,16 +54,13 @@ export function normalizeProctorConfig(backendSettings: any): ProctorConfig {
   // Check if this is the new unified schema
   const isNewSchema = backendSettings && (
     'aiProctoring' in backendSettings ||
-    'liveProctoring' in backendSettings ||
     'enforcedDefaults' in backendSettings
   );
 
   if (isNewSchema) {
     // New unified schema
     const aiEnabled = backendSettings?.aiProctoring || false;
-    const liveEnabled = backendSettings?.liveProctoring || false;
     const aiOptions = backendSettings?.aiProctoringOptions || {};
-    const liveOptions = backendSettings?.liveProctoringOptions || {};
     const enforced = backendSettings?.enforcedDefaults || {};
 
     return {
@@ -78,9 +72,8 @@ export function normalizeProctorConfig(backendSettings: any): ProctorConfig {
       enableTabSwitchDetection: enforced.tabSwitchBlock !== false, // Always enforced
       enableFullscreenMonitoring: enforced.fullscreen !== false, // Always enforced
       enableCopyPasteBlocking: enforced.copyPasteBlock !== false, // Always enforced
-      enableScreenShareMonitoring: liveEnabled && liveOptions.screenShare,
+      enableScreenShareMonitoring: false, // Not in new schema
       enableExtensionDetection: false, // Not in new schema, can be added later
-      enableHumanCameraMonitoring: liveEnabled && liveOptions.webcamStreaming,
       enableExternalDeviceDetection: false, // Not in new schema, can be added later
     };
   } else {
@@ -92,7 +85,6 @@ export function normalizeProctorConfig(backendSettings: any): ProctorConfig {
       enableCopyPasteBlocking: backendSettings?.copyPasteBlocking || false,
       enableScreenShareMonitoring: backendSettings?.liveCameraAndScreenMonitoring || false,
       enableExtensionDetection: backendSettings?.browserExtensionMonitoring || false,
-      enableHumanCameraMonitoring: backendSettings?.liveCameraAndScreenMonitoring || false,
       enableExternalDeviceDetection: backendSettings?.externalDeviceDetection || false,
     };
   }
