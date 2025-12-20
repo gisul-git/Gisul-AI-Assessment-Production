@@ -543,6 +543,7 @@ async def get_custom_mcq_assessment(
                 "subjectiveScore": submission_data.get("subjectiveScore", 0),
                 "subjectiveTotal": submission_data.get("subjectiveTotal", 0),
                 "answerLogs": submission_data.get("answerLogs", {}),  # Include answer logs
+                "submissions": submission_data.get("submissions", []),  # Include graded submissions with marks
             })
         
         assessment_serialized["submissionsList"] = submissions_list

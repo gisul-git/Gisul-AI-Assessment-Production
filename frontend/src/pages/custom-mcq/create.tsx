@@ -456,7 +456,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
     <div style={{ backgroundColor: "#ffffff", minHeight: "100vh", padding: "2rem" }}>
       <div className="container" style={{ maxWidth: "1200px", margin: "0 auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2rem" }}>
-          <h1 style={{ margin: 0, color: "#1E5A3B" }}>Create Custom MCQ Assessment</h1>
+          <h1 style={{ margin: 0, color: "#1E5A3B" }}>Create Custom MCQ/Subjective Assessment</h1>
           {isSaving && (
             <span style={{ fontSize: "0.875rem", color: "#2D7A52", fontStyle: "italic" }}>
               💾 Saving draft...
