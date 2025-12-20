@@ -3534,6 +3534,20 @@ async def generate_question_endpoint_v2(
         if not additional_requirements:
             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
         
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
             question_type=payload.questionType,
@@ -3544,7 +3558,12 @@ async def generate_question_endpoint_v2(
             additional_requirements=additional_requirements,
             experience_mode=experience_mode,
             website_summary=website_summary,  # Legacy
-            company_context=company_context  # New unified field
+            company_context=company_context,  # New unified field
+            job_designation=job_designation,  # ⭐ NEW
+            experience_min=experience_min,  # ⭐ NEW
+            experience_max=experience_max,  # ⭐ NEW
+            company_name=company_name,  # ⭐ NEW
+            assessment_requirements=assessment_requirements  # ⭐ NEW - Highest priority context
         )
         
         if not questions or len(questions) == 0:
@@ -3626,6 +3645,13 @@ async def generate_all_questions_endpoint_v2(
                         if not additional_requirements:
                             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
                         
+                        # ⭐ Extract context-aware personalization parameters
+                        assessment_requirements = assessment.get("requirements")
+                        job_designation = assessment.get("jobDesignation")
+                        experience_min = assessment.get("experienceMin")
+                        experience_max = assessment.get("experienceMax")
+                        company_name = company_context.get("company_name") if company_context else None
+                        
                         questions = await generate_questions_for_row_v2(
                             topic_label=topic["label"],
                             question_type=row["questionType"],
@@ -3636,7 +3662,12 @@ async def generate_all_questions_endpoint_v2(
                             additional_requirements=additional_requirements,
                             experience_mode=assessment.get("experienceMode", "corporate"),
                             website_summary=website_summary,
-                            company_context=company_context
+                            company_context=company_context,
+                            job_designation=job_designation,  # ⭐ NEW
+                            experience_min=experience_min,  # ⭐ NEW
+                            experience_max=experience_max,  # ⭐ NEW
+                            company_name=company_name,  # ⭐ NEW
+                            assessment_requirements=assessment_requirements  # ⭐ NEW
                         )
                         
                         row["questions"] = questions
@@ -3840,6 +3871,13 @@ async def regenerate_single_question_endpoint(
         if not additional_requirements:
             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
         
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
         new_questions = await generate_questions_for_row_v2(
             topic_label=topic["label"],
             question_type=row["questionType"],
@@ -3849,7 +3887,12 @@ async def regenerate_single_question_endpoint(
             additional_requirements=additional_requirements,
             experience_mode=assessment.get("experienceMode", "corporate"),
             website_summary=website_summary,
-            company_context=company_context
+            company_context=company_context,
+            job_designation=job_designation,  # ⭐ NEW
+            experience_min=experience_min,  # ⭐ NEW
+            experience_max=experience_max,  # ⭐ NEW
+            company_name=company_name,  # ⭐ NEW
+            assessment_requirements=assessment_requirements  # ⭐ NEW
         )
         
         if new_questions:
@@ -4795,6 +4838,20 @@ async def generate_question_endpoint_v2(
         if not additional_requirements:
             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
         
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
             question_type=payload.questionType,
@@ -4805,7 +4862,12 @@ async def generate_question_endpoint_v2(
             additional_requirements=additional_requirements,
             experience_mode=experience_mode,
             website_summary=website_summary,  # Legacy
-            company_context=company_context  # New unified field
+            company_context=company_context,  # New unified field
+            job_designation=job_designation,  # ⭐ NEW
+            experience_min=experience_min,  # ⭐ NEW
+            experience_max=experience_max,  # ⭐ NEW
+            company_name=company_name,  # ⭐ NEW
+            assessment_requirements=assessment_requirements  # ⭐ NEW - Highest priority context
         )
         
         if not questions or len(questions) == 0:
@@ -4887,6 +4949,13 @@ async def generate_all_questions_endpoint_v2(
                         if not additional_requirements:
                             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
                         
+                        # ⭐ Extract context-aware personalization parameters
+                        assessment_requirements = assessment.get("requirements")
+                        job_designation = assessment.get("jobDesignation")
+                        experience_min = assessment.get("experienceMin")
+                        experience_max = assessment.get("experienceMax")
+                        company_name = company_context.get("company_name") if company_context else None
+                        
                         questions = await generate_questions_for_row_v2(
                             topic_label=topic["label"],
                             question_type=row["questionType"],
@@ -4897,7 +4966,12 @@ async def generate_all_questions_endpoint_v2(
                             additional_requirements=additional_requirements,
                             experience_mode=assessment.get("experienceMode", "corporate"),
                             website_summary=website_summary,
-                            company_context=company_context
+                            company_context=company_context,
+                            job_designation=job_designation,  # ⭐ NEW
+                            experience_min=experience_min,  # ⭐ NEW
+                            experience_max=experience_max,  # ⭐ NEW
+                            company_name=company_name,  # ⭐ NEW
+                            assessment_requirements=assessment_requirements  # ⭐ NEW
                         )
                         
                         row["questions"] = questions
@@ -5101,6 +5175,13 @@ async def regenerate_single_question_endpoint(
         if not additional_requirements:
             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
         
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
         new_questions = await generate_questions_for_row_v2(
             topic_label=topic["label"],
             question_type=row["questionType"],
@@ -5110,7 +5191,12 @@ async def regenerate_single_question_endpoint(
             additional_requirements=additional_requirements,
             experience_mode=assessment.get("experienceMode", "corporate"),
             website_summary=website_summary,
-            company_context=company_context
+            company_context=company_context,
+            job_designation=job_designation,  # ⭐ NEW
+            experience_min=experience_min,  # ⭐ NEW
+            experience_max=experience_max,  # ⭐ NEW
+            company_name=company_name,  # ⭐ NEW
+            assessment_requirements=assessment_requirements  # ⭐ NEW
         )
         
         if new_questions:

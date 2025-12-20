@@ -172,42 +172,77 @@ def _validate_and_fix_question_types(
     
     coding_skills = [s for s in skill_names if any(lang in s for lang in CODING_LANGUAGES)]
     
-    if len(coding_skills) > 0 and len(coding_topics) == 0:
-        logger.error(
-            f"CRITICAL: No Coding topics generated despite having programming skills: {coding_skills}"
-        )
-        # Try to convert first non-framework MCQ/Subjective topic to Coding
-        for topic in topics:
-            is_v2 = "questionRows" in topic and isinstance(topic.get("questionRows"), list) and len(topic["questionRows"]) > 0
+    # ⭐ CHANGED: Calculate minimum required and enforce it (not just check == 0)
+    if len(coding_skills) > 0:
+        min_required = min(3, max(2, len(coding_skills)))  # At least 2, up to 3
+        
+        if len(coding_topics) < min_required:
+            shortage = min_required - len(coding_topics)
+            logger.warning(
+                f"⚠️ Only {len(coding_topics)} Coding topics, need {min_required}. "
+                f"Converting {shortage} more topics to Coding."
+            )
             
-            if is_v2:
-                qt = topic["questionRows"][0].get("questionType", "")
-            else:
-                qt = topic.get("questionType", "")
-            
-            if qt in ["MCQ", "Subjective", "PseudoCode"]:
-                topic_label = topic["label"].lower()
-                if not contains_unsupported_framework(topic_label):
-                    # Check if topic mentions any programming language
-                    for lang in CODING_LANGUAGES:
-                        if lang in topic_label:
+            # Find suitable topics to convert
+            converted = 0
+            for topic in topics:
+                if converted >= shortage:
+                    break
+                
+                is_v2 = "questionRows" in topic and isinstance(topic.get("questionRows"), list) and len(topic["questionRows"]) > 0
+                
+                if is_v2:
+                    qt = topic["questionRows"][0].get("questionType", "")
+                else:
+                    qt = topic.get("questionType", "")
+                
+                # Only convert MCQ/Subjective/PseudoCode topics
+                if qt in ["MCQ", "Subjective", "PseudoCode"]:
+                    topic_label = topic["label"].lower()
+                    
+                    # Check if topic is suitable for Coding conversion
+                    if not contains_unsupported_framework(topic_label):
+                        is_suitable = False
+                        
+                        # Check 1: Topic mentions programming language
+                        for lang in CODING_LANGUAGES:
+                            if lang in topic_label:
+                                is_suitable = True
+                                break
+                        
+                        # Check 2: Topic mentions algorithm/data structure keywords
+                        if not is_suitable:
+                            algo_keywords = [
+                                "algorithm", "sorting", "searching", "data structure",
+                                "array", "linked list", "tree", "graph", "stack", "queue",
+                                "recursion", "loop", "function", "implement", "hash"
+                            ]
+                            if any(kw in topic_label for kw in algo_keywords):
+                                is_suitable = True
+                        
+                        if is_suitable:
                             logger.warning(
-                                f"Force-converting topic '{topic['label']}' to Coding "
-                                f"to satisfy minimum requirement"
+                                f"🔧 Force-converting '{topic['label']}' to Coding "
+                                f"({qt} → Coding) to meet minimum requirement"
                             )
+                            
                             if is_v2:
                                 topic["questionRows"][0]["questionType"] = "Coding"
                                 topic["questionRows"][0]["canUseJudge0"] = True
                             else:
                                 topic["questionType"] = "Coding"
                                 topic["canUseJudge0"] = True
-                            break
-                    # Check if we successfully converted
-                    if is_v2:
-                        if topic["questionRows"][0].get("questionType") == "Coding":
-                            break
-                    elif topic.get("questionType") == "Coding":
-                        break
+                            
+                            converted += 1
+            
+            if converted > 0:
+                final_count = len(coding_topics) + converted
+                logger.info(f"✅ Converted {converted} topics. Total Coding topics now: {final_count}")
+            else:
+                logger.error(
+                    f"❌ Could not find suitable topics to convert. "
+                    f"Still short {shortage} Coding topics."
+                )
     
     return topics
 
