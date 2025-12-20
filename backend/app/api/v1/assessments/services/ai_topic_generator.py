@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -92,29 +93,43 @@ def _validate_and_fix_question_types(
             current_type = topic.get("questionType", "")
         
         # ⭐ CHECK IF TOPIC SHOULD BE CODING
-        # Rule 1: Topic label contains programming language name
+        # Rule 1: Topic label contains programming language name (MOST IMPORTANT)
         should_be_coding = False
         detected_lang = None
         
+        # Check if ANY programming language is mentioned in the label
         for lang in CODING_LANGUAGES:
-            if lang in label:
+            # Use word boundary matching to avoid false positives
+            pattern = r'\b' + re.escape(lang) + r'\b'
+            if re.search(pattern, label):
                 # Make sure it doesn't contain unsupported frameworks
-                if not contains_unsupported_framework(label):
-                    should_be_coding = True
-                    detected_lang = lang
-                    break
+                is_framework, _ = contains_unsupported_framework(label)
+                if not is_framework:
+                    # Exclude theory-only topics (comparative, study, overview, introduction to concepts)
+                    theory_keywords = ["comparative", "study", "overview", "introduction to", "vs ", "versus", "comparison"]
+                    is_theory_only = any(kw in label for kw in theory_keywords)
+                    
+                    if not is_theory_only:
+                        should_be_coding = True
+                        detected_lang = lang
+                        break
         
-        # Rule 2: Topic is for a programming language skill
+        # Rule 2: Topic is for a programming language skill (implementation-focused)
         if not should_be_coding:
             for skill in skill_names:
-                skill_clean = skill.strip()
+                skill_clean = skill.strip().lower()
                 for lang in CODING_LANGUAGES:
                     if lang in skill_clean:
                         # Skill is a programming language
-                        # Check if topic label contains words from this skill
-                        skill_words = skill_clean.split()
-                        if any(word in label for word in skill_words if len(word) > 2):
-                            if not contains_unsupported_framework(label):
+                        # Check if topic label contains implementation keywords
+                        implementation_keywords = [
+                            "implement", "implementation", "writing", "creating", "building",
+                            "develop", "code", "programming", "algorithm", "data structure",
+                            "function", "class", "method", "optimize", "design pattern"
+                        ]
+                        if any(kw in label for kw in implementation_keywords):
+                            is_framework, _ = contains_unsupported_framework(label)
+                            if not is_framework:
                                 should_be_coding = True
                                 detected_lang = lang
                                 break
@@ -201,23 +216,32 @@ def _validate_and_fix_question_types(
                     topic_label = topic["label"].lower()
                     
                     # Check if topic is suitable for Coding conversion
-                    if not contains_unsupported_framework(topic_label):
+                    is_framework, _ = contains_unsupported_framework(topic_label)
+                    if not is_framework:
                         is_suitable = False
                         
-                        # Check 1: Topic mentions programming language
+                        # Check 1: Topic mentions programming language (MOST IMPORTANT - use word boundary)
                         for lang in CODING_LANGUAGES:
-                            if lang in topic_label:
-                                is_suitable = True
-                                break
+                            pattern = r'\b' + re.escape(lang) + r'\b'
+                            if re.search(pattern, topic_label):
+                                # Exclude theory-only topics
+                                theory_keywords = ["comparative", "study", "overview", "introduction to", "vs ", "versus", "comparison"]
+                                is_theory_only = any(kw in topic_label for kw in theory_keywords)
+                                if not is_theory_only:
+                                    is_suitable = True
+                                    break
                         
-                        # Check 2: Topic mentions algorithm/data structure keywords
+                        # Check 2: Topic mentions implementation/algorithm keywords
                         if not is_suitable:
-                            algo_keywords = [
-                                "algorithm", "sorting", "searching", "data structure",
+                            implementation_keywords = [
+                                "implement", "implementation", "writing", "creating", "building",
+                                "develop", "code", "programming", "algorithm", "data structure",
                                 "array", "linked list", "tree", "graph", "stack", "queue",
-                                "recursion", "loop", "function", "implement", "hash"
+                                "recursion", "loop", "function", "hash", "binary search",
+                                "sorting", "searching", "optimize", "design pattern", "exception",
+                                "coroutine", "decorator", "concurrency"
                             ]
-                            if any(kw in topic_label for kw in algo_keywords):
+                            if any(kw in topic_label for kw in implementation_keywords):
                                 is_suitable = True
                         
                         if is_suitable:
@@ -257,7 +281,8 @@ async def generate_topics_v2(
     selected_skills: List[str],
     experience_min: int,
     experience_max: int,
-    experience_mode: str
+    experience_mode: str,
+    previous_topic_label: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
     Generate topics using OpenAI with multi-row data model.
@@ -306,7 +331,8 @@ async def generate_topics_unified(
     combined_skills: List[Dict[str, Any]],
     experience_min: int,
     experience_max: int,
-    experience_mode: str
+    experience_mode: str,
+    previous_topic_label: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
     Generate topics from combined skills from multiple sources (role-based, manual, CSV).
@@ -375,7 +401,8 @@ async def generate_topics_unified(
         for lang in CODING_LANGUAGES:
             if lang in skill_clean:
                 # Make sure it's not a framework (Django contains Python, etc.)
-                if not contains_unsupported_framework(skill_clean):
+                is_framework, _ = contains_unsupported_framework(skill_clean)
+                if not is_framework:
                     coding_skills.append(skill)
                     break
     
@@ -452,6 +479,42 @@ CRITICAL QUESTION TYPE ASSIGNMENT RULES:
     if has_aiml_skills:
         question_type_guidance += "\n**YOU MUST GENERATE AT LEAST 2-3 AIML TOPICS** with questionType: \"AIML\""
     
+    # ⭐ BUILD EXCLUSION CONTEXT FOR REGENERATION (HIGHEST PRIORITY)
+    exclusion_context = ""
+    if previous_topic_label:
+        exclusion_context = f"""
+{'=' * 80}
+🔥 CRITICAL: TOPIC REGENERATION - AVOID REPEATING OLD TOPIC
+{'=' * 80}
+
+The user is REGENERATING a topic they found unsatisfactory.
+
+OLD TOPIC (DO NOT REPEAT OR REUSE THIS):
+\"\"\"{previous_topic_label}\"\"\"
+
+MANDATORY REQUIREMENTS FOR NEW TOPIC:
+1. MUST be COMPLETELY DIFFERENT from the old topic above
+2. MUST take a DIFFERENT ANGLE on the skills/technologies
+3. AVOID similar concepts, keywords, or phrasing from the old topic
+4. Generate a FRESH topic that covers different aspects of the skills
+
+Examples of Good Regeneration:
+- Old: "Python List Comprehensions"
+- New: "Python Generators and Iterators" ✅ (Different concept)
+- New: "Python Memory Management and Garbage Collection" ✅ (Different angle)
+- New: "Python Decorators and Context Managers" ✅ (Different topic)
+
+Examples of Bad Regeneration:
+- Old: "Python List Comprehensions"
+- New: "Advanced Python List Comprehensions" ❌ (TOO SIMILAR!)
+- New: "List Comprehensions and Lambda Functions" ❌ (Contains old topic!)
+
+⚠️ CRITICAL: If you generate something similar to the old topic, the user will reject it!
+
+Generate topics that are GENUINELY DIFFERENT while still being relevant to the skills provided.
+{'=' * 80}
+"""
+    
     prompt = f"""
 You are an AI assistant that generates assessment topics with structured output.
 Based on:{title_context}{job_context}
@@ -464,6 +527,7 @@ Based on:{title_context}{job_context}
 - Has SQL Skills: {"YES - MUST include SQL topics" if has_sql_skills else "NO"}
 - Has AIML Skills: {"YES - MUST include AIML topics" if has_aiml_skills else "NO"}
 
+{exclusion_context}
 {'=' * 80}
 {question_type_guidance}
 {'=' * 80}
@@ -579,7 +643,8 @@ Return ONLY a JSON object with a "topics" array. Use this exact structure:
             can_use_judge0 = False
         
         # Check if topic contains unsupported frameworks
-        if question_type == "Coding" and contains_unsupported_framework(label):
+        is_framework, _ = contains_unsupported_framework(label)
+        if question_type == "Coding" and is_framework:
             can_use_judge0 = False
         
         # Create topic with v2 data model structure
@@ -656,11 +721,11 @@ async def improve_topic(
     assessment_title: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Improve a topic label and regenerate its question type using the same prompt logic as generate_topics_v2.
-    Returns both the improved label and the question type with canUseJudge0 flag.
+    Improve a topic label by generating a completely different topic while staying relevant to the skills.
+    Uses generate_topics_unified with previous_topic_label to avoid repetition.
     
     Args:
-        previous_topic_label: Current topic label to improve
+        previous_topic_label: Current topic label to improve (will be passed as exclusion)
         skill_context: Optional skill context
         skill_description: Optional skill description
         importance_level: Optional importance level
@@ -673,7 +738,7 @@ async def improve_topic(
         
     Returns:
         Dictionary with:
-        - label: Improved topic label
+        - label: Improved (different) topic label
         - questionType: Assigned question type
         - difficulty: Assigned difficulty
         - canUseJudge0: Whether Judge0 can be used
@@ -681,6 +746,78 @@ async def improve_topic(
     Raises:
         HTTPException: If topic improvement fails
     """
-    # TODO: Move implementation from topic_service_v2.py line 3177
-    pass
+    logger.info(f"Improving topic: '{previous_topic_label}'")
+    
+    # Build combined_skills if not provided
+    if not combined_skills:
+        if skill_context:
+            # Build from provided skill context
+            combined_skills = [{
+                "skill_name": skill_context,
+                "description": skill_description,
+                "importance_level": importance_level,
+                "source": "manual"
+            }]
+        else:
+            # Fallback: Extract skill name from previous topic label
+            # Example: "Python List Comprehensions" → "Python"
+            combined_skills = [{
+                "skill_name": previous_topic_label,
+                "source": "manual"
+            }]
+    
+    try:
+        # ⭐ Call generate_topics_unified with previous_topic_label to avoid repetition
+        topics = await generate_topics_unified(
+            assessment_title=assessment_title,
+            job_designation=job_designation,
+            combined_skills=combined_skills,
+            experience_min=experience_min,
+            experience_max=experience_max,
+            experience_mode=experience_mode,
+            previous_topic_label=previous_topic_label  # ⭐ CRITICAL: Pass old topic to avoid repeating
+        )
+        
+        if not topics or len(topics) == 0:
+            logger.error(f"No topics generated for improvement of '{previous_topic_label}'")
+            raise HTTPException(status_code=500, detail="Failed to generate improved topic")
+        
+        # Return first generated topic
+        first_topic = topics[0]
+        
+        # Extract question row data for return
+        question_rows = first_topic.get("questionRows", [])
+        if question_rows:
+            question_row = question_rows[0]
+            question_type = question_row.get("questionType", "MCQ")
+            difficulty = question_row.get("difficulty", "Medium")
+            can_use_judge0 = question_row.get("canUseJudge0", False)
+        else:
+            # Fallback if no question rows
+            question_type = "MCQ"
+            difficulty = "Medium"
+            can_use_judge0 = False
+        
+        improved_label = first_topic.get("label", previous_topic_label)
+        
+        logger.info(
+            f"Topic improved: '{previous_topic_label}' → '{improved_label}' "
+            f"(Type: {question_type}, Difficulty: {difficulty})"
+        )
+        
+        return {
+            "label": improved_label,
+            "questionType": question_type,
+            "difficulty": difficulty,
+            "canUseJudge0": can_use_judge0
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error improving topic '{previous_topic_label}': {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to improve topic: {str(exc)}"
+        ) from exc
 

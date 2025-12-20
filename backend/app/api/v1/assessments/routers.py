@@ -3394,19 +3394,28 @@ async def regenerate_topic_endpoint_v2(
         if assessment.get("fullTopicRegenLocked", False):
             raise HTTPException(status_code=400, detail="Topic regeneration is locked after preview")
         
+        # [STAR] CRITICAL FIX: Extract old topic label to avoid regenerating same content
+        old_topic = topics_v2[topic_index]
+        old_topic_label = old_topic.get("label", "")
+        
+        logger.info(f"[TOPIC-REGEN] Regenerating topic at index {topic_index}. Old topic: '{old_topic_label}'")
+        
         # Sanitize inputs
         sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
         sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
         sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
         
-        # Generate new topic
-        new_topics = await generate_topics_v2(
+        # Generate new topic with exclusion of old topic
+        # Use generate_topics_unified for better control
+        combined_skills = [{"skill_name": skill, "source": "manual"} for skill in sanitized_skills]
+        new_topics = await generate_topics_unified(
             assessment_title=sanitized_title,
             job_designation=sanitized_job_designation,
-            selected_skills=sanitized_skills,
+            combined_skills=combined_skills,
             experience_min=payload.experienceMin,
             experience_max=payload.experienceMax,
-            experience_mode=payload.experienceMode
+            experience_mode=payload.experienceMode,
+            previous_topic_label=old_topic_label  # [STAR] CRITICAL: Pass old topic to avoid repeating
         )
         
         if not new_topics:
@@ -3563,7 +3572,8 @@ async def generate_question_endpoint_v2(
             experience_min=experience_min,  # ⭐ NEW
             experience_max=experience_max,  # ⭐ NEW
             company_name=company_name,  # ⭐ NEW
-            assessment_requirements=assessment_requirements  # ⭐ NEW - Highest priority context
+            assessment_requirements=assessment_requirements,
+            previous_question=None  # Not regenerating  # ⭐ NEW - Highest priority context
         )
         
         if not questions or len(questions) == 0:
@@ -3860,6 +3870,23 @@ async def regenerate_single_question_endpoint(
             raise HTTPException(status_code=400, detail="Question index out of range")
         
         # Regenerate single question
+        
+        # ⭐ CRITICAL FIX: Extract old question to avoid regenerating same content
+        old_question = questions[payload.questionIndex]
+        old_question_text = None
+        
+        # Extract question text based on question type
+        if isinstance(old_question, dict):
+            # For most question types, extract the "question" field
+            old_question_text = old_question.get("question", "")
+            
+            # For MCQ, include options context too (so AI knows full question)
+            if row.get("questionType") == "MCQ" and old_question.get("options"):
+                old_question_text = f"{old_question_text}\nOptions: {', '.join(old_question.get('options', []))}"
+        else:
+            old_question_text = str(old_question)
+        
+        logger.info(f"[REGEN] Regenerating question at index {payload.questionIndex}. Old question preview: {old_question_text[:100] if old_question_text else 'N/A'}...")
         # Get company context (new) or websiteSummary (legacy)
         company_context = assessment.get("contextSummary")
         website_summary = None
@@ -4698,19 +4725,28 @@ async def regenerate_topic_endpoint_v2(
         if assessment.get("fullTopicRegenLocked", False):
             raise HTTPException(status_code=400, detail="Topic regeneration is locked after preview")
         
+        # [STAR] CRITICAL FIX: Extract old topic label to avoid regenerating same content
+        old_topic = topics_v2[topic_index]
+        old_topic_label = old_topic.get("label", "")
+        
+        logger.info(f"[TOPIC-REGEN] Regenerating topic at index {topic_index}. Old topic: '{old_topic_label}'")
+        
         # Sanitize inputs
         sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
         sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
         sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
         
-        # Generate new topic
-        new_topics = await generate_topics_v2(
+        # Generate new topic with exclusion of old topic
+        # Use generate_topics_unified for better control
+        combined_skills = [{"skill_name": skill, "source": "manual"} for skill in sanitized_skills]
+        new_topics = await generate_topics_unified(
             assessment_title=sanitized_title,
             job_designation=sanitized_job_designation,
-            selected_skills=sanitized_skills,
+            combined_skills=combined_skills,
             experience_min=payload.experienceMin,
             experience_max=payload.experienceMax,
-            experience_mode=payload.experienceMode
+            experience_mode=payload.experienceMode,
+            previous_topic_label=old_topic_label  # [STAR] CRITICAL: Pass old topic to avoid repeating
         )
         
         if not new_topics:
@@ -4867,7 +4903,8 @@ async def generate_question_endpoint_v2(
             experience_min=experience_min,  # ⭐ NEW
             experience_max=experience_max,  # ⭐ NEW
             company_name=company_name,  # ⭐ NEW
-            assessment_requirements=assessment_requirements  # ⭐ NEW - Highest priority context
+            assessment_requirements=assessment_requirements,
+            previous_question=None  # Not regenerating  # ⭐ NEW - Highest priority context
         )
         
         if not questions or len(questions) == 0:
@@ -5164,6 +5201,23 @@ async def regenerate_single_question_endpoint(
             raise HTTPException(status_code=400, detail="Question index out of range")
         
         # Regenerate single question
+        
+        # ⭐ CRITICAL FIX: Extract old question to avoid regenerating same content
+        old_question = questions[payload.questionIndex]
+        old_question_text = None
+        
+        # Extract question text based on question type
+        if isinstance(old_question, dict):
+            # For most question types, extract the "question" field
+            old_question_text = old_question.get("question", "")
+            
+            # For MCQ, include options context too (so AI knows full question)
+            if row.get("questionType") == "MCQ" and old_question.get("options"):
+                old_question_text = f"{old_question_text}\nOptions: {', '.join(old_question.get('options', []))}"
+        else:
+            old_question_text = str(old_question)
+        
+        logger.info(f"[REGEN] Regenerating question at index {payload.questionIndex}. Old question preview: {old_question_text[:100] if old_question_text else 'N/A'}...")
         # Get company context (new) or websiteSummary (legacy)
         company_context = assessment.get("contextSummary")
         website_summary = None

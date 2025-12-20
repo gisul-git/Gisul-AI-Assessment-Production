@@ -88,7 +88,8 @@ async def generate_questions_for_row_v2(
     experience_min: Optional[int] = None,
     experience_max: Optional[int] = None,
     company_name: Optional[str] = None,
-    assessment_requirements: Optional[str] = None  # ⭐ NEW - Global requirements from assessment creation
+    assessment_requirements: Optional[str] = None,  # Global requirements from assessment creation
+    previous_question: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
     Generate questions for a single question row based on question type.
@@ -143,7 +144,13 @@ async def generate_questions_for_row_v2(
             can_use_judge0=can_use_judge0,
             coding_language=coding_language,
             experience_mode=experience_mode,
-            additional_requirements=additional_requirements
+            additional_requirements=additional_requirements,
+            job_designation=job_designation,
+            experience_min=experience_min,
+            experience_max=experience_max,
+            company_name=company_name,
+            assessment_requirements=assessment_requirements,
+            previous_question=previous_question
         )
     
     elif question_type_upper in ["SQL"]:
@@ -175,7 +182,8 @@ async def generate_questions_for_row_v2(
             experience_min=experience_min,
             experience_max=experience_max,
             company_name=company_name,
-            assessment_requirements=assessment_requirements  # ⭐ Pass through
+            assessment_requirements=assessment_requirements,
+            previous_question=previous_question  # ⭐ NEW - Pass through for regeneration
         )
     
     elif question_type_upper in ["SUBJECTIVE", "DESCRIPTIVE"]:
@@ -189,7 +197,8 @@ async def generate_questions_for_row_v2(
             experience_min=experience_min,
             experience_max=experience_max,
             company_name=company_name,
-            assessment_requirements=assessment_requirements  # ⭐ Pass through
+            assessment_requirements=assessment_requirements,
+            previous_question=previous_question  # ⭐ NEW - Pass through for regeneration
         )
     
     elif question_type_upper in ["PSEUDOCODE", "PSEUDO CODE", "PSEUDO-CODE"]:
@@ -203,7 +212,8 @@ async def generate_questions_for_row_v2(
             experience_min=experience_min,
             experience_max=experience_max,
             company_name=company_name,
-            assessment_requirements=assessment_requirements  # ⭐ Pass through
+            assessment_requirements=assessment_requirements,
+            previous_question=previous_question  # ⭐ NEW - Pass through for regeneration
         )
     
     else:
@@ -256,7 +266,8 @@ async def _generate_mcq_questions(
     experience_min: Optional[int] = None,
     experience_max: Optional[int] = None,
     company_name: Optional[str] = None,
-    assessment_requirements: Optional[str] = None  # ⭐ NEW - Global requirements
+    assessment_requirements: Optional[str] = None,  # Global requirements
+    previous_question: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
     Generate MCQ questions - PRODUCTION-GRADE WITH CONTEXT-AWARE PERSONALIZATION.
@@ -280,6 +291,7 @@ async def _generate_mcq_questions(
         experience_max: Maximum years of experience required
         company_name: Company name for personalization (e.g., "Gisul")
         assessment_requirements: Global assessment requirements (HIGHEST PRIORITY)
+        previous_question: For regeneration - the old question to avoid repeating
         
     Returns:
         List of MCQ question dictionaries with:
@@ -289,6 +301,33 @@ async def _generate_mcq_questions(
     """
     # ⭐ BUILD PERSONALIZATION CONTEXT (PRIORITY ORDER)
     context_parts = []
+    
+    # Priority 0: REGENERATION CONTEXT (ABSOLUTE HIGHEST PRIORITY - Avoid repeating)
+    if previous_question:
+        # Extract question text from previous question (MCQs may include options)
+        prev_q_text = previous_question
+        if isinstance(previous_question, dict):
+            prev_q_text = previous_question.get("question", str(previous_question))
+        
+        context_parts.append(f"""**🔥 REGENERATION CONTEXT (CRITICAL - READ THIS FIRST)**:
+The user is REGENERATING a question they found unsatisfactory.
+
+OLD QUESTION (DO NOT REPEAT OR REUSE THIS):
+\"\"\"{prev_q_text}\"\"\"
+
+MANDATORY REQUIREMENTS FOR NEW QUESTION:
+1. MUST be COMPLETELY DIFFERENT from the old question above
+2. MUST be HIGHER QUALITY - more specific, more challenging, more professional
+3. MUST be MORE PERSONALIZED - use company name, role, requirements if provided below
+4. AVOID similar concepts, scenarios, or phrasing from the old question
+5. Take a FRESH perspective on the topic "{topic}" while maintaining difficulty: {difficulty}
+
+Example Improvements:
+- Old (generic): "What is the time complexity of binary search?"
+- New (context-aware): "At Gisul, you need to optimize search performance for a user database with 100M+ records. Which search algorithm would you implement for a sorted user ID lookup and why?"
+
+⚠️ CRITICAL: If you generate something similar to the old question, the user will reject it!
+""")
     
     # Priority 1: Assessment-level requirements (highest priority - from "Requirements" field)
     if assessment_requirements:
@@ -445,7 +484,8 @@ async def _generate_subjective_questions(
     experience_min: Optional[int] = None,
     experience_max: Optional[int] = None,
     company_name: Optional[str] = None,
-    assessment_requirements: Optional[str] = None  # ⭐ NEW - Global requirements
+    assessment_requirements: Optional[str] = None,  # Global requirements
+    previous_question: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
     Generate Subjective questions - PRODUCTION-GRADE WITH CONTEXT-AWARE PERSONALIZATION.
@@ -469,6 +509,7 @@ async def _generate_subjective_questions(
         experience_max: Maximum years of experience required
         company_name: Company name for personalization (e.g., "Gisul")
         assessment_requirements: Global assessment requirements (HIGHEST PRIORITY)
+        previous_question: For regeneration - the old question to avoid repeating
         
     Returns:
         List of Subjective question dictionaries with:
@@ -476,6 +517,28 @@ async def _generate_subjective_questions(
     """
     # ⭐ BUILD PERSONALIZATION CONTEXT (PRIORITY ORDER)
     context_parts = []
+    
+    # Priority 0: REGENERATION CONTEXT (ABSOLUTE HIGHEST PRIORITY - Avoid repeating)
+    if previous_question:
+        context_parts.append(f"""**🔥 REGENERATION CONTEXT (CRITICAL - READ THIS FIRST)**:
+The user is REGENERATING a question they found unsatisfactory.
+
+OLD QUESTION (DO NOT REPEAT OR REUSE THIS):
+\"\"\"{previous_question}\"\"\"
+
+MANDATORY REQUIREMENTS FOR NEW QUESTION:
+1. MUST be COMPLETELY DIFFERENT from the old question above
+2. MUST be HIGHER QUALITY - more specific, more detailed, more professional
+3. MUST be MORE PERSONALIZED - use company name, role, requirements if provided below
+4. AVOID similar concepts, scenarios, or phrasing from the old question
+5. Take a FRESH perspective on the topic "{topic}" while maintaining difficulty: {difficulty}
+
+Example Improvements:
+- Old (generic): "Explain REST API design principles"
+- New (personalized): "You are a Senior Backend Engineer at Gisul building a payment gateway handling 10M+ transactions/day on AWS. Design a REST API that ensures PCI-DSS compliance, implements rate limiting for different user tiers, and provides comprehensive error handling. Explain your authentication strategy and how you would monitor API performance in Gisul's production environment."
+
+⚠️ CRITICAL: If you generate something similar to the old question, the user will reject it!
+""")
     
     # Priority 1: Assessment-level requirements (highest priority - from "Requirements" field)
     if assessment_requirements:
@@ -647,7 +710,8 @@ async def _generate_pseudocode_questions(
     experience_min: Optional[int] = None,
     experience_max: Optional[int] = None,
     company_name: Optional[str] = None,
-    assessment_requirements: Optional[str] = None  # ⭐ NEW - Global requirements
+    assessment_requirements: Optional[str] = None,  # Global requirements
+    previous_question: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
     Generate Pseudocode questions - WITH CONTEXT-AWARE PERSONALIZATION.
