@@ -3879,12 +3879,34 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       
       // CREATE NEW: Do NOT pass assessmentId - backend will create a brand new draft
       // Only pass assessmentId if we're explicitly in edit mode
+      
+      // Convert selectedSkills (string[]) to combinedSkills (CombinedSkill[])
+      const roleBasedSkills = selectedSkills
+        .filter((skill) => topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "role" as const,
+          description: null,
+          importance_level: null
+        }));
+
+      const manualSkills = selectedSkills
+        .filter((skill) => !topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "manual" as const,
+          description: null,
+          importance_level: null
+        }));
+
+      const combinedSkills = [...roleBasedSkills, ...manualSkills];
+      
       const topicsResponse = await axios.post("/api/assessments/generate-topics-v2", {
         // Only pass assessmentId if in edit mode - for new assessments, always omit it
         assessmentId: (isEditMode && assessmentId) ? assessmentId : undefined,
         assessmentTitle: finalTitle.trim() || undefined,
         jobDesignation: jobDesignation.trim(),
-        selectedSkills: selectedSkills,
+        combinedSkills: combinedSkills,
         experienceMin: experienceMin,
         experienceMax: experienceMax,
         experienceMode: experienceMode,
@@ -3950,11 +3972,32 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     setError(null);
     
     try {
+      // Convert selectedSkills (string[]) to combinedSkills (CombinedSkill[])
+      const roleBasedSkills = selectedSkills
+        .filter((skill) => topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "role" as const,
+          description: null,
+          importance_level: null
+        }));
+
+      const manualSkills = selectedSkills
+        .filter((skill) => !topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "manual" as const,
+          description: null,
+          importance_level: null
+        }));
+
+      const combinedSkills = [...roleBasedSkills, ...manualSkills];
+      
       const response = await axios.post("/api/assessments/generate-topics-v2", {
         assessmentId: assessmentId,
         assessmentTitle: finalTitle.trim() || undefined,
         jobDesignation: jobDesignation.trim(),
-        selectedSkills: selectedSkills,
+        combinedSkills: combinedSkills,
         experienceMin: experienceMin,
         experienceMax: experienceMax,
         experienceMode: experienceMode,
