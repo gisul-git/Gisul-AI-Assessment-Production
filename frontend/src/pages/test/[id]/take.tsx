@@ -1041,7 +1041,7 @@ export default function TestTakePage() {
 
   const handleAutoSubmit = async () => {
     // Extra safety: only auto-submit when the test is fully in-progress and UI is ready.
-    if (submitting) return
+      if (submitting) return
     if (precheckMode) return
     if (!test || questions.length === 0) return
 
