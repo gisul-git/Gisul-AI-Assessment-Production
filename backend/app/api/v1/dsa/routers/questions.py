@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 from bson import ObjectId
 import logging
+import json
 from ..database import get_dsa_database as get_database
 from ..models.question import Question, QuestionCreate, QuestionUpdate
 from ..services.expected_output import compute_expected_outputs_for_testcases
@@ -112,6 +113,64 @@ def _validate_example_output_for_return_type(return_type: Optional[str], example
         return
 
     return
+
+def _convert_json_array_to_stdin(input_str: str) -> str:
+    """
+    Convert JSON array format to raw stdin format.
+    Examples:
+    - "[1,2,3]" -> "1 2 3\n"
+    - "[1, 2, 3]" -> "1 2 3\n"
+    - "[[1,2],[3,4]]" -> "1 2\n3 4\n" (matrix format)
+    """
+    if not input_str:
+        return input_str
+    
+    stripped = input_str.strip()
+    has_trailing_newline = input_str.endswith('\n')
+    
+    # Check if it's a JSON array
+    if stripped.startswith('[') and stripped.endswith(']'):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                # Handle nested arrays (matrices)
+                if parsed and isinstance(parsed[0], list):
+                    lines = []
+                    for row in parsed:
+                        if isinstance(row, list):
+                            lines.append(' '.join(str(x) for x in row))
+                        else:
+                            lines.append(str(row))
+                    result = '\n'.join(lines)
+                    return result + '\n' if has_trailing_newline or not result.endswith('\n') else result
+                else:
+                    # Simple array: convert to space-separated
+                    result = ' '.join(str(x) for x in parsed)
+                    return result + '\n' if has_trailing_newline or not result.endswith('\n') else result
+        except (json.JSONDecodeError, ValueError):
+            pass
+    
+    if has_trailing_newline and not input_str.endswith('\n'):
+        return input_str + '\n'
+    return input_str
+
+
+def _normalize_testcase_inputs(payload: Dict[str, Any]) -> None:
+    """
+    Normalize all testcase inputs to ensure they're in raw stdin format.
+    Converts JSON arrays to space-separated or multi-line format.
+    """
+    for tc_type in ["public_testcases", "hidden_testcases"]:
+        testcases = payload.get(tc_type, [])
+        if isinstance(testcases, list):
+            for tc in testcases:
+                if isinstance(tc, dict) and "input" in tc:
+                    original_input = tc["input"]
+                    normalized_input = _convert_json_array_to_stdin(str(original_input))
+                    if normalized_input != original_input:
+                        logger.warning(f"Converted JSON array to stdin format in {tc_type}: {original_input[:50]}... -> {normalized_input[:50]}...")
+                        tc["input"] = normalized_input
+
 
 def _validate_stdin_only_input(stdin: str) -> None:
     """
@@ -506,6 +565,9 @@ async def create_question(
     """
     db = get_database()
     question_dict = question.model_dump()
+
+    # Normalize testcase inputs (convert JSON arrays to raw stdin) BEFORE validation
+    _normalize_testcase_inputs(question_dict)
 
     # Validate DSA coding payload (skip SQL)
     _validate_dsa_coding_payload(question_dict)
