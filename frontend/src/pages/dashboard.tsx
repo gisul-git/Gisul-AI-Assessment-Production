@@ -191,7 +191,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
           
           return {
             id: test.id,
-            title: test.title || 'Untitled Custom MCQ Test',
+            title: test.title || 'Untitled Custom MCQ/Subjective Test',
             status: testStatus,
             isDraft: isDraft,
             hasSchedule: hasSchedule,
@@ -442,7 +442,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         if (response.data?.success) {
         setAssessments(assessments.filter((a) => a.id !== assessmentId));
         } else {
-          setError(response.data?.message || "Failed to delete custom MCQ test");
+          setError(response.data?.message || "Failed to delete custom MCQ/Subjective test");
         }
       } else {
         // Delete regular assessment
@@ -1137,7 +1137,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                       <line x1="16" y1="17" x2="8" y2="17" />
                       <polyline points="10 9 9 9 8 9" />
                     </svg>
-                    Create Custom MCQ Test (CSV)
+                    Create Custom MCQ/Subjective Test (CSV)
                   </button>
                   <p style={{
                     margin: 0,
@@ -1146,7 +1146,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                     lineHeight: 1.4,
                     textAlign: "center",
                   }}>
-                      Upload CSV file to create custom multiple-choice questions
+                      Upload CSV file to create custom MCQ and subjective questions
                     </p>
                 </div>
                 <Link href="/dsa" style={{ flex: 1, minWidth: "200px" }}>
@@ -1660,7 +1660,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               fontWeight: 600,
                             }}
                           >
-                            Custom MCQ
+                            Custom MCQ/Subjective
                           </span>
                         )}
                         <span

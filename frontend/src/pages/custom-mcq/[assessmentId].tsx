@@ -117,6 +117,44 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
 
   const submissions = (assessment as any).submissionsList || [];
   const assessmentUrl = `${window.location.origin}/custom-mcq/entry/${assessmentId}?token=${(assessment as any).assessmentToken}`;
+  
+  // Calculate attempted and not attempted questions for each submission
+  const totalQuestions = assessment.totalQuestions || assessment.questions?.length || 0;
+  
+  // Calculate overall attempted/not attempted stats
+  const calculateAttemptedStats = () => {
+    if (submissions.length === 0) {
+      return { 
+        totalAttempted: 0, 
+        totalNotAttempted: 0,
+        avgAttempted: 0, 
+        avgNotAttempted: 0 
+      };
+    }
+    
+    let totalAttempted = 0;
+    let totalNotAttempted = 0;
+    
+    submissions.forEach((submission: any) => {
+      const submissionEntries = submission.submissions || [];
+      const attemptedCount = submissionEntries.length;
+      const notAttemptedCount = Math.max(0, totalQuestions - attemptedCount);
+      totalAttempted += attemptedCount;
+      totalNotAttempted += notAttemptedCount;
+    });
+    
+    const avgAttempted = Math.round((totalAttempted / submissions.length) * 10) / 10;
+    const avgNotAttempted = Math.round((totalNotAttempted / submissions.length) * 10) / 10;
+    
+    return { 
+      totalAttempted, 
+      totalNotAttempted,
+      avgAttempted, 
+      avgNotAttempted 
+    };
+  };
+  
+  const overallStats = calculateAttemptedStats();
 
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#ffffff", padding: "2rem" }}>
@@ -204,6 +242,14 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
             <div>
               <strong style={{ color: "#2D7A52" }}>Submissions:</strong> {submissions.length}
             </div>
+            {submissions.length > 0 && (
+              <div>
+                <strong style={{ color: "#2D7A52" }}>Total Attempted Questions:</strong>{" "}
+                <span style={{ color: "#059669", fontWeight: 600, fontSize: "1.1rem" }}>
+                  {overallStats.totalAttempted}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -285,6 +331,9 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                     <th style={{ padding: "0.75rem 0.75rem", textAlign: "left", fontSize: "0.85rem", color: "#1E5A3B" }}>
                       Score / Percentage
                     </th>
+                    <th style={{ padding: "0.75rem 0.75rem", textAlign: "left", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                      Questions Attempted
+                    </th>
                     <th style={{ padding: "0.75rem 0.75rem", textAlign: "center", fontSize: "0.85rem", color: "#1E5A3B" }}>
                       View Proctoring Logs
                     </th>
@@ -304,6 +353,11 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                     const proctorSummary = (userEmail && proctorSummaryByUser[userEmail]) ? proctorSummaryByUser[userEmail] : null;
                     const isLoadingProctor = !!(userEmail && loadingProctorForUser[userEmail]);
                     const hasAnswerLogs = (submission as any).answerLogs && Object.keys((submission as any).answerLogs).length > 0;
+                    
+                    // Calculate attempted and not attempted questions for this submission
+                    const submissionEntries = (submission as any).submissions || [];
+                    const attemptedCount = submissionEntries.length;
+                    const notAttemptedCount = Math.max(0, totalQuestions - attemptedCount);
 
                     return (
                       <>
@@ -342,6 +396,19 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                             <div>
                               <strong style={{ color: "#2D7A52" }}>Percentage:</strong>{" "}
                               {submission.percentage?.toFixed(2) || 0}%
+                            </div>
+                          </td>
+                          <td style={{ padding: "0.75rem 0.75rem", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                            <div>
+                              <strong style={{ color: "#059669" }}>Attempted:</strong>{" "}
+                              <span style={{ fontWeight: 600 }}>{attemptedCount}</span>
+                            </div>
+                            <div>
+                              <strong style={{ color: "#dc2626" }}>Not Attempted:</strong>{" "}
+                              <span style={{ fontWeight: 600 }}>{notAttemptedCount}</span>
+                            </div>
+                            <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>
+                              ({attemptedCount} / {totalQuestions})
                             </div>
                           </td>
                           <td style={{ padding: "0.75rem 0.75rem", textAlign: "center" }}>
@@ -492,6 +559,14 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                                         );
                                         const questionText =
                                           question?.question || `Question ${questionId}`;
+                                        
+                                        // Find the graded submission for this question to get AI evaluated marks
+                                        const gradedSubmission = (submission as any).submissions?.find(
+                                          (s: any) => s.questionId === questionId
+                                        );
+                                        const marksAwarded = gradedSubmission?.marksAwarded;
+                                        const maxMarks = gradedSubmission?.maxMarks;
+                                        
                                         return (
                                           <div
                                             key={questionId}
@@ -510,6 +585,31 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                                             >
                                               {questionText}
                                             </div>
+                                            {/* AI Evaluated Marks */}
+                                            {marksAwarded !== undefined && maxMarks !== undefined && (
+                                              <div
+                                                style={{
+                                                  marginBottom: "0.5rem",
+                                                  padding: "0.5rem",
+                                                  backgroundColor: "#f0fdf4",
+                                                  borderRadius: "0.25rem",
+                                                  border: "1px solid #86efac",
+                                                }}
+                                              >
+                                                <div
+                                                  style={{
+                                                    fontSize: "0.85rem",
+                                                    color: "#166534",
+                                                    fontWeight: 600,
+                                                  }}
+                                                >
+                                                  AI Evaluated Marks:{" "}
+                                                  <span style={{ color: "#059669" }}>
+                                                    {marksAwarded} / {maxMarks}
+                                                  </span>
+                                                </div>
+                                              </div>
+                                            )}
                                             <div
                                               style={{
                                                 display: "flex",

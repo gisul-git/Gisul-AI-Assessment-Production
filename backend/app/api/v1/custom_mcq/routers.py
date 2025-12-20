@@ -543,6 +543,7 @@ async def get_custom_mcq_assessment(
                 "subjectiveScore": submission_data.get("subjectiveScore", 0),
                 "subjectiveTotal": submission_data.get("subjectiveTotal", 0),
                 "answerLogs": submission_data.get("answerLogs", {}),  # Include answer logs
+                "submissions": submission_data.get("submissions", []),  # Include graded submissions with marks
             })
         
         assessment_serialized["submissionsList"] = submissions_list
@@ -1449,6 +1450,209 @@ async def submit_custom_mcq_assessment(
     except Exception as e:
         logger.exception(f"Error submitting assessment: {e}")
         return error_response(f"Failed to submit assessment: {str(e)}", status_code=500)
+
+
+@router.post("/send-invitations")
+async def send_custom_mcq_invitations(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """Send email invitations to candidates for custom MCQ assessment"""
+    try:
+        from ....utils.email import get_email_service
+        from ....config.settings import get_settings
+        
+        assessment_id = payload.get("assessmentId")
+        if not assessment_id:
+            return error_response("Assessment ID is required", status_code=400)
+        
+        # Get assessment and check access
+        user_id = current_user.get("id") or current_user.get("_id")
+        if not user_id:
+            return error_response("User ID not found", status_code=401)
+        user_id = str(user_id)
+        assessment_oid = to_object_id(assessment_id)
+        
+        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
+        
+        # Check ownership
+        if str(assessment["created_by"]) != user_id:
+            return error_response("Access denied", status_code=403)
+        
+        candidates = payload.get("candidates", [])
+        assessment_url = payload.get("assessmentUrl", "")
+        template = payload.get("template", {})
+        
+        if not candidates or not assessment_url:
+            return error_response("Candidates and assessment URL are required", status_code=400)
+        
+        # Get template values
+        subject_template = template.get("subject", "")
+        message_template = template.get("message", "You have been invited to take an assessment. Please click the link below to start.")
+        footer = template.get("footer", "")
+        sent_by = template.get("sentBy", "AI Assessment Platform")
+        
+        # Get email service and verify it's configured
+        settings = get_settings()
+        if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+            return error_response(
+                "SendGrid is not configured. Please set SENDGRID_API_KEY and SENDGRID_FROM_EMAIL environment variables.",
+                status_code=500
+            )
+        
+        email_service = get_email_service()
+        
+        sent_count = 0
+        failed_emails = []
+        error_messages = []
+        skipped_emails = []
+        
+        # Get existing candidates from assessment to check invite status
+        existing_candidates = assessment.get("candidates", [])
+        existing_candidates_dict = {
+            c.get("email", "").strip().lower(): c 
+            for c in existing_candidates 
+            if c.get("email")
+        }
+        
+        for candidate in candidates:
+            email = candidate.get("email", "").strip().lower()
+            name = candidate.get("name", "").strip()
+            
+            if not email or not name:
+                failed_emails.append(email or "unknown")
+                error_messages.append(f"Invalid candidate data: email={email}, name={name}")
+                continue
+            
+            # Check if candidate has already been invited (unless forceResend is true)
+            force_resend = payload.get("forceResend", False)
+            existing_candidate = existing_candidates_dict.get(email)
+            if existing_candidate and existing_candidate.get("invited") and not force_resend:
+                skipped_emails.append(email)
+                logger.info(f"Skipping invitation to {email} - already invited")
+                continue
+            
+            # Use assessment URL without email and name parameters
+            # Replace placeholders in message
+            email_body = message_template
+            email_body = email_body.replace("{{candidate_name}}", name)
+            email_body = email_body.replace("{{candidate_email}}", email)
+            email_body = email_body.replace("{{exam_url}}", assessment_url)
+            email_body = email_body.replace("{{assessment_url}}", assessment_url)
+            
+            # Build HTML email
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ text-align: center; margin-bottom: 30px; }}
+                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
+                    .candidate-info p {{ margin: 5px 0; }}
+                    .candidate-info strong {{ color: #1e293b; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Assessment Invitation</h1>
+                    </div>
+                    <div class="content">
+                        <p>Dear {name},</p>
+                        <p>{email_body}</p>
+                        
+                        <div class="candidate-info">
+                            <p><strong>Your Details:</strong></p>
+                            <p><strong>Name:</strong> {name}</p>
+                            <p><strong>Email:</strong> {email}</p>
+                            <p style="font-size: 0.875rem; color: #64748b; margin-top: 10px;">
+                                These details will be auto-filled when you start the assessment.
+                            </p>
+                        </div>
+                        
+                        <div style="text-align: center;">
+                            <a href="{assessment_url}" class="button">Start Assessment</a>
+                        </div>
+                    </div>
+                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                    <div class="footer">
+                        <p>Sent by {sent_by}</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            subject = subject_template or f"Assessment Invitation - {assessment.get('title', 'AI Assessment Platform')}"
+            
+            try:
+                logger.info(f"Attempting to send invitation email to {email}")
+                await email_service.send_email(email, subject, html_content)
+                logger.info(f"Email sent successfully to {email}")
+                sent_count += 1
+                
+                # Update candidate invite status in assessment
+                candidates_list = assessment.get("candidates", [])
+                candidate_updated = False
+                for idx, c in enumerate(candidates_list):
+                    if c.get("email", "").lower() == email:
+                        candidates_list[idx]["invited"] = True
+                        candidates_list[idx]["inviteSentAt"] = _now_utc().isoformat()
+                        candidate_updated = True
+                        break
+                
+                # If candidate not in list, add them
+                if not candidate_updated:
+                    candidates_list.append({
+                        "name": name,
+                        "email": email,
+                        "invited": True,
+                        "inviteSentAt": _now_utc().isoformat()
+                    })
+                
+                assessment["candidates"] = candidates_list
+                await db.custom_mcq_assessments.update_one(
+                    {"_id": assessment_oid},
+                    {"$set": {"candidates": candidates_list, "updated_at": _now_utc()}}
+                )
+                
+            except Exception as exc:
+                error_msg = f"Failed to send invitation to {email}: {str(exc)}"
+                logger.error(error_msg, exc_info=True)
+                failed_emails.append(email)
+                error_messages.append(error_msg)
+        
+        # Build response message
+        message = f"Invitations sent to {sent_count} candidate(s)"
+        if len(skipped_emails) > 0:
+            message += f". {len(skipped_emails)} already invited (skipped): {', '.join(skipped_emails[:5])}"
+        if len(failed_emails) > 0:
+            message += f". {len(failed_emails)} failed: {', '.join(failed_emails[:5])}"
+        
+        return success_response(
+            message,
+            {
+                "sentCount": sent_count,
+                "failedCount": len(failed_emails),
+                "skippedCount": len(skipped_emails),
+                "failedEmails": failed_emails,
+                "skippedEmails": skipped_emails,
+                "errorMessages": error_messages,
+            }
+        )
+        
+    except Exception as e:
+        logger.exception(f"Error sending invitations: {e}")
+        return error_response(f"Failed to send invitations: {str(e)}", status_code=500)
 
 
 @router.post("/save-answer-log")

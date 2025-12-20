@@ -38,7 +38,7 @@ export default function AssessmentInstructionsPage() {
     const ctx = getGateContext(id as string);
     const isAIFlow = !ctx || ctx.flowType === "ai";
 
-    // AI: fetch schedule; non-AI: skip fetch and show defaults
+    // AI: fetch schedule; non-AI: skip fetch and show defaults to
     if (!isAIFlow) {
       setAssessmentInfo(null);
       setIsLoading(false);
