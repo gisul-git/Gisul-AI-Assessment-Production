@@ -18,6 +18,71 @@ load_dotenv()
 logger = logging.getLogger("backend")
 
 
+def _convert_json_array_to_stdin(input_str: str) -> str:
+    """
+    Convert JSON array format to raw stdin format.
+    Examples:
+    - "[1,2,3]" -> "1 2 3\n"
+    - "[1, 2, 3]" -> "1 2 3\n"
+    - "[[1,2],[3,4]]" -> "1 2\n3 4\n" (matrix format)
+    - "[1,2,3]\n" -> "1 2 3\n" (already has newline, just convert array)
+    """
+    if not input_str:
+        return input_str
+    
+    # Strip whitespace but preserve newlines at the end
+    stripped = input_str.strip()
+    has_trailing_newline = input_str.endswith('\n')
+    
+    # Check if it's a JSON array
+    if stripped.startswith('[') and stripped.endswith(']'):
+        try:
+            # Parse JSON array
+            parsed = json.loads(stripped)
+            
+            if isinstance(parsed, list):
+                # Handle nested arrays (matrices)
+                if parsed and isinstance(parsed[0], list):
+                    # Matrix format: convert to multi-line
+                    lines = []
+                    for row in parsed:
+                        if isinstance(row, list):
+                            lines.append(' '.join(str(x) for x in row))
+                        else:
+                            lines.append(str(row))
+                    result = '\n'.join(lines)
+                    return result + '\n' if has_trailing_newline or not result.endswith('\n') else result
+                else:
+                    # Simple array: convert to space-separated
+                    result = ' '.join(str(x) for x in parsed)
+                    return result + '\n' if has_trailing_newline or not result.endswith('\n') else result
+        except (json.JSONDecodeError, ValueError):
+            # Not valid JSON, return as-is
+            pass
+    
+    # Not a JSON array, return as-is (but ensure it ends with newline if original did)
+    if has_trailing_newline and not input_str.endswith('\n'):
+        return input_str + '\n'
+    return input_str
+
+
+def _normalize_testcase_inputs(question_data: Dict[str, Any]) -> None:
+    """
+    Normalize all testcase inputs to ensure they're in raw stdin format.
+    Converts JSON arrays to space-separated or multi-line format.
+    """
+    for tc_type in ["public_testcases", "hidden_testcases"]:
+        testcases = question_data.get(tc_type, [])
+        if isinstance(testcases, list):
+            for tc in testcases:
+                if isinstance(tc, dict) and "input" in tc:
+                    original_input = tc["input"]
+                    normalized_input = _convert_json_array_to_stdin(str(original_input))
+                    if normalized_input != original_input:
+                        logger.warning(f"Converted JSON array to stdin format in {tc_type}: {original_input[:50]}... -> {normalized_input[:50]}...")
+                        tc["input"] = normalized_input
+
+
 def _validate_question_consistency(question_data: Dict[str, Any]) -> Optional[str]:
     """
     Validate that all parts of the question describe the same problem.
@@ -294,8 +359,19 @@ IMPORTANT: The starter_code examples above show the SIMPLE format you must use.
 - Use appropriate return type based on testcase outputs (e.g., int, List[int], void)
 - Keep it SIMPLE - just function signatures, NO full programs, NO stdin reading, NO main() functions
 
-TECHNICAL RULES:
-- Inputs must be RAW STDIN only (no variable names, no JSON arrays)
+TECHNICAL RULES - TESTCASE INPUT FORMAT (CRITICAL):
+- Inputs MUST be RAW STDIN only - NO JSON arrays, NO variable assignments
+- CORRECT formats:
+  * Single integer: "5\n"
+  * Space-separated integers: "1 2 3\n"
+  * Comma-separated integers: "1,2,3\n"
+  * Multi-line (matrix): "3 3\n1 2 3\n4 5 6\n7 8 9\n"
+  * String: "hello\n"
+- INCORRECT formats (DO NOT USE):
+  * JSON array: "[1,2,3]" ❌
+  * JSON array with newline: "[1,2,3]\n" ❌
+  * Variable assignment: "nums = [1,2,3]" ❌
+  * Python list: "[1, 2, 3]" ❌
 - Expected outputs MUST be logically computed, NOT guessed
 - NO placeholders like "e.g." or dummy values
 - NO dynamic generation: NO join(), NO loops, NO expressions, NO concatenation
@@ -390,6 +466,9 @@ Return ONLY the JSON object. No markdown. No explanations."""
             try:
                 question_data = json.loads(content)
                 
+                # Normalize testcase inputs (convert JSON arrays to raw stdin)
+                _normalize_testcase_inputs(question_data)
+                
                 # Log parsed JSON for debugging
                 logger.info("Parsed JSON successfully:")
                 logger.info(json.dumps(question_data, indent=2))
@@ -475,6 +554,28 @@ Return ONLY the JSON object. No markdown. No explanations."""
                         raise ValueError(f"{tc_type}[{idx}] missing 'input' field")
                     if "expected_output" not in tc:
                         raise ValueError(f"{tc_type}[{idx}] missing 'expected_output' field")
+                    
+                    # Validate input format - must be raw stdin, not JSON array
+                    tc_input = str(tc.get("input", ""))
+                    if "[" in tc_input or "]" in tc_input:
+                        if attempt < max_retries:
+                            logger.warning(f"Attempt {attempt + 1}: {tc_type}[{idx}] contains JSON array format. Retrying with explicit instruction...")
+                            retry_instruction = f"\n\n⚠️ RETRY ATTEMPT {attempt + 1} - INVALID TESTCASE INPUT FORMAT:\n"
+                            retry_instruction += f"Testcase {tc_type}[{idx}] input contains JSON array format: {tc_input[:100]}\n"
+                            retry_instruction += "CRITICAL: Testcase inputs MUST be RAW STDIN format, NOT JSON arrays.\n"
+                            retry_instruction += "CORRECT examples:\n"
+                            retry_instruction += "  - Single integer: \"5\\n\"\n"
+                            retry_instruction += "  - Space-separated: \"1 2 3\\n\"\n"
+                            retry_instruction += "  - Comma-separated: \"1,2,3\\n\"\n"
+                            retry_instruction += "  - Multi-line matrix: \"3 3\\n1 2 3\\n4 5 6\\n7 8 9\\n\"\n"
+                            retry_instruction += "INCORRECT (DO NOT USE):\n"
+                            retry_instruction += "  - JSON array: \"[1,2,3]\" ❌\n"
+                            retry_instruction += "  - Python list: \"[1, 2, 3]\" ❌\n"
+                            retry_instruction += "Convert ALL testcase inputs to raw stdin format before returning JSON.\n"
+                            user_prompt += retry_instruction
+                            continue
+                        else:
+                            raise ValueError(f"{tc_type}[{idx}] input must be raw stdin format, not JSON array. Got: {tc_input[:100]}")
             
             # Validate consistency
             consistency_issues = _validate_question_consistency(question_data)
