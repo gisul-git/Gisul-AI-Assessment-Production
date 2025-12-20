@@ -542,25 +542,26 @@ export default function TestTakePage() {
 
   // Start Live Proctoring when candidate clicks "Start Assessment" (when timer starts)
   useEffect(() => {
+    const timerStarted = !!testSubmission?.started_at;
     if (timerStarted && proctoringSettings?.liveProctoringEnabled === true && liveProctorScreenStream && webcamStreamForLiveProctor) {
       console.log('[DSA Take] Starting Live Proctoring...');
       startLiveProctoring().catch(err => {
         console.error('[DSA Take] Failed to start Live Proctoring:', err);
       });
     }
-  }, [timerStarted, proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
+  }, [testSubmission?.started_at, proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
 
   // Stop Live Proctoring when assessment ends
   useEffect(() => {
-    if (submitted) {
+    if (submitting || (testSubmission && testSubmission.ended_at)) {
       stopLiveProctoring();
     }
     return () => {
-      if (submitted) {
+      if (submitting || (testSubmission && testSubmission.ended_at)) {
         stopLiveProctoring();
       }
     };
-  }, [submitted, stopLiveProctoring]);
+  }, [submitting, testSubmission, stopLiveProctoring]);
 
   // Unified Proctoring Engine (works alongside existing hooks)
   const proctorConfig = normalizeProctorConfig(proctoringSettings)
@@ -608,7 +609,7 @@ export default function TestTakePage() {
     return () => {
       unifiedProctor.stop()
     }
-  }, [test, questions.length, candidateEmail, submitted, unifiedProctor])
+  }, [test, questions.length, candidateEmail, submitting, testSubmission, unifiedProctor])
 
   // Start camera AFTER test data is loaded AND editor is visible (not immediately on mount)
   // This prevents blocking the initial page load with heavy TensorFlow.js model loading
@@ -1102,7 +1103,7 @@ export default function TestTakePage() {
 
   const handleAutoSubmit = async () => {
     // Extra safety: only auto-submit when the test is fully in-progress and UI is ready.
-    if (submitting) return
+      if (submitting) return
     if (precheckMode) return
     if (!test || questions.length === 0) return
 

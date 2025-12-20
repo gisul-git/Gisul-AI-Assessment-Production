@@ -9,6 +9,7 @@ import Link from 'next/link'
 import dsaApi from '../../../../lib/dsa/api'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video } from 'lucide-react'
 import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
+import { useMultiLiveProctorAdmin } from '../../../../hooks/useMultiLiveProctorAdmin'
 
 interface AIFeedback {
   overall_score?: number
@@ -146,7 +147,6 @@ export default function AnalyticsPage() {
     startMonitoring,
     stopMonitoring,
     refreshCandidate,
-    resumePollingIfPaused,
   } = useMultiLiveProctorAdmin({
     assessmentId: proctorAssessmentId,
     adminId: proctorAdminId,
@@ -158,7 +158,7 @@ export default function AnalyticsPage() {
   // Note: startMonitoring/stopMonitoring are excluded from deps to prevent infinite loops
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (showLiveProctor && testId && typeof testId === 'string') {
+    if (showLiveProctoring && testId && typeof testId === 'string') {
       startMonitoring()
     } else {
       stopMonitoring()
@@ -167,7 +167,7 @@ export default function AnalyticsPage() {
     return () => {
       stopMonitoring()
     }
-  }, [showLiveProctor, testId])
+  }, [showLiveProctoring, testId])
 
   const fetchAnalytics = async (userId: string, showLoading: boolean = true) => {
     if (!testId || typeof testId !== 'string') return
