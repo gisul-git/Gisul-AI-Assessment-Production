@@ -952,6 +952,894 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
   );
 };
 
+// SQL Question Renderer - pretty UI using schema + sample data when available
+const renderSqlQuestion = (question: any, isEditing: boolean, onEditChange?: (value: string) => void) => {
+  // When editing, fall back to simple subjective-style text editing for now
+  if (isEditing && onEditChange) {
+    const questionText = question.question || question.questionText || "";
+    return (
+      <div>
+        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+          Question text (shown to candidates):
+        </label>
+        <textarea
+          value={questionText}
+          onChange={(e) =>
+            onEditChange(
+              JSON.stringify(
+                {
+                  ...question,
+                  question: e.target.value,
+                  questionText: e.target.value,
+                },
+                null,
+                2
+              )
+            )
+          }
+          style={{
+            width: "100%",
+            minHeight: "160px",
+            padding: "0.75rem",
+            border: "1px solid #e2e8f0",
+            borderRadius: "0.5rem",
+            fontSize: "0.875rem",
+            fontFamily: "monospace",
+          }}
+          placeholder="Edit the SQL question text..."
+        />
+      </div>
+    );
+  }
+
+  // Read structured SQL data if present
+  const sqlData = question.sql_data || {};
+  const title = sqlData.title || "SQL Query Challenge";
+  const description =
+    sqlData.description || question.question || question.questionText || "SQL question description not available.";
+  const schemas = sqlData.schemas || {};
+  const sampleData = sqlData.sample_data || {};
+  const constraints: string[] = sqlData.constraints || [];
+  const starterQuery: string | undefined = sqlData.starter_query;
+  const hints: string[] = sqlData.hints || [];
+  const sqlCategory: string = sqlData.sql_category || "select";
+  const evaluation = sqlData.evaluation || {};
+
+  const hasSchema = schemas && Object.keys(schemas).length > 0;
+  const hasSampleData = sampleData && Object.keys(sampleData).length > 0;
+  const hasConstraints = constraints && constraints.length > 0;
+  const hasHints = hints && hints.length > 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      {/* Title and SQL Category Badge */}
+      <div
+        style={{
+          padding: "1rem 1.25rem",
+          backgroundColor: "#f8fafc",
+          borderRadius: "0.75rem",
+          border: "1px solid #e2e8f0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "1rem",
+          flexWrap: "wrap",
+        }}
+      >
+        <div style={{ fontSize: "1.1rem", fontWeight: 700, color: "#0f172a" }}>{title}</div>
+        <div
+          style={{
+            padding: "0.25rem 0.75rem",
+            backgroundColor: "#dbeafe",
+            borderRadius: "9999px",
+            fontSize: "0.75rem",
+            fontWeight: 600,
+            color: "#1e40af",
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+          }}
+        >
+          {sqlCategory}
+        </div>
+      </div>
+
+      {/* Description */}
+      <div
+        style={{
+          padding: "1.25rem",
+          backgroundColor: "#ffffff",
+          borderRadius: "0.75rem",
+          border: "1px solid #e2e8f0",
+          boxShadow: "0 1px 3px rgba(15, 23, 42, 0.08)",
+        }}
+      >
+        <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
+          Problem Description
+        </div>
+        <div style={{ fontSize: "1rem", color: "#111827", lineHeight: "1.7", whiteSpace: "pre-wrap" }}>
+          {description}
+        </div>
+      </div>
+
+      {/* Layout: schema + data side by side on large screens */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: hasSchema && hasSampleData ? "minmax(0, 1.1fr) minmax(0, 1.1fr)" : "minmax(0, 1fr)",
+          gap: "1.25rem",
+        }}
+      >
+        {/* Schema */}
+        {hasSchema && (
+          <div
+            style={{
+              padding: "1rem",
+              backgroundColor: "#f8fafc",
+              borderRadius: "0.75rem",
+              border: "1px solid #e2e8f0",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+              <span
+                style={{
+                  width: "28px",
+                  height: "28px",
+                  borderRadius: "999px",
+                  backgroundColor: "#e0f2fe",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "0.75rem",
+                  color: "#0369a1",
+                  fontWeight: 700,
+                }}
+              >
+                DB
+              </span>
+              <div style={{ fontSize: "0.95rem", fontWeight: 600, color: "#0f172a" }}>Database Schema</div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              {Object.entries<any>(schemas).map(([tableName, tableInfo]) => {
+                const columns = (tableInfo && tableInfo.columns) || {};
+                return (
+                  <div
+                    key={tableName}
+                    style={{
+                      borderRadius: "0.5rem",
+                      border: "1px solid #e2e8f0",
+                      overflow: "hidden",
+                      backgroundColor: "#ffffff",
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: "0.5rem 0.75rem",
+                        backgroundColor: "#eff6ff",
+                        borderBottom: "1px solid #e5e7eb",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: "0.8rem",
+                          fontWeight: 600,
+                          color: "#1d4ed8",
+                        }}
+                      >
+                        {tableName}
+                      </span>
+                      <span style={{ fontSize: "0.7rem", color: "#6b7280" }}>Schema</span>
+                    </div>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+                        <thead>
+                          <tr style={{ backgroundColor: "#f9fafb" }}>
+                            <th
+                              style={{
+                                textAlign: "left",
+                                padding: "0.4rem 0.6rem",
+                                borderBottom: "1px solid #e5e7eb",
+                                color: "#6b7280",
+                                fontWeight: 600,
+                              }}
+                            >
+                              Column
+                            </th>
+                            <th
+                              style={{
+                                textAlign: "left",
+                                padding: "0.4rem 0.6rem",
+                                borderBottom: "1px solid #e5e7eb",
+                                color: "#6b7280",
+                                fontWeight: 600,
+                              }}
+                            >
+                              Type
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.entries<any>(columns).map(([colName, colType]) => (
+                            <tr key={colName}>
+                              <td
+                                style={{
+                                  padding: "0.4rem 0.6rem",
+                                  borderTop: "1px solid #f3f4f6",
+                                  fontFamily: "monospace",
+                                  color: "#111827",
+                                }}
+                              >
+                                {colName}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "0.4rem 0.6rem",
+                                  borderTop: "1px solid #f3f4f6",
+                                  color: "#4b5563",
+                                }}
+                              >
+                                {String(colType)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Sample data */}
+        {hasSampleData && (
+          <div
+            style={{
+              padding: "1rem",
+              backgroundColor: "#f8fafc",
+              borderRadius: "0.75rem",
+              border: "1px solid #e2e8f0",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+              <span
+                style={{
+                  width: "28px",
+                  height: "28px",
+                  borderRadius: "999px",
+                  backgroundColor: "#fef3c7",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "0.75rem",
+                  color: "#92400e",
+                  fontWeight: 700,
+                }}
+              >
+                rows
+              </span>
+              <div style={{ fontSize: "0.95rem", fontWeight: 600, color: "#0f172a" }}>Sample Data</div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              {Object.entries<any>(sampleData).map(([tableName, rows]) => {
+                const tableRows: any[] = Array.isArray(rows) ? rows : [];
+                if (!tableRows.length) return null;
+
+                const schema = schemas[tableName] || {};
+                const schemaColumns = (schema && schema.columns) || {};
+                let columnNames: string[] = Object.keys(schemaColumns || {});
+
+                if (!columnNames.length) {
+                  const firstRow = tableRows[0];
+                  if (Array.isArray(firstRow)) {
+                    columnNames = firstRow.map((_, idx) => `col_${idx + 1}`);
+                  } else if (firstRow && typeof firstRow === "object") {
+                    columnNames = Object.keys(firstRow);
+                  }
+                }
+
+                return (
+                  <div
+                    key={tableName}
+                    style={{
+                      borderRadius: "0.5rem",
+                      border: "1px solid #e2e8f0",
+                      overflow: "hidden",
+                      backgroundColor: "#ffffff",
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: "0.5rem 0.75rem",
+                        backgroundColor: "#f9fafb",
+                        borderBottom: "1px solid #e5e7eb",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: "0.8rem",
+                          fontWeight: 600,
+                          color: "#1f2937",
+                        }}
+                      >
+                        {tableName}
+                      </span>
+                      <span style={{ fontSize: "0.7rem", color: "#6b7280" }}>
+                        {tableRows.length} row{tableRows.length > 1 ? "s" : ""}
+                      </span>
+                    </div>
+                    <div style={{ overflowX: "auto", maxHeight: "400px", overflowY: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+                        <thead>
+                          <tr style={{ backgroundColor: "#f9fafb", position: "sticky", top: 0, zIndex: 10 }}>
+                            {columnNames.map((col) => (
+                              <th
+                                key={col}
+                                style={{
+                                  textAlign: "left",
+                                  padding: "0.4rem 0.6rem",
+                                  borderBottom: "1px solid #e5e7eb",
+                                  color: "#6b7280",
+                                  fontWeight: 600,
+                                  backgroundColor: "#f9fafb",
+                                }}
+                              >
+                                {col}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {tableRows.map((row, idx) => {
+                            const cells: any[] = Array.isArray(row)
+                              ? row
+                              : columnNames.map((col) => (row && typeof row === "object" ? row[col] : ""));
+                            return (
+                              <tr key={idx}>
+                                {cells.map((cell, cellIdx) => (
+                                  <td
+                                    key={cellIdx}
+                                    style={{
+                                      padding: "0.4rem 0.6rem",
+                                      borderTop: "1px solid #f3f4f6",
+                                      fontFamily: "monospace",
+                                      color: cell === null || cell === undefined ? "#9ca3af" : "#111827",
+                                    }}
+                                  >
+                                    {cell === null || cell === undefined || cell === "" ? "NULL" : String(cell)}
+                                  </td>
+                                ))}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Requirements / constraints */}
+      {hasConstraints && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#ecfeff",
+            borderRadius: "0.75rem",
+            border: "1px solid #bae6fd",
+          }}
+        >
+          <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#075985", marginBottom: "0.5rem" }}>
+            Requirements
+          </div>
+          <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#0f172a", lineHeight: 1.6 }}>
+            {constraints.map((c, idx) => (
+              <li key={idx}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Starter query (optional) */}
+      {starterQuery && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#0f172a",
+            borderRadius: "0.75rem",
+            color: "#e5e7eb",
+            fontFamily: "monospace",
+            fontSize: "0.8rem",
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "#93c5fd", marginBottom: "0.5rem" }}>
+            Starter Query
+          </div>
+          {starterQuery}
+        </div>
+      )}
+
+      {/* Hints (optional) */}
+      {hasHints && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#fef3c7",
+            borderRadius: "0.75rem",
+            border: "1px solid #fbbf24",
+          }}
+        >
+          <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#92400e", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span>💡</span>
+            <span>Hints</span>
+          </div>
+          <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#78350f", lineHeight: 1.6 }}>
+            {hints.map((hint, idx) => (
+              <li key={idx}>{hint}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Evaluation Configuration (optional) */}
+      {evaluation && Object.keys(evaluation).length > 0 && (
+        <div
+          style={{
+            padding: "0.75rem 1rem",
+            backgroundColor: "#f3f4f6",
+            borderRadius: "0.5rem",
+            border: "1px solid #d1d5db",
+            display: "flex",
+            gap: "1.5rem",
+            fontSize: "0.75rem",
+            flexWrap: "wrap",
+          }}
+        >
+          {evaluation.engine && (
+            <div>
+              <span style={{ fontWeight: 600, color: "#6b7280" }}>Engine: </span>
+              <span style={{ color: "#111827", fontFamily: "monospace" }}>{evaluation.engine}</span>
+            </div>
+          )}
+          {evaluation.comparison && (
+            <div>
+              <span style={{ fontWeight: 600, color: "#6b7280" }}>Comparison: </span>
+              <span style={{ color: "#111827" }}>{evaluation.comparison}</span>
+            </div>
+          )}
+          {evaluation.order_sensitive !== undefined && (
+            <div>
+              <span style={{ fontWeight: 600, color: "#6b7280" }}>Order Sensitive: </span>
+              <span style={{ color: "#111827" }}>{evaluation.order_sensitive ? "Yes" : "No"}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// AIML Question Renderer - pretty UI using dataset when available
+const renderAimlQuestion = (question: any, isEditing: boolean, onEditChange?: (value: string) => void) => {
+  // When editing, fall back to simple subjective-style text editing for now
+  if (isEditing && onEditChange) {
+    const questionText = question.question || question.questionText || "";
+    return (
+      <div>
+        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+          Question text (shown to candidates):
+        </label>
+        <textarea
+          value={questionText}
+          onChange={(e) =>
+            onEditChange(
+              JSON.stringify(
+                {
+                  ...question,
+                  question: e.target.value,
+                  questionText: e.target.value,
+                },
+                null,
+                2
+              )
+            )
+          }
+          style={{
+            width: "100%",
+            minHeight: "160px",
+            padding: "0.75rem",
+            border: "1px solid #e2e8f0",
+            borderRadius: "0.5rem",
+            fontSize: "0.875rem",
+            fontFamily: "monospace",
+          }}
+          placeholder="Edit the AIML question text..."
+        />
+      </div>
+    );
+  }
+
+  // Read structured AIML data if present
+  const aimlData = question.aiml_data || {};
+  const description = aimlData.description || question.question || question.questionText || "AIML question description not available.";
+  const tasks: string[] = aimlData.tasks || [];
+  const constraints: string[] = aimlData.constraints || [];
+  const libraries: string[] = aimlData.libraries || [];
+  const dataset = aimlData.dataset || null;
+  const schema = dataset?.schema || [];
+  const rows: any[] = dataset?.rows || [];
+  const executionEnv: string = aimlData.execution_environment || "jupyter_notebook";
+  const requiresDataset: boolean = aimlData.requires_dataset || false;
+
+  const hasTasks = tasks && tasks.length > 0;
+  const hasConstraints = constraints && constraints.length > 0;
+  const hasLibraries = libraries && libraries.length > 0;
+  const hasDataset = dataset && schema && rows && rows.length > 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      {/* Execution Environment Badge */}
+      <div
+        style={{
+          padding: "0.5rem 1rem",
+          backgroundColor: "#f0fdf4",
+          borderRadius: "0.5rem",
+          border: "1px solid #86efac",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "0.5rem",
+          alignSelf: "flex-start",
+          fontSize: "0.75rem",
+          fontWeight: 600,
+          color: "#166534",
+        }}
+      >
+        <span>🔬</span>
+        <span>Environment: {executionEnv === "jupyter_notebook" ? "Jupyter Notebook" : executionEnv}</span>
+      </div>
+
+      {/* Description */}
+      <div
+        style={{
+          padding: "1.25rem",
+          backgroundColor: "#ffffff",
+          borderRadius: "0.75rem",
+          border: "1px solid #e2e8f0",
+          boxShadow: "0 1px 3px rgba(15, 23, 42, 0.08)",
+        }}
+      >
+        <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
+          Problem Description
+        </div>
+        <div style={{ fontSize: "1rem", color: "#111827", lineHeight: "1.7", whiteSpace: "pre-wrap" }}>
+          {description}
+        </div>
+      </div>
+
+      {/* Tasks */}
+      {hasTasks && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#f0fdf4",
+            borderRadius: "0.75rem",
+            border: "1px solid #bbf7d0",
+          }}
+        >
+          <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#166534", marginBottom: "0.5rem" }}>
+            Tasks
+          </div>
+          <ol style={{ margin: 0, paddingLeft: "1.5rem", fontSize: "0.875rem", color: "#0f172a", lineHeight: 1.8 }}>
+            {tasks.map((task, idx) => (
+              <li key={idx} style={{ marginBottom: "0.25rem" }}>{task}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {/* Dataset Schema and Data - side by side layout */}
+      {hasDataset && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: schema.length > 0 ? "minmax(0, 1fr) minmax(0, 2fr)" : "minmax(0, 1fr)",
+            gap: "1.25rem",
+          }}
+        >
+          {/* Schema */}
+          {schema.length > 0 && (
+            <div
+              style={{
+                padding: "1rem",
+                backgroundColor: "#f8fafc",
+                borderRadius: "0.75rem",
+                border: "1px solid #e2e8f0",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                <span
+                  style={{
+                    width: "28px",
+                    height: "28px",
+                    borderRadius: "999px",
+                    backgroundColor: "#e0f2fe",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.75rem",
+                    color: "#0369a1",
+                    fontWeight: 700,
+                  }}
+                >
+                  📊
+                </span>
+                <div style={{ fontSize: "0.95rem", fontWeight: 600, color: "#0f172a" }}>Dataset Schema</div>
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+                  <thead>
+                    <tr style={{ backgroundColor: "#f9fafb" }}>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "0.4rem 0.6rem",
+                          borderBottom: "1px solid #e5e7eb",
+                          color: "#6b7280",
+                          fontWeight: 600,
+                        }}
+                      >
+                        Column
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "0.4rem 0.6rem",
+                          borderBottom: "1px solid #e5e7eb",
+                          color: "#6b7280",
+                          fontWeight: 600,
+                        }}
+                      >
+                        Type
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {schema.map((col: any, idx: number) => (
+                      <tr key={idx}>
+                        <td
+                          style={{
+                            padding: "0.4rem 0.6rem",
+                            borderTop: "1px solid #f3f4f6",
+                            fontFamily: "monospace",
+                            color: "#111827",
+                          }}
+                        >
+                          {col.name || `col_${idx + 1}`}
+                        </td>
+                        <td
+                          style={{
+                            padding: "0.4rem 0.6rem",
+                            borderTop: "1px solid #f3f4f6",
+                            color: "#4b5563",
+                          }}
+                        >
+                          {col.type || "string"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Sample Data - Show ALL rows */}
+          {rows.length > 0 && (
+            <div
+              style={{
+                padding: "1rem",
+                backgroundColor: "#f8fafc",
+                borderRadius: "0.75rem",
+                border: "1px solid #e2e8f0",
+                maxHeight: "600px",
+                overflowY: "auto",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <span
+                    style={{
+                      width: "28px",
+                      height: "28px",
+                      borderRadius: "999px",
+                      backgroundColor: "#fef3c7",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: "0.75rem",
+                      color: "#92400e",
+                      fontWeight: 700,
+                    }}
+                  >
+                    📋
+                  </span>
+                  <div style={{ fontSize: "0.95rem", fontWeight: 600, color: "#0f172a" }}>
+                    Complete Dataset
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "1rem", fontSize: "0.75rem", color: "#6b7280" }}>
+                  <span>
+                    <strong>{rows.length}</strong> rows
+                  </span>
+                  <span>
+                    <strong>{schema.length}</strong> columns
+                  </span>
+                </div>
+              </div>
+              <div
+                style={{
+                  borderRadius: "0.5rem",
+                  border: "1px solid #e2e8f0",
+                  overflow: "hidden",
+                  backgroundColor: "#ffffff",
+                }}
+              >
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+                    <thead>
+                      <tr style={{ backgroundColor: "#f9fafb", position: "sticky", top: 0, zIndex: 10 }}>
+                        <th
+                          style={{
+                            textAlign: "center",
+                            padding: "0.5rem 0.75rem",
+                            borderBottom: "2px solid #e5e7eb",
+                            color: "#6b7280",
+                            fontWeight: 600,
+                            backgroundColor: "#f9fafb",
+                            width: "50px",
+                          }}
+                        >
+                          #
+                        </th>
+                        {schema.map((col: any, idx: number) => (
+                          <th
+                            key={idx}
+                            style={{
+                              textAlign: "left",
+                              padding: "0.5rem 0.75rem",
+                              borderBottom: "2px solid #e5e7eb",
+                              color: "#6b7280",
+                              fontWeight: 600,
+                              backgroundColor: "#f9fafb",
+                            }}
+                          >
+                            {col.name || `Column ${idx + 1}`}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row, rowIdx) => {
+                        const cells: any[] = Array.isArray(row) ? row : schema.map((col: any) => (row && typeof row === "object" ? row[col.name] : ""));
+                        return (
+                          <tr key={rowIdx} style={{ backgroundColor: rowIdx % 2 === 0 ? "#ffffff" : "#f9fafb" }}>
+                            <td
+                              style={{
+                                padding: "0.5rem 0.75rem",
+                                borderTop: "1px solid #f3f4f6",
+                                textAlign: "center",
+                                color: "#9ca3af",
+                                fontWeight: 600,
+                                fontSize: "0.75rem",
+                              }}
+                            >
+                              {rowIdx + 1}
+                            </td>
+                            {cells.map((cell, cellIdx) => (
+                              <td
+                                key={cellIdx}
+                                style={{
+                                  padding: "0.5rem 0.75rem",
+                                  borderTop: "1px solid #f3f4f6",
+                                  fontFamily: "monospace",
+                                  color: cell === null || cell === undefined || cell === "" ? "#9ca3af" : "#111827",
+                                  fontSize: "0.8rem",
+                                }}
+                              >
+                                {cell === null || cell === undefined || cell === "" ? (
+                                  <span style={{ fontStyle: "italic", color: "#9ca3af" }}>NULL</span>
+                                ) : (
+                                  String(cell)
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Constraints */}
+      {hasConstraints && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#ecfeff",
+            borderRadius: "0.75rem",
+            border: "1px solid #bae6fd",
+          }}
+        >
+          <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#075985", marginBottom: "0.5rem" }}>
+            Constraints
+          </div>
+          <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#0f172a", lineHeight: 1.6 }}>
+            {constraints.map((c, idx) => (
+              <li key={idx}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Required Libraries */}
+      {hasLibraries && (
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor: "#fef3c7",
+            borderRadius: "0.75rem",
+            border: "1px solid #fbbf24",
+          }}
+        >
+          <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#92400e", marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span>📚</span>
+            <span>Required Libraries</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+            {libraries.map((lib, idx) => (
+              <span
+                key={idx}
+                style={{
+                  padding: "0.375rem 0.75rem",
+                  backgroundColor: "#ffffff",
+                  borderRadius: "0.375rem",
+                  border: "1px solid #fbbf24",
+                  fontSize: "0.8rem",
+                  fontWeight: 600,
+                  color: "#92400e",
+                  fontFamily: "monospace",
+                }}
+              >
+                {lib}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const renderQuestionByType = (question: any, questionType: string, isEditing: boolean, onEditChange?: (value: string) => void) => {
   switch (questionType) {
     case "MCQ":
@@ -963,9 +1851,9 @@ const renderQuestionByType = (question: any, questionType: string, isEditing: bo
     case "Coding":
       return renderCodingQuestion(question, isEditing, onEditChange);
     case "SQL":
-      return renderSubjectiveQuestion(question, isEditing, onEditChange);
+      return renderSqlQuestion(question, isEditing, onEditChange);
     case "AIML":
-      return renderSubjectiveQuestion(question, isEditing, onEditChange);
+      return renderAimlQuestion(question, isEditing, onEditChange);
     default:
       return (
         <div style={{ padding: "1rem", backgroundColor: "#fef3c7", borderRadius: "0.5rem", color: "#92400e" }}>
@@ -1107,6 +1995,154 @@ function formatTime(minutes: number): string {
   return `${hours} hour${hours !== 1 ? "s" : ""} ${mins} minute${mins !== 1 ? "s" : ""}`;
 }
 
+// Helper function to detect if a topic is SQL-related (for showing SQL option in dropdown)
+function isTopicSqlRelated(topicLabel: string): boolean {
+  const label = topicLabel.toLowerCase();
+  
+  // SQL execution keywords (indicates query/procedure writing)
+  const sqlExecutionKeywords = [
+    "write sql", "write query", "sql query", "implement query",
+    "optimize query", "query optimization", "recursive query",
+    "stored procedure", "sql procedure", "create procedure",
+    "sql to", "query to", "using sql", "sql with",
+  ];
+  
+  // SQL indicator keywords (database/SQL concepts)
+  const sqlIndicators = [
+    "sql", "mysql", "postgresql", "sqlite", "database query",
+    "sql query", "sql queries", "query", "joins", "subquery",
+    "stored procedure", "trigger", "sql injection", "sql optimization",
+  ];
+  
+  // Theory/comparison keywords (NOT execution - don't show SQL option for these)
+  const sqlTheoryKeywords = [
+    " vs ", " versus ", "compare", "comparison", "difference",
+    "advantages", "disadvantages", "explained", "explanation",
+    "concepts", "principles", "overview", "strategies", "design",
+    "vulnerabilities", "security", "prevention",
+  ];
+  
+  // If has theory keywords, it's NOT SQL execution (use Subjective instead)
+  if (sqlTheoryKeywords.some(kw => label.includes(kw))) {
+    return false;
+  }
+  
+  // Check for execution keywords or SQL indicators
+  return sqlExecutionKeywords.some(kw => label.includes(kw)) ||
+         sqlIndicators.some(ind => {
+           // Use word boundaries to avoid false positives (e.g., "overview" contains "view")
+           const regex = new RegExp(`\\b${ind.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+           return regex.test(label);
+         });
+}
+
+// Helper function to detect if a topic is AIML-related (for showing AIML option in dropdown)
+function isTopicAimlRelated(topicLabel: string): boolean {
+  const label = topicLabel.toLowerCase();
+  
+  // AIML execution keywords (indicates ML code writing)
+  const aimlExecutionKeywords = [
+    "implement", "implementation", "build model", "train model",
+    "using pandas", "using numpy", "using sklearn", "using tensorflow",
+    "using pytorch", "ml implementation", "ml task", "data preprocessing code",
+    "model training", "notebook", "jupyter", "colab",
+  ];
+  
+  // AIML indicator keywords
+  const aimlIndicators = [
+    "machine learning", "deep learning", "neural network", "ml model",
+    "pandas", "numpy", "sklearn", "tensorflow", "pytorch", "keras",
+    "data preprocessing", "feature engineering", "model training",
+    "random forest", "decision tree", "regression", "classification",
+    "clustering", "supervised learning", "unsupervised learning",
+  ];
+  
+  // Theory/comparison keywords (NOT execution - don't show AIML option for these)
+  const aimlTheoryKeywords = [
+    " vs ", " versus ", "compare", "comparison", "difference",
+    "advantages", "disadvantages", "explained", "explanation",
+    "concepts", "principles", "theory", "overview",
+    "architecture", "design", "workflow",
+  ];
+  
+  // If has theory keywords, it's NOT AIML execution (use Subjective instead)
+  if (aimlTheoryKeywords.some(kw => label.includes(kw))) {
+    return false;
+  }
+  
+  // Check for execution keywords or AIML indicators
+  return aimlExecutionKeywords.some(kw => label.includes(kw)) ||
+         aimlIndicators.some(ind => {
+           const regex = new RegExp(`\\b${ind.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+           return regex.test(label);
+         });
+}
+
+// Helper function to detect if a topic is web-related (for excluding Coding option)
+function isTopicWebRelated(topicLabel: string): boolean {
+  const label = topicLabel.toLowerCase();
+  
+  // Web technology keywords (platform doesn't support browser/web execution)
+  const webKeywords = [
+    // Frontend frameworks
+    "react", "angular", "vue", "svelte", "nextjs", "next.js", "nuxt", "gatsby", "ember",
+    // Web technologies
+    "html", "css", "scss", "sass", "less", "tailwind", "bootstrap", "material ui", "chakra ui", "ant design",
+    // Browser/DOM
+    "dom", "browser", "document", "window", "event listener", "fetch api", "localstorage", "sessionstorage",
+    "cookie", "webstorage",
+    // Web frameworks (backend)
+    "express", "koa", "fastify", "nest", "nestjs", "meteor",
+    // Frontend build tools
+    "webpack", "vite", "rollup", "parcel", "babel",
+    // UI libraries
+    "jquery", "d3", "chart.js", "three.js", "gsap", "anime.js",
+    // Web concepts
+    "frontend", "web development", "responsive design", "web page", "website", "web app", "web application",
+    "spa", "single page", "ssr", "server side rendering", "csr", "client side rendering",
+    "node server", "express server", "api endpoint", "http server", "rest api in node",
+  ];
+  
+  // Check if any web keyword appears in the topic label (using word boundaries to avoid false positives)
+  return webKeywords.some(keyword => {
+    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(label);
+  });
+}
+
+// Helper function to detect if a topic supports Judge0-compatible Coding (DSA/algorithmic in supported languages)
+function isTopicCodingSupported(topicLabel: string): boolean {
+  const label = topicLabel.toLowerCase();
+  
+  // Judge0 supported languages (must mention one of these)
+  const supportedLanguages = [
+    "javascript", "typescript", "java", "python", "c++", "cpp", "c#", "csharp",
+    "c", "go", "golang", "rust", "kotlin",
+  ];
+  
+  // DSA/algorithmic keywords
+  const dsaKeywords = [
+    "algorithm", "algorithms", "data structure", "data structures", "dsa", "problem solving",
+    "sorting", "searching", "binary search", "merge sort", "quick sort", "quicksort",
+    "two sum", "array", "arrays", "string", "strings", "hash", "hash table", "hashtable",
+    "stack", "queue", "linked list", "tree", "binary tree", "bst", "heap", "trie",
+    "graph", "bfs", "dfs", "dijkstra", "dynamic programming", "dp", "recursion",
+  ];
+  
+  // Must mention at least one supported language AND one DSA keyword
+  const hasSupportedLanguage = supportedLanguages.some(lang => {
+    const regex = new RegExp(`\\b${lang.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(label);
+  });
+  
+  const hasDsaKeyword = dsaKeywords.some(keyword => {
+    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(label);
+  });
+  
+  return hasSupportedLanguage && hasDsaKeyword;
+}
+
 interface QuestionTypeConfig {
   questionType: string;
   difficulty: string;
@@ -1212,7 +2248,7 @@ export default function CreateNewAssessmentPage() {
   // ============================================
   interface QuestionRow {
     rowId: string;
-    questionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding";
+    questionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML";
     difficulty: "Easy" | "Medium" | "Hard";
     questionsCount: number;
     canUseJudge0: boolean;
@@ -1323,6 +2359,7 @@ export default function CreateNewAssessmentPage() {
   // Simple AI proctoring toggle (controls camera-based proctoring on candidate side)
   const [proctoringSettings, setProctoringSettings] = useState({
     aiProctoringEnabled: false, // default OFF until explicitly enabled
+    liveProctoringEnabled: false, // default OFF until explicitly enabled
   });
 
   const sliderRef = useRef<HTMLDivElement>(null);
@@ -3010,12 +4047,34 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       
       // CREATE NEW: Do NOT pass assessmentId - backend will create a brand new draft
       // Only pass assessmentId if we're explicitly in edit mode
+      
+      // Convert selectedSkills (string[]) to combinedSkills (CombinedSkill[])
+      const roleBasedSkills = selectedSkills
+        .filter((skill) => topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "role" as const,
+          description: null,
+          importance_level: null
+        }));
+
+      const manualSkills = selectedSkills
+        .filter((skill) => !topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "manual" as const,
+          description: null,
+          importance_level: null
+        }));
+
+      const combinedSkills = [...roleBasedSkills, ...manualSkills];
+      
       const topicsResponse = await axios.post("/api/assessments/generate-topics-v2", {
         // Only pass assessmentId if in edit mode - for new assessments, always omit it
         assessmentId: (isEditMode && assessmentId) ? assessmentId : undefined,
         assessmentTitle: finalTitle.trim() || undefined,
         jobDesignation: jobDesignation.trim(),
-        selectedSkills: selectedSkills,
+        combinedSkills: combinedSkills,
         experienceMin: experienceMin,
         experienceMax: experienceMax,
         experienceMode: experienceMode,
@@ -3081,11 +4140,32 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     setError(null);
     
     try {
+      // Convert selectedSkills (string[]) to combinedSkills (CombinedSkill[])
+      const roleBasedSkills = selectedSkills
+        .filter((skill) => topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "role" as const,
+          description: null,
+          importance_level: null
+        }));
+
+      const manualSkills = selectedSkills
+        .filter((skill) => !topicCards.includes(skill))
+        .map(skill => ({
+          skill_name: skill.trim(),
+          source: "manual" as const,
+          description: null,
+          importance_level: null
+        }));
+
+      const combinedSkills = [...roleBasedSkills, ...manualSkills];
+      
       const response = await axios.post("/api/assessments/generate-topics-v2", {
         assessmentId: assessmentId,
         assessmentTitle: finalTitle.trim() || undefined,
         jobDesignation: jobDesignation.trim(),
-        selectedSkills: selectedSkills,
+        combinedSkills: combinedSkills,
         experienceMin: experienceMin,
         experienceMax: experienceMax,
         experienceMode: experienceMode,
@@ -4288,10 +5368,12 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     setAddingTopic(true);
     
     let finalCategory: "aptitude" | "communication" | "logical_reasoning" | "technical";
-    let defaultQuestionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" = "MCQ";
+    let defaultQuestionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML" = "MCQ";
     let canUseJudge0 = false;
     let contextSummary: string | undefined = undefined;
-    let codingSupported = false; // NEW: Track coding support from classification
+    let codingSupported = false; // Track coding support from classification
+    let isSqlRelated = false; // Track if topic is SQL-related
+    let isAimlRelated = false; // Track if topic is AIML-related
     
     try {
     if (isTechnical) {
@@ -4306,25 +5388,45 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         
         if (response.data?.success && response.data?.data) {
           const classification = response.data.data;
-          defaultQuestionType = classification.questionType as "MCQ" | "Subjective" | "PseudoCode" | "Coding";
+          defaultQuestionType = classification.questionType as "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML";
           canUseJudge0 = classification.canUseJudge0 || false;
-          codingSupported = classification.coding_supported || false; // NEW: Get coding_supported from classification
+          codingSupported = classification.coding_supported || false; // Get coding_supported from classification
           contextSummary = classification.contextExplanation;
+          
+          // Detect if classification returned SQL or AIML, or if topic is SQL/AIML-related
+          const classifiedType = classification.questionType?.toUpperCase();
+          if (classifiedType === "SQL") {
+            isSqlRelated = true;
+          } else if (classifiedType === "AIML") {
+            isAimlRelated = true;
+          } else {
+            // Fallback: use frontend detection as backup
+            isSqlRelated = isTopicSqlRelated(topicName);
+            isAimlRelated = isTopicAimlRelated(topicName);
+          }
           
           // Ensure canUseJudge0 is false if question type is not Coding
           if (defaultQuestionType !== "Coding") {
             canUseJudge0 = false;
           }
+        } else {
+          // If classification fails, use frontend detection as fallback
+          isSqlRelated = isTopicSqlRelated(topicName);
+          isAimlRelated = isTopicAimlRelated(topicName);
         }
       } catch (err: any) {
         console.error("Error classifying technical topic:", err);
-          const errorMsg = err.response?.data?.message || err.response?.data?.data?.error || "Failed to classify topic. Please try again.";
-          setToastMessage(errorMsg);
-          setTimeout(() => setToastMessage(null), 5000);
-          setLoading(false);
-          // Exit early - the outer finally block will reset addingTopic
-          // The finally block executes even when returning from try block
-          return;
+        // On error, use frontend detection as fallback
+        isSqlRelated = isTopicSqlRelated(topicName);
+        isAimlRelated = isTopicAimlRelated(topicName);
+        
+        const errorMsg = err.response?.data?.message || err.response?.data?.data?.error || "Failed to classify topic. Please try again.";
+        setToastMessage(errorMsg);
+        setTimeout(() => setToastMessage(null), 5000);
+        setLoading(false);
+        // Exit early - the outer finally block will reset addingTopic
+        // The finally block executes even when returning from try block
+        return;
       } finally {
         setLoading(false);
       }
@@ -4334,15 +5436,36 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       return;
     }
     
-    // Determine allowed question types based on category and coding support
+    // Determine allowed question types based on category, coding support, and SQL/AIML detection
     // At this point, finalCategory is guaranteed to be "technical" (soft skills return early above)
     
-    // Determine allowed question types based on coding support
-    // If codingSupported = true: include mcq, subjective, pseudo, coding
-    // If codingSupported = false: include only mcq, subjective, pseudo
-    const allowedQuestionTypes: string[] = codingSupported 
-      ? ["MCQ", "Subjective", "PseudoCode", "Coding"]
-      : ["MCQ", "Subjective", "PseudoCode"];
+    // Build allowed question types dynamically based on classification results
+    const baseTypes = ["MCQ", "Subjective", "PseudoCode"];
+    
+    // Check for web-related topics (don't show Coding for web topics)
+    const isWebRelated = isTopicWebRelated(topicName);
+    
+    // Check if topic supports Judge0-compatible Coding (DSA/algorithmic in supported languages)
+    const isCodingCompatible = isTopicCodingSupported(topicName);
+    
+    // Add Coding only if:
+    // - codingSupported is true (from classification)
+    // - NOT SQL-related
+    // - NOT AIML-related
+    // - NOT web-related
+    // - Mentions Judge0-supported language and DSA concepts
+    const shouldIncludeCoding = codingSupported && 
+                                 !isSqlRelated && 
+                                 !isAimlRelated && 
+                                 !isWebRelated &&
+                                 isCodingCompatible;
+    
+    const allowedQuestionTypes: string[] = [
+      ...baseTypes,
+      ...(isSqlRelated ? ["SQL"] : []),
+      ...(isAimlRelated ? ["AIML"] : []),
+      ...(shouldIncludeCoding ? ["Coding"] : [])
+    ];
     
     // Check if questions have already been generated (any topic has generated questions)
     const hasGeneratedQuestions = topicsV2.some(topic => 
@@ -7320,18 +8443,48 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                           // Restrict question types for aptitude/communication/logical_reasoning
                           // Use allowedQuestionTypes if available (for soft skills), otherwise determine from category
                           const isSpecialCategory = topic.category && ["aptitude", "communication", "logical_reasoning"].includes(topic.category);
-                          const questionTypes = topic.allowedQuestionTypes && topic.allowedQuestionTypes.length > 0
-                            ? topic.allowedQuestionTypes // Use allowedQuestionTypes if defined
-                            : isSpecialCategory 
-                              ? ["MCQ", "Subjective"] 
-                              : [
-                                  "MCQ", 
-                                  "Subjective", 
-                                  "PseudoCode", 
-                                  "SQL",
-                                  "AIML",
-                                  ...((topic.coding_supported !== false && row.canUseJudge0) ? ["Coding"] : [])
-                                ];
+                          
+                          // Determine available question types based on topic relevance
+                          let questionTypes: string[];
+                          if (topic.allowedQuestionTypes && topic.allowedQuestionTypes.length > 0) {
+                            questionTypes = topic.allowedQuestionTypes; // Use allowedQuestionTypes if defined
+                          } else if (isSpecialCategory) {
+                            questionTypes = ["MCQ", "Subjective"]; // Soft skills only
+                          } else {
+                            // Base types available for all technical topics
+                            const baseTypes = ["MCQ", "Subjective", "PseudoCode"];
+                            
+                            // Add SQL only if topic is SQL-related
+                            const isSqlRelated = isTopicSqlRelated(topic.label);
+                            
+                            // Add AIML only if topic is AIML-related
+                            const isAimlRelated = isTopicAimlRelated(topic.label);
+                            
+                            // Add Coding ONLY if ALL conditions are met:
+                            // 1. Topic supports coding (coding_supported !== false)
+                            // 2. Row can use Judge0 (canUseJudge0 === true)
+                            // 3. Topic is NOT SQL-related (SQL topics use SQL type, not Coding)
+                            // 4. Topic is NOT AIML-related (AIML topics use AIML type, not Coding)
+                            // 5. Topic is NOT web-related (web topics don't support Judge0 execution)
+                            // 6. Topic mentions a Judge0-supported language (JavaScript, TypeScript, Java, Python, C++, C#, C, Go, Rust, Kotlin)
+                            // 7. Topic is DSA/algorithmic (sorting, searching, trees, graphs, etc.)
+                            const isWebRelated = isTopicWebRelated(topic.label);
+                            const isCodingCompatible = isTopicCodingSupported(topic.label);
+                            const supportsCoding = 
+                              topic.coding_supported !== false && 
+                              row.canUseJudge0 &&
+                              !isSqlRelated &&
+                              !isAimlRelated &&
+                              !isWebRelated &&
+                              isCodingCompatible;
+                            
+                            questionTypes = [
+                              ...baseTypes,
+                              ...(isSqlRelated ? ["SQL"] : []),
+                              ...(isAimlRelated ? ["AIML"] : []),
+                              ...(supportsCoding ? ["Coding"] : [])
+                            ];
+                          }
                           
                           return [
                             <tr key={`${topic.id}-${row.rowId}`} style={{ borderBottom: "1px solid #e2e8f0" }}>
@@ -9284,7 +10437,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 );
               })()}
 
-              {/* Proctoring Settings - AI Camera Toggle */}
+              {/* Proctoring Settings */}
               <div
                 style={{
                   marginTop: "2rem",
@@ -9305,6 +10458,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   Proctoring Settings
                 </h3>
 
+                {/* AI Proctoring Checkbox */}
                 <label
                   style={{
                     display: "flex",
@@ -9318,17 +10472,59 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   <input
                     type="checkbox"
                     checked={proctoringSettings.aiProctoringEnabled}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const checked = e.target.checked;
                       setProctoringSettings((prev) => ({
                         ...prev,
-                        aiProctoringEnabled: e.target.checked,
-                      }))
-                    }
-                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                        aiProctoringEnabled: checked,
+                        // If Live Proctoring is enabled, AI Proctoring should also be enabled
+                        liveProctoringEnabled: prev.liveProctoringEnabled && checked ? prev.liveProctoringEnabled : (prev.liveProctoringEnabled && !checked ? false : prev.liveProctoringEnabled),
+                      }));
+                    }}
+                    style={{ 
+                      width: "18px", 
+                      height: "18px", 
+                      cursor: "pointer",
+                    }}
                   />
                   <span>
                     Enable AI Proctoring (camera-based: no face, multiple faces, gaze
                     away)
+                  </span>
+                </label>
+
+                {/* Live Proctoring Checkbox */}
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    cursor: "pointer",
+                    fontSize: "0.875rem",
+                    color: "#1e293b",
+                    marginTop: "1rem",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={proctoringSettings.liveProctoringEnabled}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setProctoringSettings((prev) => ({
+                        ...prev,
+                        liveProctoringEnabled: checked,
+                        // When Live Proctoring is enabled, AI Proctoring should also be enabled
+                        aiProctoringEnabled: checked ? true : prev.aiProctoringEnabled,
+                      }));
+                    }}
+                    style={{ 
+                      width: "18px", 
+                      height: "18px", 
+                      cursor: "pointer",
+                    }}
+                  />
+                  <span>
+                    Live Proctoring (webcam + screen streaming)
                   </span>
                 </label>
               </div>

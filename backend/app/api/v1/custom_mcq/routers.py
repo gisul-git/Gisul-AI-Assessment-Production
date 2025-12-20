@@ -26,6 +26,7 @@ from .schemas import (
     UpdateCustomMCQAssessmentRequest,
     VerifyCustomMCQCandidateRequest,
     SubmitCustomMCQRequest,
+    SaveAnswerLogRequest,
 )
 from .ai_grading import grade_multiple_subjective_answers
 
@@ -122,13 +123,12 @@ def _parse_csv_to_mcq_questions(csv_data: List[Dict[str, Any]]) -> List[MCQQuest
 
 
 def _parse_csv_to_subjective_questions(csv_data: List[Dict[str, Any]]) -> List[SubjectiveQuestion]:
-    """Parse CSV data to SubjectiveQuestion objects"""
+    """Parse CSV data to SubjectiveQuestion objects (only question and marks columns)"""
     questions = []
     
     for idx, row in enumerate(csv_data):
         try:
-            # Extract section and question
-            section = str(row.get("section", "")).strip()
+            # Extract question (section column removed, use default)
             question_text = str(row.get("question", "")).strip()
             
             if not question_text:
@@ -142,9 +142,10 @@ def _parse_csv_to_subjective_questions(csv_data: List[Dict[str, Any]]) -> List[S
             except (ValueError, TypeError):
                 marks = 1
             
+            # Use default section for subjective questions
             question = SubjectiveQuestion(
                 questionType="subjective",
-                section=section,
+                section="subjective",  # Default section value
                 question=question_text,
                 marks=marks,
             )
@@ -237,13 +238,13 @@ async def download_sample_csv(
     from fastapi.responses import Response
     
     if questionType.lower() == "subjective":
-        # Sample CSV content for subjective questions
-        sample_csv = """section,question,marks
-que,What is Cloud Computing and why is it used in software applications?,5
-que,Explain the concept of time complexity in algorithms with examples.,3
-que,Describe the difference between SQL and NoSQL databases.,4
-que,What are the key principles of object-oriented programming?,5
-que,Explain how a binary search algorithm works.,4"""
+        # Sample CSV content for subjective questions (only question and marks columns)
+        sample_csv = """question,marks
+What is Cloud Computing and why is it used in software applications?,5
+Explain the concept of time complexity in algorithms with examples.,3
+Describe the difference between SQL and NoSQL databases.,4
+What are the key principles of object-oriented programming?,5
+Explain how a binary search algorithm works.,4"""
         filename = "sample_subjective.csv"
     else:
         # Sample CSV content for MCQ questions
@@ -285,11 +286,20 @@ async def create_custom_mcq_assessment(
                 return error_response("Title is required for scheduled assessments", status_code=400)
             if not request.questions or len(request.questions) == 0:
                 return error_response("At least one question is required for scheduled assessments", status_code=400)
-            # Validate exam mode requirements
-            if request.examMode == "flexible" and not request.duration:
-                return error_response("Duration is required for flexible exam mode", status_code=400)
-            if request.examMode == "strict" and (not request.startTime or not request.endTime):
-                return error_response("Start time and end time are required for strict exam mode", status_code=400)
+            # Validate exam mode requirements - NEW IMPLEMENTATION
+            if request.examMode == "strict":
+                if not request.startTime:
+                    return error_response("Start time is required for strict window mode", status_code=400)
+                if not request.duration:
+                    return error_response("Duration is required for strict window mode", status_code=400)
+                # For strict mode, endTime is calculated from startTime + duration
+            elif request.examMode == "flexible":
+                if not request.startTime:
+                    return error_response("Schedule start time is required for flexible window mode", status_code=400)
+                if not request.endTime:
+                    return error_response("Schedule end time is required for flexible window mode", status_code=400)
+                if not request.duration:
+                    return error_response("Duration is required for flexible window mode", status_code=400)
         
         # Generate assessment token (only for scheduled, or if not exists for draft)
         assessment_token = None
@@ -333,6 +343,60 @@ async def create_custom_mcq_assessment(
         # Calculate total marks
         total_marks = sum(q["marks"] for q in questions_with_ids) if questions_with_ids else 0
         
+        # Helper function to convert string or datetime to ISO string
+        # Import datetime locally to avoid closure issues
+        from datetime import datetime as dt_class, timedelta
+        
+        def to_iso_string(dt):
+            if dt is None:
+                return None
+            if isinstance(dt, str):
+                # Already a string, return as is (assuming it's already in ISO format)
+                return dt
+            if isinstance(dt, dt_class):
+                return dt.isoformat()
+            return str(dt)
+        
+        # Helper function to get datetime object from string or datetime
+        def to_datetime(dt):
+            if dt is None:
+                return None
+            if isinstance(dt, dt_class):
+                return dt.replace(tzinfo=None) if dt.tzinfo else dt
+            if isinstance(dt, str):
+                try:
+                    # Try parsing ISO format string (handles both with and without timezone)
+                    if 'Z' in dt or '+' in dt or dt.count('-') > 2:
+                        # Has timezone info
+                        return dt_class.fromisoformat(dt.replace('Z', '+00:00')).replace(tzinfo=None)
+                    else:
+                        # No timezone, assume UTC
+                        return dt_class.fromisoformat(dt)
+                except (ValueError, AttributeError):
+                    # If parsing fails, try to create datetime from common formats
+                    try:
+                        # Try common datetime formats
+                        for fmt in ['%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M']:
+                            try:
+                                return dt_class.strptime(dt, fmt)
+                            except ValueError:
+                                continue
+                        # If all formats fail, return None
+                        return None
+                    except:
+                        return None
+            return dt
+        
+        # For strict mode, calculate endTime from startTime + duration
+        calculated_end_time = None
+        if request.examMode == "strict" and request.startTime and request.duration:
+            start_dt = to_datetime(request.startTime)
+            if start_dt:
+                calculated_end_time = start_dt + timedelta(minutes=request.duration)
+        
+        # Use calculated endTime for strict mode, provided endTime for flexible mode
+        final_end_time = calculated_end_time if request.examMode == "strict" else request.endTime
+        
         # Create assessment document
         assessment_doc = {
             "title": request.title or "",
@@ -347,15 +411,17 @@ async def create_custom_mcq_assessment(
             "accessMode": request.accessMode,
             "examMode": request.examMode,
             "schedule": {
-                "startTime": request.startTime.isoformat() if request.startTime else None,
-                "endTime": request.endTime.isoformat() if request.endTime else None,
+                "startTime": to_iso_string(request.startTime),
+                "endTime": to_iso_string(final_end_time),
                 "duration": request.duration,  # In minutes
             },
+            "accessTimeBeforeStart": request.accessTimeBeforeStart if request.accessTimeBeforeStart is not None else 15,  # Default 15 minutes
             "passPercentage": request.passPercentage,
             "submissions": {},  # Store candidate submissions
             "totalMarks": total_marks,
             "currentStation": request.currentStation or 1,  # Track current station
             "proctoringSettings": request.proctoringSettings.model_dump() if getattr(request, "proctoringSettings", None) else None,
+        "showResultToCandidate": request.showResultToCandidate if request.showResultToCandidate is not None else True,
         }
         
         # Only add token and URL for scheduled assessments
@@ -465,10 +531,19 @@ async def get_custom_mcq_assessment(
                 "candidateKey": key,
                 "candidateInfo": submission_data.get("candidateInfo", {}),
                 "score": submission_data.get("score", 0),
+                "totalMarks": submission_data.get("totalMarks", 0),
                 "percentage": submission_data.get("percentage", 0),
+                "passed": submission_data.get("passed", False),
                 "status": submission_data.get("status", "pending"),
+                "gradingStatus": submission_data.get("gradingStatus", "completed"),
                 "submittedAt": submission_data.get("submittedAt"),
                 "startedAt": submission_data.get("startedAt"),
+                "mcqScore": submission_data.get("mcqScore", 0),
+                "mcqTotal": submission_data.get("mcqTotal", 0),
+                "subjectiveScore": submission_data.get("subjectiveScore", 0),
+                "subjectiveTotal": submission_data.get("subjectiveTotal", 0),
+                "answerLogs": submission_data.get("answerLogs", {}),  # Include answer logs
+                "submissions": submission_data.get("submissions", []),  # Include graded submissions with marks
             })
         
         assessment_serialized["submissionsList"] = submissions_list
@@ -545,7 +620,11 @@ async def update_custom_mcq_assessment(
             update_doc["totalMarks"] = sum(q["marks"] for q in questions_with_ids)
         
         if request.candidates is not None:
-            update_doc["candidates"] = [c.model_dump() for c in request.candidates]
+            try:
+                update_doc["candidates"] = [c.model_dump() if hasattr(c, 'model_dump') else dict(c) if isinstance(c, dict) else c for c in request.candidates]
+            except Exception as e:
+                logger.warning(f"Error processing candidates: {e}")
+                update_doc["candidates"] = [dict(c) if isinstance(c, dict) else c for c in request.candidates]
         
         if request.accessMode is not None:
             update_doc["accessMode"] = request.accessMode
@@ -553,15 +632,49 @@ async def update_custom_mcq_assessment(
         if request.examMode is not None:
             update_doc["examMode"] = request.examMode
         
+        # Import datetime locally to avoid closure issues
+        from datetime import datetime as dt_class, timedelta
+        
+        # Helper functions for datetime handling (same as in create endpoint)
+        def to_iso_string(dt):
+            if dt is None:
+                return None
+            if isinstance(dt, str):
+                return dt
+            if isinstance(dt, dt_class):
+                return dt.isoformat()
+            return str(dt)
+        
+        def to_datetime(dt):
+            if dt is None:
+                return None
+            if isinstance(dt, dt_class):
+                return dt.replace(tzinfo=None) if dt.tzinfo else dt
+            if isinstance(dt, str):
+                try:
+                    if 'Z' in dt or '+' in dt or dt.count('-') > 2:
+                        return dt_class.fromisoformat(dt.replace('Z', '+00:00')).replace(tzinfo=None)
+                    else:
+                        return dt_class.fromisoformat(dt)
+                except (ValueError, AttributeError):
+                    for fmt in ['%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M']:
+                        try:
+                            return dt_class.strptime(dt, fmt)
+                        except ValueError:
+                            continue
+                    return None
+            return dt
+        
         # Handle schedule updates - merge with existing schedule
         schedule_updated = False
-        schedule = dict(assessment.get("schedule", {}))  # Copy existing schedule
+        existing_schedule = assessment.get("schedule") or {}
+        schedule = dict(existing_schedule) if isinstance(existing_schedule, dict) else {}  # Copy existing schedule safely
         
         if request.startTime is not None:
-            schedule["startTime"] = request.startTime.isoformat()
+            schedule["startTime"] = to_iso_string(request.startTime)
             schedule_updated = True
         if request.endTime is not None:
-            schedule["endTime"] = request.endTime.isoformat()
+            schedule["endTime"] = to_iso_string(request.endTime)
             schedule_updated = True
         if request.duration is not None:
             schedule["duration"] = request.duration
@@ -572,6 +685,31 @@ async def update_custom_mcq_assessment(
         
         if request.passPercentage is not None:
             update_doc["passPercentage"] = request.passPercentage
+        
+        # Handle accessTimeBeforeStart update
+        if request.accessTimeBeforeStart is not None:
+            update_doc["accessTimeBeforeStart"] = request.accessTimeBeforeStart
+        elif request.examMode == "strict" and "accessTimeBeforeStart" not in assessment:
+            # Set default if switching to strict mode and not set
+            update_doc["accessTimeBeforeStart"] = 15
+        
+        # For strict mode, recalculate endTime if startTime or duration changed
+        if update_doc.get("examMode") == "strict" or (request.examMode is None and assessment.get("examMode") == "strict"):
+            current_schedule = update_doc.get("schedule") or (assessment.get("schedule") or {})
+            if isinstance(current_schedule, dict) and current_schedule.get("startTime") and current_schedule.get("duration"):
+                try:
+                    start_time_dt = to_datetime(current_schedule["startTime"])
+                    duration_val = current_schedule.get("duration")
+                    if start_time_dt and duration_val:
+                        # Ensure duration is a number
+                        duration_int = int(duration_val) if duration_val else None
+                        if duration_int:
+                            calculated_end = start_time_dt + timedelta(minutes=duration_int)
+                            current_schedule["endTime"] = to_iso_string(calculated_end)
+                            update_doc["schedule"] = current_schedule
+                except (ValueError, TypeError, AttributeError) as e:
+                    logger.warning(f"Error calculating endTime for strict mode: {e}")
+                    # Don't crash, just skip the calculation
         
         # Handle status update (draft -> scheduled/active)
         if request.status is not None:
@@ -587,14 +725,33 @@ async def update_custom_mcq_assessment(
                 if not current_questions or len(current_questions) == 0:
                     return error_response("At least one question is required for scheduled assessments", status_code=400)
                 
-                # Validate exam mode requirements
+                # Validate exam mode requirements - NEW IMPLEMENTATION
                 current_exam_mode = update_doc.get("examMode") or assessment.get("examMode", "strict")
-                current_schedule = update_doc.get("schedule") or assessment.get("schedule", {})
+                current_schedule = update_doc.get("schedule") or (assessment.get("schedule") or {})
                 
-                if current_exam_mode == "flexible" and not current_schedule.get("duration"):
-                    return error_response("Duration is required for flexible exam mode", status_code=400)
-                if current_exam_mode == "strict" and (not current_schedule.get("startTime") or not current_schedule.get("endTime")):
-                    return error_response("Start time and end time are required for strict exam mode", status_code=400)
+                # Ensure current_schedule is a dict
+                if not isinstance(current_schedule, dict):
+                    current_schedule = {}
+                
+                if current_exam_mode == "strict":
+                    if not current_schedule.get("startTime"):
+                        return error_response("Start time is required for strict window mode", status_code=400)
+                    if not current_schedule.get("duration"):
+                        return error_response("Duration is required for strict window mode", status_code=400)
+                    # For strict mode, calculate endTime if not present
+                    if not current_schedule.get("endTime") and current_schedule.get("startTime") and current_schedule.get("duration"):
+                        start_time_dt = to_datetime(current_schedule["startTime"])
+                        if start_time_dt:
+                            calculated_end = start_time_dt + timedelta(minutes=current_schedule["duration"])
+                            current_schedule["endTime"] = to_iso_string(calculated_end)
+                            update_doc["schedule"] = current_schedule
+                elif current_exam_mode == "flexible":
+                    if not current_schedule.get("startTime"):
+                        return error_response("Schedule start time is required for flexible window mode", status_code=400)
+                    if not current_schedule.get("endTime"):
+                        return error_response("Schedule end time is required for flexible window mode", status_code=400)
+                    if not current_schedule.get("duration"):
+                        return error_response("Duration is required for flexible window mode", status_code=400)
                 
                 # Generate assessment token if not exists
                 if not assessment.get("assessmentToken"):
@@ -607,7 +764,23 @@ async def update_custom_mcq_assessment(
 
         # Update proctoring settings if provided
         if getattr(request, "proctoringSettings", None) is not None:
-            update_doc["proctoringSettings"] = request.proctoringSettings.model_dump() if request.proctoringSettings else None
+            try:
+                if request.proctoringSettings:
+                    if hasattr(request.proctoringSettings, 'model_dump'):
+                        update_doc["proctoringSettings"] = request.proctoringSettings.model_dump()
+                    elif isinstance(request.proctoringSettings, dict):
+                        update_doc["proctoringSettings"] = request.proctoringSettings
+                    else:
+                        update_doc["proctoringSettings"] = dict(request.proctoringSettings)
+                else:
+                    update_doc["proctoringSettings"] = None
+            except Exception as e:
+                logger.warning(f"Error processing proctoringSettings: {e}")
+                update_doc["proctoringSettings"] = dict(request.proctoringSettings) if request.proctoringSettings else None
+        
+        # Update showResultToCandidate if provided
+        if getattr(request, "showResultToCandidate", None) is not None:
+            update_doc["showResultToCandidate"] = request.showResultToCandidate
         
         await db.custom_mcq_assessments.update_one(
             {"_id": assessment_oid},
@@ -729,6 +902,53 @@ async def verify_custom_mcq_candidate(
                 logger.warning(f"Blocking access for {candidate_key} - currently taking assessment (startedAt: {started_at}, submittedAt: {submitted_at})")
                 return error_response("You are already taking this assessment in another tab or browser. Please complete it there first.", status_code=400)
         
+        # NEW: Check access time based on exam mode (BEFORE checking access mode)
+        from datetime import datetime, timedelta
+        
+        exam_mode = assessment.get("examMode", "strict")
+        schedule = assessment.get("schedule") or {}
+        start_time_str = schedule.get("startTime") if isinstance(schedule, dict) else None
+        end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
+        access_time_before_start = assessment.get("accessTimeBeforeStart", 15)  # Default 15 minutes
+        now = datetime.utcnow()
+        
+        if exam_mode == "strict" and start_time_str:
+            # Strict mode: Check access time before start
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+            access_start_time = start_time - timedelta(minutes=access_time_before_start)
+            
+            if now < access_start_time:
+                # Too early - cannot access yet
+                access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                return error_response(
+                    f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}.",
+                    status_code=403
+                )
+        elif exam_mode == "flexible":
+            # Flexible mode: Check schedule window (start time to end time)
+            if not start_time_str:
+                return error_response("Assessment schedule is not properly configured", status_code=400)
+            
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+            
+            if now < start_time:
+                # Before scheduled start time - cannot access yet
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                return error_response(
+                    f"You cannot access this assessment yet. The assessment window will be available from {start_time_formatted}.",
+                    status_code=403
+                )
+            
+            if end_time_str:
+                end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                if now > end_time:
+                    # After scheduled end time - window has closed
+                    end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    return error_response(
+                        f"The assessment window has ended. The assessment was available until {end_time_formatted}. You cannot take this assessment.",
+                        status_code=403
+                    )
+        
         access_mode = assessment.get("accessMode", "private")
         
         # For public mode, anyone with the link can access (if not already submitted)
@@ -841,6 +1061,83 @@ async def get_custom_mcq_assessment_for_taking(
                         status_code=403,
                     )
 
+        # NEW IMPLEMENTATION: Check access based on exam mode
+        from datetime import datetime, timedelta
+        
+        exam_mode = assessment.get("examMode", "strict")
+        schedule = assessment.get("schedule") or {}
+        start_time_str = schedule.get("startTime") if isinstance(schedule, dict) else None
+        end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
+        duration = schedule.get("duration") if isinstance(schedule, dict) else None
+        access_time_before_start = assessment.get("accessTimeBeforeStart", 15)  # Default 15 minutes
+        
+        now = datetime.utcnow()
+        can_access = False
+        can_start = False
+        waiting_for_start = False
+        exam_started = False
+        time_remaining = None
+        error_message = None
+        
+        if exam_mode == "strict":
+            if not start_time_str or not duration:
+                return error_response("Assessment schedule is not properly configured", status_code=400)
+            
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+            end_time = start_time + timedelta(minutes=duration)
+            access_start_time = start_time - timedelta(minutes=access_time_before_start)
+            
+            if now < access_start_time:
+                # Too early - cannot access yet - return error response immediately
+                access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                return error_response(
+                    f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}.",
+                    status_code=403
+                )
+            elif access_start_time <= now < start_time:
+                # Within access window but before start time - can access for pre-checks
+                can_access = True
+                can_start = False
+                waiting_for_start = True
+            elif start_time <= now < end_time:
+                # Exam is running
+                can_access = True
+                can_start = True
+                exam_started = True
+                time_remaining = max(0, int((end_time - now).total_seconds()))
+            else:
+                # Exam has ended
+                error_message = "The assessment has ended. You cannot take this assessment."
+                can_access = False
+        
+        elif exam_mode == "flexible":
+            if not start_time_str or not end_time_str or not duration:
+                return error_response("Assessment schedule is not properly configured", status_code=400)
+            
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+            end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+            
+            if now < start_time:
+                # Before scheduled start time - cannot access yet - return error response immediately
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                return error_response(
+                    f"You cannot access this assessment yet. The assessment window will be available from {start_time_formatted}.",
+                    status_code=403
+                )
+            elif now > end_time:
+                # After scheduled end time - window has closed - return error response immediately
+                end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                return error_response(
+                    f"The assessment window has ended. The assessment was available until {end_time_formatted}. You cannot take this assessment.",
+                    status_code=403
+                )
+            else:
+                # Within window - auto-start assessment immediately after pre-checks
+                can_access = True
+                can_start = True
+                exam_started = True  # Auto-start for flexible mode (no manual start button)
+                time_remaining = duration * 60 if duration else None  # Timer starts with full duration
+        
         # Prepare candidate-facing assessment data
         assessment_serialized = serialize_document(assessment)
         if not assessment_serialized:
@@ -849,6 +1146,16 @@ async def get_custom_mcq_assessment_for_taking(
         # Remove internal fields not needed for candidate
         assessment_serialized.pop("submissions", None)
         assessment_serialized.pop("assessmentToken", None)
+        
+        # Add access control information
+        assessment_serialized["accessControl"] = {
+            "canAccess": can_access,
+            "canStart": can_start,
+            "waitingForStart": waiting_for_start,
+            "examStarted": exam_started,
+            "timeRemaining": time_remaining,
+            "errorMessage": error_message,
+        }
 
         return success_response("Assessment fetched successfully", assessment_serialized)
     except Exception as exc:
@@ -899,13 +1206,31 @@ async def submit_custom_mcq_assessment(
         for submission in request.submissions:
             question = questions_dict.get(submission.questionId)
             if not question:
+                logger.warning(f"Question {submission.questionId} not found in assessment. Available question IDs: {list(questions_dict.keys())[:5]}")
                 continue
 
-            question_type = question.get("questionType", "mcq")
-            if "options" in question and "correctAn" in question:
-                question_type = "mcq"
-            elif question_type not in ["mcq", "subjective"]:
+            # Determine question type: prioritize explicit questionType, then check structure
+            question_type_raw = question.get("questionType", "")
+            question_type = str(question_type_raw).lower().strip() if question_type_raw else ""
+            
+            # Debug: Log question structure
+            has_options = "options" in question
+            has_correct_an = "correctAn" in question
+            logger.debug(f"Question {submission.questionId}: questionType={question_type_raw}, has_options={has_options}, has_correctAn={has_correct_an}, question_keys={list(question.keys())}")
+            
+            # If questionType is explicitly set, use it
+            if question_type == "subjective":
                 question_type = "subjective"
+            elif question_type == "mcq":
+                question_type = "mcq"
+            # Otherwise, infer from structure
+            elif has_options and has_correct_an:
+                question_type = "mcq"
+            else:
+                # Default to subjective if no options/correctAn (subjective questions don't have these)
+                question_type = "subjective"
+            
+            logger.info(f"Question {submission.questionId}: detected_type={question_type}, hasSelectedAnswers={bool(submission.selectedAnswers)}, hasTextAnswer={bool(submission.textAnswer)}, marks={question.get('marks', 'N/A')}")
 
             if question_type == "mcq" and submission.selectedAnswers:
                 mcq_submissions.append({
@@ -913,14 +1238,30 @@ async def submit_custom_mcq_assessment(
                     "question": question,
                     "selectedAnswers": submission.selectedAnswers,
                 })
-            elif question_type == "subjective" and submission.textAnswer:
-                subjective_submissions.append({
-                    "questionId": submission.questionId,
-                    "question": question.get("question", ""),
-                    "answer": submission.textAnswer,
-                    "max_marks": question.get("marks", 1),
-                    "section": question.get("section", ""),
-                })
+            elif question_type == "subjective":
+                if submission.textAnswer:
+                    # Get marks from question, default to 1 if not found
+                    question_marks = question.get("marks", 1)
+                    if isinstance(question_marks, str):
+                        try:
+                            question_marks = int(question_marks)
+                        except (ValueError, TypeError):
+                            question_marks = 1
+                    if question_marks < 1:
+                        question_marks = 1
+                    
+                    logger.info(f"Adding subjective submission: questionId={submission.questionId}, marks={question_marks}, answer_length={len(submission.textAnswer)}")
+                    subjective_submissions.append({
+                        "questionId": submission.questionId,
+                        "question": question.get("question", ""),
+                        "answer": submission.textAnswer,
+                        "max_marks": question_marks,
+                        "section": question.get("section", ""),
+                    })
+                else:
+                    logger.warning(f"Question {submission.questionId} is subjective but has no textAnswer provided")
+            else:
+                logger.warning(f"Question {submission.questionId}: type={question_type}, but missing required answer data (MCQ needs selectedAnswers, Subjective needs textAnswer)")
 
         # Grade MCQ questions
         for mcq_sub in mcq_submissions:
@@ -957,29 +1298,58 @@ async def submit_custom_mcq_assessment(
         subjective_total = 0
         grading_status = "completed"
 
+        logger.info(f"Grading: {len(mcq_submissions)} MCQ submissions, {len(subjective_submissions)} subjective submissions")
+        
         if subjective_submissions:
             try:
+                logger.info(f"Starting AI grading for {len(subjective_submissions)} subjective questions")
+                logger.info(f"Subjective submissions details: {[(s['questionId'], s.get('max_marks', 'N/A'), len(s.get('answer', ''))) for s in subjective_submissions]}")
                 grading_status = "grading"
                 ai_results = await grade_multiple_subjective_answers(subjective_submissions)
+                logger.info(f"AI grading completed: {len(ai_results)} results")
+                logger.info(f"AI results: {[(r.get('questionId'), r.get('score', 0), r.get('max_marks', 'N/A')) for r in ai_results]}")
 
                 for result in ai_results:
-                    question_id = result["questionId"]
-                    score = result["score"]
-                    max_marks = next(
-                        (s["max_marks"] for s in subjective_submissions if s["questionId"] == question_id),
-                        1
+                    question_id = result.get("questionId")
+                    if not question_id:
+                        logger.error(f"AI result missing questionId: {result}")
+                        continue
+                    
+                    score = float(result.get("score", 0))
+                    # Get max_marks from the original submission
+                    submission_item = next(
+                        (s for s in subjective_submissions if s["questionId"] == question_id),
+                        None
                     )
+                    if not submission_item:
+                        logger.error(f"Could not find submission for questionId: {question_id}")
+                        continue
+                    
+                    max_marks = submission_item.get("max_marks", 1)
+                    # Ensure max_marks is an integer
+                    if isinstance(max_marks, str):
+                        try:
+                            max_marks = int(float(max_marks))
+                        except (ValueError, TypeError):
+                            max_marks = 1
+                    elif isinstance(max_marks, float):
+                        max_marks = int(max_marks)
+                    else:
+                        max_marks = int(max_marks) if max_marks else 1
+                    
+                    if max_marks < 1:
+                        max_marks = 1
+                    
                     subjective_total += max_marks
                     subjective_score += score
+                    
+                    logger.info(f"Question {question_id}: scored {score}/{max_marks}")
 
                     graded_submissions.append({
                         "questionId": question_id,
                         "questionType": "subjective",
-                        "textAnswer": next(
-                            (s["answer"] for s in subjective_submissions if s["questionId"] == question_id),
-                            ""
-                        ),
-                        "marksAwarded": score,
+                        "textAnswer": submission_item.get("answer", ""),
+                        "marksAwarded": round(score, 2),
                         "maxMarks": max_marks,
                         "feedback": result.get("feedback", ""),
                         "reasoning": result.get("reasoning", ""),
@@ -1002,13 +1372,36 @@ async def submit_custom_mcq_assessment(
                         "reasoning": "",
                     })
 
+        # Calculate totals - also count unanswered subjective questions in total marks
+        # Get all questions to calculate proper totals
+        all_mcq_questions = [q for q in questions if q.get("questionType", "").lower() == "mcq" or ("options" in q and "correctAn" in q)]
+        all_subjective_questions = [q for q in questions if q.get("questionType", "").lower() == "subjective" and not ("options" in q and "correctAn" in q)]
+        
+        # Calculate actual totals including unanswered questions
+        actual_mcq_total = sum(q.get("marks", 1) for q in all_mcq_questions)
+        actual_subjective_total = sum(q.get("marks", 1) for q in all_subjective_questions)
+        
+        # Use actual totals if they differ from what we calculated
+        if actual_mcq_total > mcq_total:
+            logger.warning(f"MCQ total mismatch: calculated={mcq_total}, actual={actual_mcq_total}")
+            mcq_total = actual_mcq_total
+        if actual_subjective_total > subjective_total:
+            logger.info(f"Subjective total includes unanswered questions: calculated={subjective_total}, actual={actual_subjective_total}")
+            subjective_total = actual_subjective_total
+        
         # Calculate totals
         total_score = mcq_score + subjective_score
         total_marks = mcq_total + subjective_total
         percentage = (total_score / total_marks * 100) if total_marks > 0 else 0
         pass_percentage = assessment.get("passPercentage", 50)
         passed = percentage >= pass_percentage
+        
+        logger.info(f"Final scores: MCQ={mcq_score}/{mcq_total}, Subjective={subjective_score}/{subjective_total}, Total={total_score}/{total_marks}, Percentage={percentage:.2f}%")
 
+        # Get existing submission data to preserve answerLogs
+        existing_submission = submissions.get(candidate_key, {})
+        existing_answer_logs = existing_submission.get("answerLogs", {})
+        
         # Save submission
         submission_data = {
             "candidateInfo": {
@@ -1028,6 +1421,7 @@ async def submit_custom_mcq_assessment(
             "mcqTotal": mcq_total,
             "subjectiveScore": subjective_score,
             "subjectiveTotal": subjective_total,
+            "answerLogs": existing_answer_logs,  # Preserve answer logs from previous saves
         }
 
         submissions[candidate_key] = submission_data
@@ -1045,9 +1439,295 @@ async def submit_custom_mcq_assessment(
                 "percentage": round(percentage, 2),
                 "passed": passed,
                 "gradingStatus": grading_status,
+                "mcqScore": mcq_score,
+                "mcqTotal": mcq_total,
+                "subjectiveScore": subjective_score,
+                "subjectiveTotal": subjective_total,
+                "showResultToCandidate": assessment.get("showResultToCandidate", True),
             }
         )
 
     except Exception as e:
         logger.exception(f"Error submitting assessment: {e}")
         return error_response(f"Failed to submit assessment: {str(e)}", status_code=500)
+
+
+@router.post("/send-invitations")
+async def send_custom_mcq_invitations(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """Send email invitations to candidates for custom MCQ assessment"""
+    try:
+        from ....utils.email import get_email_service
+        from ....config.settings import get_settings
+        
+        assessment_id = payload.get("assessmentId")
+        if not assessment_id:
+            return error_response("Assessment ID is required", status_code=400)
+        
+        # Get assessment and check access
+        user_id = current_user.get("id") or current_user.get("_id")
+        if not user_id:
+            return error_response("User ID not found", status_code=401)
+        user_id = str(user_id)
+        assessment_oid = to_object_id(assessment_id)
+        
+        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
+        
+        # Check ownership
+        if str(assessment["created_by"]) != user_id:
+            return error_response("Access denied", status_code=403)
+        
+        candidates = payload.get("candidates", [])
+        assessment_url = payload.get("assessmentUrl", "")
+        template = payload.get("template", {})
+        
+        if not candidates or not assessment_url:
+            return error_response("Candidates and assessment URL are required", status_code=400)
+        
+        # Get template values
+        subject_template = template.get("subject", "")
+        message_template = template.get("message", "You have been invited to take an assessment. Please click the link below to start.")
+        footer = template.get("footer", "")
+        sent_by = template.get("sentBy", "AI Assessment Platform")
+        
+        # Get email service and verify it's configured
+        settings = get_settings()
+        if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+            return error_response(
+                "SendGrid is not configured. Please set SENDGRID_API_KEY and SENDGRID_FROM_EMAIL environment variables.",
+                status_code=500
+            )
+        
+        email_service = get_email_service()
+        
+        sent_count = 0
+        failed_emails = []
+        error_messages = []
+        skipped_emails = []
+        
+        # Get existing candidates from assessment to check invite status
+        existing_candidates = assessment.get("candidates", [])
+        existing_candidates_dict = {
+            c.get("email", "").strip().lower(): c 
+            for c in existing_candidates 
+            if c.get("email")
+        }
+        
+        for candidate in candidates:
+            email = candidate.get("email", "").strip().lower()
+            name = candidate.get("name", "").strip()
+            
+            if not email or not name:
+                failed_emails.append(email or "unknown")
+                error_messages.append(f"Invalid candidate data: email={email}, name={name}")
+                continue
+            
+            # Check if candidate has already been invited (unless forceResend is true)
+            force_resend = payload.get("forceResend", False)
+            existing_candidate = existing_candidates_dict.get(email)
+            if existing_candidate and existing_candidate.get("invited") and not force_resend:
+                skipped_emails.append(email)
+                logger.info(f"Skipping invitation to {email} - already invited")
+                continue
+            
+            # Use assessment URL without email and name parameters
+            # Replace placeholders in message
+            email_body = message_template
+            email_body = email_body.replace("{{candidate_name}}", name)
+            email_body = email_body.replace("{{candidate_email}}", email)
+            email_body = email_body.replace("{{exam_url}}", assessment_url)
+            email_body = email_body.replace("{{assessment_url}}", assessment_url)
+            
+            # Build HTML email
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ text-align: center; margin-bottom: 30px; }}
+                    .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #3b82f6; color: #ffffff; text-decoration: none; border-radius: 6px; margin: 20px 0; }}
+                    .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+                    .candidate-info {{ background-color: #ffffff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }}
+                    .candidate-info p {{ margin: 5px 0; }}
+                    .candidate-info strong {{ color: #1e293b; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Assessment Invitation</h1>
+                    </div>
+                    <div class="content">
+                        <p>Dear {name},</p>
+                        <p>{email_body}</p>
+                        
+                        <div class="candidate-info">
+                            <p><strong>Your Details:</strong></p>
+                            <p><strong>Name:</strong> {name}</p>
+                            <p><strong>Email:</strong> {email}</p>
+                            <p style="font-size: 0.875rem; color: #64748b; margin-top: 10px;">
+                                These details will be auto-filled when you start the assessment.
+                            </p>
+                        </div>
+                        
+                        <div style="text-align: center;">
+                            <a href="{assessment_url}" class="button">Start Assessment</a>
+                        </div>
+                    </div>
+                    {f'<div class="footer"><p>{footer}</p></div>' if footer else ''}
+                    <div class="footer">
+                        <p>Sent by {sent_by}</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            subject = subject_template or f"Assessment Invitation - {assessment.get('title', 'AI Assessment Platform')}"
+            
+            try:
+                logger.info(f"Attempting to send invitation email to {email}")
+                await email_service.send_email(email, subject, html_content)
+                logger.info(f"Email sent successfully to {email}")
+                sent_count += 1
+                
+                # Update candidate invite status in assessment
+                candidates_list = assessment.get("candidates", [])
+                candidate_updated = False
+                for idx, c in enumerate(candidates_list):
+                    if c.get("email", "").lower() == email:
+                        candidates_list[idx]["invited"] = True
+                        candidates_list[idx]["inviteSentAt"] = _now_utc().isoformat()
+                        candidate_updated = True
+                        break
+                
+                # If candidate not in list, add them
+                if not candidate_updated:
+                    candidates_list.append({
+                        "name": name,
+                        "email": email,
+                        "invited": True,
+                        "inviteSentAt": _now_utc().isoformat()
+                    })
+                
+                assessment["candidates"] = candidates_list
+                await db.custom_mcq_assessments.update_one(
+                    {"_id": assessment_oid},
+                    {"$set": {"candidates": candidates_list, "updated_at": _now_utc()}}
+                )
+                
+            except Exception as exc:
+                error_msg = f"Failed to send invitation to {email}: {str(exc)}"
+                logger.error(error_msg, exc_info=True)
+                failed_emails.append(email)
+                error_messages.append(error_msg)
+        
+        # Build response message
+        message = f"Invitations sent to {sent_count} candidate(s)"
+        if len(skipped_emails) > 0:
+            message += f". {len(skipped_emails)} already invited (skipped): {', '.join(skipped_emails[:5])}"
+        if len(failed_emails) > 0:
+            message += f". {len(failed_emails)} failed: {', '.join(failed_emails[:5])}"
+        
+        return success_response(
+            message,
+            {
+                "sentCount": sent_count,
+                "failedCount": len(failed_emails),
+                "skippedCount": len(skipped_emails),
+                "failedEmails": failed_emails,
+                "skippedEmails": skipped_emails,
+                "errorMessages": error_messages,
+            }
+        )
+        
+    except Exception as e:
+        logger.exception(f"Error sending invitations: {e}")
+        return error_response(f"Failed to send invitations: {str(e)}", status_code=500)
+
+
+@router.post("/save-answer-log")
+async def save_answer_log(
+    request: SaveAnswerLogRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """Save answer change log for subjective questions"""
+    try:
+        assessment_id = request.assessmentId
+        oid = to_object_id(assessment_id)
+        if not oid:
+            return error_response("Invalid assessment ID", status_code=400)
+        
+        # Get assessment
+        assessment = await db.custom_mcq_assessments.find_one({"_id": oid})
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
+        
+        # Verify token
+        assessment_token = assessment.get("assessmentToken")
+        if not assessment_token or assessment_token != request.token:
+            return error_response("Invalid or expired assessment token", status_code=403)
+        
+        # Get candidate key
+        candidate_key = f"{request.email.lower().strip()}_{request.name.strip().lower()}"
+        
+        # Get or create submission entry
+        submissions = assessment.get("submissions", {})
+        submission_data = submissions.get(candidate_key, {})
+        
+        # Initialize answerLogs if not exists
+        if "answerLogs" not in submission_data:
+            submission_data["answerLogs"] = {}
+        
+        answer_logs = submission_data["answerLogs"]
+        
+        # Initialize logs for this question if not exists
+        if request.questionId not in answer_logs:
+            answer_logs[request.questionId] = []
+        
+        question_logs = answer_logs[request.questionId]
+        
+        # Check if this answer is different from the last log entry
+        should_save = True
+        if question_logs:
+            last_log = question_logs[-1]
+            if last_log.get("answer", "").strip() == request.answer.strip():
+                # Same answer, don't save duplicate
+                should_save = False
+        
+        if should_save:
+            # Add new log entry
+            log_entry = {
+                "answer": request.answer,
+                "timestamp": request.timestamp.isoformat() if request.timestamp else _now_utc().isoformat(),
+            }
+            question_logs.append(log_entry)
+            
+            # Update submission data
+            submission_data["answerLogs"] = answer_logs
+            submissions[candidate_key] = submission_data
+            
+            # Save to database
+            await db.custom_mcq_assessments.update_one(
+                {"_id": oid},
+                {"$set": {"submissions": submissions, "updated_at": _now_utc()}}
+            )
+            
+            logger.info(f"Saved answer log for question {request.questionId}, candidate {candidate_key}")
+            return success_response("Answer log saved successfully", {"saved": True})
+        else:
+            logger.debug(f"Skipping duplicate answer log for question {request.questionId}")
+            return success_response("Answer unchanged, log not saved", {"saved": False})
+        
+    except Exception as e:
+        logger.exception(f"Error saving answer log: {e}")
+        return error_response(f"Failed to save answer log: {str(e)}", status_code=500)

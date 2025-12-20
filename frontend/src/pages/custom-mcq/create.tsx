@@ -333,21 +333,32 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         return;
       }
 
-      // Validate schedule based on exam mode
+      // Validate schedule based on exam mode - NEW IMPLEMENTATION
       if (assessmentData.examMode === "strict") {
-        if (!assessmentData.startTime || !assessmentData.endTime) {
-          setError("Start time and end time are required for strict window mode");
+        if (!assessmentData.startTime) {
+          setError("Start time is required for strict window mode");
           setLoading(false);
           return;
         }
+        if (!assessmentData.duration) {
+          setError("Duration is required for strict window mode");
+          setLoading(false);
+          return;
+        }
+        // endTime is calculated from startTime + duration, not required
       } else if (assessmentData.examMode === "flexible") {
+        if (!assessmentData.startTime) {
+          setError("Schedule start time is required for flexible window mode");
+          setLoading(false);
+          return;
+        }
+        if (!assessmentData.endTime) {
+          setError("Schedule end time is required for flexible window mode");
+          setLoading(false);
+          return;
+        }
         if (!assessmentData.duration) {
           setError("Duration is required for flexible window mode");
-          setLoading(false);
-          return;
-        }
-        if (!assessmentData.startTime || !assessmentData.endTime) {
-          setError("Start time and end time are required for flexible window mode");
           setLoading(false);
           return;
         }
@@ -364,6 +375,8 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         startTime: assessmentData.startTime,
         endTime: assessmentData.endTime,
         duration: assessmentData.duration,
+        accessTimeBeforeStart: assessmentData.accessTimeBeforeStart || 15, // Include access time before start
+        showResultToCandidate: (assessmentData as any).showResultToCandidate !== false, // Default to true if not specified
         passPercentage: assessmentData.passPercentage || 50,
         status: "active", // Change from draft to active
         currentStation: currentStation,
@@ -443,7 +456,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
     <div style={{ backgroundColor: "#ffffff", minHeight: "100vh", padding: "2rem" }}>
       <div className="container" style={{ maxWidth: "1200px", margin: "0 auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2rem" }}>
-          <h1 style={{ margin: 0, color: "#1E5A3B" }}>Create Custom MCQ Assessment</h1>
+          <h1 style={{ margin: 0, color: "#1E5A3B" }}>Create Custom MCQ/Subjective Assessment</h1>
           {isSaving && (
             <span style={{ fontSize: "0.875rem", color: "#2D7A52", fontStyle: "italic" }}>
               💾 Saving draft...

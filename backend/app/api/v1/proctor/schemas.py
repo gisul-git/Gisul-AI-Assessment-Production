@@ -132,7 +132,6 @@ class StartSessionRequest(BaseModel):
     assessmentId: str = Field(..., description="Assessment ID")
     userId: str = Field(..., description="Candidate user ID (email)")
     ai_proctoring: bool = Field(..., description="AI proctoring enabled")
-    live_proctoring: bool = Field(..., description="Live proctoring enabled")
     consent: bool = Field(..., description="User consent given")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional session metadata")
 
@@ -142,3 +141,37 @@ class StopSessionRequest(BaseModel):
     assessmentId: str = Field(..., description="Assessment ID")
     userId: str = Field(..., description="Candidate user ID (email)")
     reason: Optional[str] = Field(default=None, description="Reason for stopping session")
+
+
+# ============================================================================
+# Live Proctoring Schemas
+# ============================================================================
+
+class LiveProctoringStartSessionRequest(BaseModel):
+    """Request to start a Live Proctoring session."""
+    assessmentId: str = Field(..., description="Assessment ID")
+    candidateId: str = Field(..., description="Candidate ID (email)")
+
+
+class LiveProctoringSessionResponse(BaseModel):
+    """Response for Live Proctoring session creation."""
+    sessionId: str = Field(..., description="Session ID")
+    assessmentId: str = Field(..., description="Assessment ID")
+    candidateId: str = Field(..., description="Candidate ID")
+    status: str = Field(..., description="Session status")
+    createdAt: str = Field(..., description="ISO timestamp")
+
+
+class LiveProctoringSessionData(BaseModel):
+    """Live Proctoring session data."""
+    sessionId: str
+    assessmentId: str
+    candidateId: str
+    status: str  # "candidate_initiated" | "offer_sent" | "active" | "ended"
+    offer: Optional[Dict[str, Any]] = None  # RTCSessionDescription
+    answer: Optional[Dict[str, Any]] = None  # RTCSessionDescription
+    candidateICE: List[Dict[str, Any]] = Field(default_factory=list)  # ICE candidates
+    adminICE: List[Dict[str, Any]] = Field(default_factory=list)  # ICE candidates
+    createdAt: str
+    updatedAt: str
+    endedAt: Optional[str] = None

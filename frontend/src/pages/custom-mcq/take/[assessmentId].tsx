@@ -6,6 +6,7 @@ import { useCameraProctor } from "../../../hooks/useCameraProctor";
 import WebcamPreview from "../../../components/WebcamPreview";
 import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
 import { useProctorUpload } from "@/hooks/useProctorUpload";
+import { useLiveProctoring } from "../../../hooks/useLiveProctoring";
 // (import kept intentionally for future gateContext-based routing; currently enforced via sessionStorage flags)
 
 export default function CustomMCQTakePage() {
@@ -15,7 +16,26 @@ export default function CustomMCQTakePage() {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string[]>>({}); // For MCQ answers
   const [textAnswers, setTextAnswers] = useState<Record<string, string>>({}); // For subjective answers
-  const [selectedQuestionType, setSelectedQuestionType] = useState<"mcq" | "subjective">("mcq");
+  
+  // Use refs to always access the latest state values in callbacks
+  const answersRef = useRef<Record<string, string[]>>({});
+  const textAnswersRef = useRef<Record<string, string>>({});
+  
+  // Track previous answers to detect changes for logging
+  const previousTextAnswersRef = useRef<Record<string, string>>({});
+  
+  // Keep refs in sync with state
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+  
+  useEffect(() => {
+    textAnswersRef.current = textAnswers;
+  }, [textAnswers]);
+  
+  // Sequential flow: MCQ first, then Subjective
+  const [assessmentPhase, setAssessmentPhase] = useState<"mcq" | "subjective">("mcq");
+  const [mcqSubmitted, setMcqSubmitted] = useState(false);
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -27,6 +47,7 @@ export default function CustomMCQTakePage() {
   const [examStarted, setExamStarted] = useState(false); // Track if exam has been manually started (for flexible mode)
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true);
   const [proctoringEnabled, setProctoringEnabled] = useState(false);
+  const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
   const cameraStartRequestedRef = useRef(false);
 
   const getViolationMessage = (eventType: string): string => {
@@ -70,12 +91,56 @@ export default function CustomMCQTakePage() {
     },
   });
 
+  // Get webcam stream from useCameraProctor
+  const webcamStreamForLiveProctor = isCameraOn && videoRef.current?.srcObject 
+    ? (videoRef.current.srcObject as MediaStream)
+    : null;
+
+  const {
+    isStreaming: isLiveProctoringStreaming,
+    connectionState: liveProctoringConnectionState,
+    error: liveProctoringError,
+    sessionId: liveProctoringSessionId,
+    startStreaming: startLiveProctoring,
+    stopStreaming: stopLiveProctoring,
+  } = useLiveProctoring({
+    assessmentId: String(assessmentId || ''),
+    candidateId: candidateInfo?.email || '',
+    enabled: proctoringEnabled,
+    preScreenStream: liveProctorScreenStream,
+    onError: (error) => {
+      console.error('[Custom MCQ Take] Live Proctoring error:', error);
+    },
+    debugMode: false,
+  });
+
+  // Start Live Proctoring when exam starts
+  useEffect(() => {
+    if (examStarted && proctoringEnabled && liveProctorScreenStream && webcamStreamForLiveProctor) {
+      console.log('[Custom MCQ Take] Starting Live Proctoring...');
+      startLiveProctoring().catch(err => {
+        console.error('[Custom MCQ Take] Failed to start Live Proctoring:', err);
+      });
+    }
+  }, [examStarted, proctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
+
+  // Stop Live Proctoring when assessment ends
+  useEffect(() => {
+    if (submitting) {
+      stopLiveProctoring();
+    }
+    return () => {
+      if (submitting) {
+        stopLiveProctoring();
+      }
+    };
+  }, [submitting, stopLiveProctoring]);
+
   // Enable proctoring (tab switch / focus lost) only once exam has started
+  // Note: proctoringEnabled is now set from liveProctoringEnabled in proctoringSettings
   useEffect(() => {
     if (!assessmentId) return;
-    if (candidateInfo && examStarted && !submitting) {
-      setProctoringEnabled(true);
-    }
+    // Keep existing logic for tab switch detection, but Live Proctoring is controlled separately
   }, [assessmentId, candidateInfo, examStarted, submitting]);
 
   // Tab visibility + focus detection (same as AI take page)
@@ -184,82 +249,57 @@ export default function CustomMCQTakePage() {
         // Only explicit true enables camera/model; missing/false => OFF (per PROCTORING_AI_TOGGLE_NOTES.md)
         const aiEnabled = (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled === true;
         setCameraProctorEnabled(aiEnabled);
+        // Set Live Proctoring enabled state
+        const liveEnabled = (assessmentData as any)?.proctoringSettings?.liveProctoringEnabled === true;
+        setProctoringEnabled(liveEnabled);
 
-        // Calculate timer based on exam mode
-        const now = new Date();
+        // NEW IMPLEMENTATION: Use accessControl from backend
+        const accessControl = assessmentData.accessControl;
         const schedule = assessmentData.schedule || {};
         const startTimeStr = schedule.startTime || assessmentData.startTime;
-        const endTimeStr = schedule.endTime || assessmentData.endTime;
-        const duration = schedule.duration || assessmentData.duration;
-
-        if (assessmentData.examMode === "flexible" && duration) {
-          // Flexible mode: check if we're within the window
-          if (startTimeStr && endTimeStr) {
-            const startTime = new Date(startTimeStr);
-            const endTime = new Date(endTimeStr);
-            
-            if (now < startTime) {
-              // Exam window hasn't opened yet
+        
+        if (accessControl) {
+          if (!accessControl.canAccess) {
+            // Cannot access - show error message
+            setError(accessControl.errorMessage || "You cannot access this assessment at this time.");
+            setWaitingForStart(false);
+            setExamStarted(false);
+            setTimeRemaining(null);
+            return;
+          }
+          
+          if (accessControl.waitingForStart) {
+            // Can access but waiting for start (strict mode - pre-check phase)
+            if (startTimeStr) {
+              const startTime = new Date(startTimeStr);
               setWaitingForStart(true);
               setStartTime(startTime);
+              setExamStarted(false);
               setTimeRemaining(null);
-              setError(`Assessment will be available from ${formatDateTime(startTime)}. Please wait until the scheduled start time.`);
-              return;
-            } else if (now > endTime) {
-              // Exam window has ended
-              setTimeRemaining(0);
-              setError("The assessment window has ended. You cannot take this assessment.");
-              return;
+              setError(null); // Clear error, show waiting message in UI
             }
-          }
-          // Within window - show Start Exam button, don't start timer yet
-          setExamStarted(false);
-          setTimeRemaining(null);
-          setError(null);
-        } else if (assessmentData.examMode === "strict") {
-          // Strict mode: exam runs from start to end time
-          if (!startTimeStr || !endTimeStr) {
-            setError("Exam schedule is not properly configured.");
             return;
           }
           
-          const startTime = new Date(startTimeStr);
-          const endTime = new Date(endTimeStr);
-          
-          // Validate dates
-          if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
-            setError("Invalid exam schedule dates.");
-            return;
-          }
-          
-          if (now < startTime) {
-            // Exam hasn't started yet
-            setWaitingForStart(true);
-            setStartTime(startTime);
-            setTimeRemaining(null);
-            setError(`Assessment has not started yet. It will begin at ${formatDateTime(startTime)}. Please wait until the scheduled start time.`);
-            return;
-          } else if (now > endTime) {
-            // Exam has ended
-            setTimeRemaining(0);
-            setError("The assessment has ended. You cannot take this assessment.");
-            return;
-          }
-          
-          // Strict mode: auto-start when start time arrives
-          // Mark session as started in backend to prevent concurrent access
-          try {
-            await customMCQApi.getAssessmentForTaking(assessmentId as string, token as string, info.email, info.name);
-            
-            const remaining = Math.max(0, Math.floor((endTime.getTime() - now.getTime()) / 1000));
-            setTimeRemaining(remaining);
+          if (accessControl.examStarted) {
+            // Exam has started (both strict and flexible mode now auto-start)
+            setWaitingForStart(false);
             setExamStarted(true);
+            setTimeRemaining(accessControl.timeRemaining || null);
             setStartedAt(new Date());
-          } catch (err: any) {
-            setError(err.message || "Failed to start assessment");
-            setLoading(false);
-            return;
+            setError(null);
+          } else if (accessControl.canStart) {
+            // Can start - this shouldn't happen now as flexible mode auto-starts
+            // But keep as fallback
+            setWaitingForStart(false);
+            setExamStarted(true);
+            setTimeRemaining(accessControl.timeRemaining || null);
+            setStartedAt(new Date());
+            setError(null);
           }
+        } else {
+          // Fallback if accessControl not available (shouldn't happen)
+          setError("Assessment access information is not available.");
         }
       } catch (err: any) {
         setError(err.message || "Failed to load assessment");
@@ -288,43 +328,35 @@ export default function CustomMCQTakePage() {
     }
   }, [assessmentId, cameraProctorEnabled, assessment, candidateInfo, examStarted, submitting, startCamera, stopCamera]);
 
-  // Auto-transition when exam time arrives (for both strict and flexible modes)
+  // Auto-transition when exam time arrives (strict mode only - for pre-check to exam start)
   useEffect(() => {
-    if (!waitingForStart || !startTime || !assessment || !candidateInfo) return;
+    if (!waitingForStart || !startTime || !assessment || !candidateInfo || assessment.examMode !== "strict") return;
 
     const checkStartTime = async () => {
       const now = new Date();
       if (now >= startTime) {
-        // Time has arrived - handle based on exam mode
-        setWaitingForStart(false);
-        setError(null);
-        
-        if (assessment.examMode === "strict") {
-          // Strict mode: auto-start the exam and timer
-          try {
-            // Mark session as started in backend to prevent concurrent access
-            await customMCQApi.getAssessmentForTaking(assessmentId as string, token as string, candidateInfo.email, candidateInfo.name);
-            
+        // Start time has arrived - reload assessment to get updated accessControl
+        try {
+          const updatedAssessment = await customMCQApi.getAssessmentForTaking(
+            assessmentId as string,
+            token as string,
+            candidateInfo.email,
+            candidateInfo.name
+          );
+          
+          setAssessment(updatedAssessment);
+          
+          // Update state based on new accessControl
+          const accessControl = updatedAssessment.accessControl;
+          if (accessControl?.examStarted) {
+            setWaitingForStart(false);
             setExamStarted(true);
-            
-            // Recalculate timer for strict mode
-            const schedule = assessment.schedule || {};
-            const endTimeStr = schedule.endTime || assessment.endTime;
-            
-            if (endTimeStr) {
-              const endTime = new Date(endTimeStr);
-              const remaining = Math.max(0, Math.floor((endTime.getTime() - now.getTime()) / 1000));
-              setTimeRemaining(remaining);
-              setStartedAt(new Date());
-            }
-          } catch (err: any) {
-            setError(err.message || "Failed to start assessment");
+            setTimeRemaining(accessControl.timeRemaining || null);
+            setStartedAt(new Date());
+            setError(null);
           }
-        } else if (assessment.examMode === "flexible") {
-          // Flexible mode: just show the "Start Exam" button (don't auto-start)
-          setExamStarted(false);
-          setTimeRemaining(null);
-          // Error is already cleared above
+        } catch (err: any) {
+          setError(err.message || "Failed to start assessment");
         }
       }
     };
@@ -343,18 +375,27 @@ export default function CustomMCQTakePage() {
     if (!assessment || !candidateInfo) return;
 
     try {
-      // Mark session as started in backend
-      await customMCQApi.getAssessmentForTaking(assessmentId as string, token as string, candidateInfo.email, candidateInfo.name);
+      // Reload assessment to get latest accessControl
+      const updatedAssessment = await customMCQApi.getAssessmentForTaking(
+        assessmentId as string,
+        token as string,
+        candidateInfo.email,
+        candidateInfo.name
+      );
       
-      // Start the timer
-      const schedule = assessment.schedule || {};
-      const duration = schedule.duration || assessment.duration;
+      setAssessment(updatedAssessment);
+      
+      // Start the timer based on duration
+      const schedule = updatedAssessment.schedule || {};
+      const duration = schedule.duration || updatedAssessment.duration;
       
       if (duration) {
         setTimeRemaining(duration * 60); // Convert minutes to seconds
         setStartedAt(new Date());
         setExamStarted(true);
         setError(null);
+      } else {
+        setError("Assessment duration is not configured.");
       }
     } catch (err: any) {
       setError(err.message || "Failed to start assessment");
@@ -391,10 +432,69 @@ export default function CustomMCQTakePage() {
   };
 
   const handleTextAnswerChange = (questionId: string, text: string) => {
-    setTextAnswers((prev) => ({
-      ...prev,
-      [questionId]: text,
-    }));
+    console.log(`Updating text answer for question ${questionId}, length: ${text.length}`);
+    setTextAnswers((prev) => {
+      const updated = {
+        ...prev,
+        [questionId]: text,
+      };
+      console.log("Text answers state updated:", Object.keys(updated).length, "questions");
+      return updated;
+    });
+  };
+
+  // Save answer log for subjective questions
+  const saveAnswerLog = async (questionId: string, answer: string, forceSave = false) => {
+    if (!assessment || !candidateInfo || !assessmentId || !token) return;
+    
+    // Only save if answer has changed (unless forceSave is true)
+    if (!forceSave) {
+      const previousAnswer = previousTextAnswersRef.current[questionId] || "";
+      if (previousAnswer.trim() === answer.trim()) {
+        // Answer unchanged, don't save
+        return;
+      }
+    }
+    
+    try {
+      await customMCQApi.saveAnswerLog(
+        assessmentId as string,
+        token as string,
+        candidateInfo.email,
+        candidateInfo.name,
+        questionId,
+        answer
+      );
+      // Update previous answer after successful save
+      previousTextAnswersRef.current[questionId] = answer;
+    } catch (err) {
+      console.error("Failed to save answer log:", err);
+      // Don't show error to user, just log it
+    }
+  };
+
+  // Save all current subjective answers as logs (for auto-save on timer end)
+  const saveAllAnswerLogs = async () => {
+    if (!assessment || !candidateInfo || !assessmentId || !token) return;
+    
+    const currentTextAnswers = textAnswersRef.current;
+    const subjectiveQuestions = (assessment.questions || []).filter(q => {
+      const qType = q.questionType || (!("options" in q && "correctAn" in q) ? "subjective" : "mcq");
+      return qType === "subjective";
+    });
+    
+    // Save logs for all subjective questions with answers
+    // Always save if answer exists (even if same as previous) to ensure all answers are logged
+    for (const question of subjectiveQuestions) {
+      const questionId = question.id;
+      if (questionId && currentTextAnswers[questionId]) {
+        const answer = currentTextAnswers[questionId];
+        if (answer && answer.trim()) {
+          // Always try to save - backend will check for duplicates
+          await saveAnswerLog(questionId, answer, true);
+        }
+      }
+    }
   };
 
   const handleSubmit = useCallback(async (isAuto = false) => {
@@ -407,11 +507,23 @@ export default function CustomMCQTakePage() {
       // Clear the timer to prevent multiple submissions
       setTimeRemaining(0);
 
+      // Get latest values from refs to avoid closure issues
+      const currentAnswers = answersRef.current;
+      const currentTextAnswers = textAnswersRef.current;
+      
       // Combine MCQ and subjective answers
-      const submissions = [];
+      const submissions: Array<{ questionId: string; selectedAnswers?: string[]; textAnswer?: string }> = [];
+      
+      // Debug: Log current state before building submissions
+      console.log("Pre-submission state:", {
+        answersKeys: Object.keys(currentAnswers),
+        textAnswersKeys: Object.keys(currentTextAnswers),
+        textAnswersValues: Object.entries(currentTextAnswers).map(([id, text]) => ({ id, textLength: text?.length || 0, textPreview: text?.substring(0, 50) || "" })),
+        assessmentQuestions: assessment.questions?.map(q => ({ id: q.id, type: q.questionType || ("options" in q ? "mcq" : "subjective") }))
+      });
       
       // Add MCQ submissions
-      for (const [questionId, selectedAnswers] of Object.entries(answers)) {
+      for (const [questionId, selectedAnswers] of Object.entries(currentAnswers)) {
         if (selectedAnswers && selectedAnswers.length > 0) {
           submissions.push({
             questionId,
@@ -420,15 +532,53 @@ export default function CustomMCQTakePage() {
         }
       }
       
-      // Add subjective submissions
-      for (const [questionId, textAnswer] of Object.entries(textAnswers)) {
-        if (textAnswer && textAnswer.trim()) {
+      // Add subjective submissions - check all questions to ensure we don't miss any
+      const subjectiveQuestionIds = assessment.questions
+        ?.filter(q => {
+          const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
+          return qType === "subjective";
+        })
+        .map(q => q.id)
+        .filter((id): id is string => Boolean(id)) || [];
+      
+      console.log("Subjective question IDs from assessment:", subjectiveQuestionIds);
+      console.log("Text answers in state:", Object.keys(currentTextAnswers));
+      console.log("All text answers:", Object.entries(currentTextAnswers).map(([id, text]) => ({ id, hasText: !!text, length: text?.length || 0 })));
+      
+      // Save all answer logs before final submission
+      await saveAllAnswerLogs();
+      
+      // First, add from textAnswers state
+      for (const [questionId, textAnswer] of Object.entries(currentTextAnswers)) {
+        if (questionId && textAnswer && textAnswer.trim()) {
           submissions.push({
             questionId,
             textAnswer: textAnswer.trim(),
           });
         }
       }
+      
+      // Also check if there are subjective questions that might not be in textAnswers
+      for (const questionId of subjectiveQuestionIds) {
+        if (questionId && !submissions.some(s => s.questionId === questionId)) {
+          const textAnswer = currentTextAnswers[questionId];
+          if (textAnswer && textAnswer.trim()) {
+            submissions.push({
+              questionId,
+              textAnswer: textAnswer.trim(),
+            });
+          }
+        }
+      }
+      
+      // Debug: Log submission details
+      console.log("Submitting assessment:", {
+        totalSubmissions: submissions.length,
+        mcqSubmissions: submissions.filter(s => s.selectedAnswers).length,
+        subjectiveSubmissions: submissions.filter(s => s.textAnswer).length,
+        submissions: submissions,
+        subjectiveQuestionIds: subjectiveQuestionIds
+      });
 
       const result = await customMCQApi.submitAssessment(
         assessmentId as string,
@@ -444,8 +594,13 @@ export default function CustomMCQTakePage() {
       sessionStorage.removeItem(`custom_mcq_${assessmentId}`);
 
       // Redirect to results page
+      const mcqScore = result.mcqScore ?? 0;
+      const mcqTotal = result.mcqTotal ?? 0;
+      const subjectiveScore = result.subjectiveScore ?? 0;
+      const subjectiveTotal = result.subjectiveTotal ?? 0;
+      const showResult = result.showResultToCandidate !== false; // Default to true if not specified
       router.push(
-        `/custom-mcq/result/${assessmentId}?score=${result.score}&total=${result.totalMarks}&percentage=${result.percentage}&passed=${result.passed}&token=${token}&gradingStatus=${result.gradingStatus || "completed"}`
+        `/custom-mcq/result/${assessmentId}?score=${result.score}&total=${result.totalMarks}&percentage=${result.percentage}&passed=${result.passed}&token=${token}&gradingStatus=${result.gradingStatus || "completed"}&mcqScore=${mcqScore}&mcqTotal=${mcqTotal}&subjectiveScore=${subjectiveScore}&subjectiveTotal=${subjectiveTotal}&showResult=${showResult}`
       );
     } catch (err: any) {
       setError(err.message || "Failed to submit assessment");
@@ -456,8 +611,13 @@ export default function CustomMCQTakePage() {
   // Auto-submit when timer reaches zero
   useEffect(() => {
     if (timeRemaining === 0 && !submitting && assessment && candidateInfo && !waitingForStart) {
-      // Timer has reached zero - auto-submit
-      handleSubmit(true);
+      // Timer has reached zero - save all answer logs first, then auto-submit
+      saveAllAnswerLogs().then(() => {
+        handleSubmit(true);
+      }).catch(() => {
+        // Even if log save fails, still submit
+        handleSubmit(true);
+      });
     }
   }, [timeRemaining, submitting, assessment, candidateInfo, waitingForStart, handleSubmit]);
 
@@ -480,36 +640,61 @@ export default function CustomMCQTakePage() {
     return () => clearInterval(interval);
   }, [timeRemaining, waitingForStart]);
 
-  // Set initial question type based on available questions
+  // Initialize assessment phase and load MCQ submitted status from session
   useEffect(() => {
     if (!assessment || !assessment.questions || assessment.questions.length === 0) return;
     
     const questions = assessment.questions || [];
     const hasMCQ = questions.some(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
     const hasSubjective = questions.some(q => q.questionType === "subjective" || !("options" in q && "correctAn" in q));
-    const hasBothTypes = hasMCQ && hasSubjective;
     
-    if (hasBothTypes) {
-      // When type changes, find first question of that type
-      const firstOfType = questions.findIndex(q => {
+    // Check if MCQ was already locked (from session storage)
+    const mcqSubmittedKey = `mcqSubmitted_${assessmentId}`;
+    const savedMcqSubmitted = sessionStorage.getItem(mcqSubmittedKey) === "true";
+    
+    if (savedMcqSubmitted) {
+      // MCQ was locked - restore state but allow navigation to all questions
+      setMcqSubmitted(true);
+      setAssessmentPhase("mcq"); // Keep phase as "mcq" to allow navigation
+      // Start at first question (user can navigate freely)
+      setCurrentQuestionIndex(0);
+    } else if (hasMCQ) {
+      // Start with MCQ phase
+      setAssessmentPhase("mcq");
+      setMcqSubmitted(false);
+      // Go to first MCQ question
+      const firstMCQ = questions.findIndex(q => {
         const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
-        return qType === selectedQuestionType;
+        return qType === "mcq";
       });
-      if (firstOfType >= 0) {
-        const currentQ = questions[currentQuestionIndex];
-        const currentQType = currentQ ? (currentQ.questionType || (("options" in currentQ && "correctAn" in currentQ) ? "mcq" : "subjective")) : null;
-        // Only update if current question doesn't match selected type
-        if (currentQType !== selectedQuestionType) {
-          setCurrentQuestionIndex(firstOfType);
-        }
+      if (firstMCQ >= 0) {
+        setCurrentQuestionIndex(firstMCQ);
       }
-    } else if (hasMCQ && selectedQuestionType !== "mcq") {
-      setSelectedQuestionType("mcq");
-    } else if (hasSubjective && !hasMCQ && selectedQuestionType !== "subjective") {
-      setSelectedQuestionType("subjective");
+    } else if (hasSubjective) {
+      // Only subjective questions, start with subjective
+      setAssessmentPhase("subjective");
+      setCurrentQuestionIndex(0);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assessment, selectedQuestionType]);
+  }, [assessment, assessmentId]);
+
+  // Auto-lock MCQ when navigating to subjective questions
+  // Must be placed before any conditional returns to follow Rules of Hooks
+  useEffect(() => {
+    if (!assessment || !assessment.questions || !examStarted) return;
+    
+    const questions = assessment.questions || [];
+    const hasMCQ = questions.some(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
+    if (!hasMCQ) return;
+    
+    const currentQuestion = questions[currentQuestionIndex] || questions[0];
+    const isCurrentMCQ = currentQuestion && (currentQuestion.questionType === "mcq" || ("options" in currentQuestion && "correctAn" in currentQuestion));
+    
+    // If current question is subjective and MCQ is not yet locked, lock it automatically
+    if (!isCurrentMCQ && !mcqSubmitted) {
+      setMcqSubmitted(true);
+      sessionStorage.setItem(`mcqSubmitted_${assessmentId}`, "true");
+    }
+  }, [currentQuestionIndex, mcqSubmitted, assessment, examStarted, assessmentId]);
 
   if (loading) {
     return (
@@ -530,93 +715,53 @@ export default function CustomMCQTakePage() {
     );
   }
 
-  // Show waiting screen if exam hasn't started yet (strict mode) or window hasn't opened (flexible mode)
-  if (waitingForStart && error) {
-    const isNotStartedError = error.includes("Assessment has not started") || error.includes("Assessment will be available");
+  // Show waiting screen for strict mode pre-check phase or access denied
+  if (waitingForStart || (error && !examStarted)) {
     const isStrictMode = assessment?.examMode === "strict";
-    return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#E8FAF0" }}>
-        <div style={{ textAlign: "center", maxWidth: "600px" }}>
-          <h1 style={{ color: "#1E5A3B", marginBottom: "1rem" }}>
-            {isNotStartedError ? "Assessment not started" : "Error"}
-          </h1>
-          <p style={{ color: "#2D7A52", fontSize: "1.125rem" }}>{error}</p>
-          {startTime && isStrictMode && (
-            <div style={{ marginTop: "2rem", padding: "1rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", border: "1px solid #A8E8BC" }}>
+    const schedule = assessment?.schedule || {};
+    const startTimeStr = schedule.startTime || assessment?.startTime;
+    const startTimeDate = startTimeStr ? new Date(startTimeStr) : null;
+    
+    // If in strict mode pre-check phase, show pre-check screen
+    if (waitingForStart && isStrictMode && startTimeDate) {
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#E8FAF0" }}>
+          <div style={{ textAlign: "center", maxWidth: "600px" }}>
+            <h1 style={{ color: "#1E5A3B", marginBottom: "1rem" }}>Pre-Check Phase</h1>
+            <p style={{ color: "#2D7A52", fontSize: "1.125rem", marginBottom: "2rem" }}>
+              You can complete pre-checks now. The assessment will start automatically at the scheduled time.
+            </p>
+            <div style={{ padding: "1.5rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", border: "2px solid #2D7A52", marginBottom: "2rem" }}>
+              <p style={{ color: "#1E5A3B", fontSize: "1.25rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                Assessment starts at
+              </p>
+              <p style={{ color: "#2D7A52", fontSize: "1.5rem", fontWeight: 700 }}>
+                {formatDateTime(startTimeDate)}
+              </p>
+            </div>
+            <div style={{ padding: "1rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", border: "1px solid #A8E8BC" }}>
               <p style={{ color: "#4A9A6A", fontSize: "0.875rem" }}>
                 The assessment will automatically start when the scheduled time arrives. This page will refresh automatically.
               </p>
             </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // Show Start Exam screen for flexible mode (within window but not started)
-  if (assessment?.examMode === "flexible" && !examStarted && !waitingForStart) {
-    const schedule = assessment.schedule || {};
-    const endTimeStr = schedule.endTime || assessment.endTime;
-    const duration = schedule.duration || assessment.duration;
-    const endTime = endTimeStr ? new Date(endTimeStr) : null;
-    const now = new Date();
-    
-    // Check if window has ended
-    if (endTime && now > endTime) {
-      return (
-        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#fee2e2" }}>
-          <div style={{ textAlign: "center", maxWidth: "600px" }}>
-            <h1 style={{ color: "#991b1b", marginBottom: "1rem" }}>Assessment Window Ended</h1>
-            <p style={{ color: "#991b1b", fontSize: "1.125rem" }}>The assessment window has ended. You cannot start this assessment.</p>
           </div>
         </div>
       );
     }
-
+    
+    // Otherwise show error/access denied screen
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#E8FAF0" }}>
-        <div style={{ textAlign: "center", maxWidth: "600px", padding: "3rem", backgroundColor: "#ffffff", borderRadius: "1rem", border: "2px solid #A8E8BC" }}>
-          <h1 style={{ color: "#1E5A3B", marginBottom: "1rem", fontSize: "2rem" }}>{assessment.title}</h1>
-          {candidateInfo && (
-            <p style={{ color: "#2D7A52", fontSize: "1rem", marginBottom: "2rem" }}>
-              {candidateInfo.name} ({candidateInfo.email})
-            </p>
-          )}
-          <div style={{ marginBottom: "2rem", padding: "1.5rem", backgroundColor: "#E8FAF0", borderRadius: "0.5rem" }}>
-            <p style={{ color: "#4A9A6A", fontSize: "1rem", marginBottom: "0.5rem" }}>
-              <strong>Duration:</strong> {duration} minutes
-            </p>
-            {endTime && (
-              <p style={{ color: "#4A9A6A", fontSize: "0.875rem" }}>
-                You must complete the assessment before {formatDateTime(endTime)}
-              </p>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={handleStartExam}
-            className="btn-primary"
-            style={{
-              padding: "1rem 3rem",
-              fontSize: "1.25rem",
-              backgroundColor: "#10b981",
-              border: "none",
-              borderRadius: "0.5rem",
-              color: "#ffffff",
-              fontWeight: 600,
-              cursor: "pointer",
-              boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
-            }}
-          >
-            Start Assessment
-          </button>
-          <p style={{ color: "#6B7280", fontSize: "0.875rem", marginTop: "1.5rem" }}>
-            Once you start, the timer will begin and you must complete the assessment within the allocated time.
-          </p>
+        <div style={{ textAlign: "center", maxWidth: "600px" }}>
+          <h1 style={{ color: "#1E5A3B", marginBottom: "1rem" }}>Access Denied</h1>
+          <p style={{ color: "#2D7A52", fontSize: "1.125rem" }}>{error || "You cannot access this assessment at this time."}</p>
         </div>
       </div>
     );
   }
+
+  // Flexible mode now auto-starts after pre-checks (no "Start Exam" button needed)
+  // Access restrictions are handled at the entry/login page level
 
   const questions = assessment.questions || [];
   
@@ -625,27 +770,26 @@ export default function CustomMCQTakePage() {
   const hasSubjective = questions.some(q => q.questionType === "subjective" || !("options" in q && "correctAn" in q));
   const hasBothTypes = hasMCQ && hasSubjective;
   
-  // Filter questions by selected type when both types exist
-  const filteredQuestions = hasBothTypes 
-    ? questions.filter(q => {
-        const qType = (q as any).questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
-        return qType === selectedQuestionType;
-      })
-    : questions;
-  
-  // Find current question index in filtered list
-  const currentQuestionIndexInFiltered = filteredQuestions.findIndex(q => q.id === questions[currentQuestionIndex]?.id);
-  
-  // If current question is not in filtered list (type changed), go to first question of filtered type
-  const currentQuestion = (currentQuestionIndexInFiltered >= 0 
-    ? filteredQuestions[currentQuestionIndexInFiltered] 
-    : filteredQuestions[0]) || filteredQuestions[0];
-  
-  const actualIndex = questions.findIndex(q => q.id === currentQuestion?.id);
+  // Show all questions - allow navigation between MCQ and Subjective freely
+  // After MCQ is "submitted" (locked), users can still navigate to view MCQ but can't edit
+  const currentQuestion = questions[currentQuestionIndex] || questions[0];
+  const actualIndex = currentQuestionIndex;
   
   const isMCQ = currentQuestion && (currentQuestion.questionType === "mcq" || ("options" in currentQuestion && "correctAn" in currentQuestion));
   const currentAnswers = isMCQ ? (answers[currentQuestion?.id || ""] || []) : [];
   const currentTextAnswer = !isMCQ ? (textAnswers[currentQuestion?.id || ""] || "") : "";
+  
+  // Handle MCQ section submission - just lock MCQ section, don't change phase or navigate
+  // This prevents fullscreen exit and allows free navigation between sections
+  const handleSubmitMCQSection = () => {
+    if (!hasMCQ) return;
+    
+    // Simply lock the MCQ section - no phase change, no navigation
+    // This prevents fullscreen exit since we're not changing DOM structure
+    setMcqSubmitted(true);
+    // Save to session storage
+    sessionStorage.setItem(`mcqSubmitted_${assessmentId}`, "true");
+  };
 
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#ffffff", padding: "2rem" }}>
@@ -661,7 +805,7 @@ export default function CustomMCQTakePage() {
         />
       )}
       <div style={{ maxWidth: "1000px", margin: "0 auto", display: "flex", gap: "2rem" }}>
-        {/* Question Type Selector (Left Panel) - Only show if both types exist */}
+        {/* Phase Indicator (Left Panel) - Only show if both types exist */}
         {hasBothTypes && examStarted && (
           <div style={{ width: "200px", flexShrink: 0 }}>
             <div
@@ -674,51 +818,48 @@ export default function CustomMCQTakePage() {
                 top: "2rem",
               }}
             >
-              <h3 style={{ marginBottom: "1rem", color: "#1E5A3B", fontSize: "1rem" }}>Question Type</h3>
+              <h3 style={{ marginBottom: "1rem", color: "#1E5A3B", fontSize: "1rem" }}>Section</h3>
               <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                 {hasMCQ && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedQuestionType("mcq");
-                      const firstMCQ = questions.findIndex(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
-                      setCurrentQuestionIndex(firstMCQ >= 0 ? firstMCQ : 0);
-                    }}
+                  <div
                     style={{
                       padding: "0.75rem",
-                      border: selectedQuestionType === "mcq" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                      border: isMCQ ? "2px solid #2D7A52" : mcqSubmitted ? "1px solid #10b981" : "1px solid #A8E8BC",
                       borderRadius: "0.5rem",
-                      backgroundColor: selectedQuestionType === "mcq" ? "#C9F4D4" : "#ffffff",
+                      backgroundColor: isMCQ ? "#C9F4D4" : mcqSubmitted ? "#dcfce7" : "#ffffff",
                       color: "#1E5A3B",
-                      fontWeight: selectedQuestionType === "mcq" ? 600 : 400,
-                      cursor: "pointer",
+                      fontWeight: isMCQ ? 600 : 400,
                       textAlign: "left",
+                      opacity: mcqSubmitted && !isMCQ ? 0.7 : 1,
                     }}
                   >
-                    MCQ
-                  </button>
+                    <div>MCQ</div>
+                    {mcqSubmitted && (
+                      <div style={{ fontSize: "0.75rem", color: "#10b981", marginTop: "0.25rem" }}>✓ Completed</div>
+                    )}
+                    {isMCQ && (
+                      <div style={{ fontSize: "0.75rem", color: "#2D7A52", marginTop: "0.25rem" }}>Current</div>
+                    )}
+                  </div>
                 )}
                 {hasSubjective && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedQuestionType("subjective");
-                      const firstSubjective = questions.findIndex(q => q.questionType === "subjective" || !("options" in q && "correctAn" in q));
-                      setCurrentQuestionIndex(firstSubjective >= 0 ? firstSubjective : 0);
-                    }}
+                  <div
                     style={{
                       padding: "0.75rem",
-                      border: selectedQuestionType === "subjective" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                      border: !isMCQ ? "2px solid #2D7A52" : "1px solid #A8E8BC",
                       borderRadius: "0.5rem",
-                      backgroundColor: selectedQuestionType === "subjective" ? "#C9F4D4" : "#ffffff",
+                      backgroundColor: !isMCQ ? "#C9F4D4" : "#ffffff",
                       color: "#1E5A3B",
-                      fontWeight: selectedQuestionType === "subjective" ? 600 : 400,
-                      cursor: "pointer",
+                      fontWeight: !isMCQ ? 600 : 400,
                       textAlign: "left",
+                      opacity: !mcqSubmitted && hasMCQ && isMCQ ? 0.5 : 1,
                     }}
                   >
-                    Subjective
-                  </button>
+                    <div>Subjective</div>
+                    {!isMCQ && (
+                      <div style={{ fontSize: "0.75rem", color: "#2D7A52", marginTop: "0.25rem" }}>Current</div>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -726,7 +867,7 @@ export default function CustomMCQTakePage() {
         )}
         
         <div style={{ flex: 1 }}>
-        {/* Header with Timer */}
+        {/* Header with Timer and Submit Button */}
         <div
           style={{
             display: "flex",
@@ -747,21 +888,51 @@ export default function CustomMCQTakePage() {
               </p>
             )}
           </div>
-          {timeRemaining !== null && !isNaN(timeRemaining) && (
-            <div
-              style={{
-                padding: "0.75rem 1.5rem",
-                backgroundColor: timeRemaining < 300 ? "#fee2e2" : "#ffffff",
-                border: `2px solid ${timeRemaining < 300 ? "#ef4444" : "#2D7A52"}`,
-                borderRadius: "0.5rem",
-                fontSize: "1.5rem",
-                fontWeight: 700,
-                color: timeRemaining < 300 ? "#991b1b" : "#1E5A3B",
-              }}
-            >
-              {formatTime(timeRemaining)}
-            </div>
-          )}
+          <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+            {timeRemaining !== null && !isNaN(timeRemaining) && (
+              <div
+                style={{
+                  padding: "0.75rem 1.5rem",
+                  backgroundColor: timeRemaining < 300 ? "#fee2e2" : "#ffffff",
+                  border: `2px solid ${timeRemaining < 300 ? "#ef4444" : "#2D7A52"}`,
+                  borderRadius: "0.5rem",
+                  fontSize: "1.5rem",
+                  fontWeight: 700,
+                  color: timeRemaining < 300 ? "#991b1b" : "#1E5A3B",
+                }}
+              >
+                {formatTime(timeRemaining)}
+              </div>
+            )}
+            {examStarted && (
+              <button
+                type="button"
+                onClick={async () => {
+                  // Save all answer logs before submitting
+                  await saveAllAnswerLogs();
+                  
+                  if (confirm("Are you sure you want to submit the entire assessment? You cannot retake this assessment.")) {
+                    handleSubmit();
+                  }
+                }}
+                disabled={submitting}
+                className="btn-primary"
+                style={{
+                  padding: "0.75rem 1.5rem",
+                  fontSize: "1rem",
+                  backgroundColor: "#10b981",
+                  border: "none",
+                  borderRadius: "0.5rem",
+                  color: "#ffffff",
+                  fontWeight: 600,
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  opacity: submitting ? 0.5 : 1,
+                }}
+              >
+                {submitting ? "Submitting..." : "Submit All Answers"}
+              </button>
+            )}
+          </div>
         </div>
 
         {error && !waitingForStart && (
@@ -792,21 +963,25 @@ export default function CustomMCQTakePage() {
           >
             <div style={{ marginBottom: "1.5rem" }}>
               <span style={{ color: "#2D7A52", fontWeight: 600 }}>
-                Question {currentQuestionIndexInFiltered + 1} of {filteredQuestions.length}
-                {hasBothTypes && ` (Total: ${questions.length})`}
+                {isMCQ 
+                  ? `MCQ Question ${actualIndex + 1} of ${questions.length}`
+                  : `Subjective Question ${actualIndex + 1} of ${questions.length}`
+                }
               </span>
               <span style={{ color: "#4A9A6A", marginLeft: "1rem" }}>[{currentQuestion.section}]</span>
-              <span style={{ 
-                marginLeft: "1rem",
-                padding: "0.25rem 0.5rem", 
-                backgroundColor: isMCQ ? "#E8FAF0" : "#FFF4E6", 
-                color: isMCQ ? "#1E5A3B" : "#B45309",
-                borderRadius: "0.25rem",
-                fontSize: "0.875rem",
-                fontWeight: 600
-              }}>
-                {isMCQ ? "MCQ" : "Subjective"}
-              </span>
+              {mcqSubmitted && isMCQ && (
+                <span style={{ 
+                  marginLeft: "1rem",
+                  padding: "0.25rem 0.5rem", 
+                  backgroundColor: "#fee2e2", 
+                  color: "#991b1b",
+                  borderRadius: "0.25rem",
+                  fontSize: "0.875rem",
+                  fontWeight: 600
+                }}>
+                  Locked
+                </span>
+              )}
             </div>
 
             <h2 style={{ marginBottom: "2rem", color: "#1E5A3B" }}>{currentQuestion.question}</h2>
@@ -824,16 +999,24 @@ export default function CustomMCQTakePage() {
                         padding: "1rem",
                         border: isSelected ? "2px solid #2D7A52" : "1px solid #A8E8BC",
                         borderRadius: "0.5rem",
-                        cursor: "pointer",
+                        cursor: mcqSubmitted && isMCQ ? "not-allowed" : "pointer",
                         backgroundColor: isSelected ? "#E8FAF0" : "#ffffff",
                         transition: "all 0.2s",
+                        opacity: mcqSubmitted && isMCQ ? 0.6 : 1,
                       }}
                     >
                       <input
                         type={(currentQuestion as MCQQuestion).answerType === "single" ? "radio" : "checkbox"}
                         checked={isSelected}
                         onChange={() => handleAnswerChange(currentQuestion.id!, option.label, currentQuestion as MCQQuestion)}
-                        style={{ marginRight: "1rem", width: "20px", height: "20px" }}
+                        disabled={mcqSubmitted && isMCQ}
+                        style={{ 
+                          marginRight: "1rem", 
+                          width: "20px", 
+                          height: "20px",
+                          cursor: mcqSubmitted && isMCQ ? "not-allowed" : "pointer",
+                          opacity: mcqSubmitted && isMCQ ? 0.5 : 1
+                        }}
                       />
                       <div>
                         <strong style={{ color: "#1E5A3B", marginRight: "0.5rem" }}>{option.label}:</strong>
@@ -850,9 +1033,18 @@ export default function CustomMCQTakePage() {
                 </label>
                 <textarea
                   value={currentTextAnswer}
-                  onChange={(e) => handleTextAnswerChange(currentQuestion.id!, e.target.value)}
+                  onChange={(e) => {
+                    const questionId = currentQuestion?.id;
+                    if (!questionId) {
+                      console.error("Cannot save text answer: question ID is missing", currentQuestion);
+                      return;
+                    }
+                    console.log(`Textarea onChange: questionId=${questionId}, text length=${e.target.value.length}`);
+                    handleTextAnswerChange(questionId, e.target.value);
+                  }}
                   placeholder="Type your answer here..."
                   rows={10}
+                  disabled={isMCQ}
                   style={{
                     width: "100%",
                     padding: "1rem",
@@ -861,6 +1053,8 @@ export default function CustomMCQTakePage() {
                     fontSize: "1rem",
                     fontFamily: "inherit",
                     resize: "vertical",
+                    opacity: isMCQ ? 0.6 : 1,
+                    cursor: isMCQ ? "not-allowed" : "text",
                   }}
                 />
               </div>
@@ -873,24 +1067,21 @@ export default function CustomMCQTakePage() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
           <button
             type="button"
-                  onClick={() => {
-                    if (hasBothTypes) {
-                      // Find previous question of same type
-                      for (let i = actualIndex - 1; i >= 0; i--) {
-                        const q = questions[i];
-                        const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
-                        if (qType === selectedQuestionType) {
-                          setCurrentQuestionIndex(i);
-                          break;
-                        }
-                      }
-                    } else {
-                      const prevIndex = actualIndex - 1;
-                      if (prevIndex >= 0) {
-                        setCurrentQuestionIndex(prevIndex);
-                      }
-                    }
-                  }}
+            onClick={async () => {
+              // Save answer log for current subjective question before navigating
+              if (currentQuestion && !isMCQ && currentQuestion.id) {
+                const currentAnswer = textAnswersRef.current[currentQuestion.id] || "";
+                if (currentAnswer.trim()) {
+                  await saveAnswerLog(currentQuestion.id, currentAnswer);
+                }
+              }
+              
+              // Navigate to previous question (any type)
+              const prevIndex = actualIndex - 1;
+              if (prevIndex >= 0) {
+                setCurrentQuestionIndex(prevIndex);
+              }
+            }}
             disabled={actualIndex === 0}
             className="btn-secondary"
             style={{
@@ -909,38 +1100,34 @@ export default function CustomMCQTakePage() {
                 ? (answers[q.id || ""]?.length > 0)
                 : (textAnswers[q.id || ""]?.trim().length > 0);
               const isCurrent = idx === actualIndex;
-              const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
-              const isInCurrentFilter = !hasBothTypes || qType === selectedQuestionType;
+              const isLocked = mcqSubmitted && isQMCQ;
               
               return (
                 <button
-                  key={idx}
+                  key={q.id || idx}
                   type="button"
-                  onClick={() => {
-                    if (hasBothTypes) {
-                      if (qType === selectedQuestionType) {
-                        setCurrentQuestionIndex(idx);
-                      } else {
-                        // Switch to the correct type and go to this question
-                        setSelectedQuestionType(qType as "mcq" | "subjective");
-                        setCurrentQuestionIndex(idx);
+                  onClick={async () => {
+                    // Save answer log for current subjective question before navigating
+                    if (currentQuestion && !isMCQ && currentQuestion.id) {
+                      const currentAnswer = textAnswersRef.current[currentQuestion.id] || "";
+                      if (currentAnswer.trim()) {
+                        await saveAnswerLog(currentQuestion.id, currentAnswer);
                       }
-                    } else {
-                      setCurrentQuestionIndex(idx);
                     }
+                    setCurrentQuestionIndex(idx);
                   }}
-                  disabled={hasBothTypes && !isInCurrentFilter}
                   style={{
                     width: "40px",
                     height: "40px",
                     borderRadius: "50%",
-                    border: isCurrent ? "2px solid #2D7A52" : "1px solid #A8E8BC",
-                    backgroundColor: hasAnswer ? "#C9F4D4" : isCurrent ? "#E8FAF0" : (hasBothTypes && !isInCurrentFilter ? "#f0f0f0" : "#ffffff"),
-                    color: hasBothTypes && !isInCurrentFilter ? "#999" : "#1E5A3B",
-                    cursor: hasBothTypes && !isInCurrentFilter ? "not-allowed" : "pointer",
+                    border: isCurrent ? "2px solid #2D7A52" : isLocked ? "1px solid #ef4444" : "1px solid #A8E8BC",
+                    backgroundColor: hasAnswer ? "#C9F4D4" : isCurrent ? "#E8FAF0" : "#ffffff",
+                    color: "#1E5A3B",
+                    cursor: "pointer",
                     fontWeight: isCurrent ? 700 : 400,
-                    opacity: hasBothTypes && !isInCurrentFilter ? 0.5 : 1,
+                    opacity: isLocked ? 0.7 : 1,
                   }}
+                  title={isLocked ? "MCQ Section Locked" : isQMCQ ? "MCQ Question" : "Subjective Question"}
                 >
                   {idx + 1}
                 </button>
@@ -948,27 +1135,22 @@ export default function CustomMCQTakePage() {
             })}
           </div>
 
-          {(hasBothTypes 
-            ? filteredQuestions.findIndex((q, idx) => idx > currentQuestionIndexInFiltered) >= 0
-            : actualIndex < questions.length - 1) ? (
+          {actualIndex < questions.length - 1 ? (
             <button
               type="button"
-              onClick={() => {
-                if (hasBothTypes) {
-                  // Find next question of same type
-                  for (let i = actualIndex + 1; i < questions.length; i++) {
-                    const q = questions[i];
-                    const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
-                    if (qType === selectedQuestionType) {
-                      setCurrentQuestionIndex(i);
-                      break;
-                    }
+              onClick={async () => {
+                // Save answer log for current subjective question before navigating
+                if (currentQuestion && !isMCQ && currentQuestion.id) {
+                  const currentAnswer = textAnswersRef.current[currentQuestion.id] || "";
+                  if (currentAnswer.trim()) {
+                    await saveAnswerLog(currentQuestion.id, currentAnswer);
                   }
-                } else {
-                  const nextIndex = actualIndex + 1;
-                  if (nextIndex < questions.length) {
-                    setCurrentQuestionIndex(nextIndex);
-                  }
+                }
+                
+                // Navigate to next question (any type)
+                const nextIndex = actualIndex + 1;
+                if (nextIndex < questions.length) {
+                  setCurrentQuestionIndex(nextIndex);
                 }
               }}
               className="btn-primary"
@@ -977,45 +1159,49 @@ export default function CustomMCQTakePage() {
               Next →
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={() => handleSubmit()}
-              disabled={submitting}
-              className="btn-primary"
-              style={{
-                padding: "0.75rem 1.5rem",
-                backgroundColor: "#10b981",
-                opacity: submitting ? 0.5 : 1,
-              }}
-            >
-              {submitting ? "Submitting..." : "✓ Submit Assessment"}
-            </button>
+            // Last question - show appropriate button based on question types
+            !mcqSubmitted && hasMCQ && hasSubjective ? (
+              // Both MCQ and Subjective exist - show Lock MCQ button
+              <button
+                type="button"
+                onClick={() => {
+                  if (confirm("Are you sure you want to lock the MCQ section? You will not be able to change your answers, but you can still review them and answer subjective questions.")) {
+                    handleSubmitMCQSection();
+                  }
+                }}
+                className="btn-primary"
+                style={{
+                  padding: "0.75rem 1.5rem",
+                  backgroundColor: "#10b981",
+                }}
+              >
+                Lock MCQ Section
+              </button>
+            ) : (
+              // Only MCQ or only Subjective - show Submit button directly
+              <button
+                type="button"
+                onClick={async () => {
+                  // Save all answer logs before submitting
+                  await saveAllAnswerLogs();
+                  
+                  if (confirm("Are you sure you want to submit the entire assessment? You cannot retake this assessment.")) {
+                    handleSubmit();
+                  }
+                }}
+                disabled={submitting}
+                className="btn-primary"
+                style={{
+                  padding: "0.75rem 1.5rem",
+                  backgroundColor: "#10b981",
+                  opacity: submitting ? 0.5 : 1,
+                }}
+              >
+                {submitting ? "Submitting..." : "Submit Whole Assessment"}
+              </button>
+            )
           )}
           </div>
-        )}
-
-        {/* Submit Button (always visible when exam started) */}
-        {examStarted && (
-          <div style={{ marginTop: "2rem", textAlign: "center" }}>
-          <button
-            type="button"
-            onClick={() => {
-              if (confirm("Are you sure you want to submit? You cannot retake this assessment.")) {
-                handleSubmit();
-              }
-            }}
-            disabled={submitting}
-            className="btn-primary"
-            style={{
-              padding: "1rem 2rem",
-              fontSize: "1.125rem",
-              backgroundColor: "#10b981",
-              opacity: submitting ? 0.5 : 1,
-            }}
-          >
-            {submitting ? "Submitting..." : "✓ Submit All Answers"}
-          </button>
-        </div>
         )}
         </div>
       </div>

@@ -55,12 +55,14 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     accessMode: str = Field(default="private", pattern=r"^(private|public)$")
     examMode: str = Field(default="strict", pattern=r"^(strict|flexible)$")
     startTime: Optional[datetime] = None
-    endTime: Optional[datetime] = None
-    duration: Optional[int] = None  # In minutes, for flexible mode
+    endTime: Optional[datetime] = None  # For flexible mode only, calculated for strict mode
+    duration: Optional[int] = None  # In minutes, required for both modes
+    accessTimeBeforeStart: Optional[int] = Field(default=15, ge=0, description="Minutes before start time candidates can access (strict mode only)")
     passPercentage: int = Field(default=50, ge=0, le=100)
     status: Optional[str] = Field(default="draft", pattern=r"^(draft|scheduled)$")  # Draft or scheduled
     currentStation: Optional[int] = Field(default=1, ge=1, le=5)  # Track which station user is on
     proctoringSettings: Optional[ProctoringSettings] = None
+    showResultToCandidate: Optional[bool] = Field(default=True, description="Whether to show results to candidates after submission")
 
 
 class UpdateCustomMCQAssessmentRequest(BaseModel):
@@ -72,12 +74,14 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     accessMode: Optional[str] = Field(default=None, pattern=r"^(private|public)$")
     examMode: Optional[str] = Field(default=None, pattern=r"^(strict|flexible)$")
     startTime: Optional[datetime] = None
-    endTime: Optional[datetime] = None
+    endTime: Optional[datetime] = None  # For flexible mode only, calculated for strict mode
     duration: Optional[int] = None
+    accessTimeBeforeStart: Optional[int] = Field(default=None, ge=0, description="Minutes before start time candidates can access (strict mode only)")
     passPercentage: Optional[int] = Field(default=None, ge=0, le=100)
     status: Optional[str] = Field(default=None, pattern=r"^(draft|scheduled)$")  # Allow status updates
     currentStation: Optional[int] = Field(default=None, ge=1, le=5)  # Track which station user is on
     proctoringSettings: Optional[ProctoringSettings] = None
+    showResultToCandidate: Optional[bool] = Field(default=None, description="Whether to show results to candidates after submission")
 
 
 class ValidateCSVRequest(BaseModel):
@@ -101,6 +105,17 @@ class SubmitCustomMCQRequest(BaseModel):
     submissions: List[CandidateSubmission]
     startedAt: Optional[datetime] = None
     submittedAt: Optional[datetime] = None
+
+
+class SaveAnswerLogRequest(BaseModel):
+    """Request to save answer change log for subjective questions"""
+    assessmentId: str
+    token: str
+    email: str
+    name: str
+    questionId: str
+    answer: str
+    timestamp: Optional[datetime] = None
 
 
 class VerifyCustomMCQCandidateRequest(BaseModel):
@@ -168,13 +183,15 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     candidates: Optional[List[Candidate]] = Field(None, description="List of candidates")
     accessMode: str = Field("private", description="'private' or 'public'")
     examMode: str = Field("strict", description="'strict' or 'flexible'")
-    startTime: Optional[datetime] = Field(None, description="Start time (for strict mode)")
-    endTime: Optional[datetime] = Field(None, description="End time (for strict mode)")
-    duration: Optional[int] = Field(None, description="Duration in minutes (for flexible mode)")
+    startTime: Optional[datetime] = Field(None, description="Start time (required for both modes)")
+    endTime: Optional[datetime] = Field(None, description="End time (for flexible mode only, calculated for strict mode)")
+    duration: Optional[int] = Field(None, description="Duration in minutes (required for both modes)")
+    accessTimeBeforeStart: Optional[int] = Field(default=15, ge=0, description="Minutes before start time candidates can access (strict mode only)")
     passPercentage: float = Field(50.0, ge=0, le=100, description="Passing percentage")
     status: Optional[str] = Field("draft", description="Assessment status")
     currentStation: Optional[int] = Field(1, description="Current station/step")
     proctoringSettings: Optional[ProctoringSettings] = None
+    showResultToCandidate: Optional[bool] = Field(default=True, description="Whether to show results to candidates after submission")
 
 
 class UpdateCustomMCQAssessmentRequest(BaseModel):
@@ -185,13 +202,15 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     candidates: Optional[List[Candidate]] = Field(None, description="List of candidates")
     accessMode: Optional[str] = Field(None, description="'private' or 'public'")
     examMode: Optional[str] = Field(None, description="'strict' or 'flexible'")
-    startTime: Optional[datetime] = Field(None, description="Start time (for strict mode)")
-    endTime: Optional[datetime] = Field(None, description="End time (for strict mode)")
-    duration: Optional[int] = Field(None, description="Duration in minutes (for flexible mode)")
+    startTime: Optional[datetime] = Field(None, description="Start time (required for both modes)")
+    endTime: Optional[datetime] = Field(None, description="End time (for flexible mode only, calculated for strict mode)")
+    duration: Optional[int] = Field(None, description="Duration in minutes (required for both modes)")
+    accessTimeBeforeStart: Optional[int] = Field(None, ge=0, description="Minutes before start time candidates can access (strict mode only)")
     passPercentage: Optional[float] = Field(None, ge=0, le=100, description="Passing percentage")
     status: Optional[str] = Field(None, description="Assessment status")
     currentStation: Optional[int] = Field(None, description="Current station/step")
     proctoringSettings: Optional[ProctoringSettings] = None
+    showResultToCandidate: Optional[bool] = Field(default=None, description="Whether to show results to candidates after submission")
 
 
 class ValidateCSVRequest(BaseModel):
