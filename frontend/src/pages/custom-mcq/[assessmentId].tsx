@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/router";
 import { GetServerSideProps } from "next";
 import { requireAuth } from "../../lib/auth";
@@ -7,7 +7,7 @@ import { CustomMCQAssessment, AssessmentSubmission } from "../../types/custom-mc
 import ProctorSummaryCard from "../../components/admin/ProctorSummaryCard";
 import LiveProctoringDashboard from "../../components/proctor/LiveProctoringDashboard";
 import { useSession } from "next-auth/react";
-import { Eye } from "lucide-react";
+import { Eye, Loader2 } from "lucide-react";
 
 interface CustomMCQDetailsPageProps {
   session: any;
@@ -26,12 +26,29 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [loadingProctorForUser, setLoadingProctorForUser] = useState<Record<string, boolean>>({});
   const [expandedProctorUser, setExpandedProctorUser] = useState<string | null>(null);
   const [showLiveProctoring, setShowLiveProctoring] = useState(false);
+  const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false);
 
   useEffect(() => {
     if (assessmentId) {
       loadAssessment();
     }
   }, [assessmentId]);
+
+  // Handle Live Proctoring cooldown when dashboard closes
+  const prevShowLiveProctoringRef = useRef(showLiveProctoring);
+  useEffect(() => {
+    // Check if dashboard was just closed (changed from true to false)
+    if (prevShowLiveProctoringRef.current === true && showLiveProctoring === false) {
+      // Dashboard was just closed, start 10-second cooldown
+      setIsLiveProctoringCooldown(true);
+      const timer = setTimeout(() => {
+        setIsLiveProctoringCooldown(false);
+      }, 8000); // 8 seconds
+
+      return () => clearTimeout(timer);
+    }
+    prevShowLiveProctoringRef.current = showLiveProctoring;
+  }, [showLiveProctoring]);
 
   const loadAssessment = async () => {
     try {
@@ -150,22 +167,33 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
             <button
               type="button"
               onClick={() => setShowLiveProctoring(true)}
+              disabled={isLiveProctoringCooldown}
               style={{
                 padding: "0.5rem 1rem",
                 fontSize: "0.875rem",
                 display: "flex",
                 alignItems: "center",
                 gap: "0.5rem",
-                backgroundColor: "#3b82f6",
+                backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
                 color: "#ffffff",
                 border: "none",
                 borderRadius: "0.5rem",
-                cursor: "pointer",
+                cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
                 fontWeight: 600,
+                opacity: isLiveProctoringCooldown ? 0.7 : 1,
               }}
             >
-              <Eye size={16} />
-              Open Live Proctoring
+              {isLiveProctoringCooldown ? (
+                <>
+                  <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+                  Please wait...
+                </>
+              ) : (
+                <>
+                  <Eye size={16} />
+                  Open Live Proctoring
+                </>
+              )}
             </button>
           </div>
           <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
@@ -467,6 +495,16 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
           adminId={sessionData.user.email || sessionData.user.id || 'admin'}
         />
       )}
+      <style jsx>{`
+        @keyframes spin {
+          from {
+            transform: rotate(0deg);
+          }
+          to {
+            transform: rotate(360deg);
+          }
+        }
+      `}</style>
     </div>
   );
 }
