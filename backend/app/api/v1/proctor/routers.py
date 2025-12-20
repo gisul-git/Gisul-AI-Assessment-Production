@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import uuid
+import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
+from collections import defaultdict
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel
 import base64
@@ -16,8 +18,12 @@ from .schemas import (
     ProctorSummaryOut, 
     EVENT_TYPE_LABELS,
     StartSessionRequest,
-    StopSessionRequest
+    StopSessionRequest,
+    LiveProctoringStartSessionRequest,
+    LiveProctoringSessionResponse,
+    LiveProctoringSessionData,
 )
+from .websocket_manager import connection_manager
 from ....utils.responses import success_response
 from ....utils.mongo import to_object_id
 
@@ -27,522 +33,8 @@ router = APIRouter(prefix="/api/v1/proctor", tags=["proctor"])
 
 
 # ============================================================================
-# WebRTC Signalling Models
+# AI Proctoring Endpoints (camera-based violations)
 # ============================================================================
-
-class CreateSessionRequest(BaseModel):
-    assessmentId: str
-    candidateId: str  # userId/email of candidate
-    adminId: str  # userId of admin creating session
-
-
-class SessionResponse(BaseModel):
-    sessionId: str
-    status: str
-
-
-class SDPRequest(BaseModel):
-    sessionId: str
-    sdp: str
-    sdpType: str  # "offer" or "answer"
-    sender: str  # "candidate" or "admin"
-
-
-class ICECandidateRequest(BaseModel):
-    sessionId: str
-    candidate: str
-    sdpMid: Optional[str] = None
-    sdpMLineIndex: Optional[int] = None
-    sender: str  # "candidate" or "admin"
-
-
-# ============================================================================
-# WebRTC Live Proctoring Endpoints
-# ============================================================================
-
-@router.post("/live/create-session")
-async def create_live_session(
-    request: CreateSessionRequest,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """
-    Create a new live proctoring session for WebRTC signalling.
-    Called by admin when they want to start watching a candidate.
-    Automatically ends any existing pending/active sessions for this candidate.
-    """
-    try:
-        # End any existing pending/active sessions for this candidate first
-        await db.proctor_sessions.update_many(
-            {
-                "assessmentId": request.assessmentId,
-                "candidateId": request.candidateId,
-                "status": {"$in": ["pending", "active", "offer_sent"]},
-            },
-            {
-                "$set": {
-                    "status": "ended",
-                    "endedAt": datetime.now(timezone.utc).isoformat(),
-                    "updatedAt": datetime.now(timezone.utc).isoformat(),
-                }
-            }
-        )
-        
-        session_id = str(uuid.uuid4())
-        
-        session = {
-            "sessionId": session_id,
-            "assessmentId": request.assessmentId,
-            "candidateId": request.candidateId,
-            "adminId": request.adminId,
-            "status": "pending",  # pending -> active -> ended
-            "offer": None,
-            "answer": None,
-            "candidateICE": [],
-            "adminICE": [],
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-            "updatedAt": datetime.now(timezone.utc).isoformat(),
-        }
-        
-        await db.proctor_sessions.insert_one(session)
-        
-        logger.info(f"[LiveProctor] Session created: {session_id} for candidate {request.candidateId}")
-        
-        # Include TURN server configuration if available
-        response_data = {"sessionId": session_id, "status": "pending"}
-        from ....config.settings import get_settings
-        turn_settings = get_settings()
-        if turn_settings.turn_url:
-            response_data["turnConfig"] = {
-                "url": turn_settings.turn_url,
-                "username": turn_settings.turn_username or "",
-                "password": turn_settings.turn_password or "",
-            }
-        
-        return success_response("Session created", response_data)
-    
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error creating session: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/live/session/{session_id}")
-async def get_live_session(
-    session_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Get current session state including SDP and ICE candidates."""
-    try:
-        session = await db.proctor_sessions.find_one({"sessionId": session_id})
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        session["_id"] = str(session["_id"])
-        
-        # Include TURN server configuration if available
-        from ....config.settings import get_settings
-        turn_settings = get_settings()
-        if turn_settings.turn_url:
-            session["turnConfig"] = {
-                "url": turn_settings.turn_url,
-                "username": turn_settings.turn_username or "",
-                "password": turn_settings.turn_password or "",
-            }
-        
-        return success_response("Session fetched", session)
-    
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error fetching session: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/live/offer")
-async def post_offer(
-    request: SDPRequest,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """
-    Post WebRTC offer SDP.
-    Candidate sends offer when starting to stream.
-    """
-    try:
-        result = await db.proctor_sessions.update_one(
-            {"sessionId": request.sessionId},
-            {
-                "$set": {
-                    "offer": {"sdp": request.sdp, "type": request.sdpType, "sender": request.sender},
-                    "status": "offer_sent",
-                    "updatedAt": datetime.now(timezone.utc).isoformat(),
-                }
-            }
-        )
-        
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        logger.info(f"[LiveProctor] Offer received for session {request.sessionId}")
-        
-        return success_response("Offer saved", {"sessionId": request.sessionId})
-    
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error saving offer: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/live/answer")
-async def post_answer(
-    request: SDPRequest,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """
-    Post WebRTC answer SDP.
-    Admin sends answer after receiving candidate's offer.
-    """
-    try:
-        result = await db.proctor_sessions.update_one(
-            {"sessionId": request.sessionId},
-            {
-                "$set": {
-                    "answer": {"sdp": request.sdp, "type": request.sdpType, "sender": request.sender},
-                    "status": "active",
-                    "updatedAt": datetime.now(timezone.utc).isoformat(),
-                }
-            }
-        )
-        
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        logger.info(f"[LiveProctor] Answer received for session {request.sessionId}")
-        
-        return success_response("Answer saved", {"sessionId": request.sessionId})
-    
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error saving answer: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/live/ice")
-async def post_ice_candidate(
-    request: ICECandidateRequest,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """
-    Post ICE candidate for WebRTC connection.
-    Both candidate and admin send ICE candidates.
-    """
-    try:
-        ice_field = "candidateICE" if request.sender == "candidate" else "adminICE"
-        
-        ice_candidate = {
-            "candidate": request.candidate,
-            "sdpMid": request.sdpMid,
-            "sdpMLineIndex": request.sdpMLineIndex,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        
-        result = await db.proctor_sessions.update_one(
-            {"sessionId": request.sessionId},
-            {
-                "$push": {ice_field: ice_candidate},
-                "$set": {"updatedAt": datetime.now(timezone.utc).isoformat()},
-            }
-        )
-        
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        return success_response("ICE candidate saved", {"sessionId": request.sessionId})
-    
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error saving ICE candidate: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/live/end-session/{session_id}")
-async def end_live_session(
-    session_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """End a live proctoring session."""
-    try:
-        result = await db.proctor_sessions.update_one(
-            {"sessionId": session_id},
-            {
-                "$set": {
-                    "status": "ended",
-                    "endedAt": datetime.now(timezone.utc).isoformat(),
-                    "updatedAt": datetime.now(timezone.utc).isoformat(),
-                }
-            }
-        )
-        
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        logger.info(f"[LiveProctor] Session ended: {session_id}")
-        
-        return success_response("Session ended", {"sessionId": session_id, "status": "ended"})
-    
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error ending session: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/live/pending/{assessment_id}/{candidate_id}")
-async def get_pending_session(
-    assessment_id: str,
-    candidate_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """
-    Check if there's a pending live proctoring session for a candidate.
-    Candidate polls this to know when admin wants to watch them.
-    """
-    try:
-        session = await db.proctor_sessions.find_one({
-            "assessmentId": assessment_id,
-            "candidateId": candidate_id,
-            "status": {"$in": ["pending", "offer_sent", "active"]},
-        })
-        
-        if not session:
-            return success_response("No active session", {"hasSession": False})
-        
-        session["_id"] = str(session["_id"])
-        
-        return success_response("Session found", {"hasSession": True, "session": session})
-    
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error checking pending session: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-# ============================================================================
-# Multi-Candidate Live Proctoring Endpoints
-# ============================================================================
-
-class CreateMultiSessionRequest(BaseModel):
-    assessmentId: str
-    adminId: str
-
-
-@router.get("/live/active-candidates/{assessment_id}")
-async def get_active_candidates(
-    assessment_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """
-    Get all candidates who are currently taking the assessment.
-    These are candidates who have started but not yet submitted.
-    """
-    try:
-        # Find candidates who have started but not submitted
-        # Look in assessment_sessions collection for active sessions
-        active_sessions = await db.assessment_sessions.find({
-            "assessmentId": assessment_id,
-            "startedAt": {"$exists": True},
-            "submittedAt": {"$exists": False},
-        }).to_list(length=100)
-        
-        candidates = []
-        for session in active_sessions:
-            # Check if there's an active proctoring session
-            proctor_session = await db.proctor_sessions.find_one({
-                "assessmentId": assessment_id,
-                "candidateId": session.get("email", session.get("candidateId")),
-                "status": {"$in": ["pending", "offer_sent", "active"]},
-            })
-            
-            candidates.append({
-                "email": session.get("email", session.get("candidateId")),
-                "name": session.get("name", "Unknown"),
-                "startedAt": session.get("startedAt"),
-                "hasActiveSession": proctor_session is not None,
-                "sessionId": proctor_session.get("sessionId") if proctor_session else None,
-                "sessionStatus": proctor_session.get("status") if proctor_session else None,
-            })
-        
-        return success_response("Active candidates retrieved", {
-            "count": len(candidates),
-            "candidates": candidates
-        })
-    
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error getting active candidates: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/live/create-multi-session")
-async def create_multi_live_sessions(
-    request: CreateMultiSessionRequest,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """
-    Create live proctoring sessions for ALL active candidates in an assessment.
-    Used for the multi-candidate proctoring dashboard.
-    """
-    try:
-        # Find all active candidates (started but not submitted)
-        active_sessions = await db.assessment_sessions.find({
-            "assessmentId": request.assessmentId,
-            "startedAt": {"$exists": True},
-            "submittedAt": {"$exists": False},
-        }).to_list(length=100)
-        
-        created_sessions = []
-        
-        for session in active_sessions:
-            candidate_id = session.get("email", session.get("candidateId"))
-            
-            # End any existing sessions for this candidate
-            await db.proctor_sessions.update_many(
-                {
-                    "assessmentId": request.assessmentId,
-                    "candidateId": candidate_id,
-                    "status": {"$in": ["pending", "active", "offer_sent"]},
-                },
-                {
-                    "$set": {
-                        "status": "ended",
-                        "endedAt": datetime.now(timezone.utc).isoformat(),
-                        "updatedAt": datetime.now(timezone.utc).isoformat(),
-                    }
-                }
-            )
-            
-            # Create new session
-            session_id = str(uuid.uuid4())
-            
-            new_session = {
-                "sessionId": session_id,
-                "assessmentId": request.assessmentId,
-                "candidateId": candidate_id,
-                "candidateName": session.get("name", "Unknown"),
-                "adminId": request.adminId,
-                "status": "pending",
-                "offer": None,
-                "answer": None,
-                "candidateICE": [],
-                "adminICE": [],
-                "createdAt": datetime.now(timezone.utc).isoformat(),
-                "updatedAt": datetime.now(timezone.utc).isoformat(),
-            }
-            
-            await db.proctor_sessions.insert_one(new_session)
-            
-            session_data = {
-                "sessionId": session_id,
-                "candidateId": candidate_id,
-                "candidateName": session.get("name", "Unknown"),
-                "status": "pending",
-            }
-            
-            # Include TURN server configuration if available
-            from ....config.settings import get_settings
-            turn_settings = get_settings()
-            if turn_settings.turn_url:
-                session_data["turnConfig"] = {
-                    "url": turn_settings.turn_url,
-                    "username": turn_settings.turn_username or "",
-                    "password": turn_settings.turn_password or "",
-                }
-            
-            created_sessions.append(session_data)
-            
-            logger.info(f"[LiveProctor] Multi-session created: {session_id} for {candidate_id}")
-        
-        return success_response("Sessions created for all active candidates", {
-            "count": len(created_sessions),
-            "sessions": created_sessions
-        })
-    
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error creating multi-sessions: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/live/all-sessions/{assessment_id}")
-async def get_all_sessions(
-    assessment_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """
-    Get all active proctoring sessions for an assessment.
-    Used by the multi-proctor dashboard to display all candidate streams.
-    Excludes sessions for candidates who have already submitted.
-    """
-    try:
-        sessions = await db.proctor_sessions.find({
-            "assessmentId": assessment_id,
-            "status": {"$in": ["pending", "offer_sent", "active"]},
-        }).to_list(length=100)
-        
-        # Convert ObjectId to string
-        for session in sessions:
-            session["_id"] = str(session["_id"])
-        
-        # Filter out sessions for candidates who have submitted
-        # Check assessment's candidateResponses to see if candidate has submittedAt
-        try:
-            try:
-                assessment_oid = to_object_id(assessment_id)
-            except ValueError:
-                logger.warning(f"[LiveProctor] Invalid assessment ID format: {assessment_id}, skipping submission check")
-                assessment_oid = None
-            
-            if assessment_oid:
-                assessment = await db.assessments.find_one({"_id": assessment_oid})
-                
-                if assessment and assessment.get("candidateResponses"):
-                    candidate_responses = assessment.get("candidateResponses", {})
-                    submitted_candidates = set()
-                    
-                    # Extract submitted candidate emails (normalize to lowercase)
-                    for response_key, response_data in candidate_responses.items():
-                        if isinstance(response_data, dict) and response_data.get("submittedAt"):
-                            email = response_data.get("email", "")
-                            if email:
-                                submitted_candidates.add(email.strip().lower())
-                    
-                    # Filter out sessions for submitted candidates
-                    if submitted_candidates:
-                        active_sessions = []
-                        for session in sessions:
-                            candidate_id = session.get("candidateId", "")
-                            candidate_email = candidate_id.strip().lower() if candidate_id else ""
-                            
-                            if candidate_email and candidate_email in submitted_candidates:
-                                logger.info(f"[LiveProctor] Filtering out session for submitted candidate: {candidate_email}")
-                                continue
-                            
-                            active_sessions.append(session)
-                        
-                        sessions = active_sessions
-                        logger.info(f"[LiveProctor] Filtered out {len(submitted_candidates)} submitted candidates, {len(sessions)} active sessions remaining")
-        except Exception as filter_exc:
-            logger.warning(f"[LiveProctor] Error filtering submitted candidates, using all sessions: {filter_exc}")
-            # If filtering fails, continue with all sessions (fail-safe)
-        
-        return success_response("Sessions retrieved", {
-            "count": len(sessions),
-            "sessions": sessions
-        })
-    
-    except Exception as exc:
-        logger.exception(f"[LiveProctor] Error getting all sessions: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
 
 # Session Lifecycle Endpoints
 # ============================================================================
@@ -577,7 +69,6 @@ async def start_proctoring_session(
                 {
                     "$set": {
                         "ai_proctoring": payload.ai_proctoring,
-                        "live_proctoring": payload.live_proctoring,
                         "updatedAt": datetime.now(timezone.utc).isoformat(),
                     }
                 }
@@ -589,7 +80,6 @@ async def start_proctoring_session(
                 "assessmentId": payload.assessmentId.strip(),
                 "userId": payload.userId.strip(),
                 "ai_proctoring": payload.ai_proctoring,
-                "live_proctoring": payload.live_proctoring,
                 "status": "active",
                 "startedAt": datetime.now(timezone.utc).isoformat(),
                 "endedAt": None,
@@ -603,7 +93,7 @@ async def start_proctoring_session(
         
         logger.info(
             f"[Proctor Session] Session started: {session_id} for user {payload.userId} "
-            f"in assessment {payload.assessmentId} (AI: {payload.ai_proctoring}, Live: {payload.live_proctoring})"
+            f"in assessment {payload.assessmentId} (AI: {payload.ai_proctoring})"
         )
         
         return success_response(
@@ -611,7 +101,6 @@ async def start_proctoring_session(
             {
                 "sessionId": session_id,
                 "ai_proctoring": payload.ai_proctoring,
-                "live_proctoring": payload.live_proctoring,
             }
         )
     
@@ -976,4 +465,403 @@ async def get_all_proctor_events_for_assessment(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch proctoring events: {str(exc)}"
         ) from exc
+
+
+# ============================================================================
+# Live Proctoring Endpoints
+# ============================================================================
+
+@router.post("/live/start-session")
+async def start_live_proctoring_session(
+    payload: LiveProctoringStartSessionRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Start a Live Proctoring session.
+    Called ONCE by candidate when starting assessment.
+    """
+    try:
+        import uuid
+        session_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        
+        session_doc = {
+            "sessionId": session_id,
+            "assessmentId": payload.assessmentId,
+            "candidateId": payload.candidateId,
+            "status": "candidate_initiated",
+            "offer": None,
+            "answer": None,
+            "candidateICE": [],
+            "adminICE": [],
+            "createdAt": now,
+            "updatedAt": now,
+            "endedAt": None,
+        }
+        
+        await db.live_proctor_sessions.insert_one(session_doc)
+        
+        logger.info(f"[Live Proctoring] Session started: {session_id} for candidate {payload.candidateId}")
+        
+        return success_response(
+            "Live Proctoring session started",
+            LiveProctoringSessionResponse(
+                sessionId=session_id,
+                assessmentId=payload.assessmentId,
+                candidateId=payload.candidateId,
+                status="candidate_initiated",
+                createdAt=now,
+            ).dict()
+        )
+    
+    except Exception as exc:
+        logger.exception(f"[Live Proctoring] Error starting session: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start Live Proctoring session: {str(exc)}"
+        ) from exc
+
+
+@router.post("/live/end-session/{session_id}")
+async def end_live_proctoring_session(
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    End a Live Proctoring session.
+    Called ONCE by candidate when ending assessment.
+    """
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        
+        result = await db.live_proctor_sessions.update_one(
+            {"sessionId": session_id},
+            {
+                "$set": {
+                    "status": "ended",
+                    "endedAt": now,
+                    "updatedAt": now,
+                }
+            }
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session {session_id} not found"
+            )
+        
+        # Notify all admins that session ended
+        session = await db.live_proctor_sessions.find_one({"sessionId": session_id})
+        if session:
+            await connection_manager.send_to_admins(
+                session["assessmentId"],
+                {
+                    "type": "session_ended",
+                    "sessionId": session_id,
+                }
+            )
+        
+        # Disconnect candidate WebSocket
+        await connection_manager.disconnect_candidate(session_id)
+        
+        logger.info(f"[Live Proctoring] Session ended: {session_id}")
+        
+        return success_response("Live Proctoring session ended", {"sessionId": session_id})
+    
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[Live Proctoring] Error ending session: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to end Live Proctoring session: {str(exc)}"
+        ) from exc
+
+
+@router.get("/live/all-sessions/{assessment_id}")
+async def get_all_live_proctoring_sessions(
+    assessment_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Get all active Live Proctoring sessions for an assessment.
+    Called by admin when opening dashboard.
+    """
+    try:
+        cursor = db.live_proctor_sessions.find({
+            "assessmentId": assessment_id,
+            "status": {"$in": ["candidate_initiated", "offer_sent", "active"]}
+        })
+        
+        sessions = []
+        async for doc in cursor:
+            sessions.append({
+                "sessionId": doc["sessionId"],
+                "candidateId": doc["candidateId"],
+                "status": doc["status"],
+                "createdAt": doc["createdAt"],
+            })
+        
+        logger.info(f"[Live Proctoring] Fetched {len(sessions)} active sessions for assessment {assessment_id}")
+        
+        return success_response(
+            "Active sessions fetched",
+            {"sessions": sessions}
+        )
+    
+    except Exception as exc:
+        logger.exception(f"[Live Proctoring] Error fetching sessions: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch sessions: {str(exc)}"
+        ) from exc
+
+
+@router.websocket("/ws/live/candidate/{session_id}")
+async def websocket_candidate(
+    websocket: WebSocket,
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    WebSocket endpoint for candidate signaling.
+    Handles offer, ICE candidates from candidate.
+    Sends answer, ICE candidates to candidate.
+    
+    Query params: candidate_id (required)
+    """
+    # Get candidate_id from query params
+    candidate_id = websocket.query_params.get("candidate_id")
+    if not candidate_id:
+        await websocket.close(code=1008, reason="Missing candidate_id")
+        return
+    
+    # Verify session exists
+    session = await db.live_proctor_sessions.find_one({"sessionId": session_id})
+    if not session:
+        await websocket.close(code=1008, reason="Session not found")
+        return
+    
+    if session["candidateId"] != candidate_id:
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+    
+    assessment_id = session["assessmentId"]
+    
+    # Connect candidate
+    await connection_manager.connect_candidate(session_id, assessment_id, websocket)
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            msg_type = message.get("type")
+            
+            if msg_type == "offer":
+                # Candidate sent offer
+                offer = message.get("offer")
+                if offer:
+                    await db.live_proctor_sessions.update_one(
+                        {"sessionId": session_id},
+                        {
+                            "$set": {
+                                "offer": offer,
+                                "status": "offer_sent",
+                                "updatedAt": datetime.now(timezone.utc).isoformat(),
+                            }
+                        }
+                    )
+                    logger.info(f"[Live Proctoring] Offer received from candidate {candidate_id}")
+                    
+                    # Notify admins that new offer is available
+                    await connection_manager.send_to_admins(
+                        assessment_id,
+                        {
+                            "type": "new_session",
+                            "sessionId": session_id,
+                            "candidateId": candidate_id,
+                        }
+                    )
+            
+            elif msg_type == "ice":
+                # Candidate sent ICE candidate
+                candidate_ice = {
+                    "candidate": message.get("candidate"),
+                    "sdpMid": message.get("sdpMid"),
+                    "sdpMLineIndex": message.get("sdpMLineIndex"),
+                }
+                
+                await db.live_proctor_sessions.update_one(
+                    {"sessionId": session_id},
+                    {
+                        "$push": {"candidateICE": candidate_ice},
+                        "$set": {"updatedAt": datetime.now(timezone.utc).isoformat()}
+                    }
+                )
+                
+                # Forward to admins
+                await connection_manager.send_to_admins(
+                    assessment_id,
+                    {
+                        "type": "ice_candidate",
+                        "sessionId": session_id,
+                        "candidate": candidate_ice,
+                    }
+                )
+    
+    except WebSocketDisconnect:
+        logger.info(f"[Live Proctoring] Candidate disconnected: {session_id}")
+    except Exception as exc:
+        logger.exception(f"[Live Proctoring] Error in candidate WebSocket: {exc}")
+    finally:
+        await connection_manager.disconnect_candidate(session_id)
+
+
+@router.websocket("/ws/live/admin/{assessment_id}")
+async def websocket_admin(
+    websocket: WebSocket,
+    assessment_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    WebSocket endpoint for admin signaling.
+    Handles get_session, answer, ICE candidates from admin.
+    Sends active_sessions, session_data, ICE candidates to admin.
+    """
+    # Connect admin
+    await connection_manager.connect_admin(assessment_id, websocket)
+    
+    try:
+        # Send active sessions immediately
+        # CRITICAL: Only include sessions where candidate WebSocket is actually connected
+        cursor = db.live_proctor_sessions.find({
+            "assessmentId": assessment_id,
+            "status": {"$in": ["candidate_initiated", "offer_sent", "active"]}
+        })
+        
+        sessions = []
+        async for doc in cursor:
+            session_id = doc["sessionId"]
+            # Only include if candidate WebSocket is connected
+            if connection_manager.is_candidate_connected(session_id):
+                sessions.append({
+                    "sessionId": session_id,
+                    "candidateId": doc["candidateId"],
+                    "status": doc["status"],
+                    "createdAt": doc["createdAt"],
+                })
+        
+        logger.info(f"[Live Proctoring] Admin connected, sending {len(sessions)} active sessions (with connected candidates) for assessment {assessment_id}")
+        
+        await websocket.send_text(json.dumps({
+            "type": "active_sessions",
+            "sessions": sessions,
+        }))
+        
+        # Handle messages from admin
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            msg_type = message.get("type")
+            
+            if msg_type == "get_session":
+                # Admin requests session data (offer)
+                session_id = message.get("sessionId")
+                session = await db.live_proctor_sessions.find_one({"sessionId": session_id})
+                
+                if session:
+                    offer = session.get("offer")
+                    # If no offer or offer is old, request candidate to send new offer
+                    if not offer or not connection_manager.is_candidate_connected(session_id):
+                        # Candidate not connected or no offer - send empty session_data
+                        # Admin will retry, and candidate should send new offer when reconnected
+                        await websocket.send_text(json.dumps({
+                            "type": "session_data",
+                            "sessionId": session_id,
+                            "offer": None,
+                            "candidateICE": [],
+                        }))
+                        logger.info(f"[Live Proctoring] Admin requested session {session_id} but candidate not connected or no offer")
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "session_data",
+                            "sessionId": session_id,
+                            "offer": offer,
+                            "candidateICE": session.get("candidateICE", []),
+                        }))
+                        logger.info(f"[Live Proctoring] Sent session data for {session_id} to admin")
+                else:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"Session {session_id} not found",
+                    }))
+            
+            elif msg_type == "answer":
+                # Admin sent answer
+                session_id = message.get("sessionId")
+                answer = message.get("answer")
+                
+                if answer:
+                    await db.live_proctor_sessions.update_one(
+                        {"sessionId": session_id},
+                        {
+                            "$set": {
+                                "answer": answer,
+                                "status": "active",
+                                "updatedAt": datetime.now(timezone.utc).isoformat(),
+                            }
+                        }
+                    )
+                    
+                    # Send answer to candidate
+                    await connection_manager.send_to_candidate(
+                        session_id,
+                        {
+                            "type": "answer",
+                            "answer": answer,
+                        }
+                    )
+            
+            elif msg_type == "ice":
+                # Admin sent ICE candidate
+                session_id = message.get("sessionId")
+                admin_ice = {
+                    "candidate": message.get("candidate"),
+                    "sdpMid": message.get("sdpMid"),
+                    "sdpMLineIndex": message.get("sdpMLineIndex"),
+                }
+                
+                await db.live_proctor_sessions.update_one(
+                    {"sessionId": session_id},
+                    {
+                        "$push": {"adminICE": admin_ice},
+                        "$set": {"updatedAt": datetime.now(timezone.utc).isoformat()}
+                    }
+                )
+                
+                # Forward to candidate
+                await connection_manager.send_to_candidate(
+                    session_id,
+                    {
+                        "type": "ice_candidate",
+                        "candidate": admin_ice,
+                    }
+                )
+    
+    except WebSocketDisconnect:
+        logger.info(f"[Live Proctoring] Admin disconnected: {assessment_id}")
+    except Exception as exc:
+        logger.exception(f"[Live Proctoring] Error in admin WebSocket: {exc}")
+    finally:
+        # Only disconnect if WebSocket is still in our connections
+        # This prevents double-close errors
+        try:
+            if assessment_id in connection_manager.admin_connections:
+                if websocket in connection_manager.admin_connections[assessment_id]:
+                    await connection_manager.disconnect_admin(assessment_id, websocket)
+        except Exception as e:
+            logger.debug(f"[Live Proctoring] Error in finally block (likely already disconnected): {e}")
+
+
 

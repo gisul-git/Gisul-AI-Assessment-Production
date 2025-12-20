@@ -8,8 +8,7 @@ import { requireAuth } from '../../../../lib/auth'
 import Link from 'next/link'
 import dsaApi from '../../../../lib/dsa/api'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video } from 'lucide-react'
-import { MultiProctorGrid } from '@/components/proctor/MultiProctorGrid'
-import { useMultiLiveProctorAdmin } from '@/hooks/useMultiLiveProctorAdmin'
+import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
 
 interface AIFeedback {
   overall_score?: number
@@ -112,7 +111,6 @@ export default function AnalyticsPage() {
   const [eventTypeLabels, setEventTypeLabels] = useState<Record<string, string>>({})
   const [loadingProctorLogs, setLoadingProctorLogs] = useState(false)
   const [showProctorLogs, setShowProctorLogs] = useState(false)
-  const [showLiveProctor, setShowLiveProctor] = useState(false)
   const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
   const [newCandidateName, setNewCandidateName] = useState("")
   const [newCandidateEmail, setNewCandidateEmail] = useState("")
@@ -129,47 +127,8 @@ export default function AnalyticsPage() {
   })
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
+  const [showLiveProctoring, setShowLiveProctoring] = useState(false)
   
-  // Memoize proctorAssessmentId to prevent infinite loops
-  const proctorAssessmentId = useMemo(() => (testId as string) || "", [testId])
-  const proctorAdminId = useMemo(() => (session as any)?.user?.id || (session as any)?.user?.email || 'admin', [session])
-  
-  // Stable callback to prevent re-renders
-  const handleProctorError = useCallback((error: string) => {
-    console.error('Multi-proctor error:', error)
-  }, [])
-  
-  // Multi-proctor hook for viewing all candidates
-  const {
-    candidateStreams,
-    activeCandidates,
-    isLoading: isProctorLoading,
-    startMonitoring,
-    stopMonitoring,
-    refreshCandidate,
-    resumePollingIfPaused,
-  } = useMultiLiveProctorAdmin({
-    assessmentId: proctorAssessmentId,
-    adminId: proctorAdminId,
-    onError: handleProctorError,
-    debugMode: false, // Disable debug mode in production
-  })
-  
-  // Start monitoring when live proctor panel opens
-  // Note: startMonitoring/stopMonitoring are excluded from deps to prevent infinite loops
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (showLiveProctor && testId && typeof testId === 'string') {
-      startMonitoring()
-    } else {
-      stopMonitoring()
-    }
-    
-    return () => {
-      stopMonitoring()
-    }
-  }, [showLiveProctor, testId])
-
   const fetchAnalytics = async (userId: string) => {
     if (!testId || typeof testId !== 'string') return
     
@@ -805,43 +764,6 @@ export default function AnalyticsPage() {
             ) : !selectedCandidate ? (
               // Overall Analytics View
               <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-                {/* Live Proctoring Button for Overall View */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}>
-                  <div>
-                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-                      Live Proctoring Dashboard
-                    </h2>
-                    <p style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                      Monitor all candidates who have started the test. View their camera and screen in real-time.
-                    </p>
-                  </div>
-                  {testId && typeof testId === 'string' && (
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={() => setShowLiveProctor(true)}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        padding: "0.75rem 1.5rem",
-                        fontSize: "0.875rem",
-                        backgroundColor: "#10b981",
-                      }}
-                    >
-                      <Video style={{ width: "20px", height: "20px" }} />
-                      Live Proctoring
-                    </button>
-                  )}
-                </div>
                 <div style={{
                   border: "1px solid #e2e8f0",
                   borderRadius: "0.75rem",
@@ -1091,6 +1013,45 @@ export default function AnalyticsPage() {
                       }
                       return null
                     })()}
+                </div>
+
+                {/* Live Proctoring Section */}
+                <div style={{
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "0.75rem",
+                  padding: "1.5rem",
+                  backgroundColor: "#ffffff",
+                  marginBottom: "1.5rem",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
+                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowLiveProctoring(true)}
+                      style={{
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        backgroundColor: "#3b82f6",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: "0.5rem",
+                        cursor: "pointer",
+                        fontWeight: 600,
+                      }}
+                    >
+                      <Eye size={16} />
+                      Open Live Proctoring
+                    </button>
+                  </div>
+                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                    Monitor candidates in real-time via webcam and screen sharing
+                  </p>
                 </div>
 
                 {/* Proctoring Logs Section */}
@@ -1705,113 +1666,15 @@ export default function AnalyticsPage() {
         </div>
       )}
 
-      {/* Multi Live Proctoring Panel */}
-      {showLiveProctor && testId && typeof testId === 'string' && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: "rgba(0, 0, 0, 0.95)",
-            zIndex: 9999,
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          {/* Header */}
-          <div
-            style={{
-              padding: "1rem 1.5rem",
-              backgroundColor: "#1e293b",
-              borderBottom: "1px solid #334155",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-              <Video style={{ width: "24px", height: "24px", color: "#10b981" }} />
-              <div>
-                <h2 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700, color: "#ffffff" }}>
-                  Live Proctoring Dashboard
-                </h2>
-                <p style={{ margin: "0.25rem 0 0", fontSize: "0.875rem", color: "#94a3b8" }}>
-                  Monitoring {candidateStreams.length} active candidate{candidateStreams.length !== 1 ? 's' : ''}
-                  {candidates.filter(c => c.status === 'started').length > 0 && (
-                    <span style={{ marginLeft: "0.5rem" }}>
-                      ({candidates.filter(c => c.status === 'started').length} started)
-                    </span>
-                  )}
-                </p>
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
-              {candidateStreams.length === 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    console.log('[Live Proctor] Refresh clicked, resuming polling...')
-                    resumePollingIfPaused()
-                    startMonitoring()
-                  }}
-                  style={{
-                    padding: "0.75rem 1.5rem",
-                    backgroundColor: "#3b82f6",
-                    color: "#ffffff",
-                    border: "none",
-                    borderRadius: "0.5rem",
-                    fontSize: "0.875rem",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                  }}
-                >
-                  <span>↻</span>
-                  Refresh
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  console.log('[Live Proctor] Close button clicked, stopping monitoring...')
-                  stopMonitoring()
-                  setShowLiveProctor(false)
-                }}
-                style={{
-                  padding: "0.75rem 1.5rem",
-                  backgroundColor: "#ef4444",
-                  color: "#ffffff",
-                  border: "none",
-                  borderRadius: "0.5rem",
-                  fontSize: "0.875rem",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.5rem",
-                }}
-              >
-                <span>✕</span>
-                Close
-              </button>
-            </div>
-          </div>
-          
-          {/* Multi-Proctor Grid */}
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <MultiProctorGrid
-              candidateStreams={candidateStreams}
-              onRefreshCandidate={refreshCandidate}
-              isLoading={isProctorLoading}
-            />
-          </div>
-        </div>
+      {/* Live Proctoring Dashboard */}
+      {showLiveProctoring && testId && typeof testId === 'string' && session?.user && (
+        <LiveProctoringDashboard
+          isOpen={showLiveProctoring}
+          onClose={() => setShowLiveProctoring(false)}
+          assessmentId={testId}
+          adminId={session.user.email || session.user.id || 'admin'}
+        />
       )}
-      
     </div>
   )
 }

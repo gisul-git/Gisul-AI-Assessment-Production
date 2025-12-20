@@ -11,11 +11,6 @@ export interface ProctorSettingsSchema {
     gazeAway: boolean;
     outOfScreen: boolean;
   };
-  liveProctoring: boolean;
-  liveProctoringOptions: {
-    screenShare: boolean;
-    webcamStreaming: boolean;
-  };
   enforcedDefaults: {
     fullscreen: boolean;
     copyPasteBlock: boolean;
@@ -40,11 +35,6 @@ export const DEFAULT_PROCTOR_SETTINGS: ProctorSettingsSchema = {
     multipleFaceDetection: true,
     gazeAway: true,
     outOfScreen: true,
-  },
-  liveProctoring: false,
-  liveProctoringOptions: {
-    screenShare: true,
-    webcamStreaming: true,
   },
   enforcedDefaults: {
     fullscreen: true,
@@ -93,11 +83,6 @@ export function migrateProctoringSettings(oldSettings: any): ProctorSettingsSche
       gazeAway: old.concentrationTracking || false,
       outOfScreen: old.frameMatchRecognition || false,
     },
-    liveProctoring: old.liveCameraAndScreenMonitoring || false,
-    liveProctoringOptions: {
-      screenShare: old.liveCameraAndScreenMonitoring || false,
-      webcamStreaming: old.liveCameraAndScreenMonitoring || false,
-    },
     enforcedDefaults: {
       fullscreen: true, // Always enforced
       copyPasteBlock: old.copyPasteBlocking !== false, // Default true, but respect old setting
@@ -134,15 +119,6 @@ export default function ProctoringSettings({
     });
   };
 
-  const handleLiveOptionChange = (key: keyof ProctorSettingsSchema["liveProctoringOptions"], checked: boolean) => {
-    if (readOnly) return;
-    handleChange({
-      liveProctoringOptions: {
-        ...settings.liveProctoringOptions,
-        [key]: checked,
-      },
-    });
-  };
 
   return (
     <div style={{
@@ -353,141 +329,7 @@ export default function ProctoringSettings({
         )}
       </div>
 
-      {/* 2️⃣ LIVE HUMAN PROCTORING */}
-      <div style={{ marginBottom: "1.5rem" }}>
-        <div style={{
-          display: "flex",
-          alignItems: "flex-start",
-          gap: "0.75rem",
-          padding: "1rem",
-          backgroundColor: settings.liveProctoring ? "#f0fdf4" : "#f8fafc",
-          borderRadius: "0.5rem",
-          border: `1px solid ${settings.liveProctoring ? "#10b981" : "#e2e8f0"}`,
-          marginBottom: settings.liveProctoring ? "1rem" : 0,
-        }}>
-          <input
-            type="checkbox"
-            id="liveProctoring"
-            checked={settings.liveProctoring}
-            onChange={(e) => handleChange({ liveProctoring: e.target.checked })}
-            disabled={readOnly}
-            style={{
-              marginTop: "0.25rem",
-              width: "18px",
-              height: "18px",
-              cursor: readOnly ? "not-allowed" : "pointer",
-            }}
-          />
-          <div style={{ flex: 1 }}>
-            <label
-              htmlFor="liveProctoring"
-              style={{
-                display: "block",
-                fontWeight: 600,
-                color: "#1e293b",
-                marginBottom: "0.25rem",
-                cursor: readOnly ? "default" : "pointer",
-              }}
-            >
-              Live Human Proctoring
-            </label>
-            <p style={{ fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-              Real-time monitoring by human proctors with live camera and screen sharing.
-            </p>
-          </div>
-        </div>
-
-        {/* Live Proctoring Sub-options */}
-        {settings.liveProctoring && (
-          <div style={{ paddingLeft: "2rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-            {/* Screen Sharing */}
-            <div style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: "0.75rem",
-              padding: "0.75rem",
-              backgroundColor: "#ffffff",
-              borderRadius: "0.5rem",
-              border: "1px solid #e2e8f0",
-            }}>
-              <input
-                type="checkbox"
-                id="screenShare"
-                checked={settings.liveProctoringOptions.screenShare}
-                onChange={(e) => handleLiveOptionChange("screenShare", e.target.checked)}
-                disabled={readOnly}
-                style={{
-                  marginTop: "0.25rem",
-                  width: "16px",
-                  height: "16px",
-                  cursor: readOnly ? "not-allowed" : "pointer",
-                }}
-              />
-              <div style={{ flex: 1 }}>
-                <label
-                  htmlFor="screenShare"
-                  style={{
-                    display: "block",
-                    fontWeight: 500,
-                    color: "#1e293b",
-                    fontSize: "0.875rem",
-                    cursor: readOnly ? "default" : "pointer",
-                  }}
-                >
-                  Screen Sharing
-                </label>
-                <p style={{ fontSize: "0.8125rem", color: "#64748b", margin: "0.25rem 0 0 0" }}>
-                  Candidate must share entire screen for live proctor monitoring.
-                </p>
-              </div>
-            </div>
-
-            {/* Webcam Streaming */}
-            <div style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: "0.75rem",
-              padding: "0.75rem",
-              backgroundColor: "#ffffff",
-              borderRadius: "0.5rem",
-              border: "1px solid #e2e8f0",
-            }}>
-              <input
-                type="checkbox"
-                id="webcamStreaming"
-                checked={settings.liveProctoringOptions.webcamStreaming}
-                onChange={(e) => handleLiveOptionChange("webcamStreaming", e.target.checked)}
-                disabled={readOnly}
-                style={{
-                  marginTop: "0.25rem",
-                  width: "16px",
-                  height: "16px",
-                  cursor: readOnly ? "not-allowed" : "pointer",
-                }}
-              />
-              <div style={{ flex: 1 }}>
-                <label
-                  htmlFor="webcamStreaming"
-                  style={{
-                    display: "block",
-                    fontWeight: 500,
-                    color: "#1e293b",
-                    fontSize: "0.875rem",
-                    cursor: readOnly ? "default" : "pointer",
-                  }}
-                >
-                  Webcam Streaming
-                </label>
-                <p style={{ fontSize: "0.8125rem", color: "#64748b", margin: "0.25rem 0 0 0" }}>
-                  Live webcam feed streamed to proctor dashboard.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* 3️⃣ ALWAYS ENABLED SECURITY (READ-ONLY) */}
+      {/* 2️⃣ ALWAYS ENABLED SECURITY (READ-ONLY) */}
       <div style={{
         padding: "1rem",
         backgroundColor: "#fef3c7",

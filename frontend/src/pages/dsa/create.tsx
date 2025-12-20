@@ -28,6 +28,7 @@ export default function CreateDSACompetencyPage() {
   const [loading, setLoading] = useState(false);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(true);
+  const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(false);
   
   // Timer mode state
   const [timerMode, setTimerMode] = useState<TimerMode>("GLOBAL");
@@ -122,7 +123,10 @@ export default function CreateDSACompetencyPage() {
         start_time: new Date(formData.start_time).toISOString(),
         end_time: new Date(formData.end_time).toISOString(),
         timer_mode: timerMode,
-        proctoringSettings: { aiProctoringEnabled },
+        proctoringSettings: { 
+          aiProctoringEnabled,
+          liveProctoringEnabled
+        },
         // New scheduling payload (mirrors Custom MCQ)
         examMode,
         schedule: {
@@ -306,9 +310,11 @@ export default function CreateDSACompetencyPage() {
               />
             </div>
 
-            {/* Proctoring Settings (single checkbox) */}
+            {/* Proctoring Settings */}
             <div style={{ marginBottom: "1.5rem", padding: "1.25rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
               <h3 style={{ marginBottom: "0.75rem", color: "#1a1625" }}>Proctoring Settings</h3>
+              
+              {/* AI Proctoring Checkbox */}
               <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer" }}>
                 <input
                   type="checkbox"

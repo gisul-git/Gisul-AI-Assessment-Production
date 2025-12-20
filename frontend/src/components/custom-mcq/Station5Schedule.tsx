@@ -33,6 +33,9 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   const [showResultToCandidate, setShowResultToCandidate] = useState(
     (assessmentData as any)?.showResultToCandidate ?? true
   );
+  const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(
+    (assessmentData as any)?.proctoringSettings?.liveProctoringEnabled ?? false
+  );
   const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
   const [sendingEmails, setSendingEmails] = useState(false);
 
@@ -45,10 +48,24 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       duration: duration ? parseInt(duration) : undefined,
       accessTimeBeforeStart: accessTimeBeforeStart ? parseInt(accessTimeBeforeStart) : 15,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
-      proctoringSettings: { aiProctoringEnabled },
+      proctoringSettings: {
+        aiProctoringEnabled,
+        liveProctoringEnabled,
+      } as CustomMCQAssessment["proctoringSettings"],
       showResultToCandidate,
     } as any);
-  }, [accessMode, examMode, startTime, endTime, duration, accessTimeBeforeStart, passPercentage, aiProctoringEnabled, showResultToCandidate]);
+  }, [
+    accessMode,
+    examMode,
+    startTime,
+    endTime,
+    duration,
+    accessTimeBeforeStart,
+    passPercentage,
+    aiProctoringEnabled,
+    liveProctoringEnabled,
+    showResultToCandidate,
+  ]);
 
   const handleSendInvitations = async (template: {
     subject: string;
@@ -319,9 +336,11 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
           </div>
         </div>
 
-        {/* Proctoring Settings (single checkbox) */}
+        {/* Proctoring Settings */}
         <div style={{ padding: "1.5rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
           <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Proctoring Settings</h3>
+          
+          {/* AI Proctoring Checkbox */}
           <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer" }}>
             <input
               type="checkbox"
