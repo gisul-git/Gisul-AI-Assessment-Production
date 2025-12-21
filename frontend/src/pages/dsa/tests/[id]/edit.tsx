@@ -30,7 +30,9 @@ interface DSATest {
   end_time: string | null;
   examMode?: ExamMode;
   schedule?: { startTime?: string; endTime?: string; duration?: number } | null;
-  question_time_limits?: Record<string, number> | null;
+  timer_mode?: TimerMode;
+  question_timings?: Array<{ question_id: string; duration_minutes: number }> | null;
+  question_time_limits?: Record<string, number> | null; // Legacy field
 }
 
 export default function EditDSACompetencyPage() {
@@ -65,6 +67,12 @@ export default function EditDSACompetencyPage() {
     return formData.question_ids.reduce((sum, qid) => sum + (questionTimings[qid] || 0), 0);
   };
 
+  // Get question title by ID
+  const getQuestionTitle = (questionId: string): string => {
+    const question = questions.find(q => q.id === questionId);
+    return question?.title || "Unknown Question";
+  };
+
   const fetchQuestions = async () => {
     try {
       const response = await dsaApi.get("/questions/");
@@ -75,25 +83,96 @@ export default function EditDSACompetencyPage() {
   };
 
   const hydrateFromTest = (test: DSATest) => {
-    const start = test.start_time ? new Date(test.start_time) : null;
-    const end = test.end_time ? new Date(test.end_time) : null;
+    // Helper function to convert ISO datetime string (UTC) to datetime-local format (local timezone)
+    // The backend stores datetimes in UTC, but datetime-local inputs need local time
+    const isoToLocalDatetime = (isoString: string | null | undefined): string => {
+      if (!isoString) return "";
+      try {
+        // Ensure the ISO string is treated as UTC if it doesn't have timezone info
+        let normalizedIso = isoString;
+        // If the string doesn't end with Z or have timezone offset, assume it's UTC and add Z
+        if (!normalizedIso.endsWith('Z') && !normalizedIso.match(/[+-]\d{2}:\d{2}$/)) {
+          // If it's just YYYY-MM-DDTHH:mm or YYYY-MM-DDTHH:mm:ss, add Z to indicate UTC
+          if (normalizedIso.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/)) {
+            normalizedIso = normalizedIso + 'Z';
+          }
+        }
+        
+        // Create Date object from ISO string (JavaScript automatically converts UTC to local)
+        const date = new Date(normalizedIso);
+        if (isNaN(date.getTime())) {
+          console.warn("Invalid date:", isoString, "normalized:", normalizedIso);
+          return "";
+        }
+        
+        // Get local time components (getFullYear, getMonth, etc. return local timezone values)
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        
+        const result = `${year}-${month}-${day}T${hours}:${minutes}`;
+        // Debug: Show both UTC and local time to verify conversion
+        const utcHours = String(date.getUTCHours()).padStart(2, '0');
+        const utcMinutes = String(date.getUTCMinutes()).padStart(2, '0');
+        console.log(`[isoToLocalDatetime] ${isoString} (normalized: ${normalizedIso}) -> UTC: ${utcHours}:${utcMinutes}, Local: ${hours}:${minutes} (timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone})`);
+        return result;
+      } catch (error) {
+        console.error("Error converting datetime:", error, isoString);
+        return "";
+      }
+    };
+
+    // Try to get start_time from schedule.startTime if available, otherwise use start_time
+    const startTimeValue = test.schedule?.startTime || test.start_time;
+    // For end_time, only use it if examMode is flexible
+    const endTimeValue = test.examMode === "flexible" ? (test.schedule?.endTime || test.end_time) : null;
+
+    console.log("[hydrateFromTest] Loading test data:", {
+      start_time: test.start_time,
+      schedule_startTime: test.schedule?.startTime,
+      end_time: test.end_time,
+      schedule_endTime: test.schedule?.endTime,
+      examMode: test.examMode,
+      startTimeValue,
+      endTimeValue,
+      converted_start: isoToLocalDatetime(startTimeValue),
+      converted_end: isoToLocalDatetime(endTimeValue)
+    });
 
     setFormData({
       title: test.title || "",
       description: test.description || "",
       question_ids: test.question_ids || [],
       duration_minutes: test.duration_minutes || 60,
-      start_time: start ? new Date(start.getTime() - start.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : "",
-      end_time: end ? new Date(end.getTime() - end.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : "",
+      start_time: isoToLocalDatetime(startTimeValue),
+      end_time: isoToLocalDatetime(endTimeValue),
     });
 
     const mode = (test.examMode as ExamMode) || "strict";
     setExamMode(mode);
 
-    const limits = test.question_time_limits || null;
-    if (limits && Object.keys(limits).length > 0) {
-      setTimerMode("PER_QUESTION");
-      setQuestionTimings(limits);
+    // Use question_timings (new format) or fallback to question_time_limits (legacy)
+    const timings = test.question_timings || test.question_time_limits || null;
+    if (timings) {
+      // Handle array format (question_timings) or object format (question_time_limits)
+      if (Array.isArray(timings) && timings.length > 0) {
+        setTimerMode("PER_QUESTION");
+        const limits: Record<string, number> = {};
+        timings.forEach((t: any) => {
+          if (t.question_id && t.duration_minutes) {
+            limits[t.question_id] = t.duration_minutes;
+          }
+        });
+        setQuestionTimings(Object.keys(limits).length > 0 ? limits : {});
+      } else if (typeof timings === 'object' && !Array.isArray(timings) && Object.keys(timings).length > 0) {
+        setTimerMode("PER_QUESTION");
+        setQuestionTimings(timings as Record<string, number>);
+      } else {
+        setTimerMode("GLOBAL");
+        setQuestionTimings({});
+      }
     } else {
       setTimerMode("GLOBAL");
       setQuestionTimings({});
@@ -127,15 +206,22 @@ export default function EditDSACompetencyPage() {
     e.preventDefault();
     if (!testId) return;
 
-    if (!formData.start_time || !formData.end_time) {
-      alert("Start time and end time are required.");
+    // Exam window validation (matching create page)
+    if (!formData.start_time) {
+      alert("Start time is required.");
       return;
     }
-    if (new Date(formData.start_time) >= new Date(formData.end_time)) {
-      alert("End time must be after start time.");
-      return;
+    // For Flexible Window, end_time is required
+    if (examMode === "flexible") {
+      if (!formData.end_time) {
+        alert("End time is required for flexible exam mode.");
+        return;
+      }
+      if (new Date(formData.start_time) >= new Date(formData.end_time)) {
+        alert("End time must be after start time.");
+        return;
+      }
     }
-
     if (examMode === "flexible") {
       const durationForSchedule =
         timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes;
@@ -145,6 +231,7 @@ export default function EditDSACompetencyPage() {
       }
     }
 
+    // Validation for per-question mode
     if (timerMode === "PER_QUESTION") {
       for (const qid of formData.question_ids) {
         const timing = questionTimings[qid];
@@ -157,35 +244,62 @@ export default function EditDSACompetencyPage() {
 
     setLoading(true);
     try {
+      // Build payload based on timer mode (matching create page)
       const payload: any = {
         ...formData,
+        start_time: new Date(formData.start_time).toISOString(),
+        timer_mode: timerMode,
+        // New scheduling payload
         examMode,
         schedule: {
-          startTime: formData.start_time ? new Date(formData.start_time).toISOString() : undefined,
-          endTime: formData.end_time ? new Date(formData.end_time).toISOString() : undefined,
+          startTime: new Date(formData.start_time).toISOString(),
+          // Only include endTime for flexible mode, omit it for strict mode
+          ...(examMode === "flexible" && formData.end_time && formData.end_time.trim() !== "" 
+            ? { endTime: new Date(formData.end_time).toISOString() }
+            : {}),
           duration:
             examMode === "flexible"
-              ? timerMode === "PER_QUESTION"
-                ? calculateTotalDuration()
-                : formData.duration_minutes
-              : undefined,
+              ? (timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes)
+              : null,
         },
+        // Also include top-level fields (requested shape)
+        startTime: new Date(formData.start_time).toISOString(),
+        // Only include endTime for flexible mode, omit it for strict mode
+        ...(examMode === "flexible" && formData.end_time && formData.end_time.trim() !== ""
+          ? { endTime: new Date(formData.end_time).toISOString() }
+          : {}),
+        duration:
+          examMode === "flexible"
+            ? (timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes)
+            : null,
       };
+      
+      // Only include end_time in payload for flexible mode (and remove it if it's empty)
+      if (examMode === "flexible" && formData.end_time && formData.end_time.trim() !== "") {
+        payload.end_time = new Date(formData.end_time).toISOString();
+      } else {
+        // Explicitly remove end_time for strict mode to avoid sending empty string
+        delete payload.end_time;
+      }
 
       if (timerMode === "PER_QUESTION") {
-        payload.timer_mode = "PER_QUESTION";
-        payload.question_timings = formData.question_ids.map((qid) => ({
+        // Convert questionTimings record to array format expected by backend
+        payload.question_timings = formData.question_ids.map(qid => ({
           question_id: qid,
-          duration_minutes: questionTimings[qid],
-        })) as QuestionTiming[];
+          duration_minutes: questionTimings[qid] || 10,
+        }));
+        // Set total duration as sum of all question timings
+        payload.duration_minutes = calculateTotalDuration();
       } else {
-        payload.timer_mode = "GLOBAL";
         payload.question_timings = null;
       }
 
       await dsaApi.put(`/tests/${testId}`, payload);
       alert("Test updated successfully!");
-      router.push(`/dsa/tests?testId=${encodeURIComponent(String(testId))}&refreshed=true`);
+      // Add a small delay to ensure backend has saved the changes
+      setTimeout(() => {
+        router.push(`/dsa/tests?testId=${encodeURIComponent(String(testId))}&refreshed=true`);
+      }, 200);
     } catch (error: any) {
       console.error("Update error:", error);
       alert(error.response?.data?.detail || "Failed to update test");
@@ -251,89 +365,253 @@ export default function EditDSACompetencyPage() {
             />
           </div>
 
-          <div className="space-y-2">
-            <label className="block font-medium">Exam Window Configuration</label>
-            <div className="flex gap-4">
-              <label className="flex items-center gap-2">
+          {/* Exam Window Configuration - matching create page */}
+          <div style={{ marginBottom: "1.5rem" }}>
+            <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+              Exam Window Configuration *
+            </label>
+            <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem" }}>
+              <label
+                style={{
+                  flex: 1,
+                  padding: "1rem",
+                  border: examMode === "strict" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                  borderRadius: "0.5rem",
+                  cursor: "pointer",
+                  backgroundColor: examMode === "strict" ? "#E8FAF0" : "#ffffff",
+                }}
+              >
                 <input
                   type="radio"
+                  name="examMode"
+                  value="strict"
                   checked={examMode === "strict"}
-                  onChange={() => setExamMode("strict")}
+                  onChange={(e) => setExamMode(e.target.value as ExamMode)}
+                  style={{ marginRight: "0.5rem" }}
                 />
-                Strict Window
+                <strong style={{ color: "#1E5A3B" }}>Fixed Window (Strict)</strong>
               </label>
-              <label className="flex items-center gap-2">
+              <label
+                style={{
+                  flex: 1,
+                  padding: "1rem",
+                  border: examMode === "flexible" ? "2px solid #2D7A52" : "1px solid #A8E8BC",
+                  borderRadius: "0.5rem",
+                  cursor: "pointer",
+                  backgroundColor: examMode === "flexible" ? "#E8FAF0" : "#ffffff",
+                }}
+              >
                 <input
                   type="radio"
+                  name="examMode"
+                  value="flexible"
                   checked={examMode === "flexible"}
-                  onChange={() => setExamMode("flexible")}
+                  onChange={(e) => setExamMode(e.target.value as ExamMode)}
+                  style={{ marginRight: "0.5rem" }}
                 />
-                Flexible Window
+                <strong style={{ color: "#1E5A3B" }}>Flexible Window</strong>
               </label>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Strict: candidates must submit within start/end. Flexible: candidates can start any time in window and get a fixed duration.
-            </p>
-          </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label className="block font-medium">Start Time</label>
-              <input
-                type="datetime-local"
-                className="input"
-                value={formData.start_time}
-                onChange={(e) => setFormData({ ...formData, start_time: e.target.value })}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="block font-medium">End Time</label>
-              <input
-                type="datetime-local"
-                className="input"
-                value={formData.end_time}
-                onChange={(e) => setFormData({ ...formData, end_time: e.target.value })}
-                required
-              />
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <label className="block font-medium">Timer Configuration</label>
-            <div className="flex gap-4">
-              <label className="flex items-center gap-2">
+            <div style={{ display: "grid", gridTemplateColumns: examMode === "strict" ? "1fr" : "1fr 1fr", gap: "1rem" }}>
+              <div>
+                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+                  Start Time *
+                </label>
                 <input
-                  type="radio"
-                  checked={timerMode === "GLOBAL"}
-                  onChange={() => setTimerMode("GLOBAL")}
+                  type="datetime-local"
+                  required
+                  value={formData.start_time}
+                  onChange={(e) => setFormData({ ...formData, start_time: e.target.value })}
+                  style={{
+                    width: "100%",
+                    padding: "0.75rem",
+                    border: "1px solid #A8E8BC",
+                    borderRadius: "0.375rem",
+                  }}
                 />
-                Global Timer
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  checked={timerMode === "PER_QUESTION"}
-                  onChange={() => setTimerMode("PER_QUESTION")}
-                />
-                Per-Question Timer
-              </label>
+                {examMode === "strict" && (
+                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                    Test will automatically end after the configured test duration. Candidates can enter 15 minutes before start time for pre-checks.
+                  </p>
+                )}
+              </div>
+              {examMode === "flexible" && (
+                <div>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+                    End Time *
+                  </label>
+                  <input
+                    type="datetime-local"
+                    required
+                    value={formData.end_time}
+                    onChange={(e) => setFormData({ ...formData, end_time: e.target.value })}
+                    style={{
+                      width: "100%",
+                      padding: "0.75rem",
+                      border: "1px solid #A8E8BC",
+                      borderRadius: "0.375rem",
+                    }}
+                  />
+                </div>
+              )}
             </div>
           </div>
 
-          {timerMode === "GLOBAL" && (
-            <div className="space-y-2">
-              <label className="block font-medium">Duration (minutes)</label>
-              <input
-                type="number"
-                className="input"
-                value={formData.duration_minutes}
-                onChange={(e) => setFormData({ ...formData, duration_minutes: Number(e.target.value) })}
-                min={1}
-                required
-              />
-            </div>
-          )}
+          {/* Timer Configuration - Show mode selector only when 2+ questions selected */}
+          <div style={{ marginBottom: "1.5rem" }}>
+            <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+              Timer Configuration *
+            </label>
+            
+            {formData.question_ids.length >= 2 && (
+              <div style={{ 
+                marginBottom: "1rem", 
+                padding: "1rem", 
+                backgroundColor: "#F0FDF4", 
+                borderRadius: "0.375rem",
+                border: "1px solid #A8E8BC"
+              }}>
+                <div style={{ display: "flex", gap: "2rem" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                    <input
+                      type="radio"
+                      name="timerMode"
+                      value="GLOBAL"
+                      checked={timerMode === "GLOBAL"}
+                      onChange={() => setTimerMode("GLOBAL")}
+                      style={{ accentColor: "#2D7A52" }}
+                    />
+                    <span>Single timer for entire test</span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                    <input
+                      type="radio"
+                      name="timerMode"
+                      value="PER_QUESTION"
+                      checked={timerMode === "PER_QUESTION"}
+                      onChange={() => setTimerMode("PER_QUESTION")}
+                      style={{ accentColor: "#2D7A52" }}
+                    />
+                    <span>Individual timer per question</span>
+                  </label>
+                </div>
+              </div>
+            )}
+
+            {/* Global Duration Input - shown when GLOBAL mode or single question */}
+            {/* This field is used for both Fixed and Flexible windows */}
+            {(timerMode === "GLOBAL" || formData.question_ids.length < 2) && (
+              <div>
+                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 500, fontSize: "0.875rem", color: "#374151" }}>
+                  Duration (minutes){examMode === "flexible" ? " *" : ""}
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="1"
+                  value={formData.duration_minutes}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    if (value === '') {
+                      setFormData({ ...formData, duration_minutes: 0 });
+                      return;
+                    }
+                    const numValue = parseInt(value, 10);
+                    if (!isNaN(numValue) && numValue >= 0) {
+                      setFormData({ ...formData, duration_minutes: numValue });
+                    }
+                  }}
+                  onBlur={() => {
+                    if (formData.duration_minutes < 1) {
+                      setFormData({ ...formData, duration_minutes: 1 });
+                    }
+                  }}
+                  style={{
+                    width: "200px",
+                    padding: "0.75rem",
+                    border: "1px solid #A8E8BC",
+                    borderRadius: "0.375rem",
+                  }}
+                />
+              </div>
+            )}
+
+            {/* Per-Question Duration Inputs - shown when PER_QUESTION mode and 2+ questions */}
+            {timerMode === "PER_QUESTION" && formData.question_ids.length >= 2 && (
+              <div>
+                <p style={{ fontSize: "0.875rem", color: "#6B7280", marginBottom: "0.75rem" }}>
+                  Set duration for each question individually:
+                </p>
+                <div style={{ 
+                  border: "1px solid #A8E8BC", 
+                  borderRadius: "0.375rem", 
+                  padding: "1rem",
+                  maxHeight: "300px",
+                  overflowY: "auto"
+                }}>
+                  {formData.question_ids.map((qid, index) => {
+                    const question = questions.find(q => q.id === qid);
+                    return (
+                      <div 
+                        key={qid} 
+                        style={{ 
+                          display: "flex", 
+                          alignItems: "center", 
+                          justifyContent: "space-between",
+                          padding: "0.75rem",
+                          marginBottom: index < formData.question_ids.length - 1 ? "0.5rem" : 0,
+                          backgroundColor: "#ffffff",
+                          borderRadius: "0.375rem",
+                          border: "1px solid #E8FAF0"
+                        }}
+                      >
+                        <div style={{ flex: 1 }}>
+                          <span style={{ fontWeight: 500, color: "#1a1625" }}>
+                            {index + 1}. {question?.title || "Unknown Question"}
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                          <input
+                            type="number"
+                            min="1"
+                            value={questionTimings[qid] || 10}
+                            onChange={(e) => {
+                              const value = parseInt(e.target.value, 10);
+                              if (!isNaN(value)) {
+                                setQuestionTimings({
+                                  ...questionTimings,
+                                  [qid]: Math.max(1, value), // Minimum 1 minute
+                                });
+                              }
+                            }}
+                            style={{
+                              width: "80px",
+                              padding: "0.5rem",
+                              border: "1px solid #A8E8BC",
+                              borderRadius: "0.375rem",
+                              textAlign: "center",
+                            }}
+                          />
+                          <span style={{ fontSize: "0.875rem", color: "#6B7280" }}>min</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ 
+                  marginTop: "0.75rem", 
+                  padding: "0.75rem", 
+                  backgroundColor: "#E8FAF0", 
+                  borderRadius: "0.375rem",
+                  fontSize: "0.875rem",
+                  color: "#1E5A3B"
+                }}>
+                  <strong>Total Duration: {calculateTotalDuration()} minutes</strong>
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="space-y-2">
             <label className="block font-medium">Questions</label>
@@ -361,31 +639,6 @@ export default function EditDSACompetencyPage() {
               })}
             </div>
           </div>
-
-          {timerMode === "PER_QUESTION" && selectedQuestions.length > 0 && (
-            <div className="space-y-3">
-              <h3 className="font-semibold">Per-Question Timings (minutes)</h3>
-              {selectedQuestions.map((q) => (
-                <div key={q.id} className="flex items-center justify-between border rounded p-3">
-                  <div className="font-medium">{q.title}</div>
-                  <input
-                    type="number"
-                    className="input"
-                    style={{ width: 120 }}
-                    min={1}
-                    value={questionTimings[q.id] || ""}
-                    onChange={(e) =>
-                      setQuestionTimings({ ...questionTimings, [q.id]: Number(e.target.value) })
-                    }
-                    required
-                  />
-                </div>
-              ))}
-              <div className="text-sm text-muted-foreground">
-                Total duration: <span className="font-medium">{calculateTotalDuration()}</span> minutes
-              </div>
-            </div>
-          )}
 
           <div className="flex gap-3">
             <button type="submit" className="btn-primary" disabled={loading}>

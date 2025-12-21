@@ -1,20 +1,15 @@
 """
-AI Question Generator - LANGUAGE AGNOSTIC
+AI Question Generator - CLEAN, DETERMINISTIC, CORRECT
 
-Generates coding questions using OpenAI.
-Creates LeetCode-style questions with 3 parts:
-1. Description - Problem statement
-2. Examples - Input/Output examples with explanations
-3. Constraints - Input limits and requirements
-
-The admin specifies which languages to generate starter code for.
+Generates complete DSA coding questions with strict consistency guarantees.
+No mismatches. No placeholders. No guessing.
 """
 
 import os
 import json
 import logging
 from dotenv import load_dotenv
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional, List, Union
 
 from openai import OpenAI
 
@@ -23,546 +18,611 @@ load_dotenv()
 logger = logging.getLogger("backend")
 
 
-def _generate_default_starter_code(
-    lang: str, 
-    func_name: str, 
-    params: List[Dict[str, str]], 
-    return_type: str
-) -> str:
+def _convert_json_array_to_stdin(input_str: str) -> str:
     """
-    Generate default starter code for a language if AI didn't provide it.
-    
-    Args:
-        lang: Programming language
-        func_name: Function name from signature
-        params: List of parameter dicts with 'name' and 'type'
-        return_type: Return type string
-    
-    Returns:
-        Default starter code string
+    Convert JSON array format to raw stdin format.
+    Examples:
+    - "[1,2,3]" -> "1 2 3\n"
+    - "[1, 2, 3]" -> "1 2 3\n"
+    - "[[1,2],[3,4]]" -> "1 2\n3 4\n" (matrix format)
+    - "[1,2,3]\n" -> "1 2 3\n" (already has newline, just convert array)
     """
-    param_names = [p.get("name", f"param{i}") for i, p in enumerate(params)]
+    if not input_str:
+        return input_str
     
-    templates = {
-        "python": f'''def {func_name}({", ".join(param_names)}):
-    # Write your solution here
-    pass
-
-# Read input and call function
-if __name__ == "__main__":
-    # TODO: Parse stdin and call {func_name}
-    pass
-''',
-        "javascript": f'''function {func_name}({", ".join(param_names)}) {{
-    // Write your solution here
-}}
-
-// Read input from stdin
-const readline = require('readline');
-const rl = readline.createInterface({{ input: process.stdin }});
-const lines = [];
-rl.on('line', (line) => lines.push(line));
-rl.on('close', () => {{
-    // TODO: Parse input and call {func_name}
-}});
-''',
-        "typescript": f'''function {func_name}({", ".join(param_names)}): {return_type} {{
-    // Write your solution here
-}}
-
-// Read input from stdin
-const readline = require('readline');
-const rl = readline.createInterface({{ input: process.stdin }});
-const lines: string[] = [];
-rl.on('line', (line: string) => lines.push(line));
-rl.on('close', () => {{
-    // TODO: Parse input and call {func_name}
-}});
-''',
-        "cpp": f'''#include <iostream>
-#include <vector>
-#include <string>
-using namespace std;
-
-// Write your solution here
-{"void" if return_type == "void" else return_type} {func_name}({", ".join(param_names)}) {{
-    // TODO: Implement solution
-}}
-
-int main() {{
-    // TODO: Read input and call {func_name}
-    return 0;
-}}
-''',
-        "java": f'''import java.util.*;
-
-public class Solution {{
-    public static {"void" if return_type == "void" else return_type} {func_name}({", ".join(param_names)}) {{
-        // Write your solution here
-    }}
+    # Strip whitespace but preserve newlines at the end
+    stripped = input_str.strip()
+    has_trailing_newline = input_str.endswith('\n')
     
-    public static void main(String[] args) {{
-        Scanner scanner = new Scanner(System.in);
-        // TODO: Read input and call {func_name}
-    }}
-}}
-''',
-        "c": f'''#include <stdio.h>
-#include <stdlib.h>
-
-// Write your solution here
-{"void" if return_type == "void" else "int"} {func_name}({", ".join(param_names) if param_names else "void"}) {{
-    // TODO: Implement solution
-}}
-
-int main() {{
-    // TODO: Read input and call {func_name}
-    return 0;
-}}
-''',
-        "go": f'''package main
-
-import "fmt"
-
-func {func_name}({", ".join(param_names)}) {{
-    // Write your solution here
-}}
-
-func main() {{
-    // TODO: Read input and call {func_name}
-    fmt.Println()
-}}
-''',
-        "rust": f'''use std::io::{{self, BufRead}};
-
-fn {func_name}({", ".join(param_names)}) {{
-    // Write your solution here
-}}
-
-fn main() {{
-    let stdin = io::stdin();
-    // TODO: Read input and call {func_name}
-}}
-''',
-        "kotlin": f'''fun {func_name}({", ".join(param_names)}) {{
-    // Write your solution here
-}}
-
-fun main() {{
-    // TODO: Read input and call {func_name}
-}}
-''',
-        "csharp": f'''using System;
-
-class Solution {{
-    static {"void" if return_type == "void" else return_type} {func_name}({", ".join(param_names)}) {{
-        // Write your solution here
-    }}
+    # Check if it's a JSON array
+    if stripped.startswith('[') and stripped.endswith(']'):
+        try:
+            # Parse JSON array
+            parsed = json.loads(stripped)
+            
+            if isinstance(parsed, list):
+                # Handle nested arrays (matrices)
+                if parsed and isinstance(parsed[0], list):
+                    # Matrix format: convert to multi-line
+                    lines = []
+                    for row in parsed:
+                        if isinstance(row, list):
+                            lines.append(' '.join(str(x) for x in row))
+                        else:
+                            lines.append(str(row))
+                    result = '\n'.join(lines)
+                    return result + '\n' if has_trailing_newline or not result.endswith('\n') else result
+                else:
+                    # Simple array: convert to space-separated
+                    result = ' '.join(str(x) for x in parsed)
+                    return result + '\n' if has_trailing_newline or not result.endswith('\n') else result
+        except (json.JSONDecodeError, ValueError):
+            # Not valid JSON, return as-is
+            pass
     
-    static void Main() {{
-        // TODO: Read input and call {func_name}
-    }}
-}}
-'''
+    # Not a JSON array, return as-is (but ensure it ends with newline if original did)
+    if has_trailing_newline and not input_str.endswith('\n'):
+        return input_str + '\n'
+    return input_str
+
+
+def _normalize_testcase_inputs(question_data: Dict[str, Any]) -> None:
+    """
+    Normalize all testcase inputs to ensure they're in raw stdin format.
+    Converts JSON arrays to space-separated or multi-line format.
+    """
+    for tc_type in ["public_testcases", "hidden_testcases"]:
+        testcases = question_data.get(tc_type, [])
+        if isinstance(testcases, list):
+            for tc in testcases:
+                if isinstance(tc, dict) and "input" in tc:
+                    original_input = tc["input"]
+                    normalized_input = _convert_json_array_to_stdin(str(original_input))
+                    if normalized_input != original_input:
+                        logger.warning(f"Converted JSON array to stdin format in {tc_type}: {original_input[:50]}... -> {normalized_input[:50]}...")
+                        tc["input"] = normalized_input
+
+
+def _validate_question_consistency(question_data: Dict[str, Any]) -> Optional[str]:
+    """
+    Validate that all parts of the question describe the same problem.
+    Returns error message if inconsistencies found, None otherwise.
+    """
+    title = question_data.get("title", "").lower()
+    description = question_data.get("problem_description", "").lower()
+    example_input = str(question_data.get("example", {}).get("input", "")).lower()
+    example_output = str(question_data.get("example", {}).get("output", "")).lower()
+    example_explanation = str(question_data.get("example", {}).get("explanation", "")).lower()
+    
+    # Collect all testcase inputs and outputs
+    all_testcase_inputs = []
+    all_testcase_outputs = []
+    for tc_type in ["public_testcases", "hidden_testcases"]:
+        for tc in question_data.get(tc_type, []):
+            all_testcase_inputs.append(str(tc.get("input", "")).lower())
+            all_testcase_outputs.append(str(tc.get("expected_output", "")).lower())
+    
+    # Combine all testcase text
+    testcase_text = " ".join(all_testcase_inputs + all_testcase_outputs)
+    
+    issues = []
+    
+    # Problem type keywords
+    problem_types = {
+        "matrix": ["matrix", "spiral", "grid", "transpose", "rotate"],
+        "prime": ["prime", "factor", "divisible", "composite"],
+        "array": ["array", "list", "sequence"],
+        "tree": ["tree", "binary", "node", "leaf"],
+        "graph": ["graph", "node", "edge", "vertex"],
+        "string": ["string", "substring", "character"],
+        "sort": ["sort", "sorted", "order"],
+        "search": ["search", "find", "locate"],
     }
     
-    return templates.get(lang, f"// TODO: Write your {func_name} solution for {lang}")
+    # Detect problem type from title
+    title_type = None
+    for prob_type, keywords in problem_types.items():
+        if any(kw in title for kw in keywords):
+            title_type = prob_type
+            break
+    
+    # Detect problem type from testcases (what they actually test)
+    testcase_type = None
+    for prob_type, keywords in problem_types.items():
+        if any(kw in testcase_text for kw in keywords):
+            testcase_type = prob_type
+            break
+    
+    # Detect problem type from description
+    description_type = None
+    for prob_type, keywords in problem_types.items():
+        if any(kw in description for kw in keywords):
+            description_type = prob_type
+            break
+    
+    # Detect problem type from example
+    example_text = f"{example_input} {example_output} {example_explanation}"
+    example_type = None
+    for prob_type, keywords in problem_types.items():
+        if any(kw in example_text for kw in keywords):
+            example_type = prob_type
+            break
+                    
+    # Check 1: Title and testcases should match (they're usually correct)
+    if title_type and testcase_type and title_type != testcase_type:
+        issues.append(f"Title suggests '{title_type}' problem but testcases show '{testcase_type}' problem")
+    
+    # Check 2: Description must match title/testcases
+    if title_type and description_type and title_type != description_type:
+        issues.append(f"Title suggests '{title_type}' problem but description describes '{description_type}' problem")
+    
+    if testcase_type and description_type and testcase_type != description_type:
+        issues.append(f"Testcases show '{testcase_type}' problem but description describes '{description_type}' problem")
+    
+    # Check 3: Example must match title/testcases
+    if title_type and example_type and title_type != example_type:
+        issues.append(f"Title suggests '{title_type}' problem but example shows '{example_type}' problem")
+    
+    if testcase_type and example_type and testcase_type != example_type:
+        issues.append(f"Testcases show '{testcase_type}' problem but example shows '{example_type}' problem")
+    
+    # Check 4: Specific common mismatches
+    # Matrix vs Prime (very common mismatch)
+    if ("matrix" in title or "transpose" in title or "spiral" in title) and "prime" in description:
+        issues.append("Title mentions matrix/transpose/spiral but description mentions prime numbers")
+    
+    if ("matrix" in testcase_text or "transpose" in testcase_text) and "prime" in description:
+        issues.append("Testcases show matrix/transpose problem but description mentions prime numbers")
+    
+    if ("matrix" in title or "transpose" in title) and "prime" in example_text:
+        issues.append("Title mentions matrix/transpose but example shows prime number problem")
+    
+    if ("matrix" in testcase_text or "transpose" in testcase_text) and "prime" in example_text:
+        issues.append("Testcases show matrix/transpose problem but example shows prime number problem")
+    
+    # Check 5: Example input/output pattern should match testcase patterns
+    # If testcases have matrix-like inputs (multiple lines with space-separated numbers)
+    # but example has single integer input, that's a mismatch
+    if testcase_text:
+        # Check if testcases suggest matrix input (multiple lines)
+        testcase_lines = [tc for tc in all_testcase_inputs if tc.count('\n') > 0]
+        example_has_multiple_lines = example_input.count('\n') > 0
+        
+        if len(testcase_lines) >= 2 and not example_has_multiple_lines:
+            # Testcases use multi-line input but example uses single-line
+            if "matrix" in title or "matrix" in testcase_text:
+                issues.append("Testcases use multi-line matrix input but example uses single-line input")
+    
+    # Check 6: Description should mention what testcases actually test
+    # If testcases show matrix operations but description talks about something else
+    if testcase_type and description_type and testcase_type != description_type:
+        # Already caught above, but be more specific
+        if testcase_type == "matrix" and description_type == "prime":
+            issues.append("CRITICAL: Testcases test matrix operations but description explains prime number checking")
+    
+    if issues:
+        return "; ".join(issues)
+    return None
 
 
 async def generate_question(
     difficulty: str = "medium", 
     topic: Optional[str] = None,
-    concepts: Optional[str] = None,
-    languages: Optional[List[str]] = None,
+    concepts: Optional[Union[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     """
-    Generate a complete coding question using OpenAI.
-    
-    Creates LeetCode-style question with:
-    - description: Problem statement
-    - examples: Input/Output examples with explanations
-    - constraints: Input limits
+    Generate a complete, correct, and internally consistent DSA coding question.
     
     Args:
-        difficulty: easy, medium, or hard
-        topic: Main topic (e.g., "arrays", "dynamic programming")
-        concepts: Specific concepts to cover (e.g., "two pointers, sliding window")
-        languages: List of languages to generate starter code for (optional)
+        difficulty: "easy", "medium", or "hard"
+        topic: Main topic (e.g., "Arrays", "Trees", "Graphs")
+        concepts: String or list of concepts (e.g., "Two Pointers" or ["Two Pointers", "BFS"])
     
     Returns:
-        Complete question JSON with all fields populated
+        Complete question JSON with all fields populated and validated
+    
+    Raises:
+        ValueError: If generation fails or question is inconsistent
     """
-    # Default to all supported DSA languages if none specified
-    if not languages:
-        languages = ["python", "javascript", "typescript", "cpp", "java", "c", "go", "rust", "kotlin", "csharp"]
+    # Validate difficulty
+    if difficulty not in ["easy", "medium", "hard"]:
+        raise ValueError(f"Invalid difficulty: {difficulty}. Must be 'easy', 'medium', or 'hard'")
     
-    languages_str = json.dumps(languages)
-    
-    # Build topic/concept prompt
-    topic_prompt = ""
-    if topic:
-        topic_prompt += f"Topic: {topic}. "
+    # Convert concepts to string
+    concepts_str = ""
     if concepts:
-        topic_prompt += f"Concepts to cover: {concepts}. "
+        if isinstance(concepts, list):
+            concepts_str = ", ".join(concepts)
+        else:
+            concepts_str = str(concepts)
     
-    prompt = f"""You are an expert coding problem generator. Generate a LeetCode-style coding question in JSON format.
+    # Build system prompt
+    system_prompt = """You are a JSON-only coding question generator.
 
-{topic_prompt}Difficulty: {difficulty}
-Languages to support: {languages_str}
+CORE PRINCIPLES:
+- Simplicity over complexity
+- Determinism over creativity
+- Correctness over cleverness
+- NO hardcoding tricks
+- NO dynamic generation inside JSON
 
-=== STEP 1: DESIGN THE PROBLEM ===
-First, design the problem with:
-- A clear title and description
-- Function signature with parameters and return type
-- Constraints that define input limits
+🚨 CRITICAL: ZERO MISMATCHES ALLOWED 🚨
+The title, description, example, and ALL testcases MUST describe the EXACT SAME problem.
+If you generate testcases for one problem but description for another, that is a CRITICAL ERROR.
+You MUST generate correctly from the start - validation is a safety net, not a fix.
 
-=== STEP 2: DETERMINE STDIN FORMAT (CRITICAL) ===
-Based on your function_signature parameters, decide ONE concrete stdin input format.
-This format MUST be used consistently across ALL testcases (public + hidden).
+GENERATION RULE:
+Generate testcases FIRST, then write title/description/example to match those testcases.
+Do NOT write description first and then testcases - this causes mismatches.
 
-Format rules based on parameter types:
-- int → single integer on one line
-- int, int → two integers space-separated OR on separate lines
-- int[] → first line: array size N, second line: N space-separated integers
-- int[], int → first line: array size N, second line: N space-separated integers, third line: the single int
-- int[], int[] → size1, arr1 elements, size2, arr2 elements (each on separate lines)
-- string → single line string
-- string[] → first line: count N, next N lines: one string each
-- int[][] (matrix) → first line: rows cols, next rows lines: space-separated integers
+STRICT OUTPUT RULES:
+- Output MUST be valid JSON only
+- No markdown, no explanations outside JSON
+- Response MUST start with '{' and end with '}'
+- All values must be literal strings
+- NO code execution or expressions inside JSON
+- NO placeholders like "e.g." or dummy values
 
-=== STEP 3: GENERATE JSON ===
-Generate a JSON object with this structure:
+FAIL-SAFE:
+If you cannot guarantee correctness or consistency, return:
+{"error":"CANNOT_GENERATE_CLEAN_QUESTION"}"""
+    
+    # Build user prompt - STRICT GENERATION ORDER TO PREVENT MISMATCHES
+    user_prompt = f"""Generate a complete DSA coding question.
+
+INPUTS:
+Topic: {topic or "General"}
+Concepts: {concepts_str or "General"}
+Difficulty: {difficulty}
+
+🚨 MANDATORY GENERATION ORDER (FOLLOW EXACTLY) 🚨
+You MUST generate in this order to prevent mismatches:
+
+STEP 1: DECIDE THE PROBLEM
+- Choose ONE specific problem type (e.g., matrix transpose, prime checking, array rotation)
+- Write down what problem you chose: "I am generating a [PROBLEM TYPE] problem"
+
+STEP 2: GENERATE TESTCASES FIRST
+- Generate public_testcases (3 testcases) for the chosen problem
+- Generate hidden_testcases (3 testcases) for the chosen problem
+- These testcases DEFINE what problem you're solving
+- Look at your testcases: What problem do they actually test? Write it down.
+
+STEP 3: GENERATE TITLE
+- Title MUST match what the testcases test
+- If testcases show matrix operations → title must mention "matrix"
+- If testcases show prime checking → title must mention "prime"
+- Verify: Does title match testcases? If NO, fix it.
+
+STEP 4: GENERATE DESCRIPTION
+- Description MUST explain EXACTLY what the testcases test
+- Read your testcases again - what operation are they testing?
+- Write description that explains THAT operation, NOT a different one
+- Verify: Does description explain what testcases test? If NO, rewrite it.
+
+STEP 5: GENERATE EXAMPLE
+- Example MUST demonstrate the SAME problem as testcases
+- Look at testcase input format - does it use multi-line? single integer? array?
+- Example input MUST use the SAME format as testcases
+- Example output MUST follow the SAME logic as testcases
+- Verify: Does example show same problem as testcases? If NO, fix it.
+
+STEP 6: FINAL CHECK
+Before returning JSON, verify:
+1. All testcases test the SAME problem type
+2. Title mentions that problem type
+3. Description explains that problem type
+4. Example demonstrates that problem type
+5. Input formats match (if testcases use multi-line, example uses multi-line)
+6. Output formats match (if testcases output matrices, example outputs matrix)
+
+If ANY check fails, DO NOT return the JSON. Fix it first or return {{"error":"CANNOT_GENERATE_CLEAN_QUESTION"}}
+
+REQUIRED OUTPUT (JSON ONLY):
 {{
-    "title": "Problem Title",
-    
-    "description": "Clear problem statement. NO examples, NO constraints here.",
-    
-    "examples": [
-        {{
-            "input": "nums = [2,7,11,15], target = 9",
-            "output": "[0,1]",
-            "explanation": "Explanation of why this is the answer."
-        }}
-    ],
-    
-    "constraints": [
-        "1 <= nums.length <= 10^4",
-        "-10^9 <= nums[i] <= 10^9"
-    ],
-    
-    "difficulty": "{difficulty}",
-    "languages": {languages_str},
-    
-    "function_signature": {{
-        "name": "functionName",
-        "parameters": [
-            {{"name": "nums", "type": "int[]"}},
-            {{"name": "target", "type": "int"}}
-        ],
-        "return_type": "int[]"
-    }},
-    
-    "stdin_format": "Line 1: N (array size)\\nLine 2: N space-separated integers (nums)\\nLine 3: target integer",
-    
+  "title": string,
+  "difficulty": "easy" | "medium" | "hard",
+  "problem_description": string,
+  "example": {{
+    "input": string,
+    "output": string,
+    "explanation": string
+  }},
     "public_testcases": [
-        {{"input": "<dynamically generated based on stdin_format>"}},
-        {{"input": "<dynamically generated based on stdin_format>"}},
-        {{"input": "<dynamically generated based on stdin_format>"}}
-    ],
-    
+    {{"input": string, "expected_output": string}},
+    {{"input": string, "expected_output": string}},
+    {{"input": string, "expected_output": string}}
+  ],
     "hidden_testcases": [
-        {{"input": "<edge case: minimum input>"}},
-        {{"input": "<edge case: maximum boundary>"}},
-        {{"input": "<edge case: special values>"}}
-    ],
-    
-    "starter_code": {{
-        "<language>": "complete starter code with stdin parsing"
-    }},
-
-    "reference_solution": "A COMPLETE, CORRECT Python 3 program that reads stdin in the declared stdin_format and prints the correct output. This MUST solve the problem. It MUST NOT be a placeholder."
+    {{"input": string, "expected_output": string}},
+    {{"input": string, "expected_output": string}},
+    {{"input": string, "expected_output": string}}
+  ],
+  "constraints": [string, string, ...],
+  "starter_code": {{
+    "python": "def functionName(parameters):\\n    pass",
+    "javascript": "function functionName(parameters) {{\\n    \\n}}",
+    "typescript": "function functionName(parameters): returnType {{\\n    \\n}}",
+    "cpp": "returnType functionName(parameters) {{\\n    \\n}}",
+    "java": "public returnType functionName(parameters) {{\\n    \\n}}",
+    "c": "returnType functionName(parameters) {{\\n    \\n}}",
+    "go": "func functionName(parameters) returnType {{\\n    \\n}}",
+    "rust": "fn functionName(parameters) -> returnType {{\\n    \\n}}",
+    "csharp": "public returnType FunctionName(parameters) {{\\n    \\n}}",
+    "kotlin": "fun functionName(parameters): returnType {{\\n    \\n}}"
+  }}
 }}
 
-=== CRITICAL REQUIREMENTS (NON-NEGOTIABLE) ===
+IMPORTANT: The starter_code examples above show the SIMPLE format you must use.
+- Use appropriate function name based on the problem (e.g., countPrimes, transposeMatrix, findMax)
+- Use appropriate parameters based on testcase inputs (e.g., nums: List[int], matrix: List[List[int]])
+- Use appropriate return type based on testcase outputs (e.g., int, List[int], void)
+- Keep it SIMPLE - just function signatures, NO full programs, NO stdin reading, NO main() functions
 
-1. EXAMPLES vs TESTCASES - COMPLETELY SEPARATE:
-   - "examples": LeetCode-style, human-readable (e.g., "nums = [1,2,3], target = 5")
-   - "testcases": Raw stdin values ONLY, NO variable names, NO JSON syntax
+TECHNICAL RULES - TESTCASE INPUT FORMAT (CRITICAL):
+- Inputs MUST be RAW STDIN only - NO JSON arrays, NO variable assignments
+- CORRECT formats:
+  * Single integer: "5\n"
+  * Space-separated integers: "1 2 3\n"
+  * Comma-separated integers: "1,2,3\n"
+  * Multi-line (matrix): "3 3\n1 2 3\n4 5 6\n7 8 9\n"
+  * String: "hello\n"
+- INCORRECT formats (DO NOT USE):
+  * JSON array: "[1,2,3]" ❌
+  * JSON array with newline: "[1,2,3]\n" ❌
+  * Variable assignment: "nums = [1,2,3]" ❌
+  * Python list: "[1, 2, 3]" ❌
+- Expected outputs MUST be logically computed, NOT guessed
+- NO placeholders like "e.g." or dummy values
+- NO dynamic generation: NO join(), NO loops, NO expressions, NO concatenation
+- ALL values must be literal strings
+- Secure mode enabled → assume function-body-only solutions
 
-2. DO NOT INCLUDE expected_output IN ANY TESTCASE:
-   - public_testcases: ONLY "input" field
-   - hidden_testcases: ONLY "input" field
-   - NO "expected_output", NO "output" field
-   - This is NON-NEGOTIABLE.
+STARTER CODE REQUIREMENTS:
+- Generate starter code for ALL 10 languages: python, javascript, typescript, cpp, java, c, go, rust, csharp, kotlin
+- Starter code must be SIMPLE function signatures ONLY - NO full programs, NO stdin reading, NO main() functions
+- Based on your testcases, determine the function signature (function name, parameters, return type)
+- Generate function signatures in the format appropriate for each language:
+  * Python: def functionName(params): followed by pass
+  * JavaScript: function functionName(params) {{ }}
+  * TypeScript: function functionName(params): returnType {{ }}
+  * C++: returnType functionName(params) {{ }}
+  * Java: public returnType functionName(params) {{ }}
+  * C: returnType functionName(params) {{ }}
+  * Go: func functionName(params) returnType {{ }}
+  * Rust: fn functionName(params) -> returnType {{ }}
+  * C#: public returnType FunctionName(params) {{ }}
+  * Kotlin: fun functionName(params): returnType {{ }}
+- Use literal strings only - NO dynamic generation in starter code values
+- Keep it SIMPLE - just function signatures with proper parameters and return types, nothing more
 
-3. stdin_format FIELD (REQUIRED):
-   - Describe your chosen stdin format in plain English
-   - Example: "Line 1: N (array size)\\nLine 2: N space-separated integers"
-   - ALL testcases MUST follow this EXACT format
-
-4. TESTCASE FORMAT CONSISTENCY:
-   - Every testcase input MUST have the same number of lines
-   - Every testcase input MUST follow the same structure
-   - Use \\n for newlines within the input string
-   - NEVER use JSON arrays like [1,2,3] - use space-separated values
-   - NEVER use variable names like "nums=" - just raw values
-
-5. MINIMUM TESTCASES:
-   - At least 3 public_testcases (basic cases)
-   - At least 3 hidden_testcases (edge cases)
-
-6. HIDDEN TESTCASES MUST COVER:
-   - Minimum valid input (single element, empty if allowed)
-   - Maximum boundary values from constraints
-   - Negative numbers (if applicable)
-   - Edge cases (duplicates, sorted, all same values)
-
-7. FUNCTION SIGNATURE:
-   - "name": camelCase (e.g., "twoSum", "findMax")
-   - "parameters": array of {{"name": "...", "type": "..."}}
-   - "return_type": string (e.g., "int", "int[]", "boolean")
-
-8. STARTER CODE:
-   - Generate for ALL languages in the languages list
-   - Include stdin parsing that matches your stdin_format
-   - Use the function_signature
-
-9. REFERENCE SOLUTION (PYTHON ONLY):
-   - Provide "reference_solution" as a full working Python 3 program
-   - It MUST read stdin matching stdin_format
-   - It MUST compute and print the correct output
-   - It MUST NOT include any network calls or randomness
-
-IMPORTANT: Return ONLY valid JSON. No markdown, no explanations."""
-
-    try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": """You are an expert coding problem generator. Generate LeetCode-style coding questions.
-
-CRITICAL RULES:
-1. First define function_signature, then derive stdin_format from it
-2. ALL testcases MUST use the EXACT same stdin format (same number of lines, same structure)
-3. NEVER include expected_output in testcases - only "input" field
-4. Testcases use raw stdin values only - NO JSON arrays, NO variable names
-5. Examples are human-readable (LeetCode style), testcases are machine-readable (raw stdin)
-6. Return valid JSON only - no markdown, no explanations"""
-                },
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-        )
-        
-        # Get content from response
-        if not response.choices or not response.choices[0].message.content:
-            raise ValueError("OpenAI API returned empty response")
-        
-        content = response.choices[0].message.content.strip()
-        
-        # Log raw content for debugging (first 500 chars)
-        logger.info(f"Raw AI response (first 500 chars): {content[:500]}")
-        
-        if not content:
-            raise ValueError("OpenAI API returned empty content")
-        
-        # Remove markdown code blocks if present
-        if content.startswith("```json"):
-            content = content[7:]
-        elif content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-        
-        # Try to extract JSON if there's extra text
-        # Look for JSON object boundaries
-        json_start = content.find("{")
-        json_end = content.rfind("}") + 1
-        
-        if json_start >= 0 and json_end > json_start:
-            content = content[json_start:json_end]
-        
-        if not content:
-            raise ValueError("No JSON content found in AI response")
-        
-        # Try to parse JSON
+Return ONLY the JSON object. No markdown. No explanations."""
+    
+    # Call OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    
+    max_retries = 2
+    for attempt in range(max_retries + 1):
         try:
-            question_data = json.loads(content)
-        except json.JSONDecodeError as json_err:
-            # Log the problematic content for debugging
-            logger.error(f"Failed to parse JSON. Content length: {len(content)}")
-            logger.error(f"Content preview: {content[:200]}...")
-            logger.error(f"JSON error: {json_err}")
-            raise ValueError(f"Failed to parse AI response as JSON: {json_err}. Content preview: {content[:200]}")
-        
-        # Validate required fields
-        required_fields = ["title", "description", "difficulty", "languages", "public_testcases", "hidden_testcases", "starter_code", "function_signature"]
-        for field in required_fields:
-            if field not in question_data:
-                # For function_signature, try to create a default one
-                if field == "function_signature":
-                    logger.warning("function_signature missing, creating default...")
-                    title = question_data.get("title", "solve")
-                    func_name = title.lower().replace(" ", "").replace("-", "")[:20] or "solve"
-                    question_data["function_signature"] = {
-                        "name": func_name,
-                        "parameters": [],
-                        "return_type": "int"
-                    }
-                    logger.info(f"Created default function_signature: {question_data['function_signature']}")
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+            )
+            
+            if not response.choices or not response.choices[0].message.content:
+                if attempt < max_retries:
+                    logger.warning(f"Attempt {attempt + 1}: Empty response. Retrying...")
+                    continue
                 else:
-                    raise ValueError(f"Generated question missing required field: {field}")
-        
-        # Validate and fix function_signature structure
-        if "function_signature" in question_data:
-            func_sig = question_data["function_signature"]
-            if not isinstance(func_sig, dict):
-                raise ValueError("function_signature must be an object")
+                    raise ValueError("AI returned empty response")
             
-            # Try to fix missing fields before validation
-            fixed = False
-            if "name" not in func_sig:
-                # Try to infer from title or use default
-                title = question_data.get("title", "solve")
-                func_sig["name"] = title.lower().replace(" ", "").replace("-", "")[:20] or "solve"
-                fixed = True
-                logger.warning(f"function_signature missing 'name', inferred: {func_sig['name']}")
+            content = response.choices[0].message.content.strip()
             
-            if "parameters" not in func_sig:
-                func_sig["parameters"] = []
-                fixed = True
-                logger.warning("function_signature missing 'parameters', using empty array")
-            elif not isinstance(func_sig["parameters"], list):
-                logger.warning(f"function_signature.parameters is not an array, converting...")
-                func_sig["parameters"] = []
-                fixed = True
+            # Log raw AI response for debugging
+            logger.info("=" * 80)
+            logger.info(f"ATTEMPT {attempt + 1}: Raw AI Response:")
+            logger.info("=" * 80)
+            logger.info(content)
+            logger.info("=" * 80)
             
-            if "return_type" not in func_sig:
-                # Try to infer from description or use default
-                func_sig["return_type"] = "int"  # Default return type
-                fixed = True
-                logger.warning("function_signature missing 'return_type', using default: 'int'")
+            # Remove markdown code fences if present
+            if content.startswith("```"):
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
             
-            if fixed:
-                logger.info(f"Fixed function_signature: {func_sig}")
-            
-            # Validate parameters structure if present
-            if func_sig["parameters"]:
-                for i, param in enumerate(func_sig["parameters"]):
-                    if not isinstance(param, dict):
-                        logger.warning(f"Parameter {i} is not an object, converting to object...")
-                        func_sig["parameters"][i] = {"name": f"param{i+1}", "type": "int"}
+            # Extract JSON boundaries
+            content = content.strip()
+            if not content.startswith("{"):
+                start_idx = content.find("{")
+                if start_idx >= 0:
+                    content = content[start_idx:]
+                else:
+                    if attempt < max_retries:
+                        logger.warning(f"Attempt {attempt + 1}: No JSON found. Retrying...")
                         continue
+                    else:
+                        raise ValueError("No JSON object found in response")
+            
+            if not content.endswith("}"):
+                end_idx = content.rfind("}")
+                if end_idx >= 0:
+                    content = content[:end_idx + 1]
+                else:
+                    if attempt < max_retries:
+                        logger.warning(f"Attempt {attempt + 1}: Incomplete JSON. Retrying...")
+                        continue
+                    else:
+                        raise ValueError("Incomplete JSON object in response")
+            
+            # Parse JSON
+            try:
+                question_data = json.loads(content)
+                
+                # Normalize testcase inputs (convert JSON arrays to raw stdin)
+                _normalize_testcase_inputs(question_data)
+                
+                # Log parsed JSON for debugging
+                logger.info("Parsed JSON successfully:")
+                logger.info(json.dumps(question_data, indent=2))
+                
+            except json.JSONDecodeError as e:
+                if attempt < max_retries:
+                    logger.warning(f"Attempt {attempt + 1}: JSON parse failed: {e}. Retrying...")
+                    continue
+                else:
+                    raise ValueError(f"Invalid JSON: {e}")
+            
+            # Check for error response
+            if isinstance(question_data, dict) and question_data.get("error"):
+                error_type = question_data.get("error")
+                if error_type == "CANNOT_GENERATE_CLEAN_QUESTION":
+                    if attempt < max_retries:
+                        logger.warning(f"Attempt {attempt + 1}: AI returned CANNOT_GENERATE_CLEAN_QUESTION. Retrying...")
+                        continue
+                    else:
+                        raise ValueError("AI could not generate a clean question after all retries")
+                elif error_type == "JSON_OUTPUT_REQUIRED":
+                    if attempt < max_retries:
+                        logger.warning(f"Attempt {attempt + 1}: AI returned JSON_OUTPUT_REQUIRED. Retrying...")
+                        continue
+                    else:
+                        raise ValueError("AI returned error: JSON_OUTPUT_REQUIRED after all retries")
+            
+            # Validate required fields
+            required_fields = ["title", "difficulty", "problem_description", "example", 
+                            "public_testcases", "hidden_testcases", "constraints", "starter_code"]
+            missing_fields = [field for field in required_fields if field not in question_data]
+            if missing_fields:
+                if attempt < max_retries:
+                    logger.warning(f"Attempt {attempt + 1}: Missing fields: {missing_fields}. Retrying...")
+                    continue
+                else:
+                    raise ValueError(f"Missing required fields: {missing_fields}")
+            
+            # Validate starter_code structure
+            starter_code = question_data.get("starter_code", {})
+            if not isinstance(starter_code, dict):
+                if attempt < max_retries:
+                    logger.warning(f"Attempt {attempt + 1}: starter_code must be an object. Retrying...")
+                    continue
+                else:
+                    raise ValueError("starter_code must be an object (dictionary)")
+            
+            # Check for required languages in starter_code
+            required_languages = ["python", "javascript", "typescript", "cpp", "java", "c", "go", "rust", "csharp", "kotlin"]
+            missing_languages = [lang for lang in required_languages if lang not in starter_code or not starter_code[lang]]
+            if missing_languages:
+                if attempt < max_retries:
+                    logger.warning(f"Attempt {attempt + 1}: Missing starter code for languages: {missing_languages}. Retrying...")
+                    continue
+                else:
+                    raise ValueError(f"Missing starter code for languages: {missing_languages}")
+            
+            # Validate structure
+            # Check example
+            example = question_data.get("example", {})
+            if not isinstance(example, dict):
+                raise ValueError("example must be an object")
+            for field in ["input", "output", "explanation"]:
+                if field not in example:
+                    raise ValueError(f"example missing '{field}' field")
+            
+            # Check testcases
+            for tc_type in ["public_testcases", "hidden_testcases"]:
+                testcases = question_data.get(tc_type, [])
+                if not isinstance(testcases, list):
+                    raise ValueError(f"{tc_type} must be an array")
+                if len(testcases) != 3:
+                    if attempt < max_retries:
+                        logger.warning(f"Attempt {attempt + 1}: {tc_type} must have exactly 3 testcases, got {len(testcases)}. Retrying...")
+                        continue
+                    else:
+                        raise ValueError(f"{tc_type} must have exactly 3 testcases, got {len(testcases)}")
+                
+                for idx, tc in enumerate(testcases):
+                    if not isinstance(tc, dict):
+                        raise ValueError(f"{tc_type}[{idx}] must be an object")
+                    if "input" not in tc:
+                        raise ValueError(f"{tc_type}[{idx}] missing 'input' field")
+                    if "expected_output" not in tc:
+                        raise ValueError(f"{tc_type}[{idx}] missing 'expected_output' field")
                     
-                    # Fix missing name or type in parameter
-                    if "name" not in param:
-                        param["name"] = f"param{i+1}"
-                        logger.warning(f"Parameter {i} missing 'name', using: {param['name']}")
-                    if "type" not in param:
-                        param["type"] = "int"  # Default type
-                        logger.warning(f"Parameter {i} missing 'type', using: {param['type']}")
-        
-        # Ensure examples exist
-        if "examples" not in question_data:
-            question_data["examples"] = []
-        
-        # Ensure constraints exist
-        if "constraints" not in question_data:
-            question_data["constraints"] = []
-        
-        # === CRITICAL: Sanitize testcases - remove expected_output ===
-        # The AI should NOT generate expected_output, but if it does, remove it
-        # Expected outputs will be computed programmatically by running reference solution
-        
-        def sanitize_testcase(testcase: dict, is_hidden: bool) -> dict:
-            """Sanitize a testcase: remove expected_output, ensure is_hidden is set."""
-            # Remove expected_output if present (AI should not generate this)
-            if "expected_output" in testcase:
-                del testcase["expected_output"]
+                    # Validate input format - must be raw stdin, not JSON array
+                    tc_input = str(tc.get("input", ""))
+                    if "[" in tc_input or "]" in tc_input:
+                        if attempt < max_retries:
+                            logger.warning(f"Attempt {attempt + 1}: {tc_type}[{idx}] contains JSON array format. Retrying with explicit instruction...")
+                            retry_instruction = f"\n\n⚠️ RETRY ATTEMPT {attempt + 1} - INVALID TESTCASE INPUT FORMAT:\n"
+                            retry_instruction += f"Testcase {tc_type}[{idx}] input contains JSON array format: {tc_input[:100]}\n"
+                            retry_instruction += "CRITICAL: Testcase inputs MUST be RAW STDIN format, NOT JSON arrays.\n"
+                            retry_instruction += "CORRECT examples:\n"
+                            retry_instruction += "  - Single integer: \"5\\n\"\n"
+                            retry_instruction += "  - Space-separated: \"1 2 3\\n\"\n"
+                            retry_instruction += "  - Comma-separated: \"1,2,3\\n\"\n"
+                            retry_instruction += "  - Multi-line matrix: \"3 3\\n1 2 3\\n4 5 6\\n7 8 9\\n\"\n"
+                            retry_instruction += "INCORRECT (DO NOT USE):\n"
+                            retry_instruction += "  - JSON array: \"[1,2,3]\" ❌\n"
+                            retry_instruction += "  - Python list: \"[1, 2, 3]\" ❌\n"
+                            retry_instruction += "Convert ALL testcase inputs to raw stdin format before returning JSON.\n"
+                            user_prompt += retry_instruction
+                            continue
+                        else:
+                            raise ValueError(f"{tc_type}[{idx}] input must be raw stdin format, not JSON array. Got: {tc_input[:100]}")
             
-            # Also remove output if present (alternative key AI might use)
-            if "output" in testcase:
-                del testcase["output"]
+            # Validate consistency
+            consistency_issues = _validate_question_consistency(question_data)
+            if consistency_issues:
+                logger.error("=" * 80)
+                logger.error(f"CONSISTENCY ISSUES DETECTED (Attempt {attempt + 1}):")
+                logger.error(consistency_issues)
+                logger.error("=" * 80)
+                print("\n" + "=" * 80)
+                print(f"CONSISTENCY ISSUES DETECTED (Attempt {attempt + 1}):")
+                print(consistency_issues)
+                print("=" * 80 + "\n")
+                
+                if attempt < max_retries:
+                    logger.warning(f"Attempt {attempt + 1}: Consistency issues: {consistency_issues}. Retrying...")
+                    # Build detailed retry instruction
+                    retry_instruction = f"\n\n⚠️ RETRY ATTEMPT {attempt + 1} - CONSISTENCY ISSUES DETECTED:\n"
+                    retry_instruction += f"{consistency_issues}\n\n"
+                    retry_instruction += "CRITICAL FIXES REQUIRED:\n"
+                    retry_instruction += "1. Look at the testcases - what problem do they actually test?\n"
+                    retry_instruction += "2. The problem_description MUST explain EXACTLY what the testcases test.\n"
+                    retry_instruction += "3. The example MUST demonstrate the SAME problem as the testcases.\n"
+                    retry_instruction += "4. If testcases show matrix operations, description MUST explain matrix operations, NOT prime numbers.\n"
+                    retry_instruction += "5. If testcases use multi-line input, example MUST also use multi-line input.\n"
+                    retry_instruction += "6. The title, description, example, and ALL testcases MUST describe the SAME problem.\n"
+                    user_prompt += retry_instruction
+                    continue
+                else:
+                    raise ValueError(f"Question consistency validation failed: {consistency_issues}")
             
-            # Ensure is_hidden flag is correctly set
-            testcase["is_hidden"] = is_hidden
+            # Success
+            logger.info("=" * 80)
+            logger.info("SUCCESS: Question generated and validated!")
+            logger.info(f"Title: {question_data.get('title', 'Unknown')}")
+            logger.info("=" * 80)
             
-            # Ensure input exists and is a string
-            if "input" not in testcase:
-                testcase["input"] = ""
-            elif not isinstance(testcase["input"], str):
-                testcase["input"] = str(testcase["input"])
+            return question_data
             
-            return testcase
-        
-        # Sanitize public testcases
-        public_testcases = question_data.get("public_testcases", [])
-        question_data["public_testcases"] = [
-            sanitize_testcase(tc, is_hidden=False) 
-            for tc in public_testcases if isinstance(tc, dict)
-        ]
-        
-        # Sanitize hidden testcases
-        hidden_testcases = question_data.get("hidden_testcases", [])
-        question_data["hidden_testcases"] = [
-            sanitize_testcase(tc, is_hidden=True) 
-            for tc in hidden_testcases if isinstance(tc, dict)
-        ]
-        
-        # Ensure minimum testcase count
-        if len(question_data["public_testcases"]) < 3:
-            logger.warning(f"Only {len(question_data['public_testcases'])} public testcases generated, expected at least 3")
-        
-        if len(question_data["hidden_testcases"]) < 3:
-            logger.warning(f"Only {len(question_data['hidden_testcases'])} hidden testcases generated, expected at least 3")
-        
-        # === FORMAT CONSISTENCY VALIDATION ===
-        # Check that all testcases use the same newline structure
-        def get_line_count(input_str: str) -> int:
-            """Count number of lines in a testcase input."""
-            if not input_str:
-                return 0
-            return input_str.count('\n') + 1
-        
-        all_testcases = question_data["public_testcases"] + question_data["hidden_testcases"]
-        if all_testcases:
-            line_counts = [get_line_count(tc.get("input", "")) for tc in all_testcases]
-            unique_counts = set(line_counts)
-            
-            if len(unique_counts) > 1:
-                logger.warning(
-                    f"Testcase format inconsistency detected: line counts vary {unique_counts}. "
-                    f"All testcases should have the same structure."
-                )
-            
-            # Log the stdin_format if provided by AI
-            stdin_format = question_data.get("stdin_format")
-            if stdin_format:
-                logger.info(f"AI-specified stdin format: {stdin_format}")
-        
-        # Ensure starter_code has all requested languages
-        if "starter_code" not in question_data:
-            question_data["starter_code"] = {}
-        
-        # Generate default starter code for missing languages
-        func_sig = question_data.get("function_signature", {})
-        func_name = func_sig.get("name", "solve")
-        params = func_sig.get("parameters", [])
-        return_type = func_sig.get("return_type", "int")
-        
-        for lang in languages:
-            if lang not in question_data["starter_code"] or not question_data["starter_code"][lang]:
-                question_data["starter_code"][lang] = _generate_default_starter_code(
-                    lang, func_name, params, return_type
-                )
-        
-        return question_data
-        
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse AI response as JSON: {e}")
-    except Exception as e:
-        raise Exception(f"OpenAI API error: {e}")
+        except ValueError:
+            # Re-raise validation errors
+            raise
+        except Exception as e:
+            if attempt < max_retries:
+                logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying...")
+                continue
+            else:
+                raise Exception(f"OpenAI API error after {max_retries + 1} attempts: {e}")
+    
+    # Should never reach here
+    raise Exception("Failed to generate valid response after all retries")

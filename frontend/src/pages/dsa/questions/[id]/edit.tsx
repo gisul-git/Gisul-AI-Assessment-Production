@@ -61,6 +61,10 @@ const DEFAULT_STARTER_CODE: Record<string, string> = {
     // Your code here
 }
 `,
+  typescript: `function solution(): void {
+    // Your code here
+}
+`,
   cpp: `#include <iostream>
 using namespace std;
 
@@ -73,6 +77,37 @@ int main() {
     public static void main(String[] args) {
         // Your code here
     }
+}
+`,
+  c: `#include <stdio.h>
+
+int main() {
+    // Your code here
+    return 0;
+}
+`,
+  go: `package main
+
+import "fmt"
+
+func main() {
+    // Your code here
+}
+`,
+  rust: `fn main() {
+    // Your code here
+}
+`,
+  csharp: `using System;
+
+class Program {
+    static void Main(string[] args) {
+        // Your code here
+    }
+}
+`,
+  kotlin: `fun main() {
+    // Your code here
 }
 `,
 }
@@ -189,7 +224,7 @@ export default function QuestionEditPage() {
         setPublicTestcases(
           data.public_testcases.map((tc: any) => ({
             input: tc.input || '',
-            expected_output: tc.expected_output ?? undefined,
+            expected_output: tc.expected_output || '', // Always show expected_output, even if empty
           }))
         )
       } else {
@@ -200,7 +235,7 @@ export default function QuestionEditPage() {
         setHiddenTestcases(
           data.hidden_testcases.map((tc: any) => ({
             input: tc.input || '',
-            expected_output: tc.expected_output ?? undefined,
+            expected_output: tc.expected_output || '', // Always show expected_output, even if empty
           }))
         )
       } else {

@@ -155,9 +155,35 @@ export function useLiveProctoring({
             // Set answer
             if (pc && message.answer) {
               try {
-                // If already have a remote description, we need to recreate the connection
+                // CRITICAL: Check signalingState, not just connectionState
+                // If already have a remote description AND signaling is stable (both descriptions set), ignore duplicate answer
+                if (pc.remoteDescription && pc.signalingState === "stable") {
+                  log("Already have remote description and signaling is stable, ignoring duplicate answer", {
+                    connectionState: pc.connectionState,
+                    signalingState: pc.signalingState,
+                    iceConnectionState: pc.iceConnectionState,
+                  });
+                  return; // Ignore duplicate answer
+                }
+                
+                // If already have a remote description AND connection is in a good state, also ignore
+                if (pc.remoteDescription && 
+                    (pc.connectionState === "connected" || pc.connectionState === "connecting")) {
+                  log("Already have remote description and connection is active, ignoring duplicate answer", {
+                    connectionState: pc.connectionState,
+                    signalingState: pc.signalingState,
+                    iceConnectionState: pc.iceConnectionState,
+                  });
+                  return; // Ignore duplicate answer
+                }
+                
+                // If we have a remote description but connection is in a bad state, recreate
                 if (pc.remoteDescription) {
-                  log("Already have remote description, recreating peer connection for fresh negotiation");
+                  log("Already have remote description but connection is in bad state, recreating peer connection", {
+                    connectionState: pc.connectionState,
+                    signalingState: pc.signalingState,
+                    iceConnectionState: pc.iceConnectionState,
+                  });
                   pc.close();
                   await setupPeerConnection(sessId);
                   pc = peerConnectionRef.current;
@@ -170,20 +196,27 @@ export function useLiveProctoring({
                 }
               } catch (err) {
                 log("Error setting remote description (answer)", err);
-                // Try recreating peer connection
-                if (pc) {
-                  try {
-                    pc.close();
-                  } catch (e) {
-                    log("Error closing peer connection after error", e);
+                // Only recreate if the error is about wrong state, not other errors
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                if (errorMsg.includes("wrong state") || errorMsg.includes("stable")) {
+                  log("Error due to wrong signaling state, recreating peer connection");
+                  if (pc) {
+                    try {
+                      pc.close();
+                    } catch (e) {
+                      log("Error closing peer connection after error", e);
+                    }
                   }
-                }
-                await setupPeerConnection(sessId);
-                pc = peerConnectionRef.current;
-                if (pc && message.answer) {
-                  await pc.setRemoteDescription(new RTCSessionDescription(message.answer));
-                  answerReceivedRef.current = true;
-                  log("Answer set after peer connection recreation");
+                  await setupPeerConnection(sessId);
+                  pc = peerConnectionRef.current;
+                  if (pc && message.answer) {
+                    await pc.setRemoteDescription(new RTCSessionDescription(message.answer));
+                    answerReceivedRef.current = true;
+                    log("Answer set after peer connection recreation");
+                  }
+                } else {
+                  // For other errors, just log but don't recreate (might be temporary)
+                  log("Non-state error when setting answer, not recreating", err);
                 }
               }
             }
@@ -293,6 +326,22 @@ export function useLiveProctoring({
     screenStream.getTracks().forEach(track => {
       pc.addTrack(track, screenStream);
       log(`Added screen track: ${track.kind}`);
+      // CRITICAL: Always log screen track addition in production
+      let trackSettings: MediaTrackSettings | null = null;
+      try {
+        trackSettings = track.getSettings();
+      } catch (err) {
+        console.warn(`[LiveProctoring] getSettings() failed for screen track:`, err);
+      }
+      console.log(`[LiveProctoring] ✅ Added screen track to peer connection`, {
+        trackId: track.id,
+        trackLabel: track.label,
+        trackKind: track.kind,
+        trackSettings: trackSettings,
+        displaySurface: trackSettings?.displaySurface,
+        streamId: screenStream.id,
+        trackReadyState: track.readyState,
+      });
     });
     
     // Handle ICE candidates
@@ -403,9 +452,30 @@ export function useLiveProctoring({
       // 2. Get screen stream
       const screenStream = getScreenStream();
       if (!screenStream) {
-        throw new Error("Screen stream not available. Please share your screen first.");
+        const errorMsg = "Screen stream not available. Please share your screen first.";
+        console.error(`[LiveProctoring] ❌ ${errorMsg}`);
+        throw new Error(errorMsg);
       }
       screenStreamRef.current = screenStream;
+      // CRITICAL: Always log screen stream acquisition in production
+      const videoTracks = screenStream.getVideoTracks();
+      const trackSettingsArray: (MediaTrackSettings | null)[] = [];
+      videoTracks.forEach(track => {
+        try {
+          trackSettingsArray.push(track.getSettings());
+        } catch (err) {
+          console.warn(`[LiveProctoring] getSettings() failed for track ${track.id}:`, err);
+          trackSettingsArray.push(null);
+        }
+      });
+      console.log(`[LiveProctoring] ✅ Screen stream acquired`, {
+        streamId: screenStream.id,
+        active: screenStream.active,
+        videoTracks: videoTracks.length,
+        trackLabels: videoTracks.map(t => t.label),
+        trackSettings: trackSettingsArray,
+        displaySurfaces: trackSettingsArray.map(ts => ts?.displaySurface),
+      });
       
       // 3. Create session (backend call ONCE)
       const response = await fetch(`${API_URL}/api/v1/proctor/live/start-session`, {

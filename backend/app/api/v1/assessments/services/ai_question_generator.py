@@ -87,7 +87,9 @@ async def generate_questions_for_row_v2(
     job_designation: Optional[str] = None,
     experience_min: Optional[int] = None,
     experience_max: Optional[int] = None,
-    company_name: Optional[str] = None
+    company_name: Optional[str] = None,
+    assessment_requirements: Optional[str] = None,  # Global requirements from assessment creation
+    previous_question: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
     Generate questions for a single question row based on question type.
@@ -142,7 +144,13 @@ async def generate_questions_for_row_v2(
             can_use_judge0=can_use_judge0,
             coding_language=coding_language,
             experience_mode=experience_mode,
-            additional_requirements=additional_requirements
+            additional_requirements=additional_requirements,
+            job_designation=job_designation,
+            experience_min=experience_min,
+            experience_max=experience_max,
+            company_name=company_name,
+            assessment_requirements=assessment_requirements,
+            previous_question=previous_question
         )
     
     elif question_type_upper in ["SQL"]:
@@ -173,7 +181,9 @@ async def generate_questions_for_row_v2(
             job_designation=job_designation,
             experience_min=experience_min,
             experience_max=experience_max,
-            company_name=company_name
+            company_name=company_name,
+            assessment_requirements=assessment_requirements,
+            previous_question=previous_question  # ⭐ NEW - Pass through for regeneration
         )
     
     elif question_type_upper in ["SUBJECTIVE", "DESCRIPTIVE"]:
@@ -186,7 +196,9 @@ async def generate_questions_for_row_v2(
             job_designation=job_designation,
             experience_min=experience_min,
             experience_max=experience_max,
-            company_name=company_name
+            company_name=company_name,
+            assessment_requirements=assessment_requirements,
+            previous_question=previous_question  # ⭐ NEW - Pass through for regeneration
         )
     
     elif question_type_upper in ["PSEUDOCODE", "PSEUDO CODE", "PSEUDO-CODE"]:
@@ -199,7 +211,9 @@ async def generate_questions_for_row_v2(
             job_designation=job_designation,
             experience_min=experience_min,
             experience_max=experience_max,
-            company_name=company_name
+            company_name=company_name,
+            assessment_requirements=assessment_requirements,
+            previous_question=previous_question  # ⭐ NEW - Pass through for regeneration
         )
     
     else:
@@ -251,10 +265,12 @@ async def _generate_mcq_questions(
     job_designation: Optional[str] = None,
     experience_min: Optional[int] = None,
     experience_max: Optional[int] = None,
-    company_name: Optional[str] = None
+    company_name: Optional[str] = None,
+    assessment_requirements: Optional[str] = None,  # Global requirements
+    previous_question: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
-    Generate MCQ questions - PRODUCTION-GRADE WITH PERSONALIZATION.
+    Generate MCQ questions - PRODUCTION-GRADE WITH CONTEXT-AWARE PERSONALIZATION.
     
     Rules:
     - MCQ must include exactly 4 options
@@ -262,18 +278,20 @@ async def _generate_mcq_questions(
     - Should NOT be overly simple syntax questions unless topic requires it
     - Should match the difficulty level
     - Generate both question + options + correctAnswer
-    - PERSONALIZED based on job role, experience level, and company
+    - PERSONALIZED based on assessment requirements, job role, experience level, and company
     
     Args:
         topic: Topic label
         difficulty: Difficulty level (Easy, Medium, Hard)
         count: Number of questions to generate
         experience_mode: Experience mode (corporate/college)
-        additional_requirements: Optional additional requirements
+        additional_requirements: Optional topic-specific requirements
         job_designation: Job role/designation (e.g., "Senior Software Engineer")
         experience_min: Minimum years of experience required
         experience_max: Maximum years of experience required
         company_name: Company name for personalization (e.g., "Gisul")
+        assessment_requirements: Global assessment requirements (HIGHEST PRIORITY)
+        previous_question: For regeneration - the old question to avoid repeating
         
     Returns:
         List of MCQ question dictionaries with:
@@ -281,11 +299,50 @@ async def _generate_mcq_questions(
         - options: List of exactly 4 options
         - correctAnswer: The correct option (must match one of the options)
     """
-    # Build personalization context
+    # ⭐ BUILD PERSONALIZATION CONTEXT (PRIORITY ORDER)
     context_parts = []
     
+    # Priority 0: REGENERATION CONTEXT (ABSOLUTE HIGHEST PRIORITY - Avoid repeating)
+    if previous_question:
+        # Extract question text from previous question (MCQs may include options)
+        prev_q_text = previous_question
+        if isinstance(previous_question, dict):
+            prev_q_text = previous_question.get("question", str(previous_question))
+        
+        context_parts.append(f"""**🔥 REGENERATION CONTEXT (CRITICAL - READ THIS FIRST)**:
+The user is REGENERATING a question they found unsatisfactory.
+
+OLD QUESTION (DO NOT REPEAT OR REUSE THIS):
+\"\"\"{prev_q_text}\"\"\"
+
+MANDATORY REQUIREMENTS FOR NEW QUESTION:
+1. MUST be COMPLETELY DIFFERENT from the old question above
+2. MUST be HIGHER QUALITY - more specific, more challenging, more professional
+3. MUST be MORE PERSONALIZED - use company name, role, requirements if provided below
+4. AVOID similar concepts, scenarios, or phrasing from the old question
+5. Take a FRESH perspective on the topic "{topic}" while maintaining difficulty: {difficulty}
+
+Example Improvements:
+- Old (generic): "What is the time complexity of binary search?"
+- New (context-aware): "At Gisul, you need to optimize search performance for a user database with 100M+ records. Which search algorithm would you implement for a sorted user ID lookup and why?"
+
+⚠️ CRITICAL: If you generate something similar to the old question, the user will reject it!
+""")
+    
+    # Priority 1: Assessment-level requirements (highest priority - from "Requirements" field)
+    if assessment_requirements:
+        context_parts.append(f"**Assessment Context (CRITICAL - USE THIS)**: {assessment_requirements}")
+    
+    # Priority 2: Topic-level additional requirements
+    if additional_requirements:
+        context_parts.append(f"**Topic-Specific Requirements**: {additional_requirements}")
+    
+    # Priority 3: Job role and company
     if job_designation:
         context_parts.append(f"**Job Role**: {job_designation}")
+    
+    if company_name:
+        context_parts.append(f"**Company**: {company_name}")
     
     if experience_min is not None and experience_max is not None:
         years_text = f"{experience_min}-{experience_max} years"
@@ -302,38 +359,48 @@ async def _generate_mcq_questions(
         
         context_parts.append(f"**Experience Required**: {years_text} ({seniority})")
     
-    if company_name:
-        context_parts.append(f"**Company**: {company_name}")
-    
-    if additional_requirements:
-        context_parts.append(f"**Additional Context**: {additional_requirements}")
-    
     personalization_context = "\n".join(context_parts) if context_parts else ""
     
     # Build prompt with personalization
     prompt = f"""You are an expert technical assessment writer. Generate {count} Multiple Choice Question(s) for the topic: {topic}.
 
 {'=' * 80}
-CANDIDATE CONTEXT (USE THIS TO PERSONALIZE QUESTIONS):
+CRITICAL: PERSONALIZATION CONTEXT (HIGHEST PRIORITY - MUST USE)
 {'=' * 80}
 {personalization_context if personalization_context else "(No specific personalization context provided - generate generic professional questions)"}
 {'=' * 80}
 
-CRITICAL REQUIREMENTS:
-1. Each question MUST have exactly 4 options (no more, no less)
-2. One option must be the correct answer
-3. Difficulty level: {difficulty}
-4. Experience mode: {experience_mode}
-5. **PERSONALIZE SCENARIOS** using job role and company context when relevant
-   - For experience-based questions, frame scenarios appropriate to seniority level
-   - For technical decisions, reference company context if applicable
-   - Use job designation when creating scenario-based MCQs
-6. Questions should match the difficulty level
+MANDATORY PERSONALIZATION REQUIREMENTS:
+
+1. **USE EXACT CONTEXT FROM ABOVE** - This is your #1 priority!
+   - If assessment context is provided: Frame questions around that specific scenario/company/role
+   - If company name is provided: Reference it in scenario-based questions
+   - If job role is provided: Use exact job title when creating scenarios
+   - If requirements mention technologies: Reference them in questions
+   
+2. **SCENARIO FRAMING EXAMPLES**:
+   
+   ✅ WITH ASSESSMENT CONTEXT (e.g., "Candidate will work at Gisul on AWS serverless"):
+   "You are working at Gisul on an AWS serverless architecture. Your Lambda functions need 
+   to process S3 events. Which approach would best handle temporary failures?"
+   
+   ✅ WITH ROLE CONTEXT (e.g., role: "Senior Backend Engineer"):
+   "As a Senior Backend Engineer, you need to decide on a caching strategy for a high-traffic 
+   API. Which approach would you recommend?"
+   
+   ❌ WITHOUT CONTEXT (generic - AVOID IF CONTEXT PROVIDED):
+   "Which caching strategy is best for APIs?"
+
+STANDARD MCQ REQUIREMENTS:
+3. Each question MUST have exactly 4 options (no more, no less)
+4. One option must be the correct answer
+5. Difficulty level: {difficulty}
+6. Experience mode: {experience_mode}
 7. All options must be plausible - avoid obviously wrong answers
 8. Options should be similar in length and structure
 9. Vary question types (conceptual, application, problem-solving)
 
-PERSONALIZATION GUIDELINES:
+PERSONALIZATION GUIDELINES BY EXPERIENCE:
 - For Junior roles: Focus on foundational concepts, syntax, basic problem-solving
 - For Mid-level roles: Include design patterns, best practices, trade-offs
 - For Senior roles: Add architecture decisions, scalability, team implications
@@ -343,12 +410,15 @@ Output format (JSON object with questions array):
 {{
   "questions": [
     {{
-      "question": "<question text>",
+      "question": "<question text - MUST use personalization context if provided>",
       "options": ["<option A>", "<option B>", "<option C>", "<option D>"],
       "correctAnswer": "<option text that matches one of the options exactly>"
     }}
   ]
 }}
+
+FINAL REMINDER: If personalization context is provided above, you MUST use it in your questions. 
+Generic questions are ONLY acceptable when NO context is provided.
 
 Return ONLY a JSON object with questions array."""
 
@@ -413,10 +483,12 @@ async def _generate_subjective_questions(
     job_designation: Optional[str] = None,
     experience_min: Optional[int] = None,
     experience_max: Optional[int] = None,
-    company_name: Optional[str] = None
+    company_name: Optional[str] = None,
+    assessment_requirements: Optional[str] = None,  # Global requirements
+    previous_question: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
-    Generate Subjective questions - PRODUCTION-GRADE WITH PERSONALIZATION.
+    Generate Subjective questions - PRODUCTION-GRADE WITH CONTEXT-AWARE PERSONALIZATION.
     
     Rules:
     - ONLY scenario-based, real-world, case-study style questions
@@ -424,28 +496,64 @@ async def _generate_subjective_questions(
     - Requires reasoning, explanation, trade-offs, evaluation
     - NO: MCQ-like phrasing, "which of the following", one-liners
     - Should reflect real-world usage of the topic
-    - PERSONALIZED based on job role, experience level, and company
+    - PERSONALIZED based on assessment requirements, job role, experience level, and company
     
     Args:
         topic: Topic label
         difficulty: Difficulty level (Easy, Medium, Hard)
         count: Number of questions to generate
         experience_mode: Experience mode (corporate/college)
-        additional_requirements: Optional additional requirements (can be URL)
+        additional_requirements: Optional topic-specific requirements (can be URL)
         job_designation: Job role/designation (e.g., "Senior Software Engineer")
         experience_min: Minimum years of experience required
         experience_max: Maximum years of experience required
         company_name: Company name for personalization (e.g., "Gisul")
+        assessment_requirements: Global assessment requirements (HIGHEST PRIORITY)
+        previous_question: For regeneration - the old question to avoid repeating
         
     Returns:
         List of Subjective question dictionaries with:
         - question: Scenario-based question text (2-4 sentences minimum)
     """
-    # Build personalization context
+    # ⭐ BUILD PERSONALIZATION CONTEXT (PRIORITY ORDER)
     context_parts = []
     
+    # Priority 0: REGENERATION CONTEXT (ABSOLUTE HIGHEST PRIORITY - Avoid repeating)
+    if previous_question:
+        context_parts.append(f"""**🔥 REGENERATION CONTEXT (CRITICAL - READ THIS FIRST)**:
+The user is REGENERATING a question they found unsatisfactory.
+
+OLD QUESTION (DO NOT REPEAT OR REUSE THIS):
+\"\"\"{previous_question}\"\"\"
+
+MANDATORY REQUIREMENTS FOR NEW QUESTION:
+1. MUST be COMPLETELY DIFFERENT from the old question above
+2. MUST be HIGHER QUALITY - more specific, more detailed, more professional
+3. MUST be MORE PERSONALIZED - use company name, role, requirements if provided below
+4. AVOID similar concepts, scenarios, or phrasing from the old question
+5. Take a FRESH perspective on the topic "{topic}" while maintaining difficulty: {difficulty}
+
+Example Improvements:
+- Old (generic): "Explain REST API design principles"
+- New (personalized): "You are a Senior Backend Engineer at Gisul building a payment gateway handling 10M+ transactions/day on AWS. Design a REST API that ensures PCI-DSS compliance, implements rate limiting for different user tiers, and provides comprehensive error handling. Explain your authentication strategy and how you would monitor API performance in Gisul's production environment."
+
+⚠️ CRITICAL: If you generate something similar to the old question, the user will reject it!
+""")
+    
+    # Priority 1: Assessment-level requirements (highest priority - from "Requirements" field)
+    if assessment_requirements:
+        context_parts.append(f"**Assessment Context (CRITICAL - USE THIS)**: {assessment_requirements}")
+    
+    # Priority 2: Topic-level additional requirements
+    if additional_requirements:
+        context_parts.append(f"**Topic-Specific Requirements**: {additional_requirements}")
+    
+    # Priority 3: Job role and company
     if job_designation:
         context_parts.append(f"**Job Role**: {job_designation}")
+    
+    if company_name:
+        context_parts.append(f"**Company**: {company_name}")
     
     if experience_min is not None and experience_max is not None:
         years_text = f"{experience_min}-{experience_max} years"
@@ -462,68 +570,86 @@ async def _generate_subjective_questions(
         
         context_parts.append(f"**Experience Required**: {years_text} ({seniority})")
     
-    if company_name:
-        context_parts.append(f"**Company**: {company_name}")
-    
-    if additional_requirements:
-        context_parts.append(f"**Additional Context**: {additional_requirements}")
-    
     personalization_context = "\n".join(context_parts) if context_parts else ""
     
     # Build prompt with personalization
     prompt = f"""You are an expert technical assessment writer. Generate {count} scenario-based subjective question(s) for the topic: {topic}.
 
 {'=' * 80}
-CANDIDATE CONTEXT (USE THIS TO PERSONALIZE QUESTIONS):
+CRITICAL: PERSONALIZATION CONTEXT (HIGHEST PRIORITY - MUST USE)
 {'=' * 80}
 {personalization_context if personalization_context else "(No specific personalization context provided - generate generic professional questions)"}
 {'=' * 80}
 
-CRITICAL PERSONALIZATION REQUIREMENTS:
-1. **USE THE EXACT JOB ROLE** when framing scenarios (if provided)
-   - ✅ CORRECT: "You are a {job_designation or 'professional'} at {company_name or 'your company'}..."
-   - ❌ WRONG: "You are a developer..." (too generic)
+MANDATORY PERSONALIZATION REQUIREMENTS:
 
-2. **ALIGN COMPLEXITY WITH EXPERIENCE LEVEL**:
+1. **USE EXACT CONTEXT FROM ABOVE** - This is your #1 priority!
+   - If assessment context is provided: Frame ALL scenarios around that specific context
+   - If company name is provided: Use it in EVERY scenario
+   - If job role is provided: Use exact job title in EVERY scenario
+   - If requirements mention technologies: Reference them in scenarios
+   - If requirements mention constraints: Include them in scenarios
+
+2. **SCENARIO FRAMING EXAMPLES**:
+   
+   ✅ WITH FULL CONTEXT (company: Gisul, role: Senior Backend Engineer, context: "AWS serverless"):
+   "You are a Senior Backend Engineer at Gisul working on AWS serverless architecture. 
+   Your team is building a high-traffic e-commerce platform serving 50M+ users daily. 
+   The platform uses Python Lambda functions on AWS. Design an API rate-limiting strategy 
+   that handles peak traffic during flash sales. Explain your approach to distributing 
+   rate limits across multiple Lambda instances, handling burst traffic, and ensuring 
+   cost-optimization for Gisul's AWS budget."
+   
+   ✅ WITH ASSESSMENT REQUIREMENTS (requirements: "Focus on healthcare compliance HIPAA"):
+   "Your application handles sensitive patient health records and must comply with HIPAA 
+   regulations. Explain your approach to implementing encryption for data at rest and in 
+   transit. Include specific technologies you would use, key management strategies, and how 
+   you would ensure audit logging meets HIPAA requirements."
+   
+   ✅ WITH TOPIC REQUIREMENTS (additional: "Focus on microservices high availability"):
+   "You are a Senior Backend Engineer at Gisul. Your team is building a microservices platform 
+   that requires high availability (99.99% uptime SLA). Design a deployment strategy that allows 
+   zero-downtime updates across 50+ microservices. Explain your approach to blue-green deployments, 
+   rollback procedures, and health checks."
+   
+   ❌ WITHOUT CONTEXT (generic - AVOID IF CONTEXT PROVIDED):
+   "Design an API rate-limiting strategy for a high-traffic system..."
+
+3. **ALIGN COMPLEXITY WITH EXPERIENCE LEVEL**:
    - Junior (0-2 years): Focus on technical execution, learning, debugging, following best practices
    - Mid-level (3-5 years): Add system design basics, code reviews, mentoring junior developers
    - Senior (5-10 years): Include architecture decisions, team leadership, cross-team collaboration
    - Principal/Lead (10+ years): Strategic planning, stakeholder management, technical direction
 
-3. **REFERENCE COMPANY NAME** when creating scenarios (if provided):
-   - ✅ CORRECT: "As a {job_designation or 'developer'} at {company_name or 'the company'}, you need to..."
-   - ❌ WRONG: "As a developer at a tech company..." (too vague)
-
-4. **USE COMPANY CONTEXT** if available:
-   - Reference company's tech stack, products, or challenges mentioned in context
-   - Make scenarios realistic to the company's domain
-
-5. **MATCH SCENARIO SCOPE TO EXPERIENCE**:
-   - Junior: Small feature, specific bug, single component
-   - Mid-level: Feature across multiple components, performance optimization
-   - Senior: System architecture, team coordination, production incidents
-   - Lead: Multi-team initiatives, technology decisions, strategic planning
+4. **QUESTION STRUCTURE** (2-4 sentences minimum):
+   - Sentence 1: Context (role, company, current situation using provided context)
+   - Sentence 2: Problem/challenge
+   - Sentence 3-4: What needs to be explained/designed/analyzed
 
 STANDARD REQUIREMENTS:
-6. Generate ONLY scenario-based, real-world, case-study style questions
-7. Each question MUST be minimum 2-4 sentences
-8. Questions MUST require reasoning, explanation, trade-offs, or evaluation
-9. NO MCQ-like phrasing (no "which of the following", no multiple choice options)
-10. NO one-liner questions
-11. Difficulty level: {difficulty}
-12. Experience mode: {experience_mode}
-13. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others.
+5. Generate ONLY scenario-based, real-world, case-study style questions
+6. Each question MUST be minimum 2-4 sentences
+7. Questions MUST require reasoning, explanation, trade-offs, or evaluation
+8. NO MCQ-like phrasing (no "which of the following", no multiple choice options)
+9. NO one-liner questions
+10. Difficulty level: {difficulty}
+11. Experience mode: {experience_mode}
+12. **CRITICAL DIVERSITY REQUIREMENT**: Each question MUST be unique and different from the others
 
-Output format (JSON object with topics array):
+Output format (JSON object with questions array):
 {{
   "questions": [
     {{
-      "question": "<scenario-based question text, 2-4 sentences minimum>"
+      "question": "<scenario-based question text, 2-4 sentences minimum, MUST use personalization context if provided>"
     }}
   ]
 }}
 
 DO NOT include idealAnswer, expectedAnswer, or any answer fields.
+
+FINAL REMINDER: If personalization context is provided above, you MUST use it in EVERY question. 
+Generic questions are ONLY acceptable when NO context is provided.
+
 Return ONLY a JSON object with questions array."""
 
     client = _get_openai_client()
@@ -583,10 +709,12 @@ async def _generate_pseudocode_questions(
     job_designation: Optional[str] = None,
     experience_min: Optional[int] = None,
     experience_max: Optional[int] = None,
-    company_name: Optional[str] = None
+    company_name: Optional[str] = None,
+    assessment_requirements: Optional[str] = None,  # Global requirements
+    previous_question: Optional[str] = None  # ⭐ NEW - For regeneration (avoid repeating)
 ) -> List[Dict[str, Any]]:
     """
-    Generate Pseudocode questions - WITH LIGHT PERSONALIZATION.
+    Generate Pseudocode questions - WITH CONTEXT-AWARE PERSONALIZATION.
     
     Rules:
     - Generate a pseudocode-related question ONLY
@@ -594,24 +722,36 @@ async def _generate_pseudocode_questions(
     - Must be scenario-based, not trivial
     - DO NOT generate the answer
     - Answer will be evaluated by AI scoring model
-    - LIGHTLY PERSONALIZED based on experience level
+    - PERSONALIZED based on assessment requirements, experience level, role, and company
     
     Args:
         topic: Topic label
         difficulty: Difficulty level (Easy, Medium, Hard)
         count: Number of questions to generate
         experience_mode: Experience mode (corporate/college)
-        additional_requirements: Optional additional requirements
+        additional_requirements: Optional topic-specific requirements
         job_designation: Job role/designation (used for context framing)
         experience_min: Minimum years of experience required
         experience_max: Maximum years of experience required
         company_name: Company name for personalization (e.g., "Gisul")
+        assessment_requirements: Global assessment requirements (HIGHEST PRIORITY)
         
     Returns:
         List of PseudoCode question dictionaries with:
         - questionText: Scenario-based pseudocode question with sample input/output
     """
-    # Build light personalization context (for framing only)
+    # ⭐ BUILD PERSONALIZATION CONTEXT (PRIORITY ORDER)
+    context_parts = []
+    
+    # Priority 1: Assessment-level requirements
+    if assessment_requirements:
+        context_parts.append(f"**Assessment Context**: {assessment_requirements}")
+    
+    # Priority 2: Topic-level requirements
+    if additional_requirements:
+        context_parts.append(f"**Topic Requirements**: {additional_requirements}")
+    
+    # Build context intro for framing
     context_intro = ""
     if job_designation and company_name:
         context_intro = f"At {company_name}, you are a {job_designation} working on"
@@ -619,6 +759,9 @@ async def _generate_pseudocode_questions(
         context_intro = f"At {company_name}, you need to"
     elif job_designation:
         context_intro = f"You are a {job_designation} and need to"
+    
+    if context_intro:
+        context_parts.append(f"**Framing**: {context_intro}")
     
     # Determine complexity level
     complexity_hint = ""
@@ -631,6 +774,11 @@ async def _generate_pseudocode_questions(
             complexity_hint = "(Senior level: Complex algorithms, efficiency considerations)"
         else:
             complexity_hint = "(Lead level: System-level algorithms, scalability focus)"
+    
+    if complexity_hint:
+        context_parts.append(f"**Complexity**: {complexity_hint}")
+    
+    personalization_context = "\n".join(context_parts) if context_parts else ""
     
     # Use legacy implementation with context awareness
     if _legacy_generate_questions:

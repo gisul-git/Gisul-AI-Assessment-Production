@@ -200,7 +200,6 @@ export function SQLEditorContainer({
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const [editorHeight, setEditorHeight] = useState(400)
   const [activeTab, setActiveTab] = useState('code')
-  const [sidebarTab, setSidebarTab] = useState<'schema' | 'data'>('schema')
 
   useEffect(() => {
     const updateHeight = () => {
@@ -242,42 +241,31 @@ export function SQLEditorContainer({
       {/* Left Panel - Schema & Sample Data */}
       {(hasSchemas || hasSampleData) && (
         <div className="w-80 border-r border-slate-700 flex flex-col bg-slate-900/50">
-          {/* Sidebar Tabs */}
-          <div className="flex border-b border-slate-700">
-            <button
-              onClick={() => setSidebarTab('schema')}
-              className={`flex-1 px-4 py-2.5 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
-                sidebarTab === 'schema'
-                  ? 'bg-slate-800 text-blue-400 border-b-2 border-blue-400'
-                  : 'text-slate-400 hover:text-slate-300 hover:bg-slate-800/50'
-              }`}
-            >
-              <Table2 className="w-4 h-4" />
-              Schema
-            </button>
-            <button
-              onClick={() => setSidebarTab('data')}
-              className={`flex-1 px-4 py-2.5 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
-                sidebarTab === 'data'
-                  ? 'bg-slate-800 text-purple-400 border-b-2 border-purple-400'
-                  : 'text-slate-400 hover:text-slate-300 hover:bg-slate-800/50'
-              }`}
-            >
-              <Database className="w-4 h-4" />
-              Data
-            </button>
-          </div>
-          
-          {/* Sidebar Content */}
-          <div className="flex-1 overflow-y-auto p-4">
-            {sidebarTab === 'schema' && question.schemas && (
-              <SchemaDisplay schemas={question.schemas} />
+          {/* Sidebar Content - Schema and Data stacked vertically */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-6">
+            {/* Schema Section */}
+            {hasSchemas && question.schemas && (
+              <div>
+                <div className="flex items-center gap-2 mb-3 px-2">
+                  <Table2 className="w-4 h-4 text-blue-400" />
+                  <h3 className="text-sm font-semibold text-blue-400">Schema</h3>
+                </div>
+                <SchemaDisplay schemas={question.schemas} />
+              </div>
             )}
-            {sidebarTab === 'data' && question.sample_data && (
-              <SampleDataDisplay 
-                sampleData={question.sample_data} 
-                schemas={question.schemas}
-              />
+            
+            {/* Data Section */}
+            {hasSampleData && question.sample_data && (
+              <div>
+                <div className="flex items-center gap-2 mb-3 px-2">
+                  <Database className="w-4 h-4 text-purple-400" />
+                  <h3 className="text-sm font-semibold text-purple-400">Data</h3>
+                </div>
+                <SampleDataDisplay 
+                  sampleData={question.sample_data} 
+                  schemas={question.schemas}
+                />
+              </div>
             )}
           </div>
         </div>

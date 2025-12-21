@@ -8,8 +8,28 @@ import dsaApi from '../../../lib/dsa/api'
 import { Clock, Eye, EyeOff, Users, Mail, Edit, Upload, List } from 'lucide-react'
 import Link from 'next/link'
 // Helper function to format dates
-const formatDate = (dateString: string, formatStr: string) => {
-  const date = new Date(dateString)
+// The backend sends UTC datetimes, so we need to ensure proper UTC->local conversion
+const formatDate = (dateString: string | null, formatStr: string): string => {
+  if (!dateString) return ''
+  
+  // Ensure the ISO string is treated as UTC if it doesn't have timezone info
+  let normalizedIso = dateString
+  // If the string doesn't end with Z or have timezone offset, assume it's UTC and add Z
+  if (!normalizedIso.endsWith('Z') && !normalizedIso.match(/[+-]\d{2}:\d{2}$/)) {
+    // If it's just YYYY-MM-DDTHH:mm or YYYY-MM-DDTHH:mm:ss, add Z to indicate UTC
+    if (normalizedIso.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?$/)) {
+      normalizedIso = normalizedIso + 'Z'
+    }
+  }
+  
+  const date = new Date(normalizedIso)
+  if (isNaN(date.getTime())) {
+    console.warn('Invalid date string:', dateString)
+    return ''
+  }
+  
+  // getMonth(), getDate(), getHours(), etc. return LOCAL timezone values
+  // This is correct since we want to display local time to the user
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
   const month = months[date.getMonth()]
   const day = date.getDate()
@@ -29,13 +49,15 @@ interface Test {
   description: string
   duration_minutes: number
   start_time: string
-  end_time: string
+  end_time: string | null
   is_active: boolean
   is_published: boolean
   invited_users: string[]
   question_ids?: string[]
   test_token?: string
   pausedAt?: string | null
+  examMode?: "strict" | "flexible"
+  schedule?: { startTime?: string; endTime?: string; duration?: number } | null
 }
 
 export default function TestsListPage() {
@@ -46,8 +68,12 @@ export default function TestsListPage() {
 
   const fetchTests = async () => {
     try {
+      // Add cache-busting parameter to ensure fresh data
       const response = await dsaApi.get('/tests/', {
-        params: { active_only: false }
+        params: { 
+          active_only: false,
+          _t: Date.now() // Cache busting
+        }
       })
       setTests(response.data)
     } catch (error) {
@@ -64,14 +90,17 @@ export default function TestsListPage() {
   // Refresh when query parameter changes (e.g., returning from edit page)
   useEffect(() => {
     if (router.query.refreshed === 'true') {
-      fetchTests()
+      // Force a fresh fetch of tests with a small delay to ensure backend has processed
+      setTimeout(() => {
+        fetchTests()
+      }, 100)
       // Remove refreshed=true but preserve testId filter (if present)
       const testId = router.query.testId
       const nextQuery: Record<string, any> = {}
       if (testId) nextQuery.testId = testId
       router.replace({ pathname: '/dsa/tests', query: nextQuery }, undefined, { shallow: true })
     }
-  }, [router.query.refreshed])
+  }, [router.query.refreshed, router.query.testId])
 
   const filteredTests = (() => {
     const q = router.query.testId
@@ -202,11 +231,20 @@ export default function TestsListPage() {
                           {test.duration_minutes} minutes
                         </div>
                         <div>
-                          Start: {formatDate(test.start_time, 'MMM dd, yyyy HH:mm')}
+                          Start: {formatDate(test.schedule?.startTime || test.start_time, 'MMM dd, yyyy HH:mm')}
                         </div>
-                        <div>
-                          End: {formatDate(test.end_time, 'MMM dd, yyyy HH:mm')}
-                        </div>
+                        {/* Only show End time for Flexible Window tests */}
+                        {test.examMode === "flexible" && (test.schedule?.endTime || test.end_time) ? (
+                          <div>
+                            End: {formatDate(test.schedule?.endTime || test.end_time, 'MMM dd, yyyy HH:mm')}
+                          </div>
+                        ) : null}
+                        {/* For Fixed Window (strict), show duration instead */}
+                        {test.examMode === "strict" ? (
+                          <div className="text-xs text-muted-foreground">
+                            (Auto-ends after {test.duration_minutes} minutes)
+                          </div>
+                        ) : null}
                         <span
                           className={`px-2 py-1 rounded text-xs ${
                             test.is_active
@@ -345,8 +383,8 @@ export default function TestsListPage() {
             }
           }}
         >
-          <Card className="w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-            <CardContent className="p-6">
+          <Card className="w-full max-w-md" onClick={(e) => e.stopPropagation()} style={{ backgroundColor: '#ffffff' }}>
+            <CardContent className="p-6" style={{ backgroundColor: '#ffffff' }}>
               <h3 className="text-lg font-semibold mb-4">Add Candidate</h3>
               
               {/* CSV Upload Section */}

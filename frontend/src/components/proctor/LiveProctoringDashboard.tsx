@@ -433,6 +433,31 @@ export function LiveProctoringDashboard({
 
   // Convert Map to array for rendering
   const streamsArray = Array.from(candidateStreams.values());
+  
+  // Debug logging
+  useEffect(() => {
+    streamsArray.forEach(s => {
+      console.log(`[LiveProctoringDashboard] Candidate ${s.sessionId}:`, {
+        candidateId: s.candidateId,
+        status: s.status,
+        hasWebcam: !!s.webcamStream,
+        hasScreen: !!s.screenStream,
+        webcamActive: s.webcamStream?.active,
+        screenActive: s.screenStream?.active,
+        webcamTracks: s.webcamStream?.getVideoTracks().length || 0,
+        screenTracks: s.screenStream?.getVideoTracks().length || 0,
+        webcamStreamId: s.webcamStream?.id,
+        screenStreamId: s.screenStream?.id,
+        webcamStreamReadyState: s.webcamStream?.getVideoTracks()[0]?.readyState,
+        screenStreamReadyState: s.screenStream?.getVideoTracks()[0]?.readyState,
+      });
+    });
+    console.log('[LiveProctoringDashboard] Summary:', {
+      activeCandidatesCount: activeCandidates.length,
+      candidateStreamsSize: candidateStreams.size,
+      streamsArrayLength: streamsArray.length,
+    });
+  }, [activeCandidates, candidateStreams, streamsArray]);
 
   // Handle expand toggle
   const handleExpandToggle = (sessionId: string) => {

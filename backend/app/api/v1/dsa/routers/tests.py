@@ -143,35 +143,85 @@ async def create_test(
     # Validate exam window rules
     if exam_mode not in ("strict", "flexible"):
         raise HTTPException(status_code=400, detail="Invalid examMode. Must be 'strict' or 'flexible'.")
-    if not start_dt or not end_dt:
-        raise HTTPException(status_code=400, detail="Start time and end time are required.")
-    if start_dt >= end_dt:
-        raise HTTPException(status_code=400, detail="End time must be after start time.")
+    
+    if not start_dt:
+        raise HTTPException(status_code=400, detail="Start time is required.")
+    
+    # For Fixed Window (strict): end_time is optional, will be auto-calculated
+    # For Flexible Window: end_time is required
     if exam_mode == "flexible":
+        if not end_dt:
+            raise HTTPException(status_code=400, detail="End time is required for flexible exam mode.")
+        if start_dt >= end_dt:
+            raise HTTPException(status_code=400, detail="End time must be after start time.")
         if not duration_minutes or int(duration_minutes) <= 0:
             raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
 
-    # For strict mode, duration in schedule is null; but we keep legacy duration_minutes for compatibility:
-    # - GLOBAL timer: derive from window length
-    # - PER_QUESTION: duration_minutes may be overridden later by per-question sum
+    # Build schedule payload (will be updated below for strict mode after calculating total_duration)
     schedule_payload = {
         "startTime": start_dt,
-        "endTime": end_dt,
+        "endTime": end_dt if exam_mode == "flexible" else None,  # Will be calculated for strict mode
         "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
     }
 
     test_dict = test.model_dump()
     test_dict["examMode"] = exam_mode
+    # schedule_payload will be updated below for strict mode after calculating total_duration
     test_dict["schedule"] = schedule_payload
     # Ensure legacy fields are set (backward compatible)
     test_dict["start_time"] = start_dt
-    test_dict["end_time"] = end_dt
-    if test.timer_mode == "GLOBAL":
-        if exam_mode == "strict":
-            window_minutes = int((end_dt - start_dt).total_seconds() // 60)
-            test_dict["duration_minutes"] = max(window_minutes, 1)
-        else:
-            test_dict["duration_minutes"] = int(duration_minutes)
+    # end_time will be set below for strict mode, or use provided end_dt for flexible
+    if exam_mode == "flexible":
+        test_dict["end_time"] = end_dt
+
+    # -------------------------------
+    # Timer configuration for DSA (GLOBAL / PER_QUESTION)
+    # -------------------------------
+    timer_mode = test_dict.get("timer_mode", "GLOBAL")
+    if timer_mode not in ("GLOBAL", "PER_QUESTION"):
+        raise HTTPException(status_code=400, detail="Invalid timer_mode. Must be 'GLOBAL' or 'PER_QUESTION'.")
+
+    # Calculate total duration based on timer mode
+    if timer_mode == "PER_QUESTION":
+        qt = test_dict.get("question_timings") or []
+        if not qt:
+            raise HTTPException(status_code=400, detail="question_timings is required for PER_QUESTION timer_mode.")
+        total_duration_minutes = sum(int(item.get("duration_minutes", 0) or 0) for item in qt)
+        if total_duration_minutes < 1:
+            raise HTTPException(status_code=400, detail="Total question timings must be at least 1 minute.")
+        test_dict["duration_minutes"] = total_duration_minutes
+        if exam_mode == "flexible":
+            test_dict["schedule"]["duration"] = total_duration_minutes
+    else:
+        # GLOBAL timer
+        if not duration_minutes or int(duration_minutes) <= 0:
+            raise HTTPException(status_code=400, detail="Duration (minutes) is required when using a single timer for the entire test.")
+        total_duration_minutes = int(duration_minutes)
+        test_dict["duration_minutes"] = total_duration_minutes
+
+    # -------------------------------
+    # For FLEXIBLE WINDOW: Validate that window duration >= test duration
+    # -------------------------------
+    if exam_mode == "flexible":
+        # Calculate window duration in minutes
+        window_duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
+        if window_duration_minutes < total_duration_minutes:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Flexible window duration ({window_duration_minutes} minutes) must be at least as long as the test duration ({total_duration_minutes} minutes)."
+            )
+
+    # -------------------------------
+    # For FIXED WINDOW (strict): Auto-calculate end_time from start_time + total_duration
+    # -------------------------------
+    if exam_mode == "strict":
+        # Auto-calculate end_time: start_time + total_duration_minutes
+        from datetime import timedelta
+        end_dt = start_dt + timedelta(minutes=total_duration_minutes)
+        # Update schedule payload with calculated end_time
+        schedule_payload["endTime"] = end_dt
+        test_dict["schedule"] = schedule_payload
+        test_dict["end_time"] = end_dt
     # Store the actual user ID who created the test - CRITICAL: Must be string, no whitespace
     # user_id is already normalized above
     test_dict["created_by"] = user_id
@@ -238,6 +288,18 @@ async def get_tests_no_slash(
 ):
     """Redirect handler for GET /api/dsa/tests (without trailing slash)"""
     return await get_tests(active_only, current_user)
+
+def _convert_question_timings_to_limits(question_timings: List[Dict]) -> Dict[str, int]:
+    """Convert question_timings array to question_time_limits dict for backward compatibility"""
+    if not question_timings:
+        return {}
+    limits = {}
+    for timing in question_timings:
+        qid = timing.get("question_id")
+        duration = timing.get("duration_minutes", 0)
+        if qid:
+            limits[str(qid)] = int(duration)
+    return limits
 
 @router.get("/", response_model=List[dict])
 async def get_tests(
@@ -459,19 +521,47 @@ async def get_tests(
     result = []
     for test in tests:
         # Convert ObjectId to string and ensure all fields are JSON serializable
+        # Helper function to format datetime to ISO string with Z suffix (UTC indicator)
+        def format_datetime_iso(dt_val):
+            """Format datetime to ISO string with Z suffix if it's a datetime object"""
+            if not dt_val:
+                return None
+            if isinstance(dt_val, datetime):
+                iso_str = dt_val.isoformat()
+                # Add Z if not already present (indicates UTC)
+                # Check if it already has timezone info
+                if not iso_str.endswith('Z') and '+' not in iso_str[-6:] and (len(iso_str) < 10 or iso_str[10] != '+'):
+                    return iso_str + 'Z'
+                return iso_str
+            return str(dt_val) if dt_val else None
+        
+        # Format schedule datetimes if schedule exists
+        schedule_data = test.get("schedule")
+        formatted_schedule = None
+        if schedule_data:
+            formatted_schedule = {}
+            if "startTime" in schedule_data and schedule_data["startTime"]:
+                formatted_schedule["startTime"] = format_datetime_iso(schedule_data["startTime"])
+            if "endTime" in schedule_data and schedule_data["endTime"]:
+                formatted_schedule["endTime"] = format_datetime_iso(schedule_data["endTime"])
+            if "duration" in schedule_data:
+                formatted_schedule["duration"] = schedule_data["duration"]
+        
         test_dict = {
             "id": str(test["_id"]),
             "title": test.get("title", ""),
             "description": test.get("description", ""),
             "duration_minutes": test.get("duration_minutes", 0),
-            "start_time": test.get("start_time").isoformat() if test.get("start_time") else None,
-            "end_time": test.get("end_time").isoformat() if test.get("end_time") else None,
+            "start_time": format_datetime_iso(test.get("start_time")),
+            "end_time": format_datetime_iso(test.get("end_time")),
             "is_active": test.get("is_active", False),
             "is_published": test.get("is_published", False),
             "invited_users": test.get("invited_users", []),
             "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in test.get("question_ids", [])],
             "test_token": test.get("test_token"),
             "created_by": str(test.get("created_by", "")),  # CRITICAL: Include for client-side verification
+            "examMode": test.get("examMode", "strict"),  # Include examMode for frontend display logic
+            "schedule": formatted_schedule if formatted_schedule else schedule_data,  # Include formatted schedule
         }
         if test.get("pausedAt"):
             paused_val = test.get("pausedAt")
@@ -577,20 +667,39 @@ async def get_test(
     logger.info(f"[get_test] Test {test_id} access granted to user {user_id}")
     
     # Convert ObjectId to string and ensure all fields are JSON serializable
+    # Ensure ISO format includes timezone (Z for UTC) so frontend can properly parse as UTC
+    start_time_val = test.get("start_time")
+    end_time_val = test.get("end_time")
+    
+    def format_datetime_iso(dt_val):
+        """Format datetime to ISO string with Z suffix if it's a datetime object"""
+        if not dt_val:
+            return None
+        if isinstance(dt_val, datetime):
+            iso_str = dt_val.isoformat()
+            # Add Z if not already present (indicates UTC)
+            if not iso_str.endswith('Z') and '+' not in iso_str and '-' not in iso_str[-6:]:
+                return iso_str + 'Z'
+            return iso_str
+        return str(dt_val) if dt_val else None
+    
     test_dict = {
         "id": str(test["_id"]),
         "title": test.get("title", ""),
         "description": test.get("description", ""),
         "duration_minutes": test.get("duration_minutes", 0),
-        "start_time": test.get("start_time").isoformat() if test.get("start_time") else None,
-        "end_time": test.get("end_time").isoformat() if test.get("end_time") else None,
+        "start_time": format_datetime_iso(start_time_val),
+        "end_time": format_datetime_iso(end_time_val),
         "examMode": test.get("examMode", "strict"),
         "schedule": test.get("schedule"),
         "is_active": test.get("is_active", False),
         "is_published": test.get("is_published", False),
         "invited_users": test.get("invited_users", []),
         "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in test.get("question_ids", [])],
-        "question_time_limits": test.get("question_time_limits"),
+        "timer_mode": test.get("timer_mode", "GLOBAL"),
+        "question_timings": test.get("question_timings", []),
+        # Legacy field for backward compatibility (convert question_timings to old format)
+        "question_time_limits": _convert_question_timings_to_limits(test.get("question_timings", [])) if test.get("question_timings") else test.get("question_time_limits"),
         "test_token": test.get("test_token"),
     }
     # Include invitationTemplate if it exists
@@ -682,6 +791,12 @@ async def update_test(
     if not ObjectId.is_valid(test_id):
         raise HTTPException(status_code=400, detail="Invalid test ID")
     
+    try:
+        # Log the received test data for debugging
+        logger.info(f"[update_test] Received test data: examMode={getattr(test, 'examMode', None)}, timer_mode={getattr(test, 'timer_mode', None)}")
+    except Exception as e:
+        logger.warning(f"[update_test] Could not log test data: {e}")
+    
     # Check if test exists and belongs to the current user
     user_id = current_user.get("id") or current_user.get("_id")
     if not user_id:
@@ -731,20 +846,52 @@ async def update_test(
 
     exam_mode = getattr(test, "examMode", None) or existing_test.get("examMode") or "strict"
     schedule_obj = getattr(test, "schedule", None)
-    start_dt = _coalesce(
-        getattr(schedule_obj, "startTime", None) if schedule_obj else None,
-        getattr(test, "startTime", None),
-        getattr(test, "start_time", None),
-        existing_test.get("start_time"),
-        (existing_test.get("schedule") or {}).get("startTime"),
+    
+    # Helper to parse datetime from various formats
+    def _parse_datetime(val):
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val
+        if isinstance(val, str):
+            try:
+                # Try parsing ISO format
+                return datetime.fromisoformat(val.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                try:
+                    # Try parsing with dateutil if available
+                    from dateutil import parser
+                    return parser.parse(val)
+                except (ImportError, ValueError):
+                    logger.warning(f"Could not parse datetime: {val}")
+                    return None
+        return None
+    
+    # Prioritize new values from the request over existing values
+    # First, try to get new values from the request
+    new_start_dt = _coalesce(
+        _parse_datetime(getattr(schedule_obj, "startTime", None) if schedule_obj else None),
+        _parse_datetime(getattr(test, "startTime", None)),
+        _parse_datetime(getattr(test, "start_time", None)),
     )
-    end_dt = _coalesce(
-        getattr(schedule_obj, "endTime", None) if schedule_obj else None,
-        getattr(test, "endTime", None),
-        getattr(test, "end_time", None),
-        existing_test.get("end_time"),
-        (existing_test.get("schedule") or {}).get("endTime"),
+    # Use new value if provided, otherwise fall back to existing
+    start_dt = new_start_dt if new_start_dt is not None else _coalesce(
+        _parse_datetime(existing_test.get("start_time")),
+        _parse_datetime((existing_test.get("schedule") or {}).get("startTime")),
     )
+    
+    new_end_dt = _coalesce(
+        _parse_datetime(getattr(schedule_obj, "endTime", None) if schedule_obj else None),
+        _parse_datetime(getattr(test, "endTime", None)),
+        _parse_datetime(getattr(test, "end_time", None)),
+    )
+    # Use new value if provided, otherwise fall back to existing
+    end_dt = new_end_dt if new_end_dt is not None else _coalesce(
+        _parse_datetime(existing_test.get("end_time")),
+        _parse_datetime((existing_test.get("schedule") or {}).get("endTime")),
+    )
+    
+    logger.info(f"[update_test] start_dt: {start_dt} (new: {new_start_dt}, existing: {existing_test.get('start_time')})")
     duration_minutes = _coalesce(
         getattr(schedule_obj, "duration", None) if schedule_obj else None,
         getattr(test, "duration", None),
@@ -755,13 +902,27 @@ async def update_test(
 
     if exam_mode not in ("strict", "flexible"):
         raise HTTPException(status_code=400, detail="Invalid examMode. Must be 'strict' or 'flexible'.")
-    if not start_dt or not end_dt:
-        raise HTTPException(status_code=400, detail="Start time and end time are required.")
-    if start_dt >= end_dt:
-        raise HTTPException(status_code=400, detail="End time must be after start time.")
+    
+    # For Fixed Window (strict), end_time is auto-calculated, so it's optional in the request
+    # For Flexible Window, end_time is required
     if exam_mode == "flexible":
+        if not end_dt:
+            raise HTTPException(status_code=400, detail="End time is required for flexible exam mode.")
+        if not start_dt:
+            raise HTTPException(status_code=400, detail="Start time is required.")
+        if start_dt >= end_dt:
+            raise HTTPException(status_code=400, detail="End time must be after start time.")
         if not duration_minutes or int(duration_minutes) <= 0:
             raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
+    else:
+        # Fixed Window (strict) - start_time is required, end_time will be auto-calculated
+        if not start_dt:
+            raise HTTPException(status_code=400, detail="Start time is required.")
+        if not duration_minutes or int(duration_minutes) <= 0:
+            raise HTTPException(status_code=400, detail="Duration is required for fixed window mode.")
+        # Auto-calculate end_time for Fixed Window: end_time = start_time + duration_minutes
+        from datetime import timedelta
+        end_dt = start_dt + timedelta(minutes=int(duration_minutes))
 
     schedule_payload = {
         "startTime": start_dt,
@@ -770,17 +931,43 @@ async def update_test(
     }
 
     # Prepare update data
-    test_dict = test.model_dump()
+    test_dict = test.model_dump(exclude_unset=True)  # Only include fields that were explicitly set
     test_dict["examMode"] = exam_mode
     test_dict["schedule"] = schedule_payload
+    # Always use the parsed start_dt and end_dt (which prioritize new values from request)
+    # These MUST be set to ensure the update happens
     test_dict["start_time"] = start_dt
     test_dict["end_time"] = end_dt
-    if test.timer_mode == "GLOBAL":
-        if exam_mode == "strict":
-            window_minutes = int((end_dt - start_dt).total_seconds() // 60)
-            test_dict["duration_minutes"] = max(window_minutes, 1)
+    test_dict["updated_at"] = datetime.utcnow()  # Update timestamp
+    
+    # Handle timer mode and duration
+    if test.timer_mode == "PER_QUESTION":
+        if test.question_timings:
+            total_duration = sum(qt.duration_minutes for qt in test.question_timings)
+            test_dict["duration_minutes"] = total_duration
+            test_dict["question_timings"] = [{"question_id": qt.question_id, "duration_minutes": qt.duration_minutes} for qt in test.question_timings]
         else:
-            test_dict["duration_minutes"] = int(duration_minutes)
+            # Keep existing if not provided
+            test_dict["duration_minutes"] = existing_test.get("duration_minutes", 60)
+            test_dict["question_timings"] = existing_test.get("question_timings")
+    else:
+        # GLOBAL mode - use provided duration
+        test_dict["duration_minutes"] = int(duration_minutes)
+        test_dict["question_timings"] = None
+
+    # -------------------------------
+    # For FLEXIBLE WINDOW: Validate that window duration >= test duration
+    # -------------------------------
+    if exam_mode == "flexible":
+        # Calculate window duration in minutes
+        window_duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
+        test_duration_minutes = test_dict["duration_minutes"]
+        if window_duration_minutes < test_duration_minutes:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Flexible window duration ({window_duration_minutes} minutes) must be at least as long as the test duration ({test_duration_minutes} minutes)."
+            )
+    
     # Preserve existing fields that shouldn't be updated
     test_dict["is_active"] = existing_test.get("is_active", True)
     test_dict["is_published"] = existing_test.get("is_published", False)
@@ -840,8 +1027,46 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     if not test.get("is_published", False):
         raise HTTPException(status_code=403, detail="Test is not published")
     
-    # For test-taking platform, allow taking published tests regardless of time window
-    # The time window is informational, not restrictive
+    # For Fixed Window (strict) in DSA: Check pre-check window (15 min before) and start time
+    exam_mode = test.get("examMode", "strict")
+    schedule = test.get("schedule") or {}
+    start_time = schedule.get("startTime") or test.get("start_time") or test.get("startTime")
+    end_time = schedule.get("endTime") or test.get("end_time") or test.get("endTime")
+
+    if exam_mode == "strict" and start_time:
+        now = datetime.utcnow()
+        from datetime import timedelta
+        
+        # Get total test duration (already calculated and stored in duration_minutes)
+        timer_mode = test.get("timer_mode", "GLOBAL")
+        total_duration_minutes = int(test.get("duration_minutes", 0) or 0)
+        
+        if total_duration_minutes <= 0:
+            raise HTTPException(status_code=400, detail="Test duration is not configured properly.")
+
+        # Pre-check window: 15 minutes before start time
+        pre_check_start = start_time - timedelta(minutes=15)
+        
+        # Check if too early (before pre-check window)
+        if now < pre_check_start:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Test not available yet. You can enter 15 minutes before the start time ({start_time.strftime('%Y-%m-%d %H:%M')})."
+            )
+        
+        # Check if in pre-check window (can enter but cannot start test yet)
+        if pre_check_start <= now < start_time:
+            # Return pre-check mode - candidate can do pre-checks but cannot start test
+            return {
+                "precheck_mode": True,
+                "start_time": start_time.isoformat() if isinstance(start_time, datetime) else start_time,
+                "message": f"Test will start at {start_time.strftime('%Y-%m-%d %H:%M')}. Please complete pre-checks and wait.",
+                "can_start": False
+            }
+        
+        # After start time: allow actual test start
+        # Test will auto-end after total_duration_minutes from when they start
+    
     # Only check if test is active flag is set
     if not test.get("is_active", True):
         raise HTTPException(status_code=400, detail="Test is not active")
@@ -1006,8 +1231,8 @@ async def get_test_question(
         if not candidate:
             raise HTTPException(status_code=403, detail="User not authorized for this test")
     
-    # Check if test submission is completed
-    if test_submission.get("is_completed", False):
+    # Check if test submission is completed (only if a submission exists)
+    if test_submission is not None and test_submission.get("is_completed", False):
         raise HTTPException(status_code=403, detail="Test already submitted")
     
     # Get the question
@@ -1197,19 +1422,35 @@ async def process_ai_feedback_background(
                 "is_final_submission": True
             }).to_list(length=100)
             
-            scored = [
-                s.get("score", 0) for s in all_submissions
-                if s.get("ai_feedback") is not None or s.get("status") == "no_code_written"
-            ]
+            # Get scores for all questions (use 0 if feedback not ready yet)
             question_count = max(len(test_submission.get("submissions") or []), 1)
-            # submissions array stores submission IDs, one per question; average keeps overall out of 100
-            new_total_score = int(round(sum(scored) / question_count))
+            scored = []
+            for sub in all_submissions:
+                if sub.get("ai_feedback") is not None or sub.get("status") == "no_code_written":
+                    scored.append(sub.get("score", 0))
+                else:
+                    # If feedback not ready, use 0 as placeholder
+                    scored.append(0)
+            
+            # Ensure we have scores for all questions
+            while len(scored) < question_count:
+                scored.append(0)
+            
+            # Calculate total score: sum all question scores (each question is out of 100)
+            # Then normalize to 100 total by dividing by question count
+            # Example: 2 questions, each 100 = 200 total, normalized = 100
+            # Example: 2 questions, one 80 one 60 = 140 total, normalized = 70
+            total_sum = sum(scored)
+            new_total_score = int(round(total_sum / question_count))
+            
+            # Ensure score is between 0 and 100
+            new_total_score = max(0, min(100, new_total_score))
             
             await db.test_submissions.update_one(
                 {"test_id": test_id, "user_id": user_id},
                 {"$set": {"score": new_total_score}}
             )
-            logger.info(f"Updated test submission total score to {new_total_score}")
+            logger.info(f"Updated test submission total score to {new_total_score} (sum={total_sum}, questions={question_count})")
         
         logger.info(f"Completed AI feedback generation for submission {submission_id}")
     except Exception as e:
@@ -1218,6 +1459,401 @@ async def process_ai_feedback_background(
         await db.submissions.update_one(
             {"_id": ObjectId(submission_id)},
             {"$set": {"ai_feedback": {"error": str(e)}}}
+        )
+
+
+async def process_question_evaluation_background(
+    submission_id: str,
+    test_id: str,
+    user_id: str,
+    question_id: str,
+    source_code: str,
+    language: str,
+    question: Dict[str, Any]
+):
+    """Background task to evaluate test cases and generate AI feedback"""
+    db = get_database()
+    try:
+        logger.info(f"Starting background evaluation for submission {submission_id}")
+        
+        # Detect question type - handle None case
+        question_type_raw = question.get("question_type") or ""
+        question_type = question_type_raw.upper() if isinstance(question_type_raw, str) else ""
+        is_sql_question = question_type == "SQL"
+        
+        if is_sql_question:
+            from ..routers.assessment import (
+                build_sql_script,
+                execute_sql_with_judge0,
+                compare_sql_results
+            )
+            
+            # Get schemas and sample data
+            schemas = question.get("schemas", {})
+            sample_data = question.get("sample_data", {})
+            reference_query = question.get("reference_query")
+            evaluation = question.get("evaluation", {})
+            order_sensitive = evaluation.get("order_sensitive", False)
+            
+            if not schemas:
+                await db.submissions.update_one(
+                    {"_id": ObjectId(submission_id)},
+                    {"$set": {
+                        "status": "error",
+                        "test_results": [],
+                        "passed_testcases": 0,
+                        "total_testcases": 0,
+                        "ai_feedback": {"error": "Question has no table schemas defined"},
+                        "score": 0
+                    }}
+                )
+                return
+            
+            # Execute user's SQL query
+            user_sql_script = build_sql_script(
+                schemas=schemas,
+                sample_data=sample_data,
+                user_query=source_code
+            )
+            
+            user_result = await execute_sql_with_judge0(user_sql_script)
+            
+            if not user_result["success"]:
+                status = "syntax_error" if user_result.get("status_id") == 6 else "error"
+                message = user_result.get("stderr") or user_result.get("compile_output") or "SQL execution failed"
+                
+                all_test_results = [{
+                    "test_number": 1,
+                    "input": "",
+                    "expected_output": "",
+                    "user_output": "",
+                    "status": status,
+                    "status_id": user_result.get("status_id", 0),
+                    "passed": False,
+                    "stderr": message,
+                }]
+                
+                await db.submissions.update_one(
+                    {"_id": ObjectId(submission_id)},
+                    {"$set": {
+                        "status": status,
+                        "test_results": all_test_results,
+                        "public_results": [],
+                        "hidden_results_full": [],
+                        "passed_testcases": 0,
+                        "total_testcases": 1,
+                        "public_passed": 0,
+                        "public_total": 0,
+                        "hidden_passed": 0,
+                        "hidden_total": 1,
+                    }}
+                )
+                
+                # Schedule AI feedback in background (non-blocking)
+                asyncio.create_task(process_ai_feedback_background(
+                    submission_id=submission_id,
+                    test_id=test_id,
+                    user_id=user_id,
+                    question_id=question_id,
+                    source_code=source_code,
+                    language="sql",
+                    question_title=question.get("title", ""),
+                    question_description=question.get("description", ""),
+                    all_test_results=all_test_results,
+                    total_passed=0,
+                    total_tests=1,
+                    public_passed=0,
+                    public_total=0,
+                    hidden_passed=0,
+                    hidden_total=1,
+                    starter_code=question.get("starter_query")
+                ))
+                return
+            
+            user_output = user_result.get("stdout", "").strip()
+            
+            # Execute reference query and compare
+            passed = False
+            expected_output = None
+            if reference_query:
+                ref_sql_script = build_sql_script(
+                    schemas=schemas,
+                    sample_data=sample_data,
+                    user_query=reference_query
+                )
+                
+                ref_result = await execute_sql_with_judge0(ref_sql_script)
+                
+                if not ref_result["success"]:
+                    status = "error"
+                    message = "Reference query execution failed"
+                else:
+                    expected_output = ref_result.get("stdout", "").strip()
+                    passed = compare_sql_results(user_output, expected_output, order_sensitive)
+                    status = "accepted" if passed else "wrong_answer"
+                    message = "Query produces correct results!" if passed else "Query output does not match expected results"
+            else:
+                passed = user_result["success"]
+                status = "accepted" if passed else "error"
+                message = "Query executed successfully" if passed else "Query execution failed"
+            
+            # Format test results
+            all_test_results = [{
+                "test_number": 1,
+                "input": "",
+                "expected_output": expected_output or "",
+                "user_output": user_output,
+                "status": status,
+                "status_id": user_result.get("status_id", 3 if passed else 0),
+                "passed": passed,
+                "time": user_result.get("time"),
+                "memory": user_result.get("memory"),
+            }]
+            
+            public_results = all_test_results if passed else []
+            full_hidden_results = all_test_results
+            
+            # Update submission with test results
+            await db.submissions.update_one(
+                {"_id": ObjectId(submission_id)},
+                {"$set": {
+                    "status": status,
+                    "test_results": all_test_results,
+                    "public_results": public_results,
+                    "hidden_results_full": full_hidden_results,
+                    "passed_testcases": 1 if passed else 0,
+                    "total_testcases": 1,
+                    "public_passed": 1 if passed else 0,
+                    "public_total": 1 if passed else 0,
+                    "hidden_passed": 1 if passed else 0,
+                    "hidden_total": 1,
+                }}
+            )
+            
+            # Schedule AI feedback in background (non-blocking)
+            asyncio.create_task(process_ai_feedback_background(
+                submission_id=submission_id,
+                test_id=test_id,
+                user_id=user_id,
+                question_id=question_id,
+                source_code=source_code,
+                language="sql",
+                question_title=question.get("title", ""),
+                question_description=question.get("description", ""),
+                all_test_results=all_test_results,
+                total_passed=1 if passed else 0,
+                total_tests=1,
+                public_passed=1 if passed else 0,
+                public_total=1 if passed else 0,
+                hidden_passed=1 if passed else 0,
+                hidden_total=1,
+                starter_code=question.get("starter_query")
+            ))
+            return
+        
+        # Handle DSA coding questions
+        language_id = LANGUAGE_IDS.get(language.lower(), None)
+        if not language_id:
+            await db.submissions.update_one(
+                {"_id": ObjectId(submission_id)},
+                {"$set": {
+                    "status": "error",
+                    "test_results": [],
+                    "passed_testcases": 0,
+                    "total_testcases": 0,
+                    "ai_feedback": {"error": f"Unknown language: {language}"},
+                    "score": 0
+                }}
+            )
+            return
+        
+        # Prepare code for execution
+        prepared_code, prep_error, code_warnings = await prepare_code_for_execution(
+            source_code=source_code,
+            language_id=language_id,
+            question=question
+        )
+        
+        if prep_error:
+            await db.submissions.update_one(
+                {"_id": ObjectId(submission_id)},
+                {"$set": {
+                    "status": "compilation_error",
+                    "test_results": [],
+                    "passed_testcases": 0,
+                    "total_testcases": 0,
+                    "ai_feedback": {"error": prep_error},
+                    "score": 0
+                }}
+            )
+            return
+        
+        # Build test cases array
+        public_test_cases = []
+        hidden_test_cases = []
+        all_test_cases = []
+        
+        for i, tc in enumerate(question.get("public_testcases", [])):
+            tc_data = {
+                "id": f"public_{i}",
+                "stdin": tc.get("input", ""),
+                "expected_output": tc.get("expected_output", ""),
+                "is_hidden": False,
+                "points": tc.get("points", 1),
+            }
+            public_test_cases.append(tc_data)
+            all_test_cases.append(tc_data)
+        
+        for i, tc in enumerate(question.get("hidden_testcases", [])):
+            tc_data = {
+                "id": f"hidden_{i}",
+                "stdin": tc.get("input", ""),
+                "expected_output": tc.get("expected_output", ""),
+                "is_hidden": True,
+                "points": tc.get("points", 1),
+            }
+            hidden_test_cases.append(tc_data)
+            all_test_cases.append(tc_data)
+        
+        if not all_test_cases:
+            await db.submissions.update_one(
+                {"_id": ObjectId(submission_id)},
+                {"$set": {
+                    "status": "error",
+                    "test_results": [],
+                    "passed_testcases": 0,
+                    "total_testcases": 0,
+                    "ai_feedback": {"error": "No test cases for question"},
+                    "score": 0
+                }}
+            )
+            return
+        
+        # Run test cases
+        cpu_time_limit = 2.0
+        memory_limit = 128000
+        
+        results = await run_all_test_cases(
+            source_code=prepared_code,
+            language_id=language_id,
+            test_cases=all_test_cases,
+            cpu_time_limit=cpu_time_limit,
+            memory_limit=memory_limit,
+            stop_on_compilation_error=True,
+        )
+        
+        # Process results
+        all_results = results.get("results", [])
+        public_count = len(public_test_cases)
+        
+        public_results = []
+        for i in range(public_count):
+            if i < len(all_results):
+                public_results.append(format_public_result(all_results[i], i + 1))
+        
+        full_hidden_results = []
+        hidden_passed = 0
+        for i in range(public_count, len(all_results)):
+            hidden_index = i - public_count
+            result = all_results[i]
+            tc = hidden_test_cases[hidden_index]
+            full_hidden_results.append(format_hidden_result_for_admin(
+                result, hidden_index + 1, tc["stdin"], tc["expected_output"]
+            ))
+            if result.get("passed", False):
+                hidden_passed += 1
+        
+        public_passed = sum(1 for r in public_results if r.get("passed", False))
+        public_total = len(public_test_cases)
+        hidden_total = len(hidden_test_cases)
+        total_passed = public_passed + hidden_passed
+        total_tests = public_total + hidden_total
+        
+        # Determine status
+        if results.get("compilation_error"):
+            status = "compilation_error"
+        elif total_passed == total_tests:
+            status = "accepted"
+        elif total_passed > 0:
+            status = "partially_accepted"
+        else:
+            status = "wrong_answer"
+        
+        all_test_results = public_results + full_hidden_results
+        
+        # Get starter code
+        starter_code = None
+        starter_code_dict = question.get("starter_code", {})
+        if isinstance(starter_code_dict, dict):
+            starter_code = starter_code_dict.get(language) or starter_code_dict.get(language.lower())
+        
+        # Check if starter code only
+        # Pass test case info to avoid false positives when tests pass
+        is_starter_only = False
+        if starter_code:
+            is_starter_only = is_starter_code_only(source_code, starter_code, language, total_passed, total_tests)
+            if is_starter_only:
+                status = "no_code_written"
+        
+        # Update submission with test results
+        update_data = {
+            "status": status,
+            "test_results": all_test_results,
+            "public_results": public_results,
+            "hidden_results_full": full_hidden_results,
+            "passed_testcases": total_passed,
+            "total_testcases": total_tests,
+            "public_passed": public_passed,
+            "public_total": public_total,
+            "hidden_passed": hidden_passed,
+            "hidden_total": hidden_total,
+        }
+        
+        if is_starter_only:
+            update_data["score"] = 0
+            update_data["ai_feedback"] = {
+                "overall_score": 0,
+                "feedback_summary": "No code was written. You submitted only the starter code template. Please implement the solution to receive a score.",
+                "one_liner": "No code written | Starter code only",
+                "evaluation_note": "Starter code only - no implementation provided"
+            }
+        
+        await db.submissions.update_one(
+            {"_id": ObjectId(submission_id)},
+            {"$set": update_data}
+        )
+        
+        # Schedule AI feedback if not starter code only (non-blocking)
+        if not is_starter_only:
+            asyncio.create_task(process_ai_feedback_background(
+                submission_id=submission_id,
+                test_id=test_id,
+                user_id=user_id,
+                question_id=question_id,
+                source_code=source_code,
+                language=language,
+                question_title=question.get("title", ""),
+                question_description=question.get("description", ""),
+                all_test_results=all_test_results,
+                total_passed=total_passed,
+                total_tests=total_tests,
+                public_passed=public_passed,
+                public_total=public_total,
+                hidden_passed=hidden_passed,
+                hidden_total=hidden_total,
+                starter_code=starter_code
+            ))
+        
+        logger.info(f"Completed evaluation for submission {submission_id}")
+    except Exception as e:
+        logger.error(f"Error in background evaluation for submission {submission_id}: {e}")
+        await db.submissions.update_one(
+            {"_id": ObjectId(submission_id)},
+            {"$set": {
+                "status": "error",
+                "ai_feedback": {"error": str(e)},
+                "score": 0
+            }}
         )
 
 
@@ -1294,9 +1930,9 @@ async def final_submit_test(
     final_submissions = []
     total_score = 0
     
-    # Process questions in parallel to speed up submission
-    async def process_question_submission(q_sub):
-        """Process a single question submission"""
+    # Process questions - save immediately, evaluate in background
+    async def save_question_submission(q_sub):
+        """Save question submission immediately, evaluation happens in background"""
         question_id = q_sub.question_id
         if not ObjectId.is_valid(question_id):
             return None
@@ -1306,6 +1942,273 @@ async def final_submit_test(
         if not question:
             return None
         
+        # Detect question type - handle None case
+        question_type_raw = question.get("question_type") or ""
+        question_type = question_type_raw.upper() if isinstance(question_type_raw, str) else ""
+        is_sql_question = question_type == "SQL"
+        
+        # Create submission record immediately with "processing" status
+        # Test case execution and AI feedback will happen in background
+        submission_data = {
+            "user_id": user_id,
+            "question_id": question_id,
+            "test_id": test_id,
+            "language": q_sub.language if not is_sql_question else "sql",
+            "code": q_sub.code,
+            "status": "processing",  # Will be updated after test case execution
+            "test_results": [],
+            "public_results": [],
+            "hidden_results_full": [],
+            "passed_testcases": 0,
+            "total_testcases": 0,
+            "public_passed": 0,
+            "public_total": 0,
+            "hidden_passed": 0,
+            "hidden_total": 0,
+            "ai_feedback": None,  # Will be generated in background
+            "score": 0,  # Will be updated after AI feedback
+            "created_at": datetime.utcnow(),
+            "is_final_submission": True,
+        }
+        
+        # Save submission immediately
+        submission_result = await db.submissions.insert_one(submission_data)
+        submission_id = str(submission_result.inserted_id)
+        
+        # Schedule test case execution and AI feedback in background (non-blocking)
+        asyncio.create_task(process_question_evaluation_background(
+            submission_id=submission_id,
+            test_id=test_id,
+            user_id=user_id,
+            question_id=question_id,
+            source_code=q_sub.code,
+            language=q_sub.language if not is_sql_question else "sql",
+            question=question
+        ))
+        
+        logger.info(f"Saved submission {submission_id} immediately, scheduled evaluation in background")
+        return submission_id
+    
+    # Removed old code - using save_question_submission + process_question_evaluation_background instead
+        """Process a single question submission - OLD VERSION, kept for reference"""
+        question_id = q_sub.question_id
+        if not ObjectId.is_valid(question_id):
+            return None
+        
+        # Get question details
+        question = await db.questions.find_one({"_id": ObjectId(question_id)})
+        if not question:
+            return None
+        
+        # Detect question type - handle None case
+        question_type_raw = question.get("question_type") or ""
+        question_type = question_type_raw.upper() if isinstance(question_type_raw, str) else ""
+        is_sql_question = question_type == "SQL"
+        
+        # Handle SQL questions differently
+        if is_sql_question:
+            from ..routers.assessment import (
+                build_sql_script,
+                execute_sql_with_judge0,
+                compare_sql_results
+            )
+            
+            # Get schemas and sample data
+            schemas = question.get("schemas", {})
+            sample_data = question.get("sample_data", {})
+            reference_query = question.get("reference_query")
+            evaluation = question.get("evaluation", {})
+            order_sensitive = evaluation.get("order_sensitive", False)
+            
+            if not schemas:
+                logger.warning(f"SQL question {question_id} has no table schemas defined")
+                submission_data = {
+                    "user_id": user_id,
+                    "question_id": question_id,
+                    "test_id": test_id,
+                    "language": "sql",
+                    "code": q_sub.code,
+                    "status": "error",
+                    "test_results": [],
+                    "passed_testcases": 0,
+                    "total_testcases": 0,
+                    "ai_feedback": {"error": "Question has no table schemas defined"},
+                    "score": 0,
+                    "created_at": datetime.utcnow(),
+                    "is_final_submission": True,
+                }
+                submission_result = await db.submissions.insert_one(submission_data)
+                return str(submission_result.inserted_id)
+            
+            # Execute user's SQL query
+            user_sql_script = build_sql_script(
+                schemas=schemas,
+                sample_data=sample_data,
+                user_query=q_sub.code
+            )
+            
+            logger.info(f"Executing user SQL script for question {question_id}...")
+            user_result = await execute_sql_with_judge0(user_sql_script)
+            
+            # Check for execution errors
+            if not user_result["success"]:
+                status = "syntax_error" if user_result.get("status_id") == 6 else "error"
+                message = user_result.get("stderr") or user_result.get("compile_output") or "SQL execution failed"
+                
+                submission_data = {
+                    "user_id": user_id,
+                    "question_id": question_id,
+                    "test_id": test_id,
+                    "language": "sql",
+                    "code": q_sub.code,
+                    "status": status,
+                    "test_results": [{
+                        "test_number": 1,
+                        "input": "",
+                        "expected_output": "",
+                        "user_output": "",
+                        "status": status,
+                        "status_id": user_result.get("status_id", 0),
+                        "passed": False,
+                        "stderr": message,
+                    }],
+                    "public_results": [],
+                    "hidden_results_full": [],
+                    "passed_testcases": 0,
+                    "total_testcases": 1,
+                    "public_passed": 0,
+                    "public_total": 0,
+                    "hidden_passed": 0,
+                    "hidden_total": 1,
+                    "ai_feedback": None,
+                    "score": 0,
+                    "created_at": datetime.utcnow(),
+                    "is_final_submission": True,
+                }
+                submission_result = await db.submissions.insert_one(submission_data)
+                submission_id = str(submission_result.inserted_id)
+                
+                # Schedule AI feedback for SQL error
+                all_test_results = submission_data["test_results"]
+                background_tasks.add_task(
+                    process_ai_feedback_background,
+                    submission_id=submission_id,
+                    test_id=test_id,
+                    user_id=user_id,
+                    question_id=question_id,
+                    source_code=q_sub.code,
+                    language="sql",
+                    question_title=question.get("title", ""),
+                    question_description=question.get("description", ""),
+                    all_test_results=all_test_results,
+                    total_passed=0,
+                    total_tests=1,
+                    public_passed=0,
+                    public_total=0,
+                    hidden_passed=0,
+                    hidden_total=1,
+                    starter_code=question.get("starter_query")
+                )
+                return submission_id
+            
+            user_output = user_result.get("stdout", "").strip()
+            
+            # Execute reference query and compare
+            passed = False
+            expected_output = None
+            if reference_query:
+                ref_sql_script = build_sql_script(
+                    schemas=schemas,
+                    sample_data=sample_data,
+                    user_query=reference_query
+                )
+                
+                logger.info(f"Executing reference SQL script for question {question_id}...")
+                ref_result = await execute_sql_with_judge0(ref_sql_script)
+                
+                if not ref_result["success"]:
+                    logger.error(f"Reference query execution failed: {ref_result.get('stderr')}")
+                    # Still proceed with user's result, but mark as error
+                    status = "error"
+                    message = "Reference query execution failed"
+                else:
+                    expected_output = ref_result.get("stdout", "").strip()
+                    passed = compare_sql_results(user_output, expected_output, order_sensitive)
+                    status = "accepted" if passed else "wrong_answer"
+                    message = "Query produces correct results!" if passed else "Query output does not match expected results"
+            else:
+                # No reference query - just check if query executed successfully
+                passed = user_result["success"]
+                status = "accepted" if passed else "error"
+                message = "Query executed successfully" if passed else "Query execution failed"
+            
+            # Format test results for AI feedback
+            all_test_results = [{
+                "test_number": 1,
+                "input": "",
+                "expected_output": expected_output or "",
+                "user_output": user_output,
+                "status": status,
+                "status_id": user_result.get("status_id", 3 if passed else 0),
+                "passed": passed,
+                "time": user_result.get("time"),
+                "memory": user_result.get("memory"),
+            }]
+            
+            public_results = all_test_results if passed else []
+            full_hidden_results = all_test_results
+            
+            # Create submission record
+            submission_data = {
+                "user_id": user_id,
+                "question_id": question_id,
+                "test_id": test_id,
+                "language": "sql",
+                "code": q_sub.code,
+                "status": status,
+                "test_results": all_test_results,
+                "public_results": public_results,
+                "hidden_results_full": full_hidden_results,
+                "passed_testcases": 1 if passed else 0,
+                "total_testcases": 1,
+                "public_passed": 1 if passed else 0,
+                "public_total": 1 if passed else 0,
+                "hidden_passed": 1 if passed else 0,
+                "hidden_total": 1,
+                "ai_feedback": None,  # Will be generated in background
+                "score": 0,  # Will be updated in background
+                "created_at": datetime.utcnow(),
+                "is_final_submission": True,
+            }
+            
+            # Save submission immediately
+            submission_result = await db.submissions.insert_one(submission_data)
+            submission_id = str(submission_result.inserted_id)
+            
+            # Schedule AI feedback generation in background for SQL
+            background_tasks.add_task(
+                process_ai_feedback_background,
+                submission_id=submission_id,
+                test_id=test_id,
+                user_id=user_id,
+                question_id=question_id,
+                source_code=q_sub.code,
+                language="sql",
+                question_title=question.get("title", ""),
+                question_description=question.get("description", ""),
+                all_test_results=all_test_results,
+                total_passed=1 if passed else 0,
+                total_tests=1,
+                public_passed=1 if passed else 0,
+                public_total=1 if passed else 0,
+                hidden_passed=1 if passed else 0,
+                hidden_total=1,
+                starter_code=question.get("starter_query")
+            )
+            logger.info(f"Saved SQL submission {submission_id} and scheduled AI feedback generation in background")
+            return submission_id
+        
+        # Handle DSA coding questions (original logic)
         # Get language ID from language name
         language_id = LANGUAGE_IDS.get(q_sub.language.lower(), None)
         if not language_id:
@@ -1437,10 +2340,11 @@ async def final_submit_test(
         
         # Check if user submitted only starter code (no actual implementation)
         # If so, set score to 0 immediately without waiting for AI feedback
+        # Pass test case info to avoid false positives when tests pass
         initial_score = 0
         is_starter_only = False
         if starter_code:
-            is_starter_only = is_starter_code_only(q_sub.code, starter_code)
+            is_starter_only = is_starter_code_only(q_sub.code, starter_code, q_sub.language, total_passed, total_tests)
             if is_starter_only:
                 logger.info(f"User submitted only starter code for question {question_id} - setting score to 0")
                 initial_score = 0
@@ -1512,8 +2416,8 @@ async def final_submit_test(
         
         return submission_id
     
-    # Process all questions in parallel for faster execution
-    submission_tasks = [process_question_submission(q_sub) for q_sub in request.question_submissions]
+    # Save all submissions immediately (evaluation happens in background)
+    submission_tasks = [save_question_submission(q_sub) for q_sub in request.question_submissions]
     submission_ids = await asyncio.gather(*submission_tasks)
     final_submissions = [sid for sid in submission_ids if sid is not None]
     
@@ -1525,12 +2429,25 @@ async def final_submit_test(
             "_id": {"$in": [ObjectId(sid) for sid in final_submissions]}
         }).to_list(length=100)
         
-        scored = [
-            s.get("score", 0) for s in all_submissions
-            if s.get("ai_feedback") is not None or s.get("status") == "no_code_written"
-        ]
         question_count = max(len(request.question_submissions), 1)
-        initial_total_score = int(round(sum(scored) / question_count))
+        scored = []
+        for sub in all_submissions:
+            if sub.get("ai_feedback") is not None or sub.get("status") == "no_code_written":
+                scored.append(sub.get("score", 0))
+            else:
+                # If feedback not ready, use 0 as placeholder
+                scored.append(0)
+        
+        # Ensure we have scores for all questions
+        while len(scored) < question_count:
+            scored.append(0)
+        
+        # Calculate total score: sum all question scores, then normalize to 100
+        total_sum = sum(scored)
+        initial_total_score = int(round(total_sum / question_count))
+        
+        # Ensure score is between 0 and 100
+        initial_total_score = max(0, min(100, initial_total_score))
     
     # Update test submission with final data (without activity logs - will be added in background)
     update_data = {
@@ -2963,4 +3880,5 @@ async def delete_test(
         raise HTTPException(status_code=404, detail="Test not found")
     
     return {"message": "Test deleted successfully"}
+
 
