@@ -67,6 +67,60 @@ export function useLiveProctoring({
     [debugMode]
   );
 
+  // Heartbeat interval ref
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastPongTimeRef = useRef<number>(Date.now());
+
+  // Start heartbeat ping-pong to detect dead connections
+  const startHeartbeat = useCallback((ws: WebSocket) => {
+    // Clear any existing heartbeat
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+    }
+    if (heartbeatTimeoutRef.current) {
+      clearTimeout(heartbeatTimeoutRef.current);
+    }
+    
+    lastPongTimeRef.current = Date.now();
+    
+    // Send ping every 30 seconds
+    heartbeatIntervalRef.current = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: "ping" }));
+          log("Sent ping to backend");
+          
+          // Check if we received pong within 10 seconds (connection might be dead)
+          heartbeatTimeoutRef.current = setTimeout(() => {
+            const timeSinceLastPong = Date.now() - lastPongTimeRef.current;
+            if (timeSinceLastPong > 10000) {
+              console.warn(`[LiveProctoring] ⚠️ No pong received in 10s, connection may be dead. Reconnecting...`);
+              // Connection is dead, trigger reconnection
+              if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                ws.close(); // This will trigger onclose and auto-reconnect
+              }
+            }
+          }, 10000);
+        } catch (err) {
+          log("Error sending ping", err);
+        }
+      }
+    }, 30000); // 30 seconds
+  }, [log]);
+
+  // Stop heartbeat
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+    if (heartbeatTimeoutRef.current) {
+      clearTimeout(heartbeatTimeoutRef.current);
+      heartbeatTimeoutRef.current = null;
+    }
+  }, []);
+
   // Get webcam stream
   const getWebcamStream = useCallback(async (): Promise<MediaStream> => {
     try {
@@ -119,11 +173,17 @@ export function useLiveProctoring({
       const ws = new WebSocket(wsUrl);
       
       ws.onopen = () => {
+        // CRITICAL: Always log WebSocket connection in production
+        console.log(`[LiveProctoring] ✅ WebSocket connected to ${wsUrl}`);
         log("WebSocket connected");
+        // CRITICAL: Start heartbeat ping-pong to detect dead connections
+        startHeartbeat(ws);
         resolve(ws);
       };
       
       ws.onerror = (err) => {
+        // CRITICAL: Always log WebSocket errors in production
+        console.error(`[LiveProctoring] ❌ WebSocket error connecting to ${wsUrl}:`, err);
         log("WebSocket error", err);
         reject(new Error("WebSocket connection failed"));
       };
@@ -132,6 +192,17 @@ export function useLiveProctoring({
         try {
           const message = JSON.parse(event.data);
           log("Received WebSocket message", message.type);
+          
+          // Handle heartbeat pong (backend responds to our ping)
+          if (message.type === "pong") {
+            lastPongTimeRef.current = Date.now();
+            if (heartbeatTimeoutRef.current) {
+              clearTimeout(heartbeatTimeoutRef.current);
+              heartbeatTimeoutRef.current = null;
+            }
+            log("Received pong from backend (connection alive)");
+            return; // Don't process pong as regular message
+          }
           
           if (message.type === "answer") {
             // Admin sent answer (admin reconnected or new admin connected)
@@ -242,17 +313,23 @@ export function useLiveProctoring({
         }
       };
       
-      ws.onclose = () => {
-        log("WebSocket closed");
+      ws.onclose = (event) => {
+        // CRITICAL: Always log WebSocket close in production
+        console.log(`[LiveProctoring] ⚠️ WebSocket closed (code: ${event.code}, reason: ${event.reason || 'none'})`);
+        log("WebSocket closed", { code: event.code, reason: event.reason });
+        stopHeartbeat(); // Stop heartbeat when connection closes
         wsRef.current = null;
         
         // CRITICAL: Auto-reconnect if streaming (unless we're stopping)
         // This ensures continuous streaming even when admin is not watching
+        // Also reconnects automatically after backend restart
         if (isStreaming && !isStoppingRef.current && sessionIdRef.current) {
           if (reconnectAttemptsRef.current < maxReconnectAttempts) {
             reconnectAttemptsRef.current += 1;
             // Exponential backoff: 3s, 6s, 12s, 24s, etc. (capped at 30s)
             const delay = Math.min(3000 * Math.pow(2, reconnectAttemptsRef.current - 1), 30000);
+            // CRITICAL: Always log reconnection attempts in production
+            console.log(`[LiveProctoring] 🔄 Attempting WebSocket reconnect (attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts}) in ${delay}ms...`);
             log(`Attempting WebSocket reconnect (attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts}) in ${delay}ms...`);
             
             reconnectTimeoutRef.current = setTimeout(() => {
@@ -478,6 +555,8 @@ export function useLiveProctoring({
       });
       
       // 3. Create session (backend call ONCE)
+      // CRITICAL: Always log session creation in production
+      console.log(`[LiveProctoring] 📝 Creating live proctoring session for assessment ${assessmentId}, candidate ${candidateId}`);
       const response = await fetch(`${API_URL}/api/v1/proctor/live/start-session`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -488,6 +567,8 @@ export function useLiveProctoring({
       });
       
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[LiveProctoring] ❌ Failed to start session: ${response.status} ${response.statusText} - ${errorText}`);
         throw new Error(`Failed to start session: ${response.statusText}`);
       }
       
@@ -495,6 +576,8 @@ export function useLiveProctoring({
       const sessId = data.data.sessionId;
       sessionIdRef.current = sessId;
       setSessionId(sessId);
+      // CRITICAL: Always log session ID in production
+      console.log(`[LiveProctoring] ✅ Session created: ${sessId}`);
       log("Session created", sessId);
       
       // 4. Connect WebSocket
@@ -514,6 +597,7 @@ export function useLiveProctoring({
       onError?.(errorMsg);
       
       // Cleanup on error
+      stopHeartbeat();
       if (webcamStreamRef.current) {
         webcamStreamRef.current.getTracks().forEach(t => t.stop());
         webcamStreamRef.current = null;
@@ -529,7 +613,7 @@ export function useLiveProctoring({
     } finally {
       isStartingRef.current = false;
     }
-  }, [assessmentId, candidateId, isStreaming, getWebcamStream, getScreenStream, setupWebSocket, setupPeerConnection, log, onError]);
+  }, [assessmentId, candidateId, isStreaming, getWebcamStream, getScreenStream, setupWebSocket, setupPeerConnection, log, onError, stopHeartbeat]);
 
   // Stop streaming
   const stopStreaming = useCallback(async (): Promise<void> => {
@@ -567,7 +651,10 @@ export function useLiveProctoring({
       log("Error ending session", err);
     }
     
-    // 2. Close WebSocket
+    // 2. Stop heartbeat
+    stopHeartbeat();
+    
+    // 3. Close WebSocket
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
