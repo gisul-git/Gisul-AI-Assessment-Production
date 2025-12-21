@@ -18,7 +18,7 @@ export default function TestCompletedPage() {
           Test Submitted Successfully!
         </h1>
         <p style={{ color: "#94a3b8", marginBottom: "2rem", fontSize: "1.125rem", lineHeight: 1.6 }}>
-          Thank you for completing the test. Your responses have been recorded and submitted.
+          Thank you for completing the test. Your responses have been submitted successfully.
         </p>
         <div style={{
           backgroundColor: "#1e293b",
@@ -27,8 +27,12 @@ export default function TestCompletedPage() {
           padding: "1.5rem",
           marginBottom: "2rem"
         }}>
-          <p style={{ color: "#cbd5e1", fontSize: "0.875rem", margin: 0 }}>
-            You will be notified about your results via email once the test is evaluated.
+
+          <p style={{ color: "#cbd5e1", fontSize: "0.875rem", margin: 0, marginBottom: "0.5rem" }}>
+            Your test is being evaluated in the background.
+          </p>
+          <p style={{ color: "#94a3b8", fontSize: "0.875rem", margin: 0 }}>
+            You will be notified about your results via email once the evaluation is complete.
           </p>
         </div>
         <p style={{ color: "#64748b", fontSize: "0.875rem" }}>
