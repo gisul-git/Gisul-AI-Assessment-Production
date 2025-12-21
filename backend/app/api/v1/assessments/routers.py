@@ -3517,15 +3517,22 @@ async def generate_question_endpoint_v2(
         if topic.get("locked", False) and row.get("questions") and len(row.get("questions", [])) > 0:
             raise HTTPException(status_code=400, detail="Topic is locked and row already has questions")
         
+        # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
+        # The payload might have stale data if frontend state wasn't updated
+        question_type = row.get("questionType") or payload.questionType
+        difficulty = row.get("difficulty") or payload.difficulty
+        questions_count = row.get("questionsCount") or payload.questionsCount
+        can_use_judge0 = row.get("canUseJudge0", False) if (row.get("questionType") or payload.questionType) == "Coding" else False
+        
         # Validate required fields
-        if not payload.questionType:
+        if not question_type:
             raise HTTPException(status_code=400, detail="questionType is required")
-        if not payload.difficulty:
+        if not difficulty:
             raise HTTPException(status_code=400, detail="difficulty is required")
-        if not payload.questionsCount or payload.questionsCount < 1:
+        if not questions_count or questions_count < 1:
             raise HTTPException(status_code=400, detail="questionsCount must be at least 1")
         
-        logger.info(f"Generating {payload.questionsCount} {payload.questionType} question(s) for topic: {payload.topicLabel}, difficulty: {payload.difficulty}, canUseJudge0: {payload.canUseJudge0}")
+        logger.info(f"Generating {questions_count} {question_type} question(s) for topic: {payload.topicLabel}, difficulty: {difficulty}, canUseJudge0: {can_use_judge0} (using row.questionType from DB)")
         
         # Get coding language from assessment (fallback to python)
         coding_language = assessment.get("codingLanguage", "python")
@@ -3563,12 +3570,19 @@ async def generate_question_endpoint_v2(
         experience_max = assessment.get("experienceMax")
         company_name = company_context.get("company_name") if company_context else None
         
+        # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
+        # The payload might have stale data if frontend state wasn't updated
+        question_type = row.get("questionType") or payload.questionType
+        difficulty = row.get("difficulty") or payload.difficulty
+        questions_count = row.get("questionsCount") or payload.questionsCount
+        can_use_judge0 = row.get("canUseJudge0", False) if question_type == "Coding" else False
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
-            question_type=payload.questionType,
-            difficulty=payload.difficulty,
-            questions_count=payload.questionsCount,
-            can_use_judge0=payload.canUseJudge0,
+            question_type=question_type,  # ⭐ Use row's question type from DB
+            difficulty=difficulty,  # ⭐ Use row's difficulty from DB
+            questions_count=questions_count,  # ⭐ Use row's questions count from DB
+            can_use_judge0=can_use_judge0,  # ⭐ Use row's canUseJudge0 from DB
             coding_language=coding_language,
             additional_requirements=additional_requirements,
             experience_mode=experience_mode,
@@ -4797,6 +4811,80 @@ async def regenerate_topic_endpoint_v2(
         logger.error(f"Error regenerating topic: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to regenerate topic: {str(exc)}") from exc
 
+@router.post("/update-question-type")
+async def update_question_type(
+    payload: dict = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Update question type for a specific topic row.
+    """
+    try:
+        assessment_id = payload.get("assessmentId")
+        topic_id = payload.get("topicId")
+        row_id = payload.get("rowId")
+        new_question_type = payload.get("questionType")
+        new_difficulty = payload.get("difficulty", "Medium")
+        can_use_judge0 = payload.get("canUseJudge0", False)
+        
+        if not all([assessment_id, topic_id, row_id, new_question_type]):
+            raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        # Get assessment
+        assessment = await db.assessments.find_one({
+            "_id": to_object_id(assessment_id)
+        })
+        
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        # Verify user has access to this assessment
+        _check_assessment_access(assessment, current_user)
+        
+        # Update the specific row
+        topics_v2 = assessment.get("topics_v2", [])
+        row_updated = False
+        
+        for topic in topics_v2:
+            if topic.get("id") == topic_id:
+                for row in topic.get("questionRows", []):
+                    if row.get("rowId") == row_id:
+                        row["questionType"] = new_question_type
+                        row["difficulty"] = new_difficulty
+                        row["canUseJudge0"] = can_use_judge0
+                        row["status"] = "pending"
+                        row["questions"] = []
+                        row["locked"] = False
+                        row["userEdited"] = True  # ⭐ Mark that user explicitly set this type
+                        row_updated = True
+                        logger.info(f"✅ Updated {topic.get('label')} to {new_question_type} (userEdited=True)")
+                        break
+                if row_updated:
+                    topic["status"] = "pending"
+                    topic["locked"] = False  # Unlock topic to allow regeneration
+                    break
+        
+        if not row_updated:
+            raise HTTPException(status_code=404, detail="Row not found")
+        
+        # Save to database
+        await db.assessments.update_one(
+            {"_id": to_object_id(assessment_id)},
+            {"$set": {"topics_v2": topics_v2}}
+        )
+        
+        return success_response(
+            f"Updated to {new_question_type}",
+            {"topicId": topic_id, "rowId": row_id, "questionType": new_question_type}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating question type: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/generate-question")
 async def generate_question_endpoint_v2(
@@ -4854,15 +4942,22 @@ async def generate_question_endpoint_v2(
         if topic.get("locked", False) and row.get("questions") and len(row.get("questions", [])) > 0:
             raise HTTPException(status_code=400, detail="Topic is locked and row already has questions")
         
+        # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
+        # The payload might have stale data if frontend state wasn't updated
+        question_type = row.get("questionType") or payload.questionType
+        difficulty = row.get("difficulty") or payload.difficulty
+        questions_count = row.get("questionsCount") or payload.questionsCount
+        can_use_judge0 = row.get("canUseJudge0", False) if (row.get("questionType") or payload.questionType) == "Coding" else False
+        
         # Validate required fields
-        if not payload.questionType:
+        if not question_type:
             raise HTTPException(status_code=400, detail="questionType is required")
-        if not payload.difficulty:
+        if not difficulty:
             raise HTTPException(status_code=400, detail="difficulty is required")
-        if not payload.questionsCount or payload.questionsCount < 1:
+        if not questions_count or questions_count < 1:
             raise HTTPException(status_code=400, detail="questionsCount must be at least 1")
         
-        logger.info(f"Generating {payload.questionsCount} {payload.questionType} question(s) for topic: {payload.topicLabel}, difficulty: {payload.difficulty}, canUseJudge0: {payload.canUseJudge0}")
+        logger.info(f"Generating {questions_count} {question_type} question(s) for topic: {payload.topicLabel}, difficulty: {difficulty}, canUseJudge0: {can_use_judge0} (using row.questionType from DB)")
         
         # Get coding language from assessment (fallback to python)
         coding_language = assessment.get("codingLanguage", "python")
@@ -4900,12 +4995,19 @@ async def generate_question_endpoint_v2(
         experience_max = assessment.get("experienceMax")
         company_name = company_context.get("company_name") if company_context else None
         
+        # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
+        # The payload might have stale data if frontend state wasn't updated
+        question_type = row.get("questionType") or payload.questionType
+        difficulty = row.get("difficulty") or payload.difficulty
+        questions_count = row.get("questionsCount") or payload.questionsCount
+        can_use_judge0 = row.get("canUseJudge0", False) if question_type == "Coding" else False
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
-            question_type=payload.questionType,
-            difficulty=payload.difficulty,
-            questions_count=payload.questionsCount,
-            can_use_judge0=payload.canUseJudge0,
+            question_type=question_type,  # ⭐ Use row's question type from DB
+            difficulty=difficulty,  # ⭐ Use row's difficulty from DB
+            questions_count=questions_count,  # ⭐ Use row's questions count from DB
+            can_use_judge0=can_use_judge0,  # ⭐ Use row's canUseJudge0 from DB
             coding_language=coding_language,
             additional_requirements=additional_requirements,
             experience_mode=experience_mode,

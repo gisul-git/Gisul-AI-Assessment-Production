@@ -334,6 +334,19 @@ def _validate_and_fix_question_types(
         
         for topic in topics:
             is_v2 = "questionRows" in topic and isinstance(topic.get("questionRows"), list) and len(topic["questionRows"]) > 0
+            
+            # ⭐ Respect user edits even for non-tech roles (but still block execution types)
+            if is_v2 and topic["questionRows"][0].get("userEdited", False):
+                qt = topic["questionRows"][0].get("questionType", "")
+                # Only override if it's an execution type
+                if qt in ["Coding", "SQL", "AIML"]:
+                    logger.warning(f"🔧 Non-tech (userEdited): '{topic['label']}': {qt} → Subjective")
+                    topic["questionRows"][0]["questionType"] = "Subjective"
+                    topic["questionRows"][0]["canUseJudge0"] = False
+                else:
+                    logger.info(f"✅ Respecting user choice in non-tech role: '{topic['label']}' = {qt}")
+                continue
+            
             qt = topic["questionRows"][0].get("questionType", "") if is_v2 else topic.get("questionType", "")
             
             if qt in ["Coding", "SQL", "AIML"]:
@@ -547,8 +560,14 @@ def _validate_and_fix_question_types(
         is_v2 = "questionRows" in topic and isinstance(topic.get("questionRows"), list) and len(topic["questionRows"]) > 0
         current_type = topic["questionRows"][0].get("questionType", "") if is_v2 else topic.get("questionType", "")
         
+        # ⭐ CRITICAL: Skip validation if user explicitly edited the question type
+        if is_v2 and topic["questionRows"][0].get("userEdited", False):
+            logger.info(f"✅ Respecting user choice: '{label}' = {current_type} (userEdited=True)")
+            continue
+        
         # ⭐ CRITICAL: If respect_user_choice is True and question type is already set, skip validation
         if respect_user_choice and current_type and current_type not in ["", "pending"]:
+            logger.info(f"✅ Preserving existing type: '{label}' = {current_type}")
             continue
         
         # ⭐ CRITICAL FIX: Check for non-Python languages first
