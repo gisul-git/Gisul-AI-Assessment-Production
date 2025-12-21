@@ -56,6 +56,12 @@ export interface CustomMCQAssessment {
     startTime?: string;
     endTime?: string;
     duration?: number;
+    candidateRequirements?: {
+      requireName?: boolean;
+      requireEmail?: boolean;
+      requireLinkedIn?: boolean;
+      requireGithub?: boolean;
+    };
   };
   proctoringSettings?: {
     aiProctoringEnabled?: boolean;

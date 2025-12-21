@@ -582,6 +582,29 @@ export default function CustomMCQTakePage() {
         subjectiveQuestionIds: subjectiveQuestionIds
       });
 
+      // Collect candidate requirements from sessionStorage
+      const candidateRequirements: { phone?: string; linkedIn?: string; github?: string; [key: string]: any } = {};
+      const phone = sessionStorage.getItem("candidatePhone");
+      const linkedIn = sessionStorage.getItem("candidateLinkedIn");
+      const github = sessionStorage.getItem("candidateGithub");
+      
+      console.log("Collecting candidate requirements from sessionStorage:", {
+        phone,
+        linkedIn,
+        github,
+        allSessionStorage: {
+          candidatePhone: sessionStorage.getItem("candidatePhone"),
+          candidateLinkedIn: sessionStorage.getItem("candidateLinkedIn"),
+          candidateGithub: sessionStorage.getItem("candidateGithub"),
+        }
+      });
+      
+      if (phone) candidateRequirements.phone = phone;
+      if (linkedIn) candidateRequirements.linkedIn = linkedIn;
+      if (github) candidateRequirements.github = github;
+
+      console.log("Candidate requirements to send:", candidateRequirements);
+
       const result = await customMCQApi.submitAssessment(
         assessmentId as string,
         token as string,
@@ -589,7 +612,8 @@ export default function CustomMCQTakePage() {
         candidateInfo.name,
         submissions,
         startedAt || new Date(),
-        new Date()
+        new Date(),
+        candidateRequirements
       );
 
       // Clear session storage

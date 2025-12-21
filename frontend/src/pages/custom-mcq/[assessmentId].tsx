@@ -26,6 +26,7 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [loadingProctorForUser, setLoadingProctorForUser] = useState<Record<string, boolean>>({});
   const [expandedProctorUser, setExpandedProctorUser] = useState<string | null>(null);
   const [expandedAnswerLogsUser, setExpandedAnswerLogsUser] = useState<string | null>(null);
+  const [expandedRequirementsUser, setExpandedRequirementsUser] = useState<string | null>(null);
   const [showLiveProctoring, setShowLiveProctoring] = useState(false);
   const [showCandidates, setShowCandidates] = useState(false);
 
@@ -459,6 +460,9 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                     <th style={{ padding: "0.75rem 0.75rem", textAlign: "center", fontSize: "0.85rem", color: "#1E5A3B" }}>
                       View Answer Logs
                     </th>
+                    <th style={{ padding: "0.75rem 0.75rem", textAlign: "center", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                      Candidate Requirements
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -467,11 +471,21 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                     const userEmail = String(candidateInfo.email || "").trim();
                     const isProctorExpanded = expandedProctorUser === userEmail && !!userEmail;
                     const isAnswerExpanded = expandedAnswerLogsUser === userEmail && !!userEmail;
+                    const isRequirementsExpanded = expandedRequirementsUser === userEmail && !!userEmail;
                     const proctorLogs = (userEmail && proctorLogsByUser[userEmail]) ? proctorLogsByUser[userEmail] : [];
                     const proctorLabels = (userEmail && proctorLabelsByUser[userEmail]) ? proctorLabelsByUser[userEmail] : {};
                     const proctorSummary = (userEmail && proctorSummaryByUser[userEmail]) ? proctorSummaryByUser[userEmail] : null;
                     const isLoadingProctor = !!(userEmail && loadingProctorForUser[userEmail]);
                     const hasAnswerLogs = (submission as any).answerLogs && Object.keys((submission as any).answerLogs).length > 0;
+                    const candidateRequirements = (submission as any).candidateRequirements || {};
+                    const hasRequirements = candidateRequirements && Object.keys(candidateRequirements).length > 0;
+                    
+                    // Debug: Log candidate requirements to console
+                    if (idx === 0) {
+                      console.log("Submission data:", submission);
+                      console.log("Candidate requirements:", candidateRequirements);
+                      console.log("Has requirements:", hasRequirements);
+                    }
                     
                     // Calculate attempted and not attempted questions for this submission
                     const submissionEntries = (submission as any).submissions || [];
@@ -579,16 +593,37 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                               {isAnswerExpanded ? "Hide Logs" : "View Logs"}
                             </button>
                           </td>
+                          <td style={{ padding: "0.75rem 0.75rem", textAlign: "center" }}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextExpanded = isRequirementsExpanded ? null : userEmail;
+                                setExpandedRequirementsUser(nextExpanded);
+                              }}
+                              style={{
+                                padding: "0.45rem 0.75rem",
+                                borderRadius: "0.5rem",
+                                border: "1px solid #6953a3",
+                                backgroundColor: isRequirementsExpanded ? "#f3f4f6" : "#f9fafb",
+                                color: "#6953a3",
+                                cursor: "pointer",
+                                fontWeight: 600,
+                                fontSize: "0.8rem",
+                              }}
+                            >
+                              {isRequirementsExpanded ? "Hide" : "View"}
+                            </button>
+                          </td>
                         </tr>
 
-                        {(isProctorExpanded || isAnswerExpanded) && (
+                        {(isProctorExpanded || isAnswerExpanded || isRequirementsExpanded) && (
                           <tr
                             style={{
                               backgroundColor: "#F9FFFB",
                               borderTop: "1px solid #E5E7EB",
                             }}
                           >
-                            <td colSpan={6} style={{ padding: "0.75rem 1rem" }}>
+                            <td colSpan={7} style={{ padding: "0.75rem 1rem" }}>
                               <div
                                 style={{
                                   display: "flex",
@@ -1015,6 +1050,161 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                                           </div>
                                         )}
                                       </>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Candidate Requirements */}
+                                {isRequirementsExpanded && (
+                                  <div
+                                    style={{
+                                      padding: "0.75rem",
+                                      backgroundColor: "#f3f4f6",
+                                      borderRadius: "0.5rem",
+                                      border: "1px solid #6953a3",
+                                      marginTop: "0.75rem",
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        fontSize: "0.85rem",
+                                        color: "#6953a3",
+                                        marginBottom: "0.75rem",
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      Candidate Requirements
+                                    </div>
+                                    {hasRequirements || candidateInfo.name || candidateInfo.email ? (
+                                      <div
+                                        style={{
+                                          display: "grid",
+                                          gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                                          gap: "0.75rem",
+                                        }}
+                                      >
+                                        {candidateInfo.name && (
+                                          <div
+                                            style={{
+                                              padding: "0.625rem",
+                                              backgroundColor: "#ffffff",
+                                              borderRadius: "0.375rem",
+                                              border: "1px solid #e5e7eb",
+                                            }}
+                                          >
+                                            <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>
+                                              Name
+                                            </div>
+                                            <div style={{ fontSize: "0.875rem", color: "#1e293b", fontWeight: 500 }}>
+                                              {candidateInfo.name}
+                                            </div>
+                                          </div>
+                                        )}
+                                        {candidateInfo.email && (
+                                          <div
+                                            style={{
+                                              padding: "0.625rem",
+                                              backgroundColor: "#ffffff",
+                                              borderRadius: "0.375rem",
+                                              border: "1px solid #e5e7eb",
+                                            }}
+                                          >
+                                            <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>
+                                              Email
+                                            </div>
+                                            <div style={{ fontSize: "0.875rem", color: "#1e293b", fontWeight: 500 }}>
+                                              {candidateInfo.email}
+                                            </div>
+                                          </div>
+                                        )}
+                                        {candidateRequirements.phone && (
+                                          <div
+                                            style={{
+                                              padding: "0.625rem",
+                                              backgroundColor: "#ffffff",
+                                              borderRadius: "0.375rem",
+                                              border: "1px solid #e5e7eb",
+                                            }}
+                                          >
+                                            <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>
+                                              Phone
+                                            </div>
+                                            <div style={{ fontSize: "0.875rem", color: "#1e293b", fontWeight: 500 }}>
+                                              {candidateRequirements.phone}
+                                            </div>
+                                          </div>
+                                        )}
+                                        {candidateRequirements.linkedIn && (
+                                          <div
+                                            style={{
+                                              padding: "0.625rem",
+                                              backgroundColor: "#ffffff",
+                                              borderRadius: "0.375rem",
+                                              border: "1px solid #e5e7eb",
+                                            }}
+                                          >
+                                            <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>
+                                              LinkedIn
+                                            </div>
+                                            <div style={{ fontSize: "0.875rem", color: "#1e293b" }}>
+                                              <a
+                                                href={candidateRequirements.linkedIn}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                style={{
+                                                  color: "#6953a3",
+                                                  textDecoration: "none",
+                                                  wordBreak: "break-all",
+                                                }}
+                                              >
+                                                {candidateRequirements.linkedIn}
+                                              </a>
+                                            </div>
+                                          </div>
+                                        )}
+                                        {candidateRequirements.github && (
+                                          <div
+                                            style={{
+                                              padding: "0.625rem",
+                                              backgroundColor: "#ffffff",
+                                              borderRadius: "0.375rem",
+                                              border: "1px solid #e5e7eb",
+                                            }}
+                                          >
+                                            <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>
+                                              GitHub
+                                            </div>
+                                            <div style={{ fontSize: "0.875rem", color: "#1e293b" }}>
+                                              <a
+                                                href={candidateRequirements.github}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                style={{
+                                                  color: "#6953a3",
+                                                  textDecoration: "none",
+                                                  wordBreak: "break-all",
+                                                }}
+                                              >
+                                                {candidateRequirements.github}
+                                              </a>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <div
+                                        style={{
+                                          padding: "0.75rem",
+                                          backgroundColor: "#ffffff",
+                                          borderRadius: "0.375rem",
+                                          border: "1px solid #e5e7eb",
+                                          color: "#64748b",
+                                          fontSize: "0.875rem",
+                                          fontStyle: "italic",
+                                        }}
+                                      >
+                                        No candidate requirements were provided for this submission.
+                                      </div>
                                     )}
                                   </div>
                                 )}

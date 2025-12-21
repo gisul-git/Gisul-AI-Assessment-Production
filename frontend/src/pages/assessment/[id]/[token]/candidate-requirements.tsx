@@ -5,12 +5,15 @@ import { getGateContext } from "@/lib/gateContext";
  
 /**
  * Default candidate requirements when assessment data is not available
+ * For custom MCQ, defaults are all false - only show what admin checked
  */
 const DEFAULT_REQUIREMENTS = {
-  requireEmail: true,
-  requireName: true,
+  requireEmail: false,
+  requireName: false,
   requirePhone: false,
   requireResume: false,
+  requireLinkedIn: false,
+  requireGithub: false,
 };
  
 export default function CandidateRequirementsPage() {
@@ -20,6 +23,8 @@ export default function CandidateRequirementsPage() {
   const [email, setEmail] = useState<string>("");
   const [name, setName] = useState<string>("");
   const [phone, setPhone] = useState<string>("");
+  const [linkedInUrl, setLinkedInUrl] = useState<string>("");
+  const [githubUrl, setGithubUrl] = useState<string>("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeFileName, setResumeFileName] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -31,15 +36,17 @@ export default function CandidateRequirementsPage() {
     requireName: boolean;
     requirePhone: boolean;
     requireResume: boolean;
+    requireLinkedIn?: boolean;
+    requireGithub?: boolean;
   }>(DEFAULT_REQUIREMENTS);
  
   useEffect(() => {
     const storedEmail = sessionStorage.getItem("candidateEmail");
     const storedName = sessionStorage.getItem("candidateName");
    
-    // Auto-fill from sessionStorage
-    if (storedEmail) setEmail(storedEmail);
-    if (storedName) setName(storedName);
+    // Don't auto-fill - let user enter manually
+    // if (storedEmail) setEmail(storedEmail);
+    // if (storedName) setName(storedName);
    
     if (!storedEmail || !storedName) {
       if (id && token) {
@@ -65,9 +72,94 @@ export default function CandidateRequirementsPage() {
    
     const ctx = getGateContext(id as string);
     const isAIFlow = !ctx || ctx.flowType === "ai";
+    const isCustomMCQFlow = ctx?.flowType === "custom-mcq";
 
-    // Non-AI flows: skip AI-only backend calls entirely and proceed
-    if (!isAIFlow && id && token) {
+    // For custom-mcq flow, fetch requirements from custom MCQ assessment
+    if (isCustomMCQFlow && id && token) {
+      const fetchCustomMCQAssessment = async () => {
+        try {
+          setFetchingAssessment(true);
+          setError(null);
+
+          // Fetch custom MCQ assessment
+          const response = await axios.get(
+            `/api/custom-mcq/take/${id}`,
+            {
+              params: { token }
+            }
+          );
+
+          const data = response.data;
+          console.log("Custom MCQ API response:", data);
+          
+          // Handle different response structures
+          const assessment = data?.data || data?.assessment || data;
+
+          if (!assessment || typeof assessment !== "object") {
+            console.warn("No custom MCQ assessment found, using default requirements");
+            setAssessmentInfo(null);
+            setCandidateRequirements(DEFAULT_REQUIREMENTS);
+            setFetchingAssessment(false);
+            return;
+          }
+
+          setAssessmentInfo(assessment);
+
+          // Get candidate requirements from schedule
+          const schedule = assessment?.schedule || {};
+          console.log("Schedule from assessment:", schedule);
+          
+          const candidateReqs = schedule?.candidateRequirements || {};
+          console.log("Candidate requirements from schedule:", candidateReqs);
+
+          const normalizedRequirements = {
+            requireEmail: candidateReqs?.requireEmail === true,
+            requireName: candidateReqs?.requireName === true,
+            requirePhone: candidateReqs?.requirePhone === true,
+            requireResume: candidateReqs?.requireResume === true,
+            requireLinkedIn: candidateReqs?.requireLinkedIn === true,
+            requireGithub: candidateReqs?.requireGithub === true,
+          };
+
+          console.log("Normalized candidate requirements for custom MCQ:", normalizedRequirements);
+          setCandidateRequirements(normalizedRequirements);
+
+          const hasAnyRequirement =
+            normalizedRequirements.requireEmail ||
+            normalizedRequirements.requireName ||
+            normalizedRequirements.requirePhone ||
+            normalizedRequirements.requireResume ||
+            normalizedRequirements.requireLinkedIn ||
+            normalizedRequirements.requireGithub;
+
+          // If no requirements are enabled, skip this page
+          if (!hasAnyRequirement && id && token) {
+            console.log("No candidate requirements enabled for custom MCQ, skipping to identity verification");
+            sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
+            router.push(`/assessment/${id}/${token}/identity-verify`);
+          }
+
+          setError(null);
+        } catch (error: any) {
+          console.error("Error fetching custom MCQ assessment:", {
+            message: error?.message,
+            response: error?.response?.data,
+            status: error?.response?.status,
+          });
+
+          setError("Failed to load assessment settings. Using default requirements.");
+          setCandidateRequirements(DEFAULT_REQUIREMENTS);
+        } finally {
+          setFetchingAssessment(false);
+        }
+      };
+
+      fetchCustomMCQAssessment();
+      return;
+    }
+
+    // Non-AI flows (other than custom-mcq): skip AI-only backend calls entirely and proceed
+    if (!isAIFlow && !isCustomMCQFlow && id && token) {
       sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
       router.replace(`/assessment/${id}/${token}/identity-verify`);
       setFetchingAssessment(false);
@@ -121,6 +213,8 @@ export default function CandidateRequirementsPage() {
           requireName: candidateReqs?.requireName ?? DEFAULT_REQUIREMENTS.requireName,
           requirePhone: candidateReqs?.requirePhone ?? DEFAULT_REQUIREMENTS.requirePhone,
           requireResume: candidateReqs?.requireResume ?? DEFAULT_REQUIREMENTS.requireResume,
+          requireLinkedIn: candidateReqs?.requireLinkedIn ?? DEFAULT_REQUIREMENTS.requireLinkedIn,
+          requireGithub: candidateReqs?.requireGithub ?? DEFAULT_REQUIREMENTS.requireGithub,
         };
  
         console.log("Normalized candidate requirements:", normalizedRequirements);
@@ -130,7 +224,9 @@ export default function CandidateRequirementsPage() {
           normalizedRequirements.requireEmail ||
           normalizedRequirements.requireName ||
           normalizedRequirements.requirePhone ||
-          normalizedRequirements.requireResume;
+          normalizedRequirements.requireResume ||
+          normalizedRequirements.requireLinkedIn ||
+          normalizedRequirements.requireGithub;
  
         // If no requirements are enabled, skip this page
         if (!hasAnyRequirement && id && token) {
@@ -183,47 +279,120 @@ export default function CandidateRequirementsPage() {
  
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Disable button immediately to prevent double-clicks
+    if (loading) return;
+    setLoading(true);
     setError(null);
+    
+    // Determine flow type
+    const ctx = getGateContext(id as string);
+    const isAIFlow = !ctx || ctx.flowType === "ai";
    
     // Validate only required fields
     if (candidateRequirements.requireEmail && !email.trim()) {
       setError("Email is required");
+      setLoading(false);
       return;
     }
-   
+    
     if (candidateRequirements.requireName && !name.trim()) {
       setError("Full Name is required");
+      setLoading(false);
       return;
     }
-   
+    
     if (candidateRequirements.requirePhone && !phone.trim()) {
       setError("Phone Number is required");
+      setLoading(false);
       return;
     }
-   
+    
     if (candidateRequirements.requireResume && !resumeFile) {
       setError("Resume upload is required");
+      setLoading(false);
       return;
     }
-   
+    
+    if (candidateRequirements.requireLinkedIn && !linkedInUrl.trim()) {
+      setError("LinkedIn URL is required");
+      setLoading(false);
+      return;
+    }
+    
+    if (candidateRequirements.requireGithub && !githubUrl.trim()) {
+      setError("GitHub URL is required");
+      setLoading(false);
+      return;
+    }
+    
     // Validate email format if email is required
     if (candidateRequirements.requireEmail) {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(email.trim())) {
         setError("Please enter a valid email address");
+        setLoading(false);
+        return;
+      }
+    }
+    
+    // Validate LinkedIn URL format if required
+    if (candidateRequirements.requireLinkedIn && linkedInUrl.trim()) {
+      const linkedInRegex = /^https?:\/\/(www\.)?linkedin\.com\/.+/i;
+      if (!linkedInRegex.test(linkedInUrl.trim())) {
+        setError("Please enter a valid LinkedIn URL (e.g., https://www.linkedin.com/in/yourprofile)");
+        setLoading(false);
+        return;
+      }
+    }
+    
+    // Validate GitHub URL format if required
+    if (candidateRequirements.requireGithub && githubUrl.trim()) {
+      const githubRegex = /^https?:\/\/(www\.)?github\.com\/.+/i;
+      if (!githubRegex.test(githubUrl.trim())) {
+        setError("Please enter a valid GitHub URL (e.g., https://github.com/yourusername)");
+        setLoading(false);
         return;
       }
     }
    
-    setLoading(true);
-   
     try {
       // Update sessionStorage with candidate info
-      sessionStorage.setItem("candidateEmail", email.trim());
-      sessionStorage.setItem("candidateName", name.trim());
+      // For email/name: if required, use form value; if not required, preserve existing from sessionStorage
+      const existingEmail = sessionStorage.getItem("candidateEmail") || "";
+      const existingName = sessionStorage.getItem("candidateName") || "";
+      
+      if (candidateRequirements.requireEmail && email.trim()) {
+        sessionStorage.setItem("candidateEmail", email.trim());
+      } else if (!candidateRequirements.requireEmail && existingEmail) {
+        // Preserve existing email if not required
+        sessionStorage.setItem("candidateEmail", existingEmail);
+      }
+      
+      if (candidateRequirements.requireName && name.trim()) {
+        sessionStorage.setItem("candidateName", name.trim());
+      } else if (!candidateRequirements.requireName && existingName) {
+        // Preserve existing name if not required
+        sessionStorage.setItem("candidateName", existingName);
+      }
+      
       if (phone.trim()) {
         sessionStorage.setItem("candidatePhone", phone.trim());
       }
+      if (linkedInUrl.trim()) {
+        sessionStorage.setItem("candidateLinkedIn", linkedInUrl.trim());
+      }
+      if (githubUrl.trim()) {
+        sessionStorage.setItem("candidateGithub", githubUrl.trim());
+      }
+     
+      // Get final email/name values (from form if required, or from sessionStorage if preserved)
+      const finalEmail = (candidateRequirements.requireEmail && email.trim()) 
+        ? email.trim() 
+        : (sessionStorage.getItem("candidateEmail") || "");
+      const finalName = (candidateRequirements.requireName && name.trim()) 
+        ? name.trim() 
+        : (sessionStorage.getItem("candidateName") || "");
      
       // Upload resume if provided
       if (resumeFile) {
@@ -231,8 +400,8 @@ export default function CandidateRequirementsPage() {
         formData.append("resume", resumeFile);
         formData.append("assessmentId", id as string);
         formData.append("token", token as string);
-        formData.append("email", email.trim());
-        formData.append("name", name.trim());
+        formData.append("email", finalEmail);
+        formData.append("name", finalName);
        
         try {
           await axios.post("/api/assessment/upload-resume", formData, {
@@ -246,18 +415,21 @@ export default function CandidateRequirementsPage() {
         }
       }
      
-      // Save candidate requirements to backend
-      try {
-        await axios.post("/api/assessment/save-candidate-info", {
-          assessmentId: id,
-          token,
-          email: email.trim(),
-          name: name.trim(),
-          phone: phone.trim() || null,
-          hasResume: !!resumeFile,
-        });
-      } catch (saveError: any) {
-        console.warn("Failed to save candidate info (non-blocking):", saveError);
+      // Save candidate requirements to backend (only for AI flow, not custom MCQ)
+      // For custom MCQ, data is stored in sessionStorage and sent with assessment submission
+      if (isAIFlow) {
+        try {
+          await axios.post("/api/assessment/save-candidate-info", {
+            assessmentId: id,
+            token,
+            email: finalEmail,
+            name: finalName,
+            phone: phone.trim() || null,
+            hasResume: !!resumeFile,
+          });
+        } catch (saveError: any) {
+          console.warn("Failed to save candidate info (non-blocking):", saveError);
+        }
       }
      
       // Mark this step as completed
@@ -279,19 +451,20 @@ export default function CandidateRequirementsPage() {
       <div style={{
         minHeight: "100vh",
         backgroundColor: "#f7f3e8",
-        padding: "2rem",
+        padding: "1.5rem",
         display: "flex",
         alignItems: "center",
         justifyContent: "center"
       }}>
         <div style={{
           backgroundColor: "#ffffff",
-          borderRadius: "1rem",
-          padding: "2rem",
-          boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
+          borderRadius: "0.75rem",
+          padding: "1.5rem",
+          boxShadow: "0 2px 8px rgba(0, 0, 0, 0.1)",
+          border: "1px solid #e5e7eb",
           textAlign: "center"
         }}>
-          <div style={{ fontSize: "1.125rem", color: "#64748b" }}>
+          <div style={{ fontSize: "0.875rem", color: "#64748b" }}>
             Loading assessment requirements...
           </div>
         </div>
@@ -303,21 +476,25 @@ export default function CandidateRequirementsPage() {
     <div style={{
       minHeight: "100vh",
       backgroundColor: "#f7f3e8",
-      padding: "2rem"
+      padding: "1.5rem",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
     }}>
-      <div style={{ maxWidth: "600px", margin: "0 auto" }}>
+      <div style={{ maxWidth: "500px", width: "100%" }}>
         <div style={{
           backgroundColor: "#ffffff",
-          borderRadius: "1rem",
-          padding: "2rem",
-          boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)"
+          borderRadius: "0.75rem",
+          padding: "1.5rem",
+          boxShadow: "0 2px 8px rgba(0, 0, 0, 0.1)",
+          border: "1px solid #e5e7eb"
         }}>
           {/* Header */}
-          <div style={{ textAlign: "center", marginBottom: "2rem" }}>
-            <h1 style={{ fontSize: "2rem", fontWeight: 700, color: "#1e293b", marginBottom: "0.5rem" }}>
+          <div style={{ marginBottom: "1.25rem" }}>
+            <h1 style={{ fontSize: "1.5rem", fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem" }}>
               Candidate Requirements
             </h1>
-            <p style={{ color: "#64748b", fontSize: "1rem" }}>
+            <p style={{ color: "#64748b", fontSize: "0.875rem", margin: 0 }}>
               Please provide the following information to proceed
             </p>
           </div>
@@ -325,30 +502,30 @@ export default function CandidateRequirementsPage() {
           {/* Assessment fetch error (non-blocking) */}
           {error && (
             <div style={{
-              padding: "0.75rem",
+              padding: "0.625rem 0.75rem",
               backgroundColor: "#fef3c7",
               border: "1px solid #fde68a",
-              borderRadius: "0.5rem",
+              borderRadius: "0.375rem",
               color: "#92400e",
               marginBottom: "1rem",
-              fontSize: "0.875rem"
+              fontSize: "0.8125rem"
             }}>
               ⚠️ {error}
             </div>
           )}
-         
+          
           {/* Form */}
           <form onSubmit={handleSubmit}>
-            <div style={{ display: "grid", gap: "1.5rem", marginBottom: "2rem" }}>
+            <div style={{ display: "grid", gap: "1rem", marginBottom: "1.25rem" }}>
               {/* Email - Only show if required */}
               {candidateRequirements.requireEmail && (
                 <div>
                   <label style={{
                     display: "block",
-                    marginBottom: "0.5rem",
-                    fontWeight: 600,
-                    color: "#1e293b",
-                    fontSize: "0.95rem"
+                    marginBottom: "0.375rem",
+                    fontWeight: 500,
+                    color: "#374151",
+                    fontSize: "0.875rem"
                   }}>
                     Email <span style={{ color: "#ef4444" }}>*</span>
                   </label>
@@ -359,15 +536,16 @@ export default function CandidateRequirementsPage() {
                     required
                     style={{
                       width: "100%",
-                      padding: "0.75rem",
-                      border: "1px solid #e5e7eb",
-                      borderRadius: "0.5rem",
-                      fontSize: "1rem",
+                      padding: "0.625rem 0.75rem",
+                      border: "1px solid #d1d5db",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
                       outline: "none",
                       transition: "border-color 0.2s",
+                      boxSizing: "border-box"
                     }}
                     onFocus={(e) => e.target.style.borderColor = "#6953a3"}
-                    onBlur={(e) => e.target.style.borderColor = "#e5e7eb"}
+                    onBlur={(e) => e.target.style.borderColor = "#d1d5db"}
                   />
                 </div>
               )}
@@ -377,10 +555,10 @@ export default function CandidateRequirementsPage() {
                 <div>
                   <label style={{
                     display: "block",
-                    marginBottom: "0.5rem",
-                    fontWeight: 600,
-                    color: "#1e293b",
-                    fontSize: "0.95rem"
+                    marginBottom: "0.375rem",
+                    fontWeight: 500,
+                    color: "#374151",
+                    fontSize: "0.875rem"
                   }}>
                     Full Name <span style={{ color: "#ef4444" }}>*</span>
                   </label>
@@ -391,15 +569,16 @@ export default function CandidateRequirementsPage() {
                     required
                     style={{
                       width: "100%",
-                      padding: "0.75rem",
-                      border: "1px solid #e5e7eb",
-                      borderRadius: "0.5rem",
-                      fontSize: "1rem",
+                      padding: "0.625rem 0.75rem",
+                      border: "1px solid #d1d5db",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
                       outline: "none",
                       transition: "border-color 0.2s",
+                      boxSizing: "border-box"
                     }}
                     onFocus={(e) => e.target.style.borderColor = "#6953a3"}
-                    onBlur={(e) => e.target.style.borderColor = "#e5e7eb"}
+                    onBlur={(e) => e.target.style.borderColor = "#d1d5db"}
                   />
                 </div>
               )}
@@ -409,10 +588,10 @@ export default function CandidateRequirementsPage() {
                 <div>
                   <label style={{
                     display: "block",
-                    marginBottom: "0.5rem",
-                    fontWeight: 600,
-                    color: "#1e293b",
-                    fontSize: "0.95rem"
+                    marginBottom: "0.375rem",
+                    fontWeight: 500,
+                    color: "#374151",
+                    fontSize: "0.875rem"
                   }}>
                     Phone Number <span style={{ color: "#ef4444" }}>*</span>
                   </label>
@@ -423,15 +602,84 @@ export default function CandidateRequirementsPage() {
                     required
                     style={{
                       width: "100%",
-                      padding: "0.75rem",
-                      border: "1px solid #e5e7eb",
-                      borderRadius: "0.5rem",
-                      fontSize: "1rem",
+                      padding: "0.625rem 0.75rem",
+                      border: "1px solid #d1d5db",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
                       outline: "none",
                       transition: "border-color 0.2s",
+                      boxSizing: "border-box"
                     }}
                     onFocus={(e) => e.target.style.borderColor = "#6953a3"}
-                    onBlur={(e) => e.target.style.borderColor = "#e5e7eb"}
+                    onBlur={(e) => e.target.style.borderColor = "#d1d5db"}
+                  />
+                </div>
+              )}
+              
+              {/* LinkedIn URL - Only show if required */}
+              {candidateRequirements.requireLinkedIn && (
+                <div>
+                  <label style={{
+                    display: "block",
+                    marginBottom: "0.375rem",
+                    fontWeight: 500,
+                    color: "#374151",
+                    fontSize: "0.875rem"
+                  }}>
+                    LinkedIn URL <span style={{ color: "#ef4444" }}>*</span>
+                  </label>
+                  <input
+                    type="url"
+                    value={linkedInUrl}
+                    onChange={(e) => setLinkedInUrl(e.target.value)}
+                    placeholder="https://www.linkedin.com/in/yourprofile"
+                    required
+                    style={{
+                      width: "100%",
+                      padding: "0.625rem 0.75rem",
+                      border: "1px solid #d1d5db",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                      transition: "border-color 0.2s",
+                      boxSizing: "border-box"
+                    }}
+                    onFocus={(e) => e.target.style.borderColor = "#6953a3"}
+                    onBlur={(e) => e.target.style.borderColor = "#d1d5db"}
+                  />
+                </div>
+              )}
+              
+              {/* GitHub URL - Only show if required */}
+              {candidateRequirements.requireGithub && (
+                <div>
+                  <label style={{
+                    display: "block",
+                    marginBottom: "0.375rem",
+                    fontWeight: 500,
+                    color: "#374151",
+                    fontSize: "0.875rem"
+                  }}>
+                    GitHub URL <span style={{ color: "#ef4444" }}>*</span>
+                  </label>
+                  <input
+                    type="url"
+                    value={githubUrl}
+                    onChange={(e) => setGithubUrl(e.target.value)}
+                    placeholder="https://github.com/yourusername"
+                    required
+                    style={{
+                      width: "100%",
+                      padding: "0.625rem 0.75rem",
+                      border: "1px solid #d1d5db",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                      transition: "border-color 0.2s",
+                      boxSizing: "border-box"
+                    }}
+                    onFocus={(e) => e.target.style.borderColor = "#6953a3"}
+                    onBlur={(e) => e.target.style.borderColor = "#d1d5db"}
                   />
                 </div>
               )}
@@ -441,17 +689,17 @@ export default function CandidateRequirementsPage() {
                 <div>
                   <label style={{
                     display: "block",
-                    marginBottom: "0.5rem",
-                    fontWeight: 600,
-                    color: "#1e293b",
-                    fontSize: "0.95rem"
+                    marginBottom: "0.375rem",
+                    fontWeight: 500,
+                    color: "#374151",
+                    fontSize: "0.875rem"
                   }}>
                     Resume <span style={{ color: "#ef4444" }}>*</span>
                   </label>
                 <div style={{
-                  border: "2px dashed #e5e7eb",
-                  borderRadius: "0.5rem",
-                  padding: "1.5rem",
+                  border: "2px dashed #d1d5db",
+                  borderRadius: "0.375rem",
+                  padding: "1rem",
                   textAlign: "center",
                   backgroundColor: "#f9fafb",
                   transition: "border-color 0.2s",
@@ -462,11 +710,11 @@ export default function CandidateRequirementsPage() {
                   e.currentTarget.style.borderColor = "#6953a3";
                 }}
                 onDragLeave={(e) => {
-                  e.currentTarget.style.borderColor = "#e5e7eb";
+                  e.currentTarget.style.borderColor = "#d1d5db";
                 }}
                 onDrop={(e) => {
                   e.preventDefault();
-                  e.currentTarget.style.borderColor = "#e5e7eb";
+                  e.currentTarget.style.borderColor = "#d1d5db";
                   const file = e.dataTransfer.files[0];
                   if (file) {
                     const allowedTypes = ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
@@ -498,16 +746,16 @@ export default function CandidateRequirementsPage() {
                   >
                     {resumeFileName ? (
                       <div>
-                        <div style={{ marginBottom: "0.5rem" }}>✓ {resumeFileName}</div>
-                        <div style={{ fontSize: "0.875rem", color: "#64748b" }}>
+                        <div style={{ marginBottom: "0.25rem", fontSize: "0.875rem" }}>✓ {resumeFileName}</div>
+                        <div style={{ fontSize: "0.75rem", color: "#64748b" }}>
                           Click to change file
                         </div>
                       </div>
                     ) : (
                       <div>
-                        <div style={{ marginBottom: "0.5rem", fontSize: "1.5rem" }}>📄</div>
-                        <div>Click to upload or drag and drop</div>
-                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginTop: "0.25rem" }}>
+                        <div style={{ marginBottom: "0.375rem", fontSize: "1.25rem" }}>📄</div>
+                        <div style={{ fontSize: "0.875rem" }}>Click to upload or drag and drop</div>
+                        <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>
                           PDF, DOC, or DOCX (max 5MB)
                         </div>
                       </div>
@@ -521,18 +769,18 @@ export default function CandidateRequirementsPage() {
             {/* Error Message */}
             {error && (
               <div style={{
-                padding: "0.75rem",
+                padding: "0.625rem 0.75rem",
                 backgroundColor: "#fef2f2",
                 border: "1px solid #fecaca",
-                borderRadius: "0.5rem",
+                borderRadius: "0.375rem",
                 color: "#991b1b",
                 marginBottom: "1rem",
-                fontSize: "0.875rem"
+                fontSize: "0.8125rem"
               }}>
                 {error}
               </div>
             )}
-           
+            
             {/* Submit Button */}
             <button
               type="submit"
@@ -540,34 +788,44 @@ export default function CandidateRequirementsPage() {
                 (candidateRequirements.requireEmail && !email.trim()) ||
                 (candidateRequirements.requireName && !name.trim()) ||
                 (candidateRequirements.requirePhone && !phone.trim()) ||
-                (candidateRequirements.requireResume && !resumeFile)}
+                (candidateRequirements.requireResume && !resumeFile) ||
+                (candidateRequirements.requireLinkedIn && !linkedInUrl.trim()) ||
+                (candidateRequirements.requireGithub && !githubUrl.trim())}
               style={{
                 width: "100%",
-                padding: "1rem 2rem",
+                padding: "0.75rem 1.5rem",
                 backgroundColor: (loading ||
                   (candidateRequirements.requireEmail && !email.trim()) ||
                   (candidateRequirements.requireName && !name.trim()) ||
                   (candidateRequirements.requirePhone && !phone.trim()) ||
-                  (candidateRequirements.requireResume && !resumeFile)) ? "#e2e8f0" : "#6953a3",
+                  (candidateRequirements.requireResume && !resumeFile) ||
+                  (candidateRequirements.requireLinkedIn && !linkedInUrl.trim()) ||
+                  (candidateRequirements.requireGithub && !githubUrl.trim())) ? "#e2e8f0" : "#6953a3",
                 color: (loading ||
                   (candidateRequirements.requireEmail && !email.trim()) ||
                   (candidateRequirements.requireName && !name.trim()) ||
                   (candidateRequirements.requirePhone && !phone.trim()) ||
-                  (candidateRequirements.requireResume && !resumeFile)) ? "#94a3b8" : "#ffffff",
+                  (candidateRequirements.requireResume && !resumeFile) ||
+                  (candidateRequirements.requireLinkedIn && !linkedInUrl.trim()) ||
+                  (candidateRequirements.requireGithub && !githubUrl.trim())) ? "#94a3b8" : "#ffffff",
                 border: "none",
-                borderRadius: "0.5rem",
-                fontSize: "1.125rem",
+                borderRadius: "0.375rem",
+                fontSize: "0.9375rem",
                 fontWeight: 600,
                 cursor: (loading ||
                   (candidateRequirements.requireEmail && !email.trim()) ||
                   (candidateRequirements.requireName && !name.trim()) ||
                   (candidateRequirements.requirePhone && !phone.trim()) ||
-                  (candidateRequirements.requireResume && !resumeFile)) ? "not-allowed" : "pointer",
+                  (candidateRequirements.requireResume && !resumeFile) ||
+                  (candidateRequirements.requireLinkedIn && !linkedInUrl.trim()) ||
+                  (candidateRequirements.requireGithub && !githubUrl.trim())) ? "not-allowed" : "pointer",
                 boxShadow: (loading ||
                   (candidateRequirements.requireEmail && !email.trim()) ||
                   (candidateRequirements.requireName && !name.trim()) ||
                   (candidateRequirements.requirePhone && !phone.trim()) ||
-                  (candidateRequirements.requireResume && !resumeFile)) ? "none" : "0 4px 6px -1px rgba(105, 83, 163, 0.3)",
+                  (candidateRequirements.requireResume && !resumeFile) ||
+                  (candidateRequirements.requireLinkedIn && !linkedInUrl.trim()) ||
+                  (candidateRequirements.requireGithub && !githubUrl.trim())) ? "none" : "0 2px 4px rgba(105, 83, 163, 0.2)",
                 transition: "all 0.2s ease"
               }}
             >

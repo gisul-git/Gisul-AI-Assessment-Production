@@ -155,7 +155,8 @@ export const customMCQApi = {
     name: string,
     submissions: Array<{ questionId: string; selectedAnswers?: string[]; textAnswer?: string }>,
     startedAt?: Date,
-    submittedAt?: Date
+    submittedAt?: Date,
+    candidateRequirements?: { phone?: string; linkedIn?: string; github?: string; [key: string]: any }
   ): Promise<{
     score: number;
     totalMarks: number;
@@ -176,6 +177,7 @@ export const customMCQApi = {
       submissions,
       startedAt: startedAt?.toISOString(),
       submittedAt: submittedAt?.toISOString(),
+      candidateRequirements: candidateRequirements || {},
     });
     
     if (response.data.success) {
