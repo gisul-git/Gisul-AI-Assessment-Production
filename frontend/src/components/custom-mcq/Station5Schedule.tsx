@@ -38,6 +38,8 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   );
   const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
   const [sendingEmails, setSendingEmails] = useState(false);
+  const [invitationsSent, setInvitationsSent] = useState(false);
+  const [candidateCountWhenSent, setCandidateCountWhenSent] = useState<number>(0);
 
   useEffect(() => {
     updateAssessmentData({
@@ -85,10 +87,25 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     setSendingEmails(true);
     try {
       await customMCQApi.sendInvitations(assessmentId, candidates, createdAssessmentUrl, template);
+      // Mark invitations as sent and store the candidate count
+      setInvitationsSent(true);
+      setCandidateCountWhenSent(candidates.length);
     } finally {
       setSendingEmails(false);
     }
   };
+
+  // Check if new candidates were added after invitations were sent
+  const currentCandidateCount = (assessmentData.candidates || []).length;
+  const hasNewCandidates = currentCandidateCount > candidateCountWhenSent;
+  
+  // Re-enable button if new candidates were added
+  useEffect(() => {
+    if (invitationsSent && hasNewCandidates) {
+      setInvitationsSent(false);
+      setCandidateCountWhenSent(0);
+    }
+  }, [currentCandidateCount, hasNewCandidates, invitationsSent]);
 
   return (
     <div>
@@ -445,11 +462,14 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
                   marginTop: "1rem",
                   width: "100%",
                   padding: "0.75rem",
-                  backgroundColor: "#2D7A52",
+                  backgroundColor: invitationsSent ? "#94a3b8" : "#2D7A52",
+                  opacity: invitationsSent && !hasNewCandidates ? 0.6 : 1,
+                  cursor: invitationsSent && !hasNewCandidates ? "not-allowed" : "pointer",
                 }}
-                disabled={sendingEmails}
+                disabled={sendingEmails || (invitationsSent && !hasNewCandidates)}
+                title={invitationsSent && !hasNewCandidates ? "Invitations already sent. Add new candidates to enable." : ""}
               >
-                📧 Send Invitation Email
+                {invitationsSent && !hasNewCandidates ? "✓ Invitations Sent" : "📧 Send Invitation Email"}
               </button>
             )}
             {router && (
@@ -478,6 +498,8 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
             assessmentTitle={assessmentData.title || "Assessment"}
             assessmentUrl={createdAssessmentUrl}
             onSend={handleSendInvitations}
+            invitationsSent={invitationsSent}
+            hasNewCandidates={hasNewCandidates}
           />
         )}
       </div>

@@ -27,6 +27,7 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [expandedProctorUser, setExpandedProctorUser] = useState<string | null>(null);
   const [expandedAnswerLogsUser, setExpandedAnswerLogsUser] = useState<string | null>(null);
   const [showLiveProctoring, setShowLiveProctoring] = useState(false);
+  const [showCandidates, setShowCandidates] = useState(false);
   const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false);
 
   useEffect(() => {
@@ -250,7 +251,27 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
             marginBottom: "2rem",
           }}
         >
-          <h2 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Assessment Details</h2>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+            <h2 style={{ margin: 0, color: "#1E5A3B" }}>Assessment Details</h2>
+            {assessment.candidates && assessment.candidates.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowCandidates(!showCandidates)}
+                style={{
+                  padding: "0.5rem 1rem",
+                  backgroundColor: showCandidates ? "#2D7A52" : "#ffffff",
+                  color: showCandidates ? "#ffffff" : "#2D7A52",
+                  border: "1px solid #2D7A52",
+                  borderRadius: "0.5rem",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                  fontSize: "0.875rem",
+                }}
+              >
+                {showCandidates ? "Hide" : "View"} Added Candidates ({assessment.candidates.length})
+              </button>
+            )}
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "1rem" }}>
             <div>
               <strong style={{ color: "#2D7A52" }}>Total Questions:</strong> {assessment.totalQuestions || 0}
@@ -279,6 +300,104 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
               </div>
             )}
           </div>
+
+          {/* Added Candidates Section */}
+          {showCandidates && assessment.candidates && assessment.candidates.length > 0 && (
+            <div
+              style={{
+                marginTop: "1.5rem",
+                padding: "1.5rem",
+                backgroundColor: "#ffffff",
+                border: "1px solid #A8E8BC",
+                borderRadius: "0.5rem",
+              }}
+            >
+              <h3 style={{ marginBottom: "1rem", color: "#1E5A3B", fontSize: "1.125rem" }}>
+                Added Candidates for this Assessment
+              </h3>
+              <div style={{ width: "100%", overflowX: "auto" }}>
+                <table
+                  style={{
+                    width: "100%",
+                    borderCollapse: "separate",
+                    borderSpacing: 0,
+                    borderRadius: "0.5rem",
+                    overflow: "hidden",
+                    border: "1px solid #A8E8BC",
+                  }}
+                >
+                  <thead>
+                    <tr style={{ backgroundColor: "#E8FAF0" }}>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                        Name
+                      </th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                        Email
+                      </th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                        Invited
+                      </th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                        Invite Sent At
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assessment.candidates.map((candidate: any, idx: number) => (
+                      <tr
+                        key={idx}
+                        style={{
+                          borderTop: "1px solid #A8E8BC",
+                          backgroundColor: idx % 2 === 0 ? "#ffffff" : "#F9FFFB",
+                        }}
+                      >
+                        <td style={{ padding: "0.75rem", fontSize: "0.9rem", color: "#1E5A3B" }}>
+                          {candidate.name || "N/A"}
+                        </td>
+                        <td style={{ padding: "0.75rem", fontSize: "0.85rem", color: "#2D7A52" }}>
+                          {candidate.email || "N/A"}
+                        </td>
+                        <td style={{ padding: "0.75rem", fontSize: "0.85rem" }}>
+                          {candidate.invited ? (
+                            <span
+                              style={{
+                                padding: "0.2rem 0.45rem",
+                                borderRadius: "0.25rem",
+                                backgroundColor: "#dcfce7",
+                                color: "#166534",
+                                fontWeight: 600,
+                                fontSize: "0.8rem",
+                              }}
+                            >
+                              ✓ Yes
+                            </span>
+                          ) : (
+                            <span
+                              style={{
+                                padding: "0.2rem 0.45rem",
+                                borderRadius: "0.25rem",
+                                backgroundColor: "#fee2e2",
+                                color: "#991b1b",
+                                fontWeight: 600,
+                                fontSize: "0.8rem",
+                              }}
+                            >
+                              No
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ padding: "0.75rem", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                          {candidate.inviteSentAt
+                            ? new Date(candidate.inviteSentAt).toLocaleString()
+                            : "Not sent"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Assessment URL */}

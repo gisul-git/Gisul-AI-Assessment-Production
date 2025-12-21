@@ -13,6 +13,8 @@ interface EmailInvitationModalProps {
     footer: string;
     sentBy: string;
   }) => Promise<void>;
+  invitationsSent?: boolean;
+  hasNewCandidates?: boolean;
 }
 
 export default function EmailInvitationModal({
@@ -22,6 +24,8 @@ export default function EmailInvitationModal({
   assessmentTitle,
   assessmentUrl,
   onSend,
+  invitationsSent = false,
+  hasNewCandidates = false,
 }: EmailInvitationModalProps) {
   const [subject, setSubject] = useState(`Assessment Invitation - ${assessmentTitle}`);
   const [message, setMessage] = useState(
@@ -267,15 +271,22 @@ export default function EmailInvitationModal({
           <button
             type="button"
             onClick={handleSend}
-            disabled={sending || candidates.length === 0}
+            disabled={sending || candidates.length === 0 || (invitationsSent && !hasNewCandidates)}
             className="btn-primary"
             style={{
               padding: "0.75rem 1.5rem",
-              opacity: sending || candidates.length === 0 ? 0.5 : 1,
-              cursor: sending || candidates.length === 0 ? "not-allowed" : "pointer",
+              opacity: sending || candidates.length === 0 || (invitationsSent && !hasNewCandidates) ? 0.5 : 1,
+              cursor: sending || candidates.length === 0 || (invitationsSent && !hasNewCandidates) ? "not-allowed" : "pointer",
+              backgroundColor: invitationsSent && !hasNewCandidates ? "#94a3b8" : undefined,
             }}
+            title={invitationsSent && !hasNewCandidates ? "Invitations already sent. Add new candidates to enable." : ""}
           >
-            {sending ? "Sending..." : `Send to ${candidates.length} Candidate(s)`}
+            {sending 
+              ? "Sending..." 
+              : invitationsSent && !hasNewCandidates 
+                ? `✓ Invitations Already Sent` 
+                : `Send to ${candidates.length} Candidate(s)`
+            }
           </button>
         </div>
       </div>
