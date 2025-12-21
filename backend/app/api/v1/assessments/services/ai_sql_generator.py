@@ -153,7 +153,9 @@ async def _generate_sql_questions(
         table_count = "3-4 tables"
     
     prompt = f"""You are an expert SQL question generator for technical assessments.
-Generate {count} comprehensive SQL question(s) for the topic: {topic}.
+Generate EXACTLY {count} comprehensive SQL question(s) for the topic: {topic}.
+
+CRITICAL: You MUST generate EXACTLY {count} question(s). Do NOT generate fewer or more than {count} questions.
 
 Topic: {topic}
 Difficulty: {difficulty}

@@ -362,7 +362,9 @@ Example Improvements:
     personalization_context = "\n".join(context_parts) if context_parts else ""
     
     # Build prompt with personalization
-    prompt = f"""You are an expert technical assessment writer. Generate {count} Multiple Choice Question(s) for the topic: {topic}.
+    prompt = f"""You are an expert technical assessment writer. Generate EXACTLY {count} Multiple Choice Question(s) for the topic: {topic}.
+
+CRITICAL: You MUST generate EXACTLY {count} question(s). Do NOT generate fewer or more than {count} questions.
 
 {'=' * 80}
 CRITICAL: PERSONALIZATION CONTEXT (HIGHEST PRIORITY - MUST USE)
@@ -573,7 +575,9 @@ Example Improvements:
     personalization_context = "\n".join(context_parts) if context_parts else ""
     
     # Build prompt with personalization
-    prompt = f"""You are an expert technical assessment writer. Generate {count} scenario-based subjective question(s) for the topic: {topic}.
+    prompt = f"""You are an expert technical assessment writer. Generate EXACTLY {count} scenario-based subjective question(s) for the topic: {topic}.
+
+CRITICAL: You MUST generate EXACTLY {count} question(s). Do NOT generate fewer or more than {count} questions.
 
 {'=' * 80}
 CRITICAL: PERSONALIZATION CONTEXT (HIGHEST PRIORITY - MUST USE)
