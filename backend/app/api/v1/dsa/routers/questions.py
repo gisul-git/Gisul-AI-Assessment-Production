@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 from bson import ObjectId
 import logging
+import json
 from ..database import get_dsa_database as get_database
 from ..models.question import Question, QuestionCreate, QuestionUpdate
 from ..services.expected_output import compute_expected_outputs_for_testcases
@@ -112,6 +113,64 @@ def _validate_example_output_for_return_type(return_type: Optional[str], example
         return
 
     return
+
+def _convert_json_array_to_stdin(input_str: str) -> str:
+    """
+    Convert JSON array format to raw stdin format.
+    Examples:
+    - "[1,2,3]" -> "1 2 3\n"
+    - "[1, 2, 3]" -> "1 2 3\n"
+    - "[[1,2],[3,4]]" -> "1 2\n3 4\n" (matrix format)
+    """
+    if not input_str:
+        return input_str
+    
+    stripped = input_str.strip()
+    has_trailing_newline = input_str.endswith('\n')
+    
+    # Check if it's a JSON array
+    if stripped.startswith('[') and stripped.endswith(']'):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                # Handle nested arrays (matrices)
+                if parsed and isinstance(parsed[0], list):
+                    lines = []
+                    for row in parsed:
+                        if isinstance(row, list):
+                            lines.append(' '.join(str(x) for x in row))
+                        else:
+                            lines.append(str(row))
+                    result = '\n'.join(lines)
+                    return result + '\n' if has_trailing_newline or not result.endswith('\n') else result
+                else:
+                    # Simple array: convert to space-separated
+                    result = ' '.join(str(x) for x in parsed)
+                    return result + '\n' if has_trailing_newline or not result.endswith('\n') else result
+        except (json.JSONDecodeError, ValueError):
+            pass
+    
+    if has_trailing_newline and not input_str.endswith('\n'):
+        return input_str + '\n'
+    return input_str
+
+
+def _normalize_testcase_inputs(payload: Dict[str, Any]) -> None:
+    """
+    Normalize all testcase inputs to ensure they're in raw stdin format.
+    Converts JSON arrays to space-separated or multi-line format.
+    """
+    for tc_type in ["public_testcases", "hidden_testcases"]:
+        testcases = payload.get(tc_type, [])
+        if isinstance(testcases, list):
+            for tc in testcases:
+                if isinstance(tc, dict) and "input" in tc:
+                    original_input = tc["input"]
+                    normalized_input = _convert_json_array_to_stdin(str(original_input))
+                    if normalized_input != original_input:
+                        logger.warning(f"Converted JSON array to stdin format in {tc_type}: {original_input[:50]}... -> {normalized_input[:50]}...")
+                        tc["input"] = normalized_input
+
 
 def _validate_stdin_only_input(stdin: str) -> None:
     """
@@ -431,14 +490,59 @@ async def get_question(
         if not _is_sql_question(question):
             public_tc = question.get("public_testcases", []) or []
             hidden_tc = question.get("hidden_testcases", []) or []
-            # Detect AI-generated if outputs are missing across all testcases (before compute)
+            
+            # Helper to check if expected_output is missing or placeholder
+            def is_missing_or_placeholder(tc):
+                eo = _normalize_str((tc or {}).get("expected_output"))
+                if not eo:
+                    return True
+                # Check for placeholder patterns
+                eo_lower = eo.lower()
+                return any(pattern in eo_lower for pattern in ["e.g.", "example", "placeholder", "expected:"])
+            
+            # Detect if any testcases need expected outputs computed
             all_tc = public_tc + hidden_tc
-            has_any_expected = any((_normalize_str((tc or {}).get("expected_output")) != "") for tc in all_tc)
-            has_any_missing = any((_normalize_str((tc or {}).get("expected_output")) == "") for tc in all_tc)
-            if (not has_any_expected) and has_any_missing:
+            needs_computation = any(is_missing_or_placeholder(tc) for tc in all_tc)
+            
+            if needs_computation:
+                # Compute expected outputs for testcases that need them
                 question_dict["ai_generated"] = True
-                question_dict["public_testcases"] = await compute_expected_outputs_for_testcases(question, public_tc)
-                question_dict["hidden_testcases"] = await compute_expected_outputs_for_testcases(question, hidden_tc)
+                
+                # Filter and compute only for testcases that need it
+                public_to_compute = [tc for tc in public_tc if is_missing_or_placeholder(tc)]
+                hidden_to_compute = [tc for tc in hidden_tc if is_missing_or_placeholder(tc)]
+                
+                logger.info(f"Found {len(public_to_compute)} public and {len(hidden_to_compute)} hidden testcases with placeholders")
+                
+                if public_to_compute:
+                    computed_public = await compute_expected_outputs_for_testcases(question, public_to_compute)
+                    # Create a map of input -> computed testcase
+                    computed_map = {tc.get("input", ""): tc for tc in computed_public}
+                    # Update testcases with computed outputs
+                    updated_public = []
+                    for tc in public_tc:
+                        if is_missing_or_placeholder(tc) and tc.get("input") in computed_map:
+                            updated_public.append(computed_map[tc.get("input")])
+                        else:
+                            updated_public.append(tc)
+                    question_dict["public_testcases"] = updated_public
+                else:
+                    question_dict["public_testcases"] = public_tc
+                
+                if hidden_to_compute:
+                    computed_hidden = await compute_expected_outputs_for_testcases(question, hidden_to_compute)
+                    # Create a map of input -> computed testcase
+                    computed_map = {tc.get("input", ""): tc for tc in computed_hidden}
+                    # Update testcases with computed outputs
+                    updated_hidden = []
+                    for tc in hidden_tc:
+                        if is_missing_or_placeholder(tc) and tc.get("input") in computed_map:
+                            updated_hidden.append(computed_map[tc.get("input")])
+                        else:
+                            updated_hidden.append(tc)
+                    question_dict["hidden_testcases"] = updated_hidden
+                else:
+                    question_dict["hidden_testcases"] = hidden_tc
     except Exception as e:
         # Fail fast for admin UI: expected output computation must succeed if needed.
         raise HTTPException(status_code=500, detail=f"Failed to compute expected outputs: {str(e)}")
@@ -461,6 +565,9 @@ async def create_question(
     """
     db = get_database()
     question_dict = question.model_dump()
+
+    # Normalize testcase inputs (convert JSON arrays to raw stdin) BEFORE validation
+    _normalize_testcase_inputs(question_dict)
 
     # Validate DSA coding payload (skip SQL)
     _validate_dsa_coding_payload(question_dict)
@@ -550,6 +657,62 @@ async def update_question(
     # Validate DSA coding payload using the merged view (skip SQL)
     merged_payload = {**existing_question, **update_data}
     _validate_dsa_coding_payload(merged_payload)
+    
+    # Auto-compute missing expected outputs for testcases if reference_solution exists
+    # This helps fix questions that were created before the validation pipeline or manually
+    if not _is_sql_question(merged_payload):
+        reference_solution = merged_payload.get("reference_solution")
+        if reference_solution:
+            # Get testcases from update_data if provided, otherwise from merged_payload
+            hidden_testcases = update_data.get("hidden_testcases") or merged_payload.get("hidden_testcases", [])
+            public_testcases = update_data.get("public_testcases") or merged_payload.get("public_testcases", [])
+            
+            # Check for missing expected outputs (empty or placeholder like "e.g., 0 1")
+            def is_missing_output(tc):
+                eo = (tc.get("expected_output") or "").strip()
+                if not eo:
+                    return True
+                # Check for placeholder patterns
+                eo_lower = eo.lower()
+                return any(pattern in eo_lower for pattern in ["e.g.", "example", "placeholder", "expected:"])
+            
+            hidden_missing = [tc for tc in hidden_testcases if is_missing_output(tc)]
+            public_missing = [tc for tc in public_testcases if is_missing_output(tc)]
+            
+            if hidden_missing or public_missing:
+                try:
+                    logger.info(f"[update_question] Computing missing expected outputs: {len(hidden_missing)} hidden, {len(public_missing)} public")
+                    
+                    if hidden_missing:
+                        computed_hidden = await compute_expected_outputs_for_testcases(merged_payload, hidden_missing)
+                        # Create a map of input -> computed testcase
+                        computed_map = {tc.get("input", ""): tc for tc in computed_hidden}
+                        # Update missing testcases with computed outputs
+                        updated_hidden = []
+                        for tc in hidden_testcases:
+                            if is_missing_output(tc) and tc.get("input") in computed_map:
+                                updated_hidden.append(computed_map[tc.get("input")])
+                            else:
+                                updated_hidden.append(tc)
+                        update_data["hidden_testcases"] = updated_hidden
+                        logger.info(f"[update_question] Computed {len(computed_hidden)} hidden testcase expected outputs")
+                    
+                    if public_missing:
+                        computed_public = await compute_expected_outputs_for_testcases(merged_payload, public_missing)
+                        # Create a map of input -> computed testcase
+                        computed_map = {tc.get("input", ""): tc for tc in computed_public}
+                        # Update missing testcases with computed outputs
+                        updated_public = []
+                        for tc in public_testcases:
+                            if is_missing_output(tc) and tc.get("input") in computed_map:
+                                updated_public.append(computed_map[tc.get("input")])
+                            else:
+                                updated_public.append(tc)
+                        update_data["public_testcases"] = updated_public
+                        logger.info(f"[update_question] Computed {len(computed_public)} public testcase expected outputs")
+                except Exception as e:
+                    # Log but don't fail the update - expected outputs computation is best-effort
+                    logger.warning(f"[update_question] Failed to compute expected outputs: {e}. Question update will proceed without computed outputs.")
     
     update_data["updated_at"] = datetime.utcnow()
     

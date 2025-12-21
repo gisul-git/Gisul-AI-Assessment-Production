@@ -226,8 +226,13 @@ export function useProctorUpload({ assessmentId, candidateId }: UseProctorUpload
         eventType: payload.eventType,
         assessmentId: payload.assessmentId,
         userId: payload.userId,
+        userIdType: typeof payload.userId,
+        userIdLength: payload.userId?.length,
+        userIdValue: payload.userId, // Explicit value for debugging
         hasSnapshot: !!snapshotBase64,
         snapshotSize: snapshotBase64 ? Math.round(snapshotBase64.length / 1024) + 'KB' : 'none',
+        currentCandidateId: currentCandidateId,
+        dataCandidateId: data.candidateId,
       });
 
       // Validate required fields

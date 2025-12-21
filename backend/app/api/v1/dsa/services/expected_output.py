@@ -53,12 +53,38 @@ def _pick_reference_code_and_language(question: Dict[str, Any]) -> Tuple[str, in
     )
 
 
+def _is_placeholder_output(output: str) -> bool:
+    """Check if expected_output is a placeholder."""
+    if not output:
+        return True
+    
+    output_lower = output.lower().strip()
+    
+    # Explicit placeholder patterns (including "e.g.," with comma)
+    placeholder_patterns = [
+        "e.g.",
+        "e.g.,",
+        "example",
+        "placeholder",
+        "expected output",
+        "expected:",
+    ]
+    
+    # Check for explicit placeholder patterns
+    if any(pattern in output_lower for pattern in placeholder_patterns):
+        logger.debug(f"Detected placeholder: '{output}' matches pattern")
+        return True
+    
+    return False
+
+
 async def compute_expected_outputs_for_testcases(
     question: Dict[str, Any],
     testcases: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Compute expected_output for any testcase missing it by executing a trusted reference solution via Judge0.
+    Compute expected_output for any testcase missing it or with placeholder values.
+    Executes a trusted reference solution via Judge0.
     This does NOT persist anything; it returns an augmented list.
     """
     ref_code, language_id = _pick_reference_code_and_language(question)
@@ -67,12 +93,15 @@ async def compute_expected_outputs_for_testcases(
     for idx, tc in enumerate(testcases):
         tc_copy = dict(tc or {})
         eo = (tc_copy.get("expected_output") or "").strip()
-        if eo:
+        
+        # Skip only if expected_output exists and is NOT a placeholder
+        if eo and not _is_placeholder_output(eo):
             augmented.append(tc_copy)
             continue
 
+        # Compute expected output if missing or placeholder
         stdin = tc_copy.get("input") or ""
-        logger.info("[expected_output] Computing expected_output for testcase %s", idx)
+        logger.info("[expected_output] Computing expected_output for testcase %s (missing or placeholder)", idx)
         result = await submit_to_judge0(source_code=ref_code, language_id=language_id, stdin=stdin)
         stdout = _normalize_output(result.get("stdout"))
         if stdout == "" and (result.get("stderr") or result.get("compile_output")):

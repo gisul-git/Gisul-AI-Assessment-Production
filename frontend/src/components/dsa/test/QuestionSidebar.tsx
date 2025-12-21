@@ -19,6 +19,7 @@ interface QuestionSidebarProps {
   submitting: boolean
   questionStatus?: Record<string, 'solved' | 'attempted' | 'not-attempted'>
   submittedQuestions?: Record<string, boolean>
+  timerMode?: 'GLOBAL' | 'PER_QUESTION'
   onBack?: () => void
 }
 
@@ -31,13 +32,21 @@ export function QuestionSidebar({
   submitting,
   questionStatus = {},
   submittedQuestions = {},
+  timerMode = 'PER_QUESTION',
   onBack
 }: QuestionSidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
   const router = useRouter()
 
-  // Check if a question is accessible (first question OR previous question submitted)
+  // Check if a question is accessible
+  // For GLOBAL mode: all questions are accessible
+  // For PER_QUESTION mode: first question OR previous question submitted
   const isQuestionAccessible = (index: number): boolean => {
+    // In GLOBAL mode, all questions are accessible
+    if (timerMode === 'GLOBAL') {
+      return true
+    }
+    // For PER_QUESTION mode, enforce sequential unlocking
     if (index === 0) return true // First question always accessible
     const previousQuestionId = questions[index - 1]?.id
     return previousQuestionId ? submittedQuestions[previousQuestionId] === true : false

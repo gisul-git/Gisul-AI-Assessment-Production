@@ -29,6 +29,7 @@ Note: DSA module integration is optional. If unavailable, falls back to basic ge
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -69,30 +70,47 @@ async def _generate_coding_questions(
     can_use_judge0: bool,
     coding_language: str = "python",
     experience_mode: str = "corporate",
-    additional_requirements: Optional[str] = None
+    additional_requirements: Optional[str] = None,
+    job_designation: Optional[str] = None,
+    experience_min: Optional[int] = None,
+    experience_max: Optional[int] = None,
+    company_name: Optional[str] = None,
+    assessment_requirements: Optional[str] = None,
+    previous_question: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Generate Coding questions (Judge0-compatible) using DSA module architecture.
+    Returns COMPLETE DSA-format questions with all test cases.
     
     Args:
         topic: Topic label
         difficulty: Difficulty level (Easy, Medium, Hard)
         count: Number of questions to generate
         can_use_judge0: Whether Judge0 can be used
-        coding_language: Programming language (python, java, cpp, c, javascript, typescript, go, ruby)
+        coding_language: Programming language (python, java, cpp, c, javascript, typescript, go, rust, kotlin, csharp)
         experience_mode: Experience mode (corporate/college)
         additional_requirements: Optional additional requirements
+        job_designation: Job role for personalization
+        experience_min: Minimum experience years
+        experience_max: Maximum experience years
+        company_name: Company name for personalization
+        assessment_requirements: Global assessment requirements
+        previous_question: For regeneration - avoid repeating
         
     Returns:
-        List of coding question dictionaries with:
-        - questionText (description + examples + constraints)
-        - starterCode (for specified language)
-        - visibleTestCases (public test cases)
-        - hiddenTestCases (hidden test cases)
-        - constraints
-        - functionSignature
-        - explanation (optional)
-        - language (Judge0 language ID)
+        List of COMPLETE coding question dictionaries with DSA format:
+        - title: Problem title
+        - description: Problem statement
+        - examples: Array of {input, output, explanation}
+        - constraints: Array of constraint strings
+        - function_signature: {name, parameters, return_type}
+        - stdin_format: Description of stdin format
+        - public_testcases: Array of {input, is_hidden: false}
+        - hidden_testcases: Array of {input, is_hidden: true}
+        - starter_code: Object with language keys
+        - reference_solution: Python reference solution
+        - difficulty: Easy/Medium/Hard
+        - type: "Coding"
         
     Raises:
         HTTPException: If can_use_judge0 is False or generation fails
@@ -120,23 +138,21 @@ async def _generate_coding_questions(
                 )
                 
                 if question_data:
-                    # Extract the necessary fields
-                    formatted_question = {
-                        "questionText": question_data.get("description", ""),
-                        "type": "Coding",
-                        "difficulty": difficulty,
-                        "language": coding_language,
-                        "judge0_language_id": _get_judge0_language_id(coding_language),
-                        "function_signature": question_data.get("function_signature", {}),
-                        "examples": question_data.get("examples", []),
-                        "constraints": question_data.get("constraints", []),
-                        "starterCode": question_data.get("starter_code", {}).get(coding_language.lower(), ""),
-                        "public_testcases": question_data.get("public_testcases", []),
-                        "hidden_testcases": question_data.get("hidden_testcases", []),
-                        "stdin_format": question_data.get("stdin_format", ""),
-                        "reference_solution": question_data.get("reference_solution", "")
-                    }
-                    questions.append(formatted_question)
+                    # ⭐ Return COMPLETE DSA format (no transformation)
+                    # Keep ALL fields from DSA generator - this is what frontend expects!
+                    question_data["type"] = "Coding"  # Add type field for frontend
+                    question_data["difficulty"] = difficulty.capitalize()  # Normalize difficulty
+                    
+                    # Ensure test cases have is_hidden flag
+                    if "public_testcases" in question_data:
+                        for tc in question_data["public_testcases"]:
+                            tc["is_hidden"] = False
+                    
+                    if "hidden_testcases" in question_data:
+                        for tc in question_data["hidden_testcases"]:
+                            tc["is_hidden"] = True
+                    
+                    questions.append(question_data)
             
             if questions:
                 logger.info(f"Successfully generated {len(questions)} Coding questions using DSA module")
@@ -146,103 +162,104 @@ async def _generate_coding_questions(
         except Exception as exc:
             logger.warning(f"DSA generator failed: {exc}. Falling back to basic generation")
     
-    # Fallback: Basic coding question generation using OpenAI
-    logger.info("Using basic Coding question generation (OpenAI)")
+    # Fallback: Basic coding question generation using OpenAI (matching DSA format)
+    logger.info("Using basic Coding question generation (OpenAI) with DSA format")
     
-    prompt = f"""You are an expert coding problem generator for Judge0 platform. Generate {count} coding question(s) for the topic: {topic}.
+    # Build personalization context
+    context_parts = []
+    if previous_question:
+        context_parts.append(f"""🔥 REGENERATION: User is regenerating. OLD QUESTION: "{previous_question[:200]}..."
+MUST generate COMPLETELY DIFFERENT question. DO NOT repeat similar concepts or phrasing.""")
+    
+    if assessment_requirements:
+        context_parts.append(f"Assessment Requirements: {assessment_requirements}")
+    if company_name:
+        context_parts.append(f"Company: {company_name}")
+    if job_designation:
+        context_parts.append(f"Job Role: {job_designation}")
+    
+    personalization = "\n".join(context_parts) if context_parts else ""
+    
+    # Supported languages (10 Judge0 languages)
+    all_supported_langs = ["python", "javascript", "typescript", "cpp", "java", "c", "go", "rust", "kotlin", "csharp"]
+    
+    prompt = f"""You are an expert coding problem generator. Generate a LeetCode-style coding question in JSON format.
 
-CRITICAL PLATFORM REQUIREMENTS:
-- Platform: Judge0 (stdin/stdout based execution)
-- Language: {coding_language}
-- Difficulty: {difficulty}
-- Experience Mode: {experience_mode}
-{f"Additional Requirements: {additional_requirements}" if additional_requirements else ""}
+Topic: {topic}
+Difficulty: {difficulty}
+Language for starter code: {coding_language}
+{personalization}
 
-⚠️ JUDGE0 COMPATIBILITY RULES (MANDATORY):
-1. Questions MUST be executable via stdin/stdout
-2. NO external libraries/frameworks (Django, Flask, React, TensorFlow, Pandas, etc.)
-3. ONLY standard library features allowed
-4. Algorithm/data structure problems (LeetCode-style)
-5. Pure computational problems with clear input/output
+⚠️ JUDGE0 PLATFORM REQUIREMENTS:
+- stdin/stdout based execution ONLY
+- NO external libraries/frameworks
+- Algorithm/data structure problems only
+- Standard library features only
 
-VALID Judge0 Topics:
-✅ Algorithms: sorting, searching, recursion, dynamic programming
-✅ Data structures: arrays, lists, stacks, queues, trees, graphs
-✅ String manipulation, math problems, bit manipulation
-✅ Standard library usage (built-in functions, collections)
-
-INVALID Topics (NOT Judge0-compatible):
-❌ Web frameworks (Django, Flask, Express, Spring)
-❌ Frontend frameworks (React, Angular, Vue)
-❌ ML/Data libraries (TensorFlow, PyTorch, Pandas, NumPy)
-❌ Database queries, API calls, file I/O operations
-❌ GUI applications, network programming
-
-REQUIREMENTS:
-1. Each question must include:
-   - Clear algorithmic problem statement (LeetCode-style)
-   - Function signature with parameters and return type
-   - Input/output examples with explanations
-   - Constraints (input limits, time/space complexity)
-   - Public test cases (3+) with ONLY stdin input
-   - Hidden test cases (3+) with ONLY stdin input
-   - Starter code for {coding_language}
-
-2. Testcase format (stdin/stdout):
-   - Use raw stdin format (e.g., "4\\n1 2 3 4\\n5")
-   - NO variable names (e.g., "nums=")
-   - NO JSON arrays (e.g., [1,2,3])
-   - Just raw values matching stdin_format
-   - Must be parseable from stdin
-
-3. Question complexity should match {difficulty} level:
-   - Easy: Basic algorithms, simple data structures (O(n) solutions)
-   - Medium: Moderate algorithms, common patterns (two pointers, sliding window, O(n log n))
-   - Hard: Complex algorithms, advanced data structures, optimization (O(n²) or better)
-
-Output format (JSON object with questions array):
+Generate a JSON object with this EXACT structure (matching DSA module format):
 {{
-  "questions": [
+  "title": "Problem Title",
+  "description": "Clear problem statement. NO examples, NO constraints here.",
+  "examples": [
     {{
-      "title": "Problem Title",
-      "description": "Clear problem statement (NO examples here)",
-      "examples": [
-        {{
-          "input": "nums = [1,2,3], target = 5",
-          "output": "[0,1]",
-          "explanation": "Why this is the answer"
-        }}
-      ],
-      "constraints": [
-        "1 <= n <= 10^4",
-        "-10^9 <= nums[i] <= 10^9"
-      ],
-      "function_signature": {{
-        "name": "functionName",
-        "parameters": [{{"name": "nums", "type": "int[]"}}, {{"name": "target", "type": "int"}}],
-        "return_type": "int[]"
-      }},
-      "stdin_format": "Line 1: N\\nLine 2: N space-separated integers\\nLine 3: target",
-      "public_testcases": [
-        {{"input": "4\\n1 2 3 4\\n5"}},
-        {{"input": "5\\n2 7 11 15 9\\n9"}}
-      ],
-      "hidden_testcases": [
-        {{"input": "1\\n5\\n5"}},
-        {{"input": "2\\n-1 -2\\n-3"}}
-      ],
-      "starter_code": "def functionName(nums, target):\\n    # Write your solution here\\n    pass"
+      "input": "nums = [2,7,11,15], target = 9",
+      "output": "[0,1]",
+      "explanation": "Because nums[0] + nums[1] == 9"
     }}
-  ]
+  ],
+  "constraints": [
+    "1 <= nums.length <= 10^4",
+    "-10^9 <= nums[i] <= 10^9"
+  ],
+  "difficulty": "{difficulty.lower()}",
+  "languages": {json.dumps(all_supported_langs)},
+  "function_signature": {{
+    "name": "functionName",
+    "parameters": [
+      {{"name": "nums", "type": "int[]"}},
+      {{"name": "target", "type": "int"}}
+    ],
+    "return_type": "int[]"
+  }},
+  "stdin_format": "Line 1: N (array size)\\nLine 2: N space-separated integers (nums)\\nLine 3: target integer",
+  "public_testcases": [
+    {{"input": "4\\n2 7 11 15\\n9"}},
+    {{"input": "3\\n3 2 4\\n6"}},
+    {{"input": "2\\n3 3\\n6"}}
+  ],
+  "hidden_testcases": [
+    {{"input": "1\\n5\\n5"}},
+    {{"input": "2\\n-1 -2\\n-3"}},
+    {{"input": "5\\n1 2 3 4 5\\n9"}}
+  ],
+  "starter_code": {{
+    "python": "def functionName(nums, target):\\n    # Write your solution here\\n    pass",
+    "{coding_language}": "starter code for {coding_language}"
+  }},
+  "reference_solution": "# Complete Python 3 program that reads stdin and prints output\\nimport sys\\n\\n# Read input\\n..."
 }}
 
-CRITICAL: 
-- DO NOT include expected_output in testcases
-- Use consistent stdin format across all testcases
-- Starter code should match the function_signature
+CRITICAL REQUIREMENTS:
+1. EXAMPLES vs TESTCASES - COMPLETELY SEPARATE:
+   - examples: Human-readable LeetCode style (e.g., "nums = [1,2,3]")
+   - testcases: Raw stdin ONLY, NO variable names, NO JSON arrays
 
-Return ONLY a JSON object with questions array."""
+2. DO NOT include expected_output in testcases:
+   - public_testcases: ONLY "input" field
+   - hidden_testcases: ONLY "input" field
 
+3. stdin_format: Describe your format in plain English
+
+4. ALL testcases MUST follow EXACT same format
+
+5. Generate at least 3 public_testcases and 3 hidden_testcases
+
+6. starter_code: Generate for {coding_language} at minimum
+
+7. reference_solution: Complete working Python 3 program
+
+Return ONLY valid JSON, no markdown."""
+    
     client = _get_openai_client()
     try:
         response = await client.chat.completions.create(
@@ -259,75 +276,86 @@ Return ONLY a JSON object with questions array."""
     content = response.choices[0].message.content.strip() if response.choices else ""
     data = _parse_json_response(content)
     
-    # Handle response format
-    if isinstance(data, dict) and "questions" in data:
+    # Handle response format - expecting single question object (DSA format)
+    if isinstance(data, dict) and ("title" in data or "description" in data):
+        # Single question object (expected format)
+        question_data = data
+    elif isinstance(data, dict) and "questions" in data:
+        # Array wrapped in questions key
         questions_list = data["questions"]
-    elif isinstance(data, list):
-        questions_list = data
-    elif isinstance(data, dict) and ("title" in data or "description" in data):
-        # Single question object
-        questions_list = [data]
+        if questions_list and isinstance(questions_list, list):
+            question_data = questions_list[0]
+        else:
+            raise HTTPException(status_code=500, detail="No valid questions in response")
     else:
         logger.error(f"Unexpected response format for Coding questions: {data}")
         raise HTTPException(status_code=500, detail="Invalid response format from AI")
     
-    # Format questions
-    result = []
-    for q in questions_list[:count]:
-        if not isinstance(q, dict):
-            continue
-        
-        # Extract components
-        title = q.get("title", "Coding Challenge")
-        description = q.get("description", "")
-        examples = q.get("examples", [])
-        constraints = q.get("constraints", [])
-        function_sig = q.get("function_signature", {})
-        stdin_format = q.get("stdin_format", "")
-        public_testcases = q.get("public_testcases", [])
-        hidden_testcases = q.get("hidden_testcases", [])
-        starter_code = q.get("starter_code", "")
-        
-        # Build formatted question text
-        question_text = f"**{title}**\n\n{description}"
-        
-        if examples:
-            question_text += "\n\n**Examples:**\n"
-            for i, ex in enumerate(examples, 1):
-                question_text += f"\nExample {i}:\n"
-                question_text += f"Input: {ex.get('input', '')}\n"
-                question_text += f"Output: {ex.get('output', '')}\n"
-                if ex.get("explanation"):
-                    question_text += f"Explanation: {ex.get('explanation')}\n"
-        
-        if constraints:
-            question_text += "\n**Constraints:**\n"
-            for constraint in constraints:
-                question_text += f"- {constraint}\n"
-        
-        # Create question object
-        question_obj = {
-            "questionText": question_text,
-            "type": "Coding",
-            "difficulty": difficulty,
-            "language": coding_language,
-            "judge0_language_id": _get_judge0_language_id(coding_language),
-            "function_signature": function_sig,
-            "examples": examples,
-            "constraints": constraints,
-            "starterCode": starter_code or _get_starter_code_template(coding_language, function_sig),
-            "public_testcases": public_testcases,
-            "hidden_testcases": hidden_testcases,
-            "stdin_format": stdin_format
+    # ⭐ Return COMPLETE DSA format (no transformation!)
+    # Validate and sanitize the question
+    if not isinstance(question_data, dict):
+        raise HTTPException(status_code=500, detail="Invalid question format")
+    
+    # Ensure required fields exist
+    if "title" not in question_data:
+        question_data["title"] = f"{topic} - Coding Challenge"
+    if "description" not in question_data:
+        raise HTTPException(status_code=500, detail="Question missing description")
+    if "function_signature" not in question_data:
+        question_data["function_signature"] = {
+            "name": "solve",
+            "parameters": [],
+            "return_type": "int"
         }
-        
-        result.append(question_obj)
     
-    if not result:
-        raise HTTPException(status_code=500, detail="No valid Coding questions generated")
+    # Add type field
+    question_data["type"] = "Coding"
+    question_data["difficulty"] = difficulty.capitalize()
     
-    logger.info(f"Successfully generated {len(result)} Coding questions using basic generation")
-    return result
+    # Ensure test cases have is_hidden flag
+    if "public_testcases" not in question_data:
+        question_data["public_testcases"] = []
+    for tc in question_data["public_testcases"]:
+        tc["is_hidden"] = False
+        # Remove expected_output if present
+        tc.pop("expected_output", None)
+        tc.pop("output", None)
+    
+    if "hidden_testcases" not in question_data:
+        question_data["hidden_testcases"] = []
+    for tc in question_data["hidden_testcases"]:
+        tc["is_hidden"] = True
+        # Remove expected_output if present
+        tc.pop("expected_output", None)
+        tc.pop("output", None)
+    
+    # Ensure starter_code exists
+    if "starter_code" not in question_data or not question_data["starter_code"]:
+        question_data["starter_code"] = {}
+    
+    # Generate starter code for requested language if missing
+    if coding_language not in question_data["starter_code"]:
+        func_sig = question_data.get("function_signature", {})
+        question_data["starter_code"][coding_language] = _get_starter_code_template(
+            coding_language, func_sig
+        )
+    
+    # Ensure other fields exist
+    if "examples" not in question_data:
+        question_data["examples"] = []
+    if "constraints" not in question_data:
+        question_data["constraints"] = []
+    if "stdin_format" not in question_data:
+        question_data["stdin_format"] = ""
+    if "reference_solution" not in question_data:
+        question_data["reference_solution"] = ""
+    
+    logger.info(f"Successfully generated Coding question using basic generation (DSA format)")
+    logger.info(f"  - Title: {question_data.get('title')}")
+    logger.info(f"  - Public testcases: {len(question_data.get('public_testcases', []))}")
+    logger.info(f"  - Hidden testcases: {len(question_data.get('hidden_testcases', []))}")
+    
+    return [question_data]  # Return list with single question
 
 
 

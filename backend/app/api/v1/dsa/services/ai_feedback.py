@@ -71,27 +71,79 @@ def normalize_code(code: str) -> str:
     return code
 
 
-def is_starter_code_only(submitted_code: str, starter_code: Optional[str]) -> bool:
+def is_starter_code_only(submitted_code: str, starter_code: Optional[str], language: Optional[str] = None, total_passed: Optional[int] = None, total_tests: Optional[int] = None) -> bool:
     """
     Check if submitted code is essentially the same as starter code.
-    Returns True if codes are identical after normalization (ignoring whitespace/comments).
+    Returns True ONLY if codes are truly identical after normalization (ignoring whitespace/comments).
+    
+    IMPORTANT: This should be very strict - only flag truly empty/placeholder code.
+    Do NOT flag valid implementations that happen to be similar to starter code.
+    
+    CRITICAL: If test cases pass (total_passed > 0), this CANNOT be starter code.
+    Passing test cases means the user wrote actual implementation.
+    
+    For SQL queries: Be extra careful - SQL queries often share common keywords (SELECT, FROM, etc.)
+    but can be completely different implementations. For SQL, be even more lenient.
     """
     if not starter_code:
         return False
     
+    # CRITICAL: If any test cases passed, this is NOT starter code
+    # Passing test cases means the user wrote actual implementation
+    if total_passed is not None and total_tests is not None and total_tests > 0:
+        if total_passed > 0:
+            logger.info(f"Test cases passed ({total_passed}/{total_tests}) - cannot be starter code")
+            return False
+    
+    # For SQL queries, use very lenient detection
+    # SQL queries often share structure but have different logic
+    is_sql = language and language.lower() == "sql"
+    
     normalized_submitted = normalize_code(submitted_code)
     normalized_starter = normalize_code(starter_code)
     
-    # If normalized codes are the same, user didn't write anything
+    # If both are empty after normalization, consider it starter code
+    if not normalized_submitted and not normalized_starter:
+        return True
+    
+    # If submitted is empty but starter is not, it's starter code
+    if not normalized_submitted and normalized_starter:
+        return True
+    
+    # For SQL: Be very lenient - only flag if EXACTLY the same
+    if is_sql:
+        # For SQL, only return True if normalized codes are EXACTLY the same
+        # Any difference means it's a real implementation
+        if normalized_submitted == normalized_starter:
+            return True
+        # If submitted code has any additional content beyond starter, it's real
+        if len(normalized_submitted) > len(normalized_starter):
+            return False
+        # If submitted has different SQL keywords, it's real
+        sql_indicators = ['join', 'where', 'group', 'order', 'having', 'union', 'case', 'when', 'coalesce', 'count', 'sum', 'avg', 'max', 'min', 'distinct', 'limit', 'offset', 'like', 'in', 'exists']
+        submitted_has_indicators = any(indicator in normalized_submitted for indicator in sql_indicators)
+        if submitted_has_indicators:
+            # If submitted has SQL keywords, it's likely a real implementation
+            # Only flag if it's exactly the same as starter
+            return False
+        # For SQL, default to NOT being starter code if there's any doubt
+        return normalized_submitted == normalized_starter
+    
+    # Only return True if normalized codes are EXACTLY the same
+    # This is the strictest check - user must have written something different
     if normalized_submitted == normalized_starter:
         return True
     
-    # Also check if submitted code is just starter code with minimal changes (e.g., only whitespace)
-    # If the difference is very small (less than 5% of starter code length), consider it unchanged
-    if len(normalized_starter) > 0:
-        similarity = len(set(normalized_submitted) & set(normalized_starter)) / len(normalized_starter)
-        if similarity > 0.95 and len(normalized_submitted) <= len(normalized_starter) * 1.1:
+    # Additional check: if submitted code is SHORTER than starter code, it's likely incomplete
+    # But only if it's significantly shorter (more than 30% reduction) AND it's a substring
+    if len(normalized_submitted) < len(normalized_starter) * 0.7:
+        # Check if submitted code is just starter code with parts removed
+        # If submitted is a substring of starter, it's likely incomplete
+        if normalized_submitted in normalized_starter:
             return True
+    
+    # REMOVED: The similarity check was too aggressive and flagged valid implementations
+    # Only use exact match or significant reduction checks
     
     return False
 
@@ -334,7 +386,8 @@ def generate_simple_feedback(
     - Scores based on correctness, complexity, and code quality
     """
     # Check if user only submitted starter code (no actual code written)
-    if starter_code and is_starter_code_only(source_code, starter_code):
+    # Pass test case info to avoid false positives when tests pass
+    if starter_code and is_starter_code_only(source_code, starter_code, language, total_passed, total_tests):
         logger.info("User submitted only starter code - returning 0 score (rule-based)")
         return {
             "overall_score": 0,
@@ -682,7 +735,8 @@ def generate_code_feedback(
     - Score based purely on function implementation quality
     """
     # Check if user only submitted starter code (no actual code written)
-    if starter_code and is_starter_code_only(source_code, starter_code):
+    # Pass test case info to avoid false positives when tests pass
+    if starter_code and is_starter_code_only(source_code, starter_code, language, total_passed, total_tests):
         logger.info("User submitted only starter code - returning 0 score")
         return {
             "overall_score": 0,
@@ -804,6 +858,37 @@ def generate_code_feedback(
             if hidden_failed:
                 failed_details += f"- Hidden tests: {len(hidden_failed)} hidden test case(s) failed (details not shown to user)\n"
         
+        # Check if this is starter code only BEFORE calling AI
+        # CRITICAL: If test cases passed, this is NOT starter code - user wrote actual implementation
+        starter_code_check = ""
+        if starter_code and total_passed == 0:
+            starter_code_check = f"""
+
+**CRITICAL: STARTER CODE CHECK**
+The following is the starter code template provided to the user:
+```
+{starter_code}
+```
+
+**MANDATORY RULE:** If the user's code is identical or nearly identical to the starter code (only whitespace/comments changed, or just placeholder statements like "pass", "return None", "TODO", etc.), you MUST return overall_score = 0. Do NOT give any points (not even 35) for starter code submissions. Starter code is just a template and does not solve the problem.
+
+**IMPORTANT:** Since {total_passed}/{total_tests} test cases passed, this indicates the user wrote actual implementation code. Evaluate based on test results, code structure, and implementation quality.
+"""
+        
+        # Check if this is SQL - SQL evaluation should be more lenient
+        is_sql = language and language.lower() == "sql"
+        sql_note = ""
+        if is_sql:
+            sql_note = """
+
+**SQL-SPECIFIC EVALUATION (MORE LENIENT):**
+- For SQL queries, use ANY reasonable criteria for evaluation
+- SQL queries can be written in many different ways and still be correct
+- Focus on: (1) Does the query produce correct results? (2) Is the query structure reasonable? (3) Does it demonstrate SQL knowledge?
+- Be flexible with SQL syntax variations - different approaches can be equally valid
+- If the query passes test cases, it should receive a high score
+"""
+        
         prompt = f"""You are evaluating code for an online coding judge platform (like LeetCode/HackerRank).
 This platform supports ANY programming language that Judge0 supports.
 
@@ -816,7 +901,7 @@ CRITICAL EVALUATION RULES:
 6. If the function logic is correct and all tests pass, the score should be 100/100
 7. Empty or missing main() must NOT reduce the score
 8. Be LANGUAGE-AGNOSTIC - the same rules apply regardless of programming language
-9. ANALYZE THE ACTUAL CODE to determine time and space complexity - do not guess, analyze the loops, data structures, and algorithm logic
+9. ANALYZE THE ACTUAL CODE to determine time and space complexity - do not guess, analyze the loops, data structures, and algorithm logic{sql_note}{starter_code_check}
 
 **Question:** {question_title}
 
@@ -845,25 +930,33 @@ IMPORTANT: Analyze the actual code structure to determine time and space complex
 
 Evaluate ONLY the function implementation and provide comprehensive, detailed feedback in this JSON format:
 
-SCORING GUIDELINES:
-- If ALL tests pass (100%): overall_score = 100 (perfect solution)
-- If 80-99% tests pass: overall_score = 85-99 (excellent, minor issues)
-- If 60-79% tests pass: overall_score = 70-84 (good, needs some fixes)
-- If 40-59% tests pass: overall_score = 55-69 (fair, significant issues)
-- If <40% tests pass: overall_score = 35-54 (poor, major revision needed)
+SCORING GUIDELINES (PRIORITIZE TEST CASES PASSED):
+- **PRIMARY FACTOR: Test cases passed** - This is the most important indicator of correctness
+- **If ALL tests pass (100%): overall_score = 100 (perfect solution)** - Must score 100 if all tests pass
+- **If 80-99% tests pass: overall_score = 85-99 (excellent, minor issues)** - Base score should be close to pass rate
+- **If 60-79% tests pass: overall_score = 70-84 (good, needs some fixes)** - Base score should reflect pass rate
+- **If 40-59% tests pass: overall_score = 55-69 (fair, significant issues)** - Base score should reflect pass rate
+- **If <40% tests pass: overall_score = 35-54 (poor, major revision needed)** - Base score should reflect pass rate
+- **If user submitted only starter code (no implementation AND 0 tests passed): overall_score = 0 (MANDATORY - do not give any points)**
 
 Within each range, adjust based on:
-- Code quality (clarity, structure, readability): ±5 points
-- Algorithm efficiency (optimal time/space complexity): ±5 points
-- Edge case handling: ±5 points
+- **Code structure and implementation quality** (clarity, organization, maintainability): ±5 points
+- **Algorithm efficiency** (optimal time/space complexity): ±5 points
+- **Edge case handling** (based on test results): ±5 points
+
+**CRITICAL:** If test cases passed, the user wrote actual code. Evaluate based on:
+1. Test cases passed (primary factor)
+2. Code structure and implementation quality
+3. Algorithm efficiency
+4. Edge case handling
 
 {{
     "overall_score": <0-100 calculated as: base score from test pass rate (see guidelines above) ± adjustments for code quality, efficiency, and edge cases. Must be 100 if all tests pass>,
-    "feedback_summary": "<2-3 sentences providing a comprehensive overview. Include: (1) Overall assessment of the solution's correctness and efficiency, (2) Time and space complexity analysis with context, (3) Code quality and structure evaluation, (4) Brief mention of strengths and any areas that could be improved. Make it informative and educational.>",
+    "feedback_summary": "<2-3 sentences providing a comprehensive overview. PRIORITIZE test cases passed. Include: (1) Overall assessment based on test results ({total_passed}/{total_tests} passed), (2) Code structure and implementation quality evaluation, (3) Time and space complexity analysis with context, (4) Brief mention of strengths and any areas that could be improved. Make it informative and educational.>",
     "one_liner": "<Brief summary: '✓ All tests passed | Time: O(n) | Space: O(1)' format>",
     "code_quality": {{
         "score": <0-100>,
-        "comments": "<Detailed 2-3 sentence analysis of code clarity, structure, readability, naming conventions, and maintainability. Discuss how well-organized the code is and whether it follows best practices. Ignore main/I/O code completely.>"
+        "comments": "<Detailed 2-3 sentence analysis of code structure, implementation quality, clarity, readability, naming conventions, and maintainability. Discuss how well-organized the code is, the implementation approach, and whether it follows best practices. Ignore main/I/O code completely. Focus on code structure and implementation quality.>"
     }},
     "efficiency": {{
         "time_complexity": "<Big O notation - e.g., O(1), O(log n), O(√n), O(n), O(n log n), O(n²), etc. For prime checking with loop up to √n, use O(√n)>",
@@ -871,8 +964,8 @@ Within each range, adjust based on:
         "comments": "<Comprehensive 3-4 sentence analysis: (1) Explain why this time/space complexity is achieved (e.g., for O(√n), explain that the loop iterates up to √n, making it more efficient than O(n)), (2) Discuss whether this is optimal for the problem, (3) Compare with alternative approaches if relevant, (4) Mention any trade-offs or optimizations that could be made. Be educational and detailed.>"
     }},
     "correctness": {{
-        "score": <0-100 based on test pass rate>,
-        "comments": "<Detailed 2-3 sentence analysis: (1) Explain which test cases passed/failed and why, (2) Discuss edge case handling, (3) Evaluate the algorithm's logic and correctness, (4) Mention any potential issues or bugs if tests failed.>"
+        "score": <0-100 based on test pass rate - should be close to (total_passed/total_tests)*100>,
+        "comments": "<Detailed 2-3 sentence analysis: (1) Explain test results ({total_passed}/{total_tests} passed) and what this indicates about correctness, (2) Discuss edge case handling based on test results, (3) Evaluate the algorithm's logic and correctness based on test cases passed, (4) Mention any potential issues or bugs if tests failed.>"
     }},
     "suggestions": ["<Detailed improvement suggestions for the FUNCTION only - be specific and actionable>", "<Additional suggestions>"],
     "strengths": ["<Detailed strengths - explain what was done well and why it's good>", "<Additional strengths>"],
@@ -893,7 +986,7 @@ IMPORTANT:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert code reviewer and algorithm analyst for a LeetCode-style platform. Users only write function implementations - never I/O. Your task is to: 1) Analyze the ACTUAL CODE STRUCTURE to determine precise time and space complexity (e.g., if a loop iterates up to √n, report O(√n), not O(n)), 2) Evaluate only the function logic, 3) Be language-agnostic, 4) Always respond with valid JSON, 5) Provide comprehensive, detailed feedback with educational context. Carefully examine loops, their bounds, data structures used, and algorithm logic to give accurate complexity analysis."
+                    "content": "You are an expert code reviewer and algorithm analyst for a LeetCode-style platform. Users only write function implementations - never I/O. Your task is to: 1) PRIORITIZE test cases passed - this is the primary indicator of correctness, 2) Evaluate code structure and implementation quality, 3) Analyze the ACTUAL CODE STRUCTURE to determine precise time and space complexity (e.g., if a loop iterates up to √n, report O(√n), not O(n)), 4) Evaluate only the function logic, 5) Be language-agnostic, 6) Always respond with valid JSON, 7) Provide comprehensive, detailed feedback with educational context, 8) CRITICALLY IMPORTANT: If test cases passed, the user wrote actual code - evaluate based on test results, code structure, and implementation quality. If the user's code is identical to starter code AND 0 tests passed, return overall_score = 0. 9) For SQL queries: Be MORE LENIENT - use any reasonable criteria, focus on correctness and query structure, be flexible with syntax variations. Carefully examine loops, their bounds, data structures used, and algorithm logic to give accurate complexity analysis."
                 },
                 {
                     "role": "user",
@@ -911,8 +1004,25 @@ IMPORTANT:
         if json_match:
             import json
             feedback = json.loads(json_match.group())
+            
+            # CRITICAL: Double-check if this is starter code only and force score to 0
+            # This prevents AI from giving any points (like 35) for starter code submissions
+            # Pass test case info to avoid false positives when tests pass
+            if starter_code and is_starter_code_only(source_code, starter_code, language, total_passed, total_tests):
+                logger.warning(f"AI returned score {feedback.get('overall_score', 0)} for starter code - forcing to 0")
+                feedback["overall_score"] = 0
+                feedback["feedback_summary"] = "No code was written. You submitted only the starter code template. Please implement the solution to receive a score."
+                feedback["one_liner"] = "No code written | Starter code only"
+                feedback["correctness"] = feedback.get("correctness", {})
+                feedback["correctness"]["score"] = 0
+                feedback["code_quality"] = feedback.get("code_quality", {})
+                feedback["code_quality"]["score"] = 0
+                feedback["deduction_reasons"] = ["No code was written - only starter code template was submitted"]
+                feedback["evaluation_note"] = "Starter code only - no implementation provided (score forced to 0)"
+            
             feedback["ai_generated"] = True
-            feedback["evaluation_note"] = "Evaluated function implementation only (language-agnostic)"
+            if not (starter_code and is_starter_code_only(source_code, starter_code, language, total_passed, total_tests)):
+                feedback["evaluation_note"] = "Evaluated function implementation only (language-agnostic)"
             # Add test breakdown information
             feedback["test_breakdown"] = {
                 "public_passed": public_passed,

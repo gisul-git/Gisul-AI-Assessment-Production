@@ -324,6 +324,16 @@ export function EditorContainer({
   const panelRef = useRef<HTMLDivElement>(null)
   const isResizingRef = useRef(false)
 
+  // Debug: Log test cases
+  useEffect(() => {
+    console.log('[EditorContainer] Test cases received:', {
+      visibleTestcasesLength: visibleTestcases.length,
+      visibleTestcases: visibleTestcases,
+      publicResultsLength: publicResults.length,
+      willShowPanel: publicResults.length > 0 || visibleTestcases.length > 0
+    })
+  }, [visibleTestcases, publicResults])
+
   useEffect(() => {
     const updateHeight = () => {
       if (editorContainerRef.current) {
