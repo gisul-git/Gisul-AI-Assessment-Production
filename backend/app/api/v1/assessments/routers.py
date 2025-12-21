@@ -3425,6 +3425,12 @@ async def regenerate_topic_endpoint_v2(
         new_topic = new_topics[0]
         new_topic["id"] = payload.topicId  # Keep same ID
         new_topic["locked"] = False
+        # ⭐ CRITICAL: Preserve category from old topic (don't lose it on regeneration)
+        old_topic = topics_v2[topic_index]
+        if old_topic.get("category"):
+            new_topic["category"] = old_topic["category"]
+        else:
+            new_topic["category"] = "technical"  # Default if not set
         # Reset all questionRows - keep only the first auto-generated one
         if new_topic.get("questionRows"):
             first_row = new_topic["questionRows"][0]
@@ -4756,6 +4762,12 @@ async def regenerate_topic_endpoint_v2(
         new_topic = new_topics[0]
         new_topic["id"] = payload.topicId  # Keep same ID
         new_topic["locked"] = False
+        # ⭐ CRITICAL: Preserve category from old topic (don't lose it on regeneration)
+        old_topic = topics_v2[topic_index]
+        if old_topic.get("category"):
+            new_topic["category"] = old_topic["category"]
+        else:
+            new_topic["category"] = "technical"  # Default if not set
         # Reset all questionRows - keep only the first auto-generated one
         if new_topic.get("questionRows"):
             first_row = new_topic["questionRows"][0]
@@ -5484,14 +5496,133 @@ async def add_custom_topic_endpoint(
         if any(t.get("label", "").lower() == topic_name.lower() for t in topics_v2):
             raise HTTPException(status_code=400, detail="Topic already exists")
         
-        # Generate topic context for technical topics
-        if payload.category == "technical":
+        # ⭐ STEP 1: Auto-detect category based on topic content
+        # Check if topic is a programming language, SQL, or AIML → automatically technical
+        from .services.ai_topic_generator import CODING_LANGUAGES
+        from .services.ai_utils import _v2_is_aiml_execution_topic, _v2_is_sql_execution_topic
+        from .services.judge0_utils import contains_unsupported_framework
+        import re
+        
+        topic_lower = topic_name.lower().strip()
+        topic_clean = topic_name.strip()
+        
+        # Check if topic is a programming language, SQL, or AIML → must be technical
+        is_programming_lang = False
+        is_sql_topic = False
+        is_aiml_topic = False
+        
+        # Check for programming languages with aliases
+        LANGUAGE_ALIASES = {
+            "cpp": ["c++", "cpp", "c plus plus"],
+            "csharp": ["c#", "csharp", "c sharp"],
+            "c": ["c"],
+            "java": ["java"],
+            "kotlin": ["kotlin"],
+            "python": ["python"],
+            "javascript": ["javascript", "js"],
+            "typescript": ["typescript", "ts"],
+            "go": ["go", "golang"],
+            "rust": ["rust"]
+        }
+        
+        for lang in CODING_LANGUAGES:
+            lang_lower = lang.lower()
+            aliases = LANGUAGE_ALIASES.get(lang_lower, [lang_lower])
+            
+            for alias in aliases:
+                if lang_lower == "c":
+                    # Special handling for "C" - match standalone "C" or "C " at start
+                    if topic_clean.lower() == "c" or topic_clean.lower() == "c ":
+                        is_framework, _ = contains_unsupported_framework(topic_lower)
+                        if not is_framework:
+                            is_programming_lang = True
+                            break
+                    elif re.search(r'\bc\b(?![\+\#\w])', topic_lower):
+                        c_context = r'\bc\s+(programming|language|code)'
+                        if re.search(c_context, topic_lower) or re.search(r'^c\s+', topic_lower):
+                            is_framework, _ = contains_unsupported_framework(topic_lower)
+                            if not is_framework:
+                                is_programming_lang = True
+                                break
+                elif lang_lower == "cpp":
+                    # Match "C++", "cpp", "C Plus Plus", etc.
+                    if alias in topic_lower or "c++" in topic_lower or "c plus" in topic_lower:
+                        is_framework, _ = contains_unsupported_framework(topic_lower)
+                        if not is_framework:
+                            is_programming_lang = True
+                            break
+                elif lang_lower == "csharp":
+                    # Match "C#", "csharp", "C Sharp", etc.
+                    if alias in topic_lower or "c#" in topic_lower or "c sharp" in topic_lower:
+                        is_framework, _ = contains_unsupported_framework(topic_lower)
+                        if not is_framework:
+                            is_programming_lang = True
+                            break
+                else:
+                    # For other languages, match whole word
+                    pattern = r'\b' + re.escape(alias) + r'\b'
+                    if re.search(pattern, topic_lower):
+                        is_framework, _ = contains_unsupported_framework(topic_lower)
+                        if not is_framework:
+                            is_programming_lang = True
+                            break
+            
+            if is_programming_lang:
+                break
+        
+        # Check for SQL topics
+        is_sql_topic = _v2_is_sql_execution_topic(topic_lower)
+        
+        # Check for AIML topics (but exclude if non-Python language is mentioned)
+        if _v2_is_aiml_execution_topic(topic_lower):
+            # Only AIML if no non-Python language is mentioned
+            mentions_non_python = False
+            for lang in CODING_LANGUAGES:
+                if lang.lower() == "python":
+                    continue
+                pattern = r'\b' + re.escape(lang.lower()) + r'\b'
+                if re.search(pattern, topic_lower):
+                    mentions_non_python = True
+                    break
+            if not mentions_non_python:
+                is_aiml_topic = True
+        
+        # ⭐ If topic is programming language, SQL, or AIML → MUST be technical category
+        if is_programming_lang or is_sql_topic or is_aiml_topic:
+            detected_category = "technical"
+            logger.info(f"✅ Auto-detected category: technical (programming_lang={is_programming_lang}, sql={is_sql_topic}, aiml={is_aiml_topic})")
+        elif not detected_category or detected_category == "technical":
+            # Use AI to verify if it's actually technical
             try:
+                is_technical = await _is_technical_topic_ai(topic_name)
+                if is_technical:
+                    detected_category = "technical"
+                else:
+                    # If user said "technical" but topic is not technical, keep as technical (trust user)
+                    detected_category = payload.category or "technical"
+            except Exception as detect_err:
+                logger.warning(f"Failed to detect topic category: {detect_err}")
+                detected_category = payload.category or "technical"
+        
+        # ⭐ STEP 2: Generate topic context and detect question type
+        context_data = {}
+        if detected_category == "technical":
+            try:
+                # This function now properly detects Coding/SQL/AIML in correct order
                 context_data = await generate_topic_context_summary(topic_name, "technical")
                 suggested_question_type = context_data.get("suggestedQuestionType", "MCQ")
+                logger.info(f"✅ Detected question type: {suggested_question_type} for topic: {topic_name}")
             except Exception as ctx_err:
                 logger.warning(f"Failed to generate context for technical topic: {ctx_err}")
-                suggested_question_type = "MCQ"
+                # Fallback: Use detected types from above
+                if is_programming_lang:
+                    suggested_question_type = "Coding"
+                elif is_sql_topic:
+                    suggested_question_type = "SQL"
+                elif is_aiml_topic:
+                    suggested_question_type = "AIML"
+                else:
+                    suggested_question_type = "MCQ"
         else:
             suggested_question_type = "MCQ"
         
@@ -5500,11 +5631,11 @@ async def add_custom_topic_endpoint(
         new_topic = {
             "id": f"custom-{uuid.uuid4().hex[:12]}",
             "label": topic_name,
-            "category": payload.category,
+            "category": detected_category,  # ⭐ Use detected/validated category
             "locked": False,
             "source": "custom",
             "status": "pending",
-            "contextSummary": context_data.get("contextSummary", "") if payload.category == "technical" else "",
+            "contextSummary": context_data.get("contextSummary", "") if detected_category == "technical" else "",
             "suggestedQuestionType": suggested_question_type,
             "questionRows": []
         }

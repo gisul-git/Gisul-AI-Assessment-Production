@@ -190,10 +190,145 @@ async def generate_topic_context_summary(
     Generate context summary and suggested question type for a topic.
     Returns: {
         "contextSummary": str,
-        "suggestedQuestionType": "MCQ" | "Subjective",
+        "suggestedQuestionType": "MCQ" | "Subjective" | "Coding" | "SQL" | "AIML" | "PseudoCode",
         "reasoning": str
     }
     """
+    # ⭐ CRITICAL: Check if topic is Coding, SQL, or AIML BEFORE generating context
+    # ORDER MATTERS: Coding first (to catch Java, Kotlin, C, etc.), then SQL, then AIML
+    from .services.ai_utils import _v2_is_aiml_execution_topic, _v2_is_sql_execution_topic
+    from .services.ai_topic_generator import CODING_LANGUAGES
+    from .services.judge0_utils import contains_unsupported_framework
+    import re
+    
+    topic_lower = topic_name.lower().strip()
+    topic_clean = topic_name.strip()
+    
+    # ⭐ STEP 1: Check for Coding topics FIRST (programming languages)
+    # This must come BEFORE AIML check to prevent Java/Kotlin from being classified as AIML
+    # ORDER: Check Coding languages first, then SQL, then AIML
+    
+    # Language aliases for user input variations
+    LANGUAGE_ALIASES = {
+        "cpp": ["c++", "cpp", "c plus plus"],
+        "csharp": ["c#", "csharp", "c sharp"],
+        "c": ["c"],
+        "java": ["java"],
+        "kotlin": ["kotlin"],
+        "python": ["python"],
+        "javascript": ["javascript", "js"],
+        "typescript": ["typescript", "ts"],
+        "go": ["go", "golang"],
+        "rust": ["rust"]
+    }
+    
+    for lang in CODING_LANGUAGES:
+        matches = False
+        lang_lower = lang.lower()
+        
+        # Get aliases for this language
+        aliases = LANGUAGE_ALIASES.get(lang_lower, [lang_lower])
+        
+        # Check if topic matches any alias
+        for alias in aliases:
+            if lang_lower == "c":
+                # Special handling for "C" to avoid matching "C++" or "C#"
+                if topic_clean.lower() == "c" or topic_clean.lower() == "c ":
+                    matches = True
+                    break
+                elif re.search(r'\bc\b(?![\+\#\w])', topic_lower):
+                    # Additional check: must be "C programming", "C language", or start with "C "
+                    c_context = r'\bc\s+(programming|language|code)'
+                    if re.search(c_context, topic_lower) or re.search(r'^c\s+', topic_lower):
+                        matches = True
+                        break
+            elif lang_lower == "cpp":
+                # Match "C++", "cpp", "C Plus Plus", etc.
+                if alias in topic_lower or "c++" in topic_lower or "c plus" in topic_lower:
+                    matches = True
+                    break
+            elif lang_lower == "csharp":
+                # Match "C#", "csharp", "C Sharp", etc.
+                if alias in topic_lower or "c#" in topic_lower or "c sharp" in topic_lower:
+                    matches = True
+                    break
+            else:
+                # For other languages, match whole word
+                pattern = r'\b' + re.escape(alias) + r'\b'
+                if re.search(pattern, topic_lower):
+                    matches = True
+                    break
+        
+        if matches:
+            # Check if it's a framework (not supported for Coding)
+            is_framework, _ = contains_unsupported_framework(topic_lower)
+            if not is_framework:
+                # ⭐ CRITICAL: For simple language names (like "C", "Java", "Kotlin", "C++", "C#"), 
+                # classify as Coding even without implementation keywords
+                # Only require implementation keywords for complex topics
+                IMPLEMENTATION_KW = [
+                    "implement", "write", "create", "build", "develop", "code", "program",
+                    "algorithm", "data structure", "function", "method", "class"
+                ]
+                has_impl = any(kw in topic_lower for kw in IMPLEMENTATION_KW)
+                
+                # Simple language name patterns
+                is_simple_lang = (
+                    topic_clean.lower() == lang_lower or
+                    topic_clean.lower() in [alias for alias in aliases] or
+                    topic_clean.lower().startswith(lang_lower + " ") or
+                    any(topic_clean.lower().startswith(alias + " ") for alias in aliases) or
+                    topic_clean.lower() == f"{lang_lower} programming" or
+                    topic_clean.lower() == f"{lang_lower} language" or
+                    (lang_lower == "cpp" and ("c++" in topic_clean.lower() or "cpp" in topic_clean.lower())) or
+                    (lang_lower == "csharp" and ("c#" in topic_clean.lower() or "csharp" in topic_clean.lower()))
+                )
+                
+                if is_simple_lang or has_impl:
+                    # Map internal names to display names
+                    display_name = {
+                        "cpp": "C++",
+                        "csharp": "C#",
+                        "c": "C"
+                    }.get(lang_lower, lang_lower.capitalize())
+                    
+                    return {
+                        "contextSummary": f"This topic covers {topic_name} programming concepts and implementation.",
+                        "suggestedQuestionType": "Coding",
+                        "reasoning": f"Topic '{topic_name}' is identified as a Coding topic (language: {display_name})."
+                    }
+            break
+    
+    # ⭐ STEP 2: Check for SQL topics
+    if _v2_is_sql_execution_topic(topic_lower):
+        return {
+            "contextSummary": f"This topic covers {topic_name} concepts and database query operations.",
+            "suggestedQuestionType": "SQL",
+            "reasoning": f"Topic '{topic_name}' is identified as a SQL topic based on keywords and context."
+        }
+    
+    # ⭐ STEP 3: Check for AIML topics LAST (after Coding check)
+    # This prevents Java, Kotlin, etc. from being classified as AIML
+    # AIML is ONLY for Python + ML libraries
+    if _v2_is_aiml_execution_topic(topic_lower):
+        # ⭐ CRITICAL: Double-check that no non-Python language is mentioned
+        mentions_non_python = False
+        for lang in CODING_LANGUAGES:
+            if lang.lower() == "python":
+                continue
+            pattern = r'\b' + re.escape(lang.lower()) + r'\b'
+            if re.search(pattern, topic_lower):
+                mentions_non_python = True
+                break
+        
+        # Only classify as AIML if no non-Python language is mentioned
+        if not mentions_non_python:
+            return {
+                "contextSummary": f"This topic covers {topic_name} concepts and practical applications in machine learning and data science.",
+                "suggestedQuestionType": "AIML",
+                "reasoning": f"Topic '{topic_name}' is identified as an AIML (AI/ML) topic based on keywords and context."
+            }
+    
     category_descriptions = {
         "aptitude": "numerical problem-solving and quantitative reasoning",
         "communication": "written communication, professional correspondence",
@@ -244,9 +379,9 @@ Return ONLY JSON:
         
         result = json.loads(content)
         
-        # Validate question type
+        # Validate question type - allow AIML, SQL, Coding, PseudoCode in addition to MCQ and Subjective
         suggested_type = result.get("suggestedQuestionType", "MCQ")
-        if suggested_type not in ["MCQ", "Subjective"]:
+        if suggested_type not in ["MCQ", "Subjective", "Coding", "SQL", "AIML", "PseudoCode"]:
             suggested_type = "MCQ"
         
         return {
