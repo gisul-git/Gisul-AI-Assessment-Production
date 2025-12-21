@@ -366,21 +366,67 @@ export function useMultiLiveProctorAdmin({
                   const trackId = event.track.id;
                   
                   // Determine if it's webcam or screen:
-                  // 1. Check track label for keywords
+                  // 1. Check track label for keywords (most reliable)
                   // 2. Check stream ID for keywords
-                  // 3. Use order: first video track = webcam, second = screen
+                  // 3. Check track settings (screen shares often have different constraints)
+                  // 4. Use order: first video track = webcam, second = screen (fallback)
                   const labelLower = (event.track.label || '').toLowerCase();
                   const streamIdLower = (stream?.id || '').toLowerCase();
                   const isScreenByLabel = labelLower.includes("screen") || 
                                          labelLower.includes("display") ||
+                                         labelLower.includes("window") ||
                                          streamIdLower.includes("screen");
+                  
+                  // Check track settings - screen shares often have different characteristics
+                  // Wrap in try-catch as getSettings() might fail in some browsers/production builds
+                  let trackSettings: MediaTrackSettings | null = null;
+                  let isScreenBySettings = false;
+                  try {
+                    trackSettings = event.track.getSettings();
+                    isScreenBySettings = trackSettings?.displaySurface === "monitor" ||
+                                        trackSettings?.displaySurface === "window" ||
+                                        trackSettings?.displaySurface === "browser" ||
+                                        trackSettings?.displaySurface === "screen";
+                  } catch (err) {
+                    // getSettings() might not be available or might throw in some browsers
+                    console.warn(`[MultiLiveProctorAdmin] getSettings() failed for track ${event.track.id}:`, err);
+                    trackSettings = null;
+                  }
                   
                   // Count how many unique video tracks we've received for this session
                   const isFirstVideoTrack = !sessionTracks.has(trackId) && sessionTracks.size === 0;
                   const isSecondVideoTrack = !sessionTracks.has(trackId) && sessionTracks.size === 1;
                   
-                  // If label/stream ID indicates screen, use that; otherwise use order
-                  const isScreen = isScreenByLabel || (!isFirstVideoTrack && isSecondVideoTrack);
+                  // Priority: label > settings > order
+                  const isScreen = isScreenByLabel || isScreenBySettings || (!isFirstVideoTrack && isSecondVideoTrack);
+                  
+                  // CRITICAL: Always log ALL track detection details in production (even if debugMode is false)
+                  // This helps diagnose production issues
+                  console.log(`[MultiLiveProctorAdmin] Track detection for ${sessionId}`, {
+                    trackId: trackId,
+                    trackLabel: event.track.label,
+                    streamId: stream?.id,
+                    trackSettings: trackSettings,
+                    displaySurface: trackSettings?.displaySurface,
+                    isScreenByLabel,
+                    isScreenBySettings,
+                    isFirstVideoTrack,
+                    isSecondVideoTrack,
+                    receivedTracksCount: sessionTracks.size,
+                    finalIsScreen: isScreen,
+                    detectionMethod: isScreenByLabel ? 'label' : (isScreenBySettings ? 'settings' : 'order'),
+                  });
+                  
+                  if (!isScreenByLabel && !isScreenBySettings) {
+                    console.warn(`[MultiLiveProctorAdmin] ⚠️ Screen detection using fallback (order) for ${sessionId}`, {
+                      trackLabel: event.track.label,
+                      streamId: stream?.id,
+                      trackSettings: trackSettings,
+                      isFirstVideoTrack,
+                      isSecondVideoTrack,
+                      receivedTracksCount: sessionTracks.size,
+                    });
+                  }
                   
                   // Check if this is a duplicate track (already processed)
                   const isDuplicate = sessionTracks.has(trackId);
@@ -434,6 +480,12 @@ export function useMultiLiveProctorAdmin({
                       streamId: stream?.id,
                       trackCount: stream?.getVideoTracks().length,
                       trackIds: stream?.getVideoTracks().map(t => t.id),
+                    });
+                    // CRITICAL: Always log screen stream detection in production
+                    console.log(`[MultiLiveProctorAdmin] ✅ Screen stream detected for ${sessionId}`, {
+                      streamId: stream?.id,
+                      trackLabel: event.track.label,
+                      trackSettings: event.track.getSettings(),
                     });
                   } else if (!isScreen && !existing.webcamStream) {
                     // Update ref FIRST (source of truth, not affected by React batching)

@@ -326,6 +326,22 @@ export function useLiveProctoring({
     screenStream.getTracks().forEach(track => {
       pc.addTrack(track, screenStream);
       log(`Added screen track: ${track.kind}`);
+      // CRITICAL: Always log screen track addition in production
+      let trackSettings: MediaTrackSettings | null = null;
+      try {
+        trackSettings = track.getSettings();
+      } catch (err) {
+        console.warn(`[LiveProctoring] getSettings() failed for screen track:`, err);
+      }
+      console.log(`[LiveProctoring] ✅ Added screen track to peer connection`, {
+        trackId: track.id,
+        trackLabel: track.label,
+        trackKind: track.kind,
+        trackSettings: trackSettings,
+        displaySurface: trackSettings?.displaySurface,
+        streamId: screenStream.id,
+        trackReadyState: track.readyState,
+      });
     });
     
     // Handle ICE candidates
@@ -436,9 +452,30 @@ export function useLiveProctoring({
       // 2. Get screen stream
       const screenStream = getScreenStream();
       if (!screenStream) {
-        throw new Error("Screen stream not available. Please share your screen first.");
+        const errorMsg = "Screen stream not available. Please share your screen first.";
+        console.error(`[LiveProctoring] ❌ ${errorMsg}`);
+        throw new Error(errorMsg);
       }
       screenStreamRef.current = screenStream;
+      // CRITICAL: Always log screen stream acquisition in production
+      const videoTracks = screenStream.getVideoTracks();
+      const trackSettingsArray: (MediaTrackSettings | null)[] = [];
+      videoTracks.forEach(track => {
+        try {
+          trackSettingsArray.push(track.getSettings());
+        } catch (err) {
+          console.warn(`[LiveProctoring] getSettings() failed for track ${track.id}:`, err);
+          trackSettingsArray.push(null);
+        }
+      });
+      console.log(`[LiveProctoring] ✅ Screen stream acquired`, {
+        streamId: screenStream.id,
+        active: screenStream.active,
+        videoTracks: videoTracks.length,
+        trackLabels: videoTracks.map(t => t.label),
+        trackSettings: trackSettingsArray,
+        displaySurfaces: trackSettingsArray.map(ts => ts?.displaySurface),
+      });
       
       // 3. Create session (backend call ONCE)
       const response = await fetch(`${API_URL}/api/v1/proctor/live/start-session`, {
