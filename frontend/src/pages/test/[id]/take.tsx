@@ -463,12 +463,35 @@ export default function TestTakePage() {
 
   // Get screen stream from window.__screenStream (set by identity-verify gate)
   useEffect(() => {
+    console.log('[DSA Take] Checking for screen stream...', {
+      hasWindow: typeof window !== 'undefined',
+      hasScreenStream: typeof window !== 'undefined' ? !!(window as any).__screenStream : false,
+    });
+    
     if (typeof window !== 'undefined' && (window as any).__screenStream) {
       const stream = (window as any).__screenStream as MediaStream;
+      console.log('[DSA Take] Screen stream found, checking validity...', {
+        hasStream: !!stream,
+        isActive: stream?.active,
+        videoTracksCount: stream?.getVideoTracks()?.length || 0,
+        streamId: stream?.id,
+      });
+      
       if (stream && stream.active && stream.getVideoTracks().length > 0) {
         setLiveProctorScreenStream(stream);
-        console.log('[DSA Take] Found global screen stream for Live Proctoring');
+        console.log('[DSA Take] ✅ Found global screen stream for Live Proctoring', {
+          streamId: stream.id,
+          trackCount: stream.getVideoTracks().length,
+        });
+      } else {
+        console.warn('[DSA Take] ❌ Screen stream found but invalid', {
+          hasStream: !!stream,
+          isActive: stream?.active,
+          videoTracksCount: stream?.getVideoTracks()?.length || 0,
+        });
       }
+    } else {
+      console.warn('[DSA Take] ❌ No screen stream found in window.__screenStream');
     }
   }, []);
 
@@ -499,19 +522,56 @@ export default function TestTakePage() {
   const liveProctoringStartedRef = useRef(false);
   useEffect(() => {
     const timerStarted = !!testSubmission?.started_at;
+    
+    // CRITICAL: Log all conditions for debugging
+    const conditions = {
+      timerStarted,
+      liveProctoringEnabled,
+      hasLiveProctorScreenStream: !!liveProctorScreenStream,
+      hasWebcamStreamForLiveProctor: !!webcamStreamForLiveProctor,
+      alreadyStarted: liveProctoringStartedRef.current,
+      testSubmissionStartedAt: testSubmission?.started_at,
+      screenStreamId: liveProctorScreenStream?.id,
+      webcamStreamId: webcamStreamForLiveProctor?.id,
+      webcamLive,
+    };
+    
+    console.log('[DSA Take] Live Proctoring conditions check:', conditions);
+    
     if (timerStarted && liveProctoringEnabled && liveProctorScreenStream && webcamStreamForLiveProctor && !liveProctoringStartedRef.current) {
       liveProctoringStartedRef.current = true;
-      console.log('[DSA Take] Starting Live Proctoring...');
+      console.log('[DSA Take] ✅ All conditions met, Starting Live Proctoring...');
       startLiveProctoring().catch(err => {
-        console.error('[DSA Take] Failed to start Live Proctoring:', err);
+        console.error('[DSA Take] ❌ Failed to start Live Proctoring:', err);
         liveProctoringStartedRef.current = false; // Reset on error so it can retry
       });
+    } else {
+      // Check for actual missing conditions (excluding alreadyStarted)
+      const missingConditions = [];
+      if (!timerStarted) missingConditions.push('timerStarted');
+      if (!liveProctoringEnabled) missingConditions.push('liveProctoringEnabled');
+      if (!liveProctorScreenStream) missingConditions.push('liveProctorScreenStream');
+      if (!webcamStreamForLiveProctor) missingConditions.push('webcamStreamForLiveProctor');
+      
+      // Only log warnings for actual missing conditions
+      if (missingConditions.length > 0) {
+        console.warn('[DSA Take] ⚠️ Live Proctoring NOT starting - missing conditions:', missingConditions);
+      } else if (liveProctoringStartedRef.current) {
+        // If all conditions are met but already started, log as info (not warning)
+        // This is expected behavior, so we don't want to spam warnings
+        // Only log once or very infrequently to avoid console noise
+        // We'll skip logging this to reduce noise
+      }
     }
+    
     // Reset guard if conditions are no longer met
     if (!timerStarted || !liveProctoringEnabled || !liveProctorScreenStream || !webcamStreamForLiveProctor) {
+      if (liveProctoringStartedRef.current) {
+        console.log('[DSA Take] Resetting live proctoring guard due to missing conditions');
+      }
       liveProctoringStartedRef.current = false;
     }
-  }, [testSubmission?.started_at, liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
+  }, [testSubmission?.started_at, liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring, webcamLive]);
 
   // Reset guard when streaming stops (allows restart on reconnection)
   useEffect(() => {
@@ -1120,6 +1180,10 @@ export default function TestTakePage() {
 
           // Load proctoring settings from test data
           const proctoringSettingsFromTest = testData?.proctoringSettings || {};
+          // Ensure boolean values (backend should normalize, but be defensive)
+          const aiProctoringEnabledValue = proctoringSettingsFromTest.aiProctoringEnabled === true;
+          const liveProctoringEnabledValue = proctoringSettingsFromTest.liveProctoringEnabled === true;
+          
           console.log('[DSA Take] Proctoring settings received from backend:', {
             proctoringSettingsFromTest,
             rawTestData: testData,
@@ -1127,14 +1191,29 @@ export default function TestTakePage() {
             liveProctoringEnabled: proctoringSettingsFromTest.liveProctoringEnabled,
             aiProctoringEnabledType: typeof proctoringSettingsFromTest.aiProctoringEnabled,
             liveProctoringEnabledType: typeof proctoringSettingsFromTest.liveProctoringEnabled,
+            normalizedAiProctoringEnabled: aiProctoringEnabledValue,
+            normalizedLiveProctoringEnabled: liveProctoringEnabledValue,
           });
-          setProctoringSettings(proctoringSettingsFromTest);
-          setAiProctoringEnabled(proctoringSettingsFromTest.aiProctoringEnabled === true);
-          setLiveProctoringEnabled(proctoringSettingsFromTest.liveProctoringEnabled === true);
+          
+          // Normalize proctoringSettings to ensure boolean values
+          const normalizedProctoringSettings = {
+            aiProctoringEnabled: aiProctoringEnabledValue,
+            liveProctoringEnabled: liveProctoringEnabledValue,
+          };
+          
+          setProctoringSettings(normalizedProctoringSettings);
+          setAiProctoringEnabled(aiProctoringEnabledValue);
+          setLiveProctoringEnabled(liveProctoringEnabledValue);
+          
           console.log('[DSA Take] State updated:', {
-            aiProctoringEnabled: proctoringSettingsFromTest.aiProctoringEnabled === true,
-            liveProctoringEnabled: proctoringSettingsFromTest.liveProctoringEnabled === true,
+            aiProctoringEnabled: aiProctoringEnabledValue,
+            liveProctoringEnabled: liveProctoringEnabledValue,
           });
+          
+          // Warn if live proctoring is not enabled
+          if (!liveProctoringEnabledValue) {
+            console.warn('[DSA Take] ⚠️ Live Proctoring is NOT enabled for this test. Enable it in test settings to use live proctoring.');
+          }
         }
 
         const isPrecheck = submissionData?.precheck_mode === true
