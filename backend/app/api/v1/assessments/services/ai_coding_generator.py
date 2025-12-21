@@ -423,6 +423,23 @@ Return ONLY valid JSON, no markdown."""
                 "expected_output": tc.get("expected_output", "")
             })
         
+        # ⭐ CRITICAL FIX: Ensure visible test cases exist with at least one example
+        if not visible_test_cases or len(visible_test_cases) == 0:
+            logger.warning(f"⚠️ Question {question_num + 1} missing visible test cases, generating from examples...")
+            # Try to use examples as test cases
+            examples = question_data.get("examples", [])
+            if examples:
+                visible_test_cases = [{
+                    "input": ex.get("input", ""),
+                    "output": ex.get("output", ""),
+                    "expected_output": ex.get("output", "")
+                } for ex in examples[:3]]  # Use up to 3 examples
+            else:
+                # Fallback to generic test cases
+                visible_test_cases = [
+                    {"input": "Sample input", "output": "Sample output", "expected_output": "Sample output"}
+                ]
+        
         hidden_test_cases = []
         for tc in question_data.get("hidden_testcases", []):
             hidden_test_cases.append({
