@@ -56,6 +56,14 @@ export function useMultiLiveProctorAdmin({
   const receivedVideoTracksRef = useRef<Map<string, Set<string>>>(new Map()); // Track received video tracks per session
   // CRITICAL: Use ref to track streams independently of React state to avoid batching issues
   const streamsRef = useRef<Map<string, { webcamStream: MediaStream | null; screenStream: MediaStream | null }>>(new Map());
+  // Track when each connection was established (for auto-retry logic)
+  const connectionEstablishedTimeRef = useRef<Map<string, number>>(new Map());
+  // Track when ICE connection was established (for auto-retry logic - more accurate than connectionState)
+  const iceConnectedTimeRef = useRef<Map<string, number>>(new Map());
+  // Track retry attempts per session (prevent infinite retries)
+  const retryAttemptsRef = useRef<Map<string, number>>(new Map());
+  // Store candidateId per session for retry logic
+  const candidateIdRef = useRef<Map<string, string>>(new Map());
 
   const log = useCallback(
     (message: string, data?: unknown) => {
@@ -80,6 +88,11 @@ export function useMultiLiveProctorAdmin({
     }
     // Remove from connecting set
     connectingSessionsRef.current.delete(sessionId);
+    // Clear connection tracking refs
+    connectionEstablishedTimeRef.current.delete(sessionId);
+    iceConnectedTimeRef.current.delete(sessionId);
+    retryAttemptsRef.current.delete(sessionId);
+    candidateIdRef.current.delete(sessionId);
     // Clear received tracks for this session
     receivedVideoTracksRef.current.delete(sessionId);
     // Clear streams ref for this session
@@ -124,9 +137,13 @@ export function useMultiLiveProctorAdmin({
     setCandidateStreams(prev => {
       const newMap = new Map(prev);
       const existing = newMap.get(sessionId);
+      const finalCandidateId = existing?.candidateId || candidateId;
+      // Store candidateId in ref for retry logic
+      candidateIdRef.current.set(sessionId, finalCandidateId);
+      
       newMap.set(sessionId, {
         sessionId,
-        candidateId: existing?.candidateId || candidateId,
+        candidateId: finalCandidateId,
         status: "connecting",
         webcamStream: existing?.webcamStream || null,
         screenStream: existing?.screenStream || null,
@@ -556,8 +573,14 @@ export function useMultiLiveProctorAdmin({
                   screenStreamId: existing?.screenStream?.id,
                 });
                 
-                // Remove from connecting set when connected or failed/disconnected
-                if (state === "connected") {
+                // CRITICAL FIX: Mark as connected when ICE is connected (ICE connection is what matters for streaming)
+                // connectionState might stay "connecting" even when ICE is connected, so we check ICE first
+                const isActuallyConnected = pc.iceConnectionState === "connected";
+                
+                // Remove from connecting set when ICE is connected or failed/disconnected
+                if (isActuallyConnected) {
+                  // Track when connection was established (for auto-retry logic)
+                  connectionEstablishedTimeRef.current.set(sessionId, Date.now());
                   connectingSessionsRef.current.delete(sessionId);
                   // Use a small delay to ensure state has propagated
                   setTimeout(() => {
@@ -572,6 +595,7 @@ export function useMultiLiveProctorAdmin({
                         hasScreenStream: !!latest?.screenStream,
                         webcamStreamId: latest?.webcamStream?.id,
                         screenStreamId: latest?.screenStream?.id,
+                        iceConnectionState: pc.iceConnectionState,
                       });
                       return prev; // No change, just logging
                     });
@@ -588,10 +612,13 @@ export function useMultiLiveProctorAdmin({
                       hasScreenStream: !!latest?.screenStream,
                       webcamStreamId: latest?.webcamStream?.id,
                       screenStreamId: latest?.screenStream?.id,
+                      iceConnectionState: pc.iceConnectionState,
                     });
                     return prev; // No change, just logging
                   });
                 } else if (state === "failed" || state === "disconnected" || state === "closed") {
+                  // Clear connection established time on disconnect
+                  connectionEstablishedTimeRef.current.delete(sessionId);
                   connectingSessionsRef.current.delete(sessionId);
                   log(`Connection lost for ${sessionId}`, {
                     reason: state,
@@ -616,11 +643,25 @@ export function useMultiLiveProctorAdmin({
                   const webcamStream = refStreams?.webcamStream || existing.webcamStream;
                   const screenStream = refStreams?.screenStream || existing.screenStream;
                   
+                  // CRITICAL FIX: Mark as "connected" when ICE is connected (ICE is what matters for streaming)
+                  // connectionState might lag behind, so we prioritize iceConnectionState
+                  let finalStatus: "connecting" | "connected" | "disconnected" | "failed" = state as "connecting" | "connected" | "disconnected" | "failed";
+                  
+                  // If ICE is connected, mark as connected (even if connectionState is still "connecting")
+                  if (pc.iceConnectionState === "connected" && state !== "failed" && state !== "closed") {
+                    finalStatus = "connected";
+                    log(`ICE is connected, marking as "connected" for ${sessionId} (connectionState: ${state})`);
+                  } else if (state === "connected" && pc.iceConnectionState !== "connected") {
+                    // Connection state says connected but ICE is not - keep as connecting
+                    finalStatus = "connecting";
+                    log(`Connection state is "connected" but ICE is "${pc.iceConnectionState}", keeping status as "connecting" for ${sessionId}`);
+                  }
+                  
                   newMap.set(sessionId, {
                     ...existing,
                     webcamStream, // Use from ref (always up-to-date)
                     screenStream, // Use from ref (always up-to-date)
-                    status: state as "connecting" | "connected" | "disconnected" | "failed",
+                    status: finalStatus,
                   });
                   
                   // Log to verify streams are preserved
@@ -644,10 +685,77 @@ export function useMultiLiveProctorAdmin({
             
             // Handle ICE connection state changes (more detailed than connectionState)
             pc.oniceconnectionstatechange = () => {
-              log(`ICE connection state for ${sessionId}: ${pc.iceConnectionState}`, {
+              const iceState = pc.iceConnectionState;
+              log(`ICE connection state for ${sessionId}: ${iceState}`, {
                 connectionState: pc.connectionState,
                 signalingState: pc.signalingState,
               });
+              
+              // Track when ICE successfully connects (more accurate than connectionState)
+              if (iceState === "connected") {
+                iceConnectedTimeRef.current.set(sessionId, Date.now());
+                // Reset retry count when ICE successfully connects
+                retryAttemptsRef.current.delete(sessionId);
+                log(`ICE connected for ${sessionId}, tracking connection time`);
+                
+                // CRITICAL FIX: Update status to "connected" when ICE connects (even if connectionState is still "connecting")
+                setCandidateStreams(prev => {
+                  const newMap = new Map(prev);
+                  const existing = newMap.get(sessionId);
+                  if (existing) {
+                    newMap.set(sessionId, {
+                      ...existing,
+                      status: "connected",
+                    });
+                    log(`Updated status to "connected" for ${sessionId} (ICE connected)`);
+                  }
+                  return newMap;
+                });
+              }
+              
+              // OPTION 1 + 2: Auto-retry if ICE fails quickly after connection
+              // If ICE goes to "disconnected" or "failed" within 5 seconds of ICE being connected, auto-retry once
+              // CRITICAL FIX: Check ICE connection time, not connectionState (which may still be "connecting")
+              if (iceState === "disconnected" || iceState === "failed") {
+                const iceConnectedTime = iceConnectedTimeRef.current.get(sessionId);
+                const now = Date.now();
+                
+                // Only retry if ICE was connected recently (within 5 seconds)
+                // This works even if connectionState is still "connecting"
+                if (iceConnectedTime && (now - iceConnectedTime) < 5000) {
+                  const retryCount = retryAttemptsRef.current.get(sessionId) || 0;
+                  
+                  // Only retry once per session to prevent infinite loops
+                  if (retryCount < 1) {
+                    retryAttemptsRef.current.set(sessionId, retryCount + 1);
+                    log(`ICE connection failed quickly for ${sessionId}, auto-retrying connection...`, {
+                      iceState,
+                      connectionState: pc.connectionState,
+                      timeSinceIceConnected: now - iceConnectedTime,
+                      retryCount: retryCount + 1,
+                    });
+                    
+                    // Close current peer connection and reconnect
+                    setTimeout(() => {
+                      closePeerConnection(sessionId);
+                      // Get candidateId from ref and reconnect
+                      const candidateId = candidateIdRef.current.get(sessionId) || sessionId;
+                      connectToCandidate({
+                        sessionId,
+                        candidateId,
+                        status: "connecting",
+                      }, true); // Force reconnect
+                    }, 500); // Small delay before retry
+                  } else {
+                    log(`ICE connection failed for ${sessionId} but max retries reached, not retrying again`);
+                  }
+                } else if (iceConnectedTime) {
+                  log(`ICE connection failed for ${sessionId} but too much time has passed (${now - iceConnectedTime}ms), not retrying`);
+                }
+                
+                // Clear ICE connection time on disconnect/failure
+                iceConnectedTimeRef.current.delete(sessionId);
+              }
             };
             
             // Set offer as remote description
@@ -841,6 +949,11 @@ export function useMultiLiveProctorAdmin({
     
     // Clear local state
     streamsRef.current.clear();
+    // Clear connection tracking refs
+    connectionEstablishedTimeRef.current.clear();
+    iceConnectedTimeRef.current.clear();
+    retryAttemptsRef.current.clear();
+    candidateIdRef.current.clear();
     setCandidateStreams(new Map());
     setActiveCandidates([]);
     setIsLoading(false);

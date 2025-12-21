@@ -407,7 +407,7 @@ export function useLiveProctoring({
                 log("Error sending new offer after peer connection failure", err);
               }
             }
-          }, 1000); // Wait 1 second before sending new offer
+          }, 500); // Wait 500ms before sending new offer (OPTION 3: Reduced from 1000ms for faster recovery)
         }
       }
     };
