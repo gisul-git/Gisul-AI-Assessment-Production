@@ -214,15 +214,74 @@ export default function AnalyticsPage() {
     
     setLoadingProctorLogs(true)
     try {
-      const response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(testId)}&userId=${encodeURIComponent(userId)}`)
-      const data = await response.json()
+      console.log('[Analytics] Fetching proctor logs with:', {
+        assessmentId: testId,
+        userId: userId,
+        userIdType: typeof userId,
+        userIdLength: userId?.length,
+      })
       
-      if (data.success && data.data) {
-        setProctorLogs(data.data.logs || [])
+      // First try with the provided userId
+      let response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(testId)}&userId=${encodeURIComponent(userId)}`)
+      let data = await response.json()
+      
+      console.log('[Analytics] Proctor logs response (first attempt):', {
+        success: data.success,
+        totalLogs: data.data?.totalCount || 0,
+        logsCount: data.data?.logs?.length || 0,
+        firstLogUserId: data.data?.logs?.[0]?.userId,
+        firstLogAssessmentId: data.data?.logs?.[0]?.assessmentId,
+      })
+      
+      // If logs found, use them
+      if (data.success && data.data && data.data.logs && data.data.logs.length > 0) {
+        setProctorLogs(data.data.logs)
         setEventTypeLabels(data.data.eventTypeLabels || {})
       } else {
-        setProctorLogs([])
-        setEventTypeLabels({})
+        // Fallback: Try to fetch all logs for this assessment and filter
+        console.log('[Analytics] No logs found with userId, trying assessment-wide search...')
+        
+        try {
+          response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(testId)}&userId=*`)
+          data = await response.json()
+          
+          if (data.success && data.data && data.data.logs) {
+            const allLogs = data.data.logs || []
+            // Filter logs that might belong to this candidate
+            // Try matching by exact userId, email pattern, or candidate- prefix
+            const candidateLogs = allLogs.filter((log: any) => {
+              const logUserId = (log.userId || '').toString().toLowerCase()
+              const searchUserId = userId.toString().toLowerCase()
+              const emailPart = searchUserId.includes('@') ? searchUserId.split('@')[0] : searchUserId
+              
+              return logUserId === searchUserId || 
+                     logUserId.includes(emailPart) ||
+                     logUserId.startsWith('candidate-') ||
+                     logUserId === searchUserId.replace(/[^a-z0-9]/g, '')
+            })
+            
+            console.log('[Analytics] Filtered logs from assessment-wide search:', {
+              totalLogs: allLogs.length,
+              candidateLogs: candidateLogs.length,
+              sampleLogUserIds: allLogs.slice(0, 3).map((l: any) => l.userId),
+            })
+            
+            if (candidateLogs.length > 0) {
+              setProctorLogs(candidateLogs)
+              setEventTypeLabels(data.data.eventTypeLabels || {})
+            } else {
+              setProctorLogs([])
+              setEventTypeLabels({})
+            }
+          } else {
+            setProctorLogs([])
+            setEventTypeLabels({})
+          }
+        } catch (fallbackError) {
+          console.error('[Analytics] Error in fallback log fetch:', fallbackError)
+          setProctorLogs([])
+          setEventTypeLabels({})
+        }
       }
     } catch (error) {
       console.error('Error fetching proctor logs:', error)
@@ -280,13 +339,28 @@ export default function AnalyticsPage() {
         
         // Fetch candidates
         const response = await dsaApi.get(`/tests/${testId}/candidates`)
-        setCandidates(response.data || [])
+        const candidatesData = response.data || []
+        setCandidates(candidatesData)
+        
+        console.log('[Analytics] Candidates fetched:', {
+          count: candidatesData.length,
+          candidates: candidatesData.map((c: any) => ({
+            user_id: c.user_id,
+            user_idType: typeof c.user_id,
+            email: c.email,
+            name: c.name,
+          })),
+        })
         
         // If candidate query param is set, load that candidate's analytics
         if (candidateUserId && typeof candidateUserId === 'string') {
+          const candidate = candidatesData.find((c: any) => c.user_id === candidateUserId)
           setSelectedCandidate(candidateUserId)
           fetchAnalytics(candidateUserId)
-          fetchProctorLogs(candidateUserId)
+          // Use candidate email for fetching proctor logs (violations are recorded with email as userId)
+          const emailForProctorLogs = candidate?.email || candidateUserId
+          console.log('[Analytics] Initial load - fetching proctor logs with email:', emailForProctorLogs, 'instead of user_id:', candidateUserId)
+          fetchProctorLogs(emailForProctorLogs)
         }
       } catch (error) {
         console.error('Error fetching data:', error)
@@ -331,9 +405,19 @@ export default function AnalyticsPage() {
   }, [selectedCandidate, testId, analytics])
 
   const handleCandidateSelect = (userId: string) => {
+    const candidate = candidates.find(c => c.user_id === userId)
+    console.log('[Analytics] Candidate selected:', {
+      userId: userId,
+      userIdType: typeof userId,
+      candidateData: candidate,
+      candidateEmail: candidate?.email,
+    })
     setSelectedCandidate(userId)
     fetchAnalytics(userId)
-    fetchProctorLogs(userId)
+    // Use candidate email for fetching proctor logs (violations are recorded with email as userId)
+    const emailForProctorLogs = candidate?.email || userId
+    console.log('[Analytics] Fetching proctor logs with email:', emailForProctorLogs, 'instead of user_id:', userId)
+    fetchProctorLogs(emailForProctorLogs)
     // Auto-show logs when candidate is selected (same expectation as AI assessment analytics)
     setShowProctorLogs(true)
     // Scroll to top of analytics content when candidate is selected
@@ -876,6 +960,56 @@ export default function AnalyticsPage() {
             ) : !selectedCandidate ? (
               // Overall Analytics View
               <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+                {/* Live Proctoring Section */}
+                <div style={{
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "0.75rem",
+                  padding: "1.5rem",
+                  backgroundColor: "#ffffff",
+                  marginBottom: "1.5rem",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
+                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowLiveProctoring(true)}
+                      disabled={isLiveProctoringCooldown}
+                      style={{
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: "0.5rem",
+                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
+                        fontWeight: 600,
+                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
+                      }}
+                    >
+                      {isLiveProctoringCooldown ? (
+                        <>
+                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+                          Please wait...
+                        </>
+                      ) : (
+                        <>
+                          <Eye size={16} />
+                          Open Live Proctoring
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                    Monitor candidates in real-time via webcam and screen sharing
+                  </p>
+                </div>
+
                 <div style={{
                   border: "1px solid #e2e8f0",
                   borderRadius: "0.75rem",
@@ -1126,56 +1260,6 @@ export default function AnalyticsPage() {
                       }
                       return null
                     })()}
-                </div>
-
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
                 </div>
 
                 {/* Proctoring Logs Section */}
