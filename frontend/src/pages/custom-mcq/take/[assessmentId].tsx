@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/router";
 import { customMCQApi } from "../../../lib/custom-mcq/api";
 import { CustomMCQAssessment, MCQQuestion, SubjectiveQuestion, Question } from "../../../types/custom-mcq";
@@ -48,6 +48,8 @@ export default function CustomMCQTakePage() {
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true);
   const [proctoringEnabled, setProctoringEnabled] = useState(false);
   const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
+  const [showMCQLockWarning, setShowMCQLockWarning] = useState(false);
+  const [pendingNavigationIndex, setPendingNavigationIndex] = useState<number | null>(null);
   const cameraStartRequestedRef = useRef(false);
 
   const getViolationMessage = (eventType: string): string => {
@@ -640,11 +642,22 @@ export default function CustomMCQTakePage() {
     return () => clearInterval(interval);
   }, [timeRemaining, waitingForStart]);
 
+  // Sort questions: MCQ first, then Subjective (for initialization)
+  const sortedQuestionsForInit = useMemo(() => {
+    if (!assessment || !assessment.questions || assessment.questions.length === 0) return [];
+    const questions = assessment.questions || [];
+    const getQuestionTypeOrder = (q: Question) => {
+      const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
+      return qType === "mcq" ? 0 : 1; // 0 for MCQ (comes first), 1 for Subjective
+    };
+    return [...questions].sort((a, b) => getQuestionTypeOrder(a) - getQuestionTypeOrder(b));
+  }, [assessment?.questions]);
+
   // Initialize assessment phase and load MCQ submitted status from session
   useEffect(() => {
-    if (!assessment || !assessment.questions || assessment.questions.length === 0) return;
+    if (!assessment || !sortedQuestionsForInit || sortedQuestionsForInit.length === 0) return;
     
-    const questions = assessment.questions || [];
+    const questions = sortedQuestionsForInit;
     const hasMCQ = questions.some(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
     const hasSubjective = questions.some(q => q.questionType === "subjective" || !("options" in q && "correctAn" in q));
     
@@ -662,39 +675,17 @@ export default function CustomMCQTakePage() {
       // Start with MCQ phase
       setAssessmentPhase("mcq");
       setMcqSubmitted(false);
-      // Go to first MCQ question
-      const firstMCQ = questions.findIndex(q => {
-        const qType = q.questionType || (("options" in q && "correctAn" in q) ? "mcq" : "subjective");
-        return qType === "mcq";
-      });
-      if (firstMCQ >= 0) {
-        setCurrentQuestionIndex(firstMCQ);
-      }
+      // Go to first MCQ question (should be index 0 after sorting)
+      setCurrentQuestionIndex(0);
     } else if (hasSubjective) {
       // Only subjective questions, start with subjective
       setAssessmentPhase("subjective");
       setCurrentQuestionIndex(0);
     }
-  }, [assessment, assessmentId]);
+  }, [assessment, sortedQuestionsForInit, assessmentId]);
 
-  // Auto-lock MCQ when navigating to subjective questions
-  // Must be placed before any conditional returns to follow Rules of Hooks
-  useEffect(() => {
-    if (!assessment || !assessment.questions || !examStarted) return;
-    
-    const questions = assessment.questions || [];
-    const hasMCQ = questions.some(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
-    if (!hasMCQ) return;
-    
-    const currentQuestion = questions[currentQuestionIndex] || questions[0];
-    const isCurrentMCQ = currentQuestion && (currentQuestion.questionType === "mcq" || ("options" in currentQuestion && "correctAn" in currentQuestion));
-    
-    // If current question is subjective and MCQ is not yet locked, lock it automatically
-    if (!isCurrentMCQ && !mcqSubmitted) {
-      setMcqSubmitted(true);
-      sessionStorage.setItem(`mcqSubmitted_${assessmentId}`, "true");
-    }
-  }, [currentQuestionIndex, mcqSubmitted, assessment, examStarted, assessmentId]);
+  // Note: Auto-lock is now handled by checkAndLockMCQBeforeNavigation function
+  // which shows confirmation popup before locking when navigating from MCQ to Subjective
 
   if (loading) {
     return (
@@ -763,7 +754,8 @@ export default function CustomMCQTakePage() {
   // Flexible mode now auto-starts after pre-checks (no "Start Exam" button needed)
   // Access restrictions are handled at the entry/login page level
 
-  const questions = assessment.questions || [];
+  // Use sorted questions (already sorted before conditional returns)
+  const questions = sortedQuestionsForInit;
   
   // Check if we have both types
   const hasMCQ = questions.some(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q));
@@ -791,6 +783,45 @@ export default function CustomMCQTakePage() {
     sessionStorage.setItem(`mcqSubmitted_${assessmentId}`, "true");
   };
 
+  // Helper function to check if navigating from MCQ to Subjective and show warning
+  const checkAndShowMCQLockWarning = (targetIndex: number): boolean => {
+    if (mcqSubmitted || !hasMCQ) return true; // Already locked or no MCQ, allow navigation
+    
+    const currentQ = questions[currentQuestionIndex] || questions[0];
+    const targetQ = questions[targetIndex];
+    
+    if (!currentQ || !targetQ) return true;
+    
+    const isCurrentMCQ = currentQ.questionType === "mcq" || ("options" in currentQ && "correctAn" in currentQ);
+    const isTargetSubjective = !(targetQ.questionType === "mcq" || ("options" in targetQ && "correctAn" in targetQ));
+    
+    // If navigating from MCQ to Subjective, show warning on page
+    if (isCurrentMCQ && isTargetSubjective) {
+      setPendingNavigationIndex(targetIndex);
+      setShowMCQLockWarning(true);
+      return false; // Don't navigate yet, wait for user confirmation
+    }
+    
+    return true; // Allow navigation (not MCQ to Subjective transition)
+  };
+
+  // Handle confirming MCQ lock and navigation
+  const handleConfirmMCQLock = () => {
+    if (pendingNavigationIndex !== null) {
+      setMcqSubmitted(true);
+      sessionStorage.setItem(`mcqSubmitted_${assessmentId}`, "true");
+      setCurrentQuestionIndex(pendingNavigationIndex);
+      setShowMCQLockWarning(false);
+      setPendingNavigationIndex(null);
+    }
+  };
+
+  // Handle canceling MCQ lock warning
+  const handleCancelMCQLock = () => {
+    setShowMCQLockWarning(false);
+    setPendingNavigationIndex(null);
+  };
+
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#ffffff", padding: "2rem" }}>
       <ViolationToast />
@@ -804,6 +835,79 @@ export default function CustomMCQTakePage() {
           facesCount={facesCount}
         />
       )}
+      
+      {/* MCQ Lock Warning Banner */}
+      {showMCQLockWarning && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 10000,
+            padding: "2rem",
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: "#ffffff",
+              borderRadius: "0.75rem",
+              padding: "2rem",
+              maxWidth: "500px",
+              width: "100%",
+              border: "2px solid #ef4444",
+              boxShadow: "0 10px 25px rgba(0, 0, 0, 0.2)",
+            }}
+          >
+            <div style={{ marginBottom: "1.5rem" }}>
+              <h2 style={{ color: "#ef4444", marginBottom: "1rem", fontSize: "1.5rem" }}>
+                ⚠️ Warning: Moving to Subjective Questions
+              </h2>
+              <p style={{ color: "#1E5A3B", fontSize: "1rem", lineHeight: "1.6" }}>
+                The MCQ section will be locked once you proceed. You will not be able to change your MCQ answers after this.
+              </p>
+            </div>
+            <div style={{ display: "flex", gap: "1rem", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={handleCancelMCQLock}
+                style={{
+                  padding: "0.75rem 1.5rem",
+                  backgroundColor: "#ffffff",
+                  border: "2px solid #A8E8BC",
+                  borderRadius: "0.5rem",
+                  color: "#1E5A3B",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmMCQLock}
+                style={{
+                  padding: "0.75rem 1.5rem",
+                  backgroundColor: "#ef4444",
+                  border: "none",
+                  borderRadius: "0.5rem",
+                  color: "#ffffff",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
       <div style={{ maxWidth: "1000px", margin: "0 auto", display: "flex", gap: "2rem" }}>
         {/* Phase Indicator (Left Panel) - Only show if both types exist */}
         {hasBothTypes && examStarted && (
@@ -1114,6 +1218,12 @@ export default function CustomMCQTakePage() {
                         await saveAnswerLog(currentQuestion.id, currentAnswer);
                       }
                     }
+                    
+                    // Check if navigating from MCQ to Subjective and show warning
+                    if (!checkAndShowMCQLockWarning(idx)) {
+                      return; // Warning shown, wait for user confirmation
+                    }
+                    
                     setCurrentQuestionIndex(idx);
                   }}
                   style={{
@@ -1150,6 +1260,11 @@ export default function CustomMCQTakePage() {
                 // Navigate to next question (any type)
                 const nextIndex = actualIndex + 1;
                 if (nextIndex < questions.length) {
+                  // Check if navigating from MCQ to Subjective and show warning
+                  if (!checkAndShowMCQLockWarning(nextIndex)) {
+                    return; // Warning shown, wait for user confirmation
+                  }
+                  
                   setCurrentQuestionIndex(nextIndex);
                 }
               }}

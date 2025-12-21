@@ -61,7 +61,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
   };
 
   const handleSaveQuestion = () => {
-    if (!newQuestion.section || !newQuestion.question) {
+    if (!newQuestion.question) {
       alert("Please fill in all required fields");
       return;
     }
@@ -91,7 +91,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
       questionToSave = {
         id: editingQuestion?.id || `q_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         questionType: "mcq",
-        section: newQuestion.section!,
+        section: newQuestion.section || "General",
         question: newQuestion.question!,
         options: mcqQuestion.options!,
         correctAn: mcqQuestion.correctAn!.toUpperCase(),
@@ -102,7 +102,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
       questionToSave = {
         id: editingQuestion?.id || `q_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         questionType: "subjective",
-        section: newQuestion.section!,
+        section: newQuestion.section || "General",
         question: newQuestion.question!,
         marks: newQuestion.marks || 1,
       } as SubjectiveQuestion;
@@ -123,16 +123,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
     setEditingQuestion(null);
     setEditingQuestionIndex(null);
     setShowAddForm(false);
-    setNewQuestionType("mcq");
-    setNewQuestion({
-      questionType: "mcq",
-      section: "",
-      question: "",
-      options: [{ label: "A", text: "" }, { label: "B", text: "" }, { label: "C", text: "" }, { label: "D", text: "" }],
-      correctAn: "",
-      answerType: "single",
-      marks: 1,
-    });
+    resetForm("mcq");
   };
 
   const handleEdit = (question: Question, index: number) => {
@@ -162,17 +153,24 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
     }
   };
 
-  const resetForm = () => {
-    setNewQuestionType("mcq");
-    setNewQuestion({
-      questionType: "mcq",
-      section: "",
-      question: "",
-      options: [{ label: "A", text: "" }, { label: "B", text: "" }, { label: "C", text: "" }, { label: "D", text: "" }],
-      correctAn: "",
-      answerType: "single",
-      marks: 1,
-    });
+  const resetForm = (questionType: "mcq" | "subjective" = "mcq") => {
+    setNewQuestionType(questionType);
+    if (questionType === "mcq") {
+      setNewQuestion({
+        questionType: "mcq",
+        question: "",
+        options: [{ label: "A", text: "" }, { label: "B", text: "" }, { label: "C", text: "" }, { label: "D", text: "" }],
+        correctAn: "",
+        answerType: "single",
+        marks: 1,
+      });
+    } else {
+      setNewQuestion({
+        questionType: "subjective",
+        question: "",
+        marks: 1,
+      });
+    }
   };
 
   const mcqCount = questionsWithIds.filter(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q)).length;
@@ -197,7 +195,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
           onClick={() => {
             setShowAddForm(true);
             setEditingQuestion(null);
-            resetForm();
+            resetForm("mcq");
           }}
           className="btn-primary"
         >
@@ -229,8 +227,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
                 <button
                   type="button"
                   onClick={() => {
-                    setNewQuestionType("mcq");
-                    resetForm();
+                    resetForm("mcq");
                   }}
                   style={{
                     padding: "0.75rem 1.5rem",
@@ -247,8 +244,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
                 <button
                   type="button"
                   onClick={() => {
-                    setNewQuestionType("subjective");
-                    resetForm();
+                    resetForm("subjective");
                   }}
                   style={{
                     padding: "0.75rem 1.5rem",
@@ -267,19 +263,6 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
           )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-            <div>
-              <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
-                Section <span style={{ color: "#ef4444" }}>*</span>
-              </label>
-              <input
-                type="text"
-                value={newQuestion.section || ""}
-                onChange={(e) => setNewQuestion({ ...newQuestion, section: e.target.value })}
-                placeholder="e.g., aptitude, technical"
-                style={{ width: "100%", padding: "0.5rem", border: "1px solid #A8E8BC", borderRadius: "0.25rem" }}
-              />
-            </div>
-
             <div>
               <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
                 Question <span style={{ color: "#ef4444" }}>*</span>
@@ -419,7 +402,7 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
                 onClick={() => {
                   setShowAddForm(false);
                   setEditingQuestion(null);
-                  resetForm();
+                  resetForm("mcq");
                 }}
                 className="btn-secondary"
               >
