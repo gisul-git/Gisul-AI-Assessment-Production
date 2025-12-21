@@ -360,38 +360,43 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
             marginBottom: "1rem",
           }}
         />
-        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-          Input Format:
-        </label>
-        <textarea
-          value={question.inputFormat || ""}
-          onChange={(e) => onEditChange(JSON.stringify({ ...question, inputFormat: e.target.value }, null, 2))}
-          style={{
-            width: "100%",
-            minHeight: "60px",
-            padding: "0.75rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.5rem",
-            fontSize: "0.875rem",
-            marginBottom: "1rem",
-          }}
-        />
-        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-          Output Format:
-        </label>
-        <textarea
-          value={question.outputFormat || ""}
-          onChange={(e) => onEditChange(JSON.stringify({ ...question, outputFormat: e.target.value }, null, 2))}
-          style={{
-            width: "100%",
-            minHeight: "60px",
-            padding: "0.75rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.5rem",
-            fontSize: "0.875rem",
-            marginBottom: "1rem",
-          }}
-        />
+        {/* ⭐ Only show Input Format/Output Format if they have values (legacy support) */}
+        {(question.inputFormat || question.outputFormat) && (
+          <>
+            <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+              Input Format:
+            </label>
+            <textarea
+              value={question.inputFormat || ""}
+              onChange={(e) => onEditChange(JSON.stringify({ ...question, inputFormat: e.target.value }, null, 2))}
+              style={{
+                width: "100%",
+                minHeight: "60px",
+                padding: "0.75rem",
+                border: "1px solid #e2e8f0",
+                borderRadius: "0.5rem",
+                fontSize: "0.875rem",
+                marginBottom: "1rem",
+              }}
+            />
+            <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+              Output Format:
+            </label>
+            <textarea
+              value={question.outputFormat || ""}
+              onChange={(e) => onEditChange(JSON.stringify({ ...question, outputFormat: e.target.value }, null, 2))}
+              style={{
+                width: "100%",
+                minHeight: "60px",
+                padding: "0.75rem",
+                border: "1px solid #e2e8f0",
+                borderRadius: "0.5rem",
+                fontSize: "0.875rem",
+                marginBottom: "1rem",
+              }}
+            />
+          </>
+        )}
         <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
           Constraints:
         </label>
@@ -408,40 +413,45 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
             marginBottom: "1rem",
           }}
         />
-        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-          Sample Input:
-        </label>
-        <textarea
-          value={question.sampleInput || ""}
-          onChange={(e) => onEditChange(JSON.stringify({ ...question, sampleInput: e.target.value }, null, 2))}
-          style={{
-            width: "100%",
-            minHeight: "60px",
-            padding: "0.75rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.5rem",
-            fontSize: "0.875rem",
-            fontFamily: "monospace",
-            marginBottom: "1rem",
-          }}
-        />
-        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-          Sample Output:
-        </label>
-        <textarea
-          value={question.sampleOutput || ""}
-          onChange={(e) => onEditChange(JSON.stringify({ ...question, sampleOutput: e.target.value }, null, 2))}
-          style={{
-            width: "100%",
-            minHeight: "60px",
-            padding: "0.75rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.5rem",
-            fontSize: "0.875rem",
-            fontFamily: "monospace",
-            marginBottom: "1rem",
-          }}
-        />
+        {/* ⭐ Only show Sample Input/Output if they have values (legacy support) */}
+        {(question.sampleInput || question.sampleOutput) && (
+          <>
+            <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+              Sample Input:
+            </label>
+            <textarea
+              value={question.sampleInput || ""}
+              onChange={(e) => onEditChange(JSON.stringify({ ...question, sampleInput: e.target.value }, null, 2))}
+              style={{
+                width: "100%",
+                minHeight: "60px",
+                padding: "0.75rem",
+                border: "1px solid #e2e8f0",
+                borderRadius: "0.5rem",
+                fontSize: "0.875rem",
+                fontFamily: "monospace",
+                marginBottom: "1rem",
+              }}
+            />
+            <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+              Sample Output:
+            </label>
+            <textarea
+              value={question.sampleOutput || ""}
+              onChange={(e) => onEditChange(JSON.stringify({ ...question, sampleOutput: e.target.value }, null, 2))}
+              style={{
+                width: "100%",
+                minHeight: "60px",
+                padding: "0.75rem",
+                border: "1px solid #e2e8f0",
+                borderRadius: "0.5rem",
+                fontSize: "0.875rem",
+                fontFamily: "monospace",
+                marginBottom: "1rem",
+              }}
+            />
+          </>
+        )}
         
         {/* Visible Test Cases */}
         <div style={{ marginBottom: "1.5rem" }}>
