@@ -1,6 +1,19 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Proxy API requests to backend server (exclude NextAuth routes)
+  async rewrites() {
+    return [
+      {
+        source: '/api/v1/:path*',
+        destination: 'http://localhost:8000/api/v1/:path*',
+      },
+      {
+        source: '/api/v2/:path*',
+        destination: 'http://localhost:8000/api/v2/:path*',
+      },
+    ];
+  },
   // Ensure static files in public/ are served with correct MIME types
   async headers() {
     return [

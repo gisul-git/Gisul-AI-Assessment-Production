@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { initializeFaceDetection, detectFaces, cleanupFaceDetection, type FaceDetectionState } from "../engine/faceDetection";
-import axios from "axios";
+import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
 
 export interface IdentityVerificationProps {
   assessmentId: string;

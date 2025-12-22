@@ -913,11 +913,13 @@ async def _generate_pseudocode_questions(
     
     # Use legacy implementation with context awareness
     if _legacy_generate_questions:
-        config = {
-            "numQuestions": count,
-            "Q1type": "Pseudo Code",
-            "Q1difficulty": difficulty
-        }
+        # Build a full config so every requested slot is explicitly pseudocode; otherwise
+        # the legacy generator defaults Q2..Qn to Subjective and we end up with only one pseudocode.
+        config = {"numQuestions": count}
+        for i in range(1, count + 1):
+            config[f"Q{i}type"] = "Pseudo Code"
+            config[f"Q{i}difficulty"] = difficulty
+
         questions = await _legacy_generate_questions(topic, config, coding_supported=False, experience_mode=experience_mode)
         # Filter to only PseudoCode questions and ensure proper format
         pseudocode_questions = []

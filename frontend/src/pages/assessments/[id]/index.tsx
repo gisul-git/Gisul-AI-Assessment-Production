@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useRouter } from "next/router";
 import { GetServerSideProps } from "next";
 import { requireAuth } from "../../../lib/auth";
-import axios from "axios";
+import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
 
 export default function AssessmentDetailPage() {
   const router = useRouter();

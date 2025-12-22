@@ -4,7 +4,7 @@ import { SessionProvider, useSession } from "next-auth/react";
 import { useEffect, useRef } from "react";
 import { getSession } from "next-auth/react";
 import { checkTokenExpiration } from "@/lib/jwt";
-import axios from "axios";
+import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
 import Lenis from "lenis";
 
 import "@/styles/globals.css";
