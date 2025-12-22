@@ -160,14 +160,40 @@ export default function TestTakePage() {
   const [testReadyToStart, setTestReadyToStart] = useState(false)
   // Default OFF; only explicit `proctoringSettings.aiProctoringEnabled === true` enables camera/model
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(false)
-  const [showFullscreenWarning, setShowFullscreenWarning] = useState(false)
-  const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false)
+ 
   const [tabSwitchCount, setTabSwitchCount] = useState(0)
   const [latestViolation, setLatestViolation] = useState<any>(null)
-  const [debugMode, setDebugMode] = useState(false)
-  const editorRef = useRef<HTMLDivElement>(null)
   const cameraStartRequestedRef = useRef(false)
   const cameraStartedRef = useRef(false)
+
+  const [webcamLive, setWebcamLive] = useState(false);
+  const [faceMeshStatus, setFaceMeshStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
+  const [displayedFacesCount, setDisplayedFacesCount] = useState(0);
+  const [proctoringEnabled, setProctoringEnabled] = useState(false);
+  // AI (camera-based) proctoring toggle from schedule.proctoringSettings
+  const [aiProctoringEnabled, setAiProctoringEnabled] = useState(false);
+  const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(false);
+  const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
+  // Proctoring refs
+  const thumbVideoRef = useRef<HTMLVideoElement>(null);
+  const webcamStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const noFaceCountRef = useRef(0);
+  const multipleFacesCooldownRef = useRef(0);
+ 
+  // Cooldown constants
+  const NO_FACE_FRAMES_THRESHOLD = 5;
+  const MULTIPLE_FACES_COOLDOWN_MS = 15000; // 15 seconds
+ 
+  const editorRef = useRef<HTMLDivElement>(null);
+  const [debugMode, setDebugMode] = useState(false);
+  const [showFullscreenWarning, setShowFullscreenWarning] = useState(false);
+  const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false);
+ 
+
+
+
 
   const getViolationMessage = (eventType: string): string => {
     const messages: Record<string, string> = {
@@ -508,8 +534,7 @@ export default function TestTakePage() {
     debugMode,
   })
 
-  // Live Proctoring hook (webcam + screen streaming)
-  const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
+
   
   // Get screen stream from window.__screenStream (set by identity-verify gate)
   useEffect(() => {
@@ -984,12 +1009,15 @@ export default function TestTakePage() {
 
       const aiEnabled = testData?.proctoringSettings?.aiProctoringEnabled === true
       setCameraProctorEnabled(aiEnabled)
-
+      let cancelled = false
       const isPrecheck = submissionData?.precheck_mode === true
-      if (!isPrecheck && submissionData?.is_completed) {
-        router.push('/dashboard')
-        return
-      }
+        if (!isPrecheck && submissionData?.is_completed) {
+          if (!cancelled) {
+            alert('You have already submitted this test. You cannot attempt it again.')
+            router.push('/dashboard')
+          }
+          return
+        }
 
       // --- Step 3: Fetch all questions in parallel ---
       const questionIds: string[] = testData.question_ids || []
