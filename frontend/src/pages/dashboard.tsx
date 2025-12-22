@@ -707,6 +707,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
         return { bg: "#fef3c7", text: "#92400e", border: "#f59e0b", icon: "⏸️" }; // Amber/yellow for paused
       case "published":
         return { bg: "#dbeafe", text: "#1e40af", border: "#3b82f6" }; // Same as active (info blue)
+      case "completed":
+        return { bg: "#f3f4f6", text: "#6b7280", border: "#9ca3af" }; // Gray for completed
       default:
         return { bg: "rgba(232, 250, 240, 0.5)", text: "#2D7A52", border: "#A8E8BC" }; // Mint 50/400
     }
@@ -1372,7 +1374,13 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
               }}
             >
               {assessments.map((assessment) => {
-                const statusColors = getStatusColor(assessment.status);
+                // Check if end time has passed to determine if status should be "completed"
+                const endTime = assessment.scheduleStatus?.endTime;
+                const isEndTimePassed = endTime ? new Date(endTime) < new Date() : false;
+                const displayStatus = (assessment.status === "active" || assessment.status === "published") && isEndTimePassed 
+                  ? "completed" 
+                  : assessment.status;
+                const statusColors = getStatusColor(displayStatus);
                 return (
                   <div
                     key={assessment.id}
@@ -1678,8 +1686,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                             padding: "0.375rem 0.75rem",
                           }}
                         >
-                          {assessment.status === "paused" && "⏸️"}
-                          {assessment.status}
+                          {displayStatus === "paused" && "⏸️"}
+                          {displayStatus}
                         </span>
                       </div>
                     </div>
@@ -1709,28 +1717,51 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                         alignItems: "center",
                         gap: "0.5rem",
                       }}>
-                        {assessment.hasSchedule && assessment.scheduleStatus ? (
-                          assessment.scheduleStatus.isActive ? (
-                            <>
-                              <div style={{
-                                width: "8px",
-                                height: "8px",
-                                borderRadius: "50%",
-                                backgroundColor: "#10b981",
-                                boxShadow: "0 0 0 2px rgba(16, 185, 129, 0.2)",
-                              }} />
-                              <span style={{ color: "#10b981", fontWeight: 500 }}>Active</span>
-                            </>
-                          ) : (
-                            <>
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <circle cx="12" cy="12" r="10" />
-                                <polyline points="12 6 12 12 16 14" />
-                              </svg>
-                              <span style={{ color: "#f59e0b", fontWeight: 500 }}>Scheduled</span>
-                            </>
-                          )
-                        ) : (
+                        {assessment.hasSchedule && assessment.scheduleStatus ? (() => {
+                          const endTime = assessment.scheduleStatus.endTime;
+                          const isEndTimePassed = endTime ? new Date(endTime) < new Date() : false;
+                          
+                          if (isEndTimePassed && assessment.scheduleStatus.isActive) {
+                            // Show Completed if end time has passed
+                            return (
+                              <>
+                                <div style={{
+                                  width: "8px",
+                                  height: "8px",
+                                  borderRadius: "50%",
+                                  backgroundColor: "#6b7280",
+                                  boxShadow: "0 0 0 2px rgba(107, 114, 128, 0.2)",
+                                }} />
+                                <span style={{ color: "#6b7280", fontWeight: 500 }}>Completed</span>
+                              </>
+                            );
+                          } else if (assessment.scheduleStatus.isActive) {
+                            // Show Active if test is active and end time hasn't passed
+                            return (
+                              <>
+                                <div style={{
+                                  width: "8px",
+                                  height: "8px",
+                                  borderRadius: "50%",
+                                  backgroundColor: "#10b981",
+                                  boxShadow: "0 0 0 2px rgba(16, 185, 129, 0.2)",
+                                }} />
+                                <span style={{ color: "#10b981", fontWeight: 500 }}>Active</span>
+                              </>
+                            );
+                          } else {
+                            // Show Scheduled if not active yet
+                            return (
+                              <>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <circle cx="12" cy="12" r="10" />
+                                  <polyline points="12 6 12 12 16 14" />
+                                </svg>
+                                <span style={{ color: "#f59e0b", fontWeight: 500 }}>Scheduled</span>
+                              </>
+                            );
+                          }
+                        })() : (
                           <>
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <circle cx="12" cy="12" r="10" />
