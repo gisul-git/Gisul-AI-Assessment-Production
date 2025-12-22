@@ -494,6 +494,8 @@ async def start_live_proctoring_session(
             "answer": None,
             "candidateICE": [],
             "adminICE": [],
+            "wsConnected": False,  # WebSocket connection status (persisted in DB)
+            "wsLastSeen": None,  # Last heartbeat timestamp
             "createdAt": now,
             "updatedAt": now,
             "endedAt": None,
@@ -649,14 +651,55 @@ async def websocket_candidate(
     
     assessment_id = session["assessmentId"]
     
+    logger.info(f"[Live Proctoring] Candidate WebSocket connecting: session_id={session_id}, candidate_id={candidate_id}, assessment_id={assessment_id}")
+    logger.info(f"[Live Proctoring] Session document from DB: sessionId={session.get('sessionId')}, status={session.get('status')}, candidateId={session.get('candidateId')}")
+    
     # Connect candidate
     await connection_manager.connect_candidate(session_id, assessment_id, websocket)
+    
+    # CRITICAL: Mark WebSocket as connected in MongoDB (persists across restarts)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.live_proctor_sessions.update_one(
+        {"sessionId": session_id},
+        {
+            "$set": {
+                "wsConnected": True,
+                "wsLastSeen": now,
+                "updatedAt": now,
+            }
+        }
+    )
+    logger.info(f"[Live Proctoring] ✅ Marked session {session_id} as wsConnected=True in MongoDB")
+    
+    # Verify connection was registered
+    is_registered = connection_manager.is_candidate_connected(session_id)
+    logger.info(f"[Live Proctoring] After connect_candidate, is_candidate_connected({session_id}) = {is_registered}")
+    logger.info(f"[Live Proctoring] All registered candidate connections: {list(connection_manager.candidate_connections.keys())}")
     
     try:
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
             msg_type = message.get("type")
+            
+            # Handle heartbeat ping (frontend sends this periodically)
+            if msg_type == "ping":
+                # Update last seen timestamp
+                now = datetime.now(timezone.utc).isoformat()
+                await db.live_proctor_sessions.update_one(
+                    {"sessionId": session_id},
+                    {
+                        "$set": {
+                            "wsLastSeen": now,
+                            "wsConnected": True,  # Ensure it's still marked as connected
+                            "updatedAt": now,
+                        }
+                    }
+                )
+                # Send pong response
+                await websocket.send_text(json.dumps({"type": "pong"}))
+                logger.debug(f"[Live Proctoring] Received ping from {session_id}, sent pong")
+                continue
             
             if msg_type == "offer":
                 # Candidate sent offer
@@ -711,11 +754,28 @@ async def websocket_candidate(
                 )
     
     except WebSocketDisconnect:
-        logger.info(f"[Live Proctoring] Candidate disconnected: {session_id}")
+        logger.info(f"[Live Proctoring] Candidate WebSocket disconnected: {session_id}")
     except Exception as exc:
         logger.exception(f"[Live Proctoring] Error in candidate WebSocket: {exc}")
     finally:
+        logger.info(f"[Live Proctoring] Cleaning up candidate connection: {session_id}")
+        logger.info(f"[Live Proctoring] Before disconnect, is_candidate_connected({session_id}) = {connection_manager.is_candidate_connected(session_id)}")
+        
+        # CRITICAL: Mark WebSocket as disconnected in MongoDB (persists across restarts)
+        now = datetime.now(timezone.utc).isoformat()
+        await db.live_proctor_sessions.update_one(
+            {"sessionId": session_id},
+            {
+                "$set": {
+                    "wsConnected": False,
+                    "updatedAt": now,
+                }
+            }
+        )
+        logger.info(f"[Live Proctoring] ✅ Marked session {session_id} as wsConnected=False in MongoDB")
+        
         await connection_manager.disconnect_candidate(session_id)
+        logger.info(f"[Live Proctoring] After disconnect, is_candidate_connected({session_id}) = {connection_manager.is_candidate_connected(session_id)}")
 
 
 @router.websocket("/ws/live/admin/{assessment_id}")
@@ -735,24 +795,58 @@ async def websocket_admin(
     try:
         # Send active sessions immediately
         # CRITICAL: Only include sessions where candidate WebSocket is actually connected
+        logger.info(f"[Live Proctoring] Admin connecting for assessment {assessment_id}, querying active sessions...")
+        
         cursor = db.live_proctor_sessions.find({
             "assessmentId": assessment_id,
             "status": {"$in": ["candidate_initiated", "offer_sent", "active"]}
         })
         
         sessions = []
+        all_sessions_in_db = []
+        connected_session_ids = list(connection_manager.candidate_connections.keys())
+        
         async for doc in cursor:
             session_id = doc["sessionId"]
-            # Only include if candidate WebSocket is connected
-            if connection_manager.is_candidate_connected(session_id):
+            candidate_id = doc.get("candidateId", "unknown")
+            status = doc.get("status", "unknown")
+            ws_connected_db = doc.get("wsConnected", False)  # Check MongoDB status (persists across restarts)
+            ws_last_seen = doc.get("wsLastSeen")
+            all_sessions_in_db.append({
+                "sessionId": session_id,
+                "candidateId": candidate_id,
+                "status": status,
+                "wsConnected": ws_connected_db,
+            })
+            
+            # CRITICAL FIX: Check MongoDB status first (persists across restarts)
+            # Also check in-memory as secondary (for real-time accuracy)
+            is_connected_memory = connection_manager.is_candidate_connected(session_id)
+            is_connected = ws_connected_db or is_connected_memory
+            
+            # If MongoDB says connected but in-memory doesn't, update in-memory (candidate reconnected after restart)
+            if ws_connected_db and not is_connected_memory:
+                logger.info(f"[Live Proctoring] 🔄 Session {session_id} marked connected in DB but not in memory - candidate may have reconnected")
+            
+            # Only include if candidate WebSocket is connected (either in DB or memory)
+            if is_connected:
                 sessions.append({
                     "sessionId": session_id,
-                    "candidateId": doc["candidateId"],
-                    "status": doc["status"],
+                    "candidateId": candidate_id,
+                    "status": status,
                     "createdAt": doc["createdAt"],
                 })
+                logger.info(f"[Live Proctoring] ✅ INCLUDED: Session {session_id} (candidate: {candidate_id}, status: {status}) - WebSocket connected (DB: {ws_connected_db}, Memory: {is_connected_memory})")
+            else:
+                logger.warning(f"[Live Proctoring] ❌ EXCLUDED: Session {session_id} (candidate: {candidate_id}, status: {status}) - WebSocket NOT connected (DB: {ws_connected_db}, Memory: {is_connected_memory})")
         
-        logger.info(f"[Live Proctoring] Admin connected, sending {len(sessions)} active sessions (with connected candidates) for assessment {assessment_id}")
+        logger.info(f"[Live Proctoring] ===== Admin Connection Summary =====")
+        logger.info(f"[Live Proctoring] Assessment ID: {assessment_id}")
+        logger.info(f"[Live Proctoring] Total sessions in DB: {len(all_sessions_in_db)}")
+        logger.info(f"[Live Proctoring] Sessions with connected WebSocket: {len(sessions)}")
+        logger.info(f"[Live Proctoring] Currently connected candidate sessions: {connected_session_ids}")
+        logger.info(f"[Live Proctoring] Sessions being sent to admin: {[s['sessionId'] for s in sessions]}")
+        logger.info(f"[Live Proctoring] =====================================")
         
         await websocket.send_text(json.dumps({
             "type": "active_sessions",
