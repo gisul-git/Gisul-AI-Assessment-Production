@@ -649,6 +649,26 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           <button
             type="button"
             onClick={async () => {
+              // Don't save draft if assessment was just activated
+              if (isActivatedRef.current) {
+                router.push("/dashboard?refresh=true");
+                return;
+              }
+
+              // Check if assessment is already active - don't overwrite
+              if (assessmentId) {
+                try {
+                  const current = await customMCQApi.getAssessment(assessmentId);
+                  if (current && current.status === 'active') {
+                    // Assessment is already active, don't save as draft
+                    router.push("/dashboard?refresh=true");
+                    return;
+                  }
+                } catch (e) {
+                  // If we can't check, proceed with save
+                }
+              }
+
               // Save draft before navigating away
               if (saveTimeoutRef.current) {
                 clearTimeout(saveTimeoutRef.current);
@@ -679,7 +699,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
               } catch (err) {
                 console.error("Error saving draft before navigation:", err);
               }
-              router.push("/dashboard");
+              router.push("/dashboard?refresh=true");
             }}
             className="btn-secondary"
             style={{
