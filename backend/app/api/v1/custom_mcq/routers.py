@@ -335,6 +335,20 @@ async def create_custom_mcq_assessment(
                 q_dict["updatedAt"] = _now_utc()
                 questions_with_ids.append(q_dict)
         
+        # Sort questions: MCQ first, then Subjective
+        def get_question_type_order(q):
+            """Return 0 for MCQ, 1 for Subjective (for sorting)"""
+            q_type = q.get("questionType", "mcq")
+            if q_type not in ["mcq", "subjective"]:
+                # Infer from structure
+                if "options" in q and "correctAn" in q:
+                    return 0  # MCQ
+                else:
+                    return 1  # Subjective
+            return 0 if q_type == "mcq" else 1
+        
+        questions_with_ids.sort(key=get_question_type_order)
+        
         # Prepare candidates
         candidates_list = []
         if request.candidates:
@@ -616,6 +630,20 @@ async def update_custom_mcq_assessment(
                 if "createdAt" not in q_dict:
                     q_dict["createdAt"] = _now_utc()
                 questions_with_ids.append(q_dict)
+            
+            # Sort questions: MCQ first, then Subjective
+            def get_question_type_order(q):
+                """Return 0 for MCQ, 1 for Subjective (for sorting)"""
+                q_type = q.get("questionType", "mcq")
+                if q_type not in ["mcq", "subjective"]:
+                    # Infer from structure
+                    if "options" in q and "correctAn" in q:
+                        return 0  # MCQ
+                    else:
+                        return 1  # Subjective
+                return 0 if q_type == "mcq" else 1
+            
+            questions_with_ids.sort(key=get_question_type_order)
             update_doc["questions"] = questions_with_ids
             update_doc["totalMarks"] = sum(q["marks"] for q in questions_with_ids)
         
@@ -1731,3 +1759,158 @@ async def save_answer_log(
     except Exception as e:
         logger.exception(f"Error saving answer log: {e}")
         return error_response(f"Failed to save answer log: {str(e)}", status_code=500)
+
+
+@router.post("/{assessment_id}/pause")
+async def pause_custom_mcq_assessment(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Pause an active custom MCQ assessment.
+    Sets status to "paused" and records pausedAt timestamp.
+    Does not affect candidates who have already started.
+    """
+    try:
+        assessment_oid = to_object_id(assessment_id)
+        if not assessment_oid:
+            return error_response("Invalid assessment ID", status_code=400)
+        
+        # Get assessment
+        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
+        
+        # Check access
+        user_id = current_user.get("id") or current_user.get("_id")
+        if not user_id:
+            return error_response("User ID not found", status_code=401)
+        user_id = str(user_id)
+        
+        if str(assessment.get("created_by")) != user_id:
+            return error_response("Access denied", status_code=403)
+        
+        current_status = assessment.get("status")
+        if current_status == "paused":
+            # Idempotent: already paused
+            return success_response(
+                "Assessment is already paused",
+                {"assessment": serialize_document(assessment)}
+            )
+        
+        if current_status not in ["active", "scheduled"]:
+            return error_response(
+                f"Cannot pause assessment with status '{current_status}'. Only 'active' or 'scheduled' assessments can be paused.",
+                status_code=400
+            )
+        
+        now = _now_utc()
+        
+        # Store previous status for resume
+        status_before_pause = current_status
+        
+        # Atomic update
+        result = await db.custom_mcq_assessments.update_one(
+            {"_id": assessment_oid},
+            {
+                "$set": {
+                    "status": "paused",
+                    "statusBeforePause": status_before_pause,
+                    "pausedAt": now,
+                    "updated_at": now,
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            return error_response("Assessment not found or not modified", status_code=404)
+        
+        # Fetch updated assessment
+        updated_assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        
+        return success_response(
+            "Assessment paused successfully",
+            {"assessment": serialize_document(updated_assessment)}
+        )
+        
+    except Exception as exc:
+        logger.error(f"Error pausing custom MCQ assessment: {exc}", exc_info=True)
+        return error_response(f"Failed to pause assessment: {str(exc)}", status_code=500)
+
+
+@router.post("/{assessment_id}/resume")
+async def resume_custom_mcq_assessment(
+    assessment_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Resume a paused custom MCQ assessment.
+    Sets status back to previous status (usually "active") and records resumeAt timestamp.
+    """
+    try:
+        assessment_oid = to_object_id(assessment_id)
+        if not assessment_oid:
+            return error_response("Invalid assessment ID", status_code=400)
+        
+        # Get assessment
+        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
+        
+        # Check access
+        user_id = current_user.get("id") or current_user.get("_id")
+        if not user_id:
+            return error_response("User ID not found", status_code=401)
+        user_id = str(user_id)
+        
+        if str(assessment.get("created_by")) != user_id:
+            return error_response("Access denied", status_code=403)
+        
+        current_status = assessment.get("status")
+        if current_status != "paused":
+            if current_status == "active":
+                # Idempotent: already active
+                return success_response(
+                    "Assessment is already active",
+                    {"assessment": serialize_document(assessment)}
+                )
+            return error_response(
+                f"Cannot resume assessment with status '{current_status}'. Only 'paused' assessments can be resumed.",
+                status_code=400
+            )
+        
+        now = _now_utc()
+        previous_status = assessment.get("statusBeforePause", "active")  # Default to active if not set
+        
+        # Atomic update
+        result = await db.custom_mcq_assessments.update_one(
+            {"_id": assessment_oid},
+            {
+                "$set": {
+                    "status": previous_status,
+                    "resumeAt": now,
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "pausedAt": "",
+                    "statusBeforePause": "",
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            return error_response("Assessment not found or not modified", status_code=404)
+        
+        # Fetch updated assessment
+        updated_assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        
+        return success_response(
+            "Assessment resumed successfully",
+            {"assessment": serialize_document(updated_assessment)}
+        )
+        
+    except Exception as exc:
+        logger.error(f"Error resuming custom MCQ assessment: {exc}", exc_info=True)
+        return error_response(f"Failed to resume assessment: {str(exc)}", status_code=500)

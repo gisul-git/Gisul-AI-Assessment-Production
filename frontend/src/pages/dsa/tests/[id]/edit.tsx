@@ -33,6 +33,10 @@ interface DSATest {
   timer_mode?: TimerMode;
   question_timings?: Array<{ question_id: string; duration_minutes: number }> | null;
   question_time_limits?: Record<string, number> | null; // Legacy field
+  proctoringSettings?: {
+    aiProctoringEnabled?: boolean;
+    liveProctoringEnabled?: boolean;
+  } | null;
 }
 
 export default function EditDSACompetencyPage() {
@@ -48,6 +52,12 @@ export default function EditDSACompetencyPage() {
   const [timerMode, setTimerMode] = useState<TimerMode>("GLOBAL");
   const [questionTimings, setQuestionTimings] = useState<Record<string, number>>({});
   const [examMode, setExamMode] = useState<ExamMode>("strict");
+  
+  // Proctoring settings
+  const [proctoringSettings, setProctoringSettings] = useState({
+    aiProctoringEnabled: false,
+    liveProctoringEnabled: false,
+  });
 
   const [formData, setFormData] = useState({
     title: "",
@@ -177,6 +187,13 @@ export default function EditDSACompetencyPage() {
       setTimerMode("GLOBAL");
       setQuestionTimings({});
     }
+    
+    // Load proctoring settings
+    const proctoring = test.proctoringSettings || {};
+    setProctoringSettings({
+      aiProctoringEnabled: proctoring.aiProctoringEnabled === true,
+      liveProctoringEnabled: proctoring.liveProctoringEnabled === true,
+    });
   };
 
   const fetchTest = async (tid: string) => {
@@ -293,6 +310,12 @@ export default function EditDSACompetencyPage() {
       } else {
         payload.question_timings = null;
       }
+      
+      // Include proctoring settings in payload
+      payload.proctoringSettings = {
+        aiProctoringEnabled: proctoringSettings.aiProctoringEnabled,
+        liveProctoringEnabled: proctoringSettings.liveProctoringEnabled,
+      };
 
       await dsaApi.put(`/tests/${testId}`, payload);
       alert("Test updated successfully!");
@@ -611,6 +634,81 @@ export default function EditDSACompetencyPage() {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Proctoring Settings */}
+          <div style={{ marginBottom: "1.5rem", padding: "1.25rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}>
+            <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Proctoring Settings</h3>
+            
+            {/* AI Proctoring Checkbox */}
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                cursor: "pointer",
+                fontSize: "0.875rem",
+                color: "#1e293b",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={proctoringSettings.aiProctoringEnabled}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setProctoringSettings((prev) => ({
+                    ...prev,
+                    aiProctoringEnabled: checked,
+                    // If Live Proctoring is enabled, AI Proctoring should also be enabled
+                    liveProctoringEnabled: prev.liveProctoringEnabled && checked ? prev.liveProctoringEnabled : (prev.liveProctoringEnabled && !checked ? false : prev.liveProctoringEnabled),
+                  }));
+                }}
+                style={{ 
+                  width: "18px", 
+                  height: "18px", 
+                  cursor: "pointer",
+                }}
+              />
+              <span>
+                Enable AI Proctoring (camera-based: no face, multiple faces, gaze
+                away)
+              </span>
+            </label>
+
+            {/* Live Proctoring Checkbox */}
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                cursor: "pointer",
+                fontSize: "0.875rem",
+                color: "#1e293b",
+                marginTop: "1rem",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={proctoringSettings.liveProctoringEnabled}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setProctoringSettings((prev) => ({
+                    ...prev,
+                    liveProctoringEnabled: checked,
+                    // When Live Proctoring is enabled, AI Proctoring should also be enabled
+                    aiProctoringEnabled: checked ? true : prev.aiProctoringEnabled,
+                  }));
+                }}
+                style={{ 
+                  width: "18px", 
+                  height: "18px", 
+                  cursor: "pointer",
+                }}
+              />
+              <span>
+                Live Proctoring (webcam + screen streaming)
+              </span>
+            </label>
           </div>
 
           <div className="space-y-2">

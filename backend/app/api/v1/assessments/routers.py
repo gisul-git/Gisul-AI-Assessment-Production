@@ -3394,19 +3394,28 @@ async def regenerate_topic_endpoint_v2(
         if assessment.get("fullTopicRegenLocked", False):
             raise HTTPException(status_code=400, detail="Topic regeneration is locked after preview")
         
+        # [STAR] CRITICAL FIX: Extract old topic label to avoid regenerating same content
+        old_topic = topics_v2[topic_index]
+        old_topic_label = old_topic.get("label", "")
+        
+        logger.info(f"[TOPIC-REGEN] Regenerating topic at index {topic_index}. Old topic: '{old_topic_label}'")
+        
         # Sanitize inputs
         sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
         sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
         sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
         
-        # Generate new topic
-        new_topics = await generate_topics_v2(
+        # Generate new topic with exclusion of old topic
+        # Use generate_topics_unified for better control
+        combined_skills = [{"skill_name": skill, "source": "manual"} for skill in sanitized_skills]
+        new_topics = await generate_topics_unified(
             assessment_title=sanitized_title,
             job_designation=sanitized_job_designation,
-            selected_skills=sanitized_skills,
+            combined_skills=combined_skills,
             experience_min=payload.experienceMin,
             experience_max=payload.experienceMax,
-            experience_mode=payload.experienceMode
+            experience_mode=payload.experienceMode,
+            previous_topic_label=old_topic_label  # [STAR] CRITICAL: Pass old topic to avoid repeating
         )
         
         if not new_topics:
@@ -3416,6 +3425,12 @@ async def regenerate_topic_endpoint_v2(
         new_topic = new_topics[0]
         new_topic["id"] = payload.topicId  # Keep same ID
         new_topic["locked"] = False
+        # ⭐ CRITICAL: Preserve category from old topic (don't lose it on regeneration)
+        old_topic = topics_v2[topic_index]
+        if old_topic.get("category"):
+            new_topic["category"] = old_topic["category"]
+        else:
+            new_topic["category"] = "technical"  # Default if not set
         # Reset all questionRows - keep only the first auto-generated one
         if new_topic.get("questionRows"):
             first_row = new_topic["questionRows"][0]
@@ -3502,15 +3517,22 @@ async def generate_question_endpoint_v2(
         if topic.get("locked", False) and row.get("questions") and len(row.get("questions", [])) > 0:
             raise HTTPException(status_code=400, detail="Topic is locked and row already has questions")
         
+        # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
+        # The payload might have stale data if frontend state wasn't updated
+        question_type = row.get("questionType") or payload.questionType
+        difficulty = row.get("difficulty") or payload.difficulty
+        questions_count = row.get("questionsCount") or payload.questionsCount
+        can_use_judge0 = row.get("canUseJudge0", False) if (row.get("questionType") or payload.questionType) == "Coding" else False
+        
         # Validate required fields
-        if not payload.questionType:
+        if not question_type:
             raise HTTPException(status_code=400, detail="questionType is required")
-        if not payload.difficulty:
+        if not difficulty:
             raise HTTPException(status_code=400, detail="difficulty is required")
-        if not payload.questionsCount or payload.questionsCount < 1:
+        if not questions_count or questions_count < 1:
             raise HTTPException(status_code=400, detail="questionsCount must be at least 1")
         
-        logger.info(f"Generating {payload.questionsCount} {payload.questionType} question(s) for topic: {payload.topicLabel}, difficulty: {payload.difficulty}, canUseJudge0: {payload.canUseJudge0}")
+        logger.info(f"Generating {questions_count} {question_type} question(s) for topic: {payload.topicLabel}, difficulty: {difficulty}, canUseJudge0: {can_use_judge0} (using row.questionType from DB)")
         
         # Get coding language from assessment (fallback to python)
         coding_language = assessment.get("codingLanguage", "python")
@@ -3534,17 +3556,44 @@ async def generate_question_endpoint_v2(
         if not additional_requirements:
             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
         
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
+        # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
+        # The payload might have stale data if frontend state wasn't updated
+        question_type = row.get("questionType") or payload.questionType
+        difficulty = row.get("difficulty") or payload.difficulty
+        questions_count = row.get("questionsCount") or payload.questionsCount
+        can_use_judge0 = row.get("canUseJudge0", False) if question_type == "Coding" else False
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
-            question_type=payload.questionType,
-            difficulty=payload.difficulty,
-            questions_count=payload.questionsCount,
-            can_use_judge0=payload.canUseJudge0,
+            question_type=question_type,  # ⭐ Use row's question type from DB
+            difficulty=difficulty,  # ⭐ Use row's difficulty from DB
+            questions_count=questions_count,  # ⭐ Use row's questions count from DB
+            can_use_judge0=can_use_judge0,  # ⭐ Use row's canUseJudge0 from DB
             coding_language=coding_language,
             additional_requirements=additional_requirements,
             experience_mode=experience_mode,
             website_summary=website_summary,  # Legacy
-            company_context=company_context  # New unified field
+            company_context=company_context,  # New unified field
+            job_designation=job_designation,  # ⭐ NEW
+            experience_min=experience_min,  # ⭐ NEW
+            experience_max=experience_max,  # ⭐ NEW
+            company_name=company_name,  # ⭐ NEW
+            assessment_requirements=assessment_requirements,
+            previous_question=None  # Not regenerating  # ⭐ NEW - Highest priority context
         )
         
         if not questions or len(questions) == 0:
@@ -3626,6 +3675,13 @@ async def generate_all_questions_endpoint_v2(
                         if not additional_requirements:
                             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
                         
+                        # ⭐ Extract context-aware personalization parameters
+                        assessment_requirements = assessment.get("requirements")
+                        job_designation = assessment.get("jobDesignation")
+                        experience_min = assessment.get("experienceMin")
+                        experience_max = assessment.get("experienceMax")
+                        company_name = company_context.get("company_name") if company_context else None
+                        
                         questions = await generate_questions_for_row_v2(
                             topic_label=topic["label"],
                             question_type=row["questionType"],
@@ -3636,7 +3692,12 @@ async def generate_all_questions_endpoint_v2(
                             additional_requirements=additional_requirements,
                             experience_mode=assessment.get("experienceMode", "corporate"),
                             website_summary=website_summary,
-                            company_context=company_context
+                            company_context=company_context,
+                            job_designation=job_designation,  # ⭐ NEW
+                            experience_min=experience_min,  # ⭐ NEW
+                            experience_max=experience_max,  # ⭐ NEW
+                            company_name=company_name,  # ⭐ NEW
+                            assessment_requirements=assessment_requirements  # ⭐ NEW
                         )
                         
                         row["questions"] = questions
@@ -3829,6 +3890,23 @@ async def regenerate_single_question_endpoint(
             raise HTTPException(status_code=400, detail="Question index out of range")
         
         # Regenerate single question
+        
+        # ⭐ CRITICAL FIX: Extract old question to avoid regenerating same content
+        old_question = questions[payload.questionIndex]
+        old_question_text = None
+        
+        # Extract question text based on question type
+        if isinstance(old_question, dict):
+            # For most question types, extract the "question" field
+            old_question_text = old_question.get("question", "")
+            
+            # For MCQ, include options context too (so AI knows full question)
+            if row.get("questionType") == "MCQ" and old_question.get("options"):
+                old_question_text = f"{old_question_text}\nOptions: {', '.join(old_question.get('options', []))}"
+        else:
+            old_question_text = str(old_question)
+        
+        logger.info(f"[REGEN] Regenerating question at index {payload.questionIndex}. Old question preview: {old_question_text[:100] if old_question_text else 'N/A'}...")
         # Get company context (new) or websiteSummary (legacy)
         company_context = assessment.get("contextSummary")
         website_summary = None
@@ -3840,6 +3918,13 @@ async def regenerate_single_question_endpoint(
         if not additional_requirements:
             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
         
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
         new_questions = await generate_questions_for_row_v2(
             topic_label=topic["label"],
             question_type=row["questionType"],
@@ -3849,7 +3934,12 @@ async def regenerate_single_question_endpoint(
             additional_requirements=additional_requirements,
             experience_mode=assessment.get("experienceMode", "corporate"),
             website_summary=website_summary,
-            company_context=company_context
+            company_context=company_context,
+            job_designation=job_designation,  # ⭐ NEW
+            experience_min=experience_min,  # ⭐ NEW
+            experience_max=experience_max,  # ⭐ NEW
+            company_name=company_name,  # ⭐ NEW
+            assessment_requirements=assessment_requirements  # ⭐ NEW
         )
         
         if new_questions:
@@ -4655,19 +4745,28 @@ async def regenerate_topic_endpoint_v2(
         if assessment.get("fullTopicRegenLocked", False):
             raise HTTPException(status_code=400, detail="Topic regeneration is locked after preview")
         
+        # [STAR] CRITICAL FIX: Extract old topic label to avoid regenerating same content
+        old_topic = topics_v2[topic_index]
+        old_topic_label = old_topic.get("label", "")
+        
+        logger.info(f"[TOPIC-REGEN] Regenerating topic at index {topic_index}. Old topic: '{old_topic_label}'")
+        
         # Sanitize inputs
         sanitized_job_designation = sanitize_text_field(payload.jobDesignation)
         sanitized_skills = [sanitize_text_field(skill) for skill in payload.selectedSkills]
         sanitized_title = sanitize_text_field(payload.assessmentTitle) if payload.assessmentTitle else None
         
-        # Generate new topic
-        new_topics = await generate_topics_v2(
+        # Generate new topic with exclusion of old topic
+        # Use generate_topics_unified for better control
+        combined_skills = [{"skill_name": skill, "source": "manual"} for skill in sanitized_skills]
+        new_topics = await generate_topics_unified(
             assessment_title=sanitized_title,
             job_designation=sanitized_job_designation,
-            selected_skills=sanitized_skills,
+            combined_skills=combined_skills,
             experience_min=payload.experienceMin,
             experience_max=payload.experienceMax,
-            experience_mode=payload.experienceMode
+            experience_mode=payload.experienceMode,
+            previous_topic_label=old_topic_label  # [STAR] CRITICAL: Pass old topic to avoid repeating
         )
         
         if not new_topics:
@@ -4677,6 +4776,12 @@ async def regenerate_topic_endpoint_v2(
         new_topic = new_topics[0]
         new_topic["id"] = payload.topicId  # Keep same ID
         new_topic["locked"] = False
+        # ⭐ CRITICAL: Preserve category from old topic (don't lose it on regeneration)
+        old_topic = topics_v2[topic_index]
+        if old_topic.get("category"):
+            new_topic["category"] = old_topic["category"]
+        else:
+            new_topic["category"] = "technical"  # Default if not set
         # Reset all questionRows - keep only the first auto-generated one
         if new_topic.get("questionRows"):
             first_row = new_topic["questionRows"][0]
@@ -4705,6 +4810,80 @@ async def regenerate_topic_endpoint_v2(
     except Exception as exc:
         logger.error(f"Error regenerating topic: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to regenerate topic: {str(exc)}") from exc
+
+@router.post("/update-question-type")
+async def update_question_type(
+    payload: dict = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Update question type for a specific topic row.
+    """
+    try:
+        assessment_id = payload.get("assessmentId")
+        topic_id = payload.get("topicId")
+        row_id = payload.get("rowId")
+        new_question_type = payload.get("questionType")
+        new_difficulty = payload.get("difficulty", "Medium")
+        can_use_judge0 = payload.get("canUseJudge0", False)
+        
+        if not all([assessment_id, topic_id, row_id, new_question_type]):
+            raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        # Get assessment
+        assessment = await db.assessments.find_one({
+            "_id": to_object_id(assessment_id)
+        })
+        
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        # Verify user has access to this assessment
+        _check_assessment_access(assessment, current_user)
+        
+        # Update the specific row
+        topics_v2 = assessment.get("topics_v2", [])
+        row_updated = False
+        
+        for topic in topics_v2:
+            if topic.get("id") == topic_id:
+                for row in topic.get("questionRows", []):
+                    if row.get("rowId") == row_id:
+                        row["questionType"] = new_question_type
+                        row["difficulty"] = new_difficulty
+                        row["canUseJudge0"] = can_use_judge0
+                        row["status"] = "pending"
+                        row["questions"] = []
+                        row["locked"] = False
+                        row["userEdited"] = True  # ⭐ Mark that user explicitly set this type
+                        row_updated = True
+                        logger.info(f"✅ Updated {topic.get('label')} to {new_question_type} (userEdited=True)")
+                        break
+                if row_updated:
+                    topic["status"] = "pending"
+                    topic["locked"] = False  # Unlock topic to allow regeneration
+                    break
+        
+        if not row_updated:
+            raise HTTPException(status_code=404, detail="Row not found")
+        
+        # Save to database
+        await db.assessments.update_one(
+            {"_id": to_object_id(assessment_id)},
+            {"$set": {"topics_v2": topics_v2}}
+        )
+        
+        return success_response(
+            f"Updated to {new_question_type}",
+            {"topicId": topic_id, "rowId": row_id, "questionType": new_question_type}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating question type: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/generate-question")
@@ -4763,15 +4942,22 @@ async def generate_question_endpoint_v2(
         if topic.get("locked", False) and row.get("questions") and len(row.get("questions", [])) > 0:
             raise HTTPException(status_code=400, detail="Topic is locked and row already has questions")
         
+        # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
+        # The payload might have stale data if frontend state wasn't updated
+        question_type = row.get("questionType") or payload.questionType
+        difficulty = row.get("difficulty") or payload.difficulty
+        questions_count = row.get("questionsCount") or payload.questionsCount
+        can_use_judge0 = row.get("canUseJudge0", False) if (row.get("questionType") or payload.questionType) == "Coding" else False
+        
         # Validate required fields
-        if not payload.questionType:
+        if not question_type:
             raise HTTPException(status_code=400, detail="questionType is required")
-        if not payload.difficulty:
+        if not difficulty:
             raise HTTPException(status_code=400, detail="difficulty is required")
-        if not payload.questionsCount or payload.questionsCount < 1:
+        if not questions_count or questions_count < 1:
             raise HTTPException(status_code=400, detail="questionsCount must be at least 1")
         
-        logger.info(f"Generating {payload.questionsCount} {payload.questionType} question(s) for topic: {payload.topicLabel}, difficulty: {payload.difficulty}, canUseJudge0: {payload.canUseJudge0}")
+        logger.info(f"Generating {questions_count} {question_type} question(s) for topic: {payload.topicLabel}, difficulty: {difficulty}, canUseJudge0: {can_use_judge0} (using row.questionType from DB)")
         
         # Get coding language from assessment (fallback to python)
         coding_language = assessment.get("codingLanguage", "python")
@@ -4795,17 +4981,44 @@ async def generate_question_endpoint_v2(
         if not additional_requirements:
             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
         
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
+        # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
+        # The payload might have stale data if frontend state wasn't updated
+        question_type = row.get("questionType") or payload.questionType
+        difficulty = row.get("difficulty") or payload.difficulty
+        questions_count = row.get("questionsCount") or payload.questionsCount
+        can_use_judge0 = row.get("canUseJudge0", False) if question_type == "Coding" else False
+        
         questions = await generate_questions_for_row_v2(
             topic_label=payload.topicLabel,
-            question_type=payload.questionType,
-            difficulty=payload.difficulty,
-            questions_count=payload.questionsCount,
-            can_use_judge0=payload.canUseJudge0,
+            question_type=question_type,  # ⭐ Use row's question type from DB
+            difficulty=difficulty,  # ⭐ Use row's difficulty from DB
+            questions_count=questions_count,  # ⭐ Use row's questions count from DB
+            can_use_judge0=can_use_judge0,  # ⭐ Use row's canUseJudge0 from DB
             coding_language=coding_language,
             additional_requirements=additional_requirements,
             experience_mode=experience_mode,
             website_summary=website_summary,  # Legacy
-            company_context=company_context  # New unified field
+            company_context=company_context,  # New unified field
+            job_designation=job_designation,  # ⭐ NEW
+            experience_min=experience_min,  # ⭐ NEW
+            experience_max=experience_max,  # ⭐ NEW
+            company_name=company_name,  # ⭐ NEW
+            assessment_requirements=assessment_requirements,
+            previous_question=None  # Not regenerating  # ⭐ NEW - Highest priority context
         )
         
         if not questions or len(questions) == 0:
@@ -4887,6 +5100,13 @@ async def generate_all_questions_endpoint_v2(
                         if not additional_requirements:
                             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
                         
+                        # ⭐ Extract context-aware personalization parameters
+                        assessment_requirements = assessment.get("requirements")
+                        job_designation = assessment.get("jobDesignation")
+                        experience_min = assessment.get("experienceMin")
+                        experience_max = assessment.get("experienceMax")
+                        company_name = company_context.get("company_name") if company_context else None
+                        
                         questions = await generate_questions_for_row_v2(
                             topic_label=topic["label"],
                             question_type=row["questionType"],
@@ -4897,7 +5117,12 @@ async def generate_all_questions_endpoint_v2(
                             additional_requirements=additional_requirements,
                             experience_mode=assessment.get("experienceMode", "corporate"),
                             website_summary=website_summary,
-                            company_context=company_context
+                            company_context=company_context,
+                            job_designation=job_designation,  # ⭐ NEW
+                            experience_min=experience_min,  # ⭐ NEW
+                            experience_max=experience_max,  # ⭐ NEW
+                            company_name=company_name,  # ⭐ NEW
+                            assessment_requirements=assessment_requirements  # ⭐ NEW
                         )
                         
                         row["questions"] = questions
@@ -5090,6 +5315,23 @@ async def regenerate_single_question_endpoint(
             raise HTTPException(status_code=400, detail="Question index out of range")
         
         # Regenerate single question
+        
+        # ⭐ CRITICAL FIX: Extract old question to avoid regenerating same content
+        old_question = questions[payload.questionIndex]
+        old_question_text = None
+        
+        # Extract question text based on question type
+        if isinstance(old_question, dict):
+            # For most question types, extract the "question" field
+            old_question_text = old_question.get("question", "")
+            
+            # For MCQ, include options context too (so AI knows full question)
+            if row.get("questionType") == "MCQ" and old_question.get("options"):
+                old_question_text = f"{old_question_text}\nOptions: {', '.join(old_question.get('options', []))}"
+        else:
+            old_question_text = str(old_question)
+        
+        logger.info(f"[REGEN] Regenerating question at index {payload.questionIndex}. Old question preview: {old_question_text[:100] if old_question_text else 'N/A'}...")
         # Get company context (new) or websiteSummary (legacy)
         company_context = assessment.get("contextSummary")
         website_summary = None
@@ -5101,6 +5343,13 @@ async def regenerate_single_question_endpoint(
         if not additional_requirements:
             additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
         
+        # ⭐ Extract context-aware personalization parameters
+        assessment_requirements = assessment.get("requirements")
+        job_designation = assessment.get("jobDesignation")
+        experience_min = assessment.get("experienceMin")
+        experience_max = assessment.get("experienceMax")
+        company_name = company_context.get("company_name") if company_context else None
+        
         new_questions = await generate_questions_for_row_v2(
             topic_label=topic["label"],
             question_type=row["questionType"],
@@ -5110,7 +5359,12 @@ async def regenerate_single_question_endpoint(
             additional_requirements=additional_requirements,
             experience_mode=assessment.get("experienceMode", "corporate"),
             website_summary=website_summary,
-            company_context=company_context
+            company_context=company_context,
+            job_designation=job_designation,  # ⭐ NEW
+            experience_min=experience_min,  # ⭐ NEW
+            experience_max=experience_max,  # ⭐ NEW
+            company_name=company_name,  # ⭐ NEW
+            assessment_requirements=assessment_requirements  # ⭐ NEW
         )
         
         if new_questions:
@@ -5344,14 +5598,133 @@ async def add_custom_topic_endpoint(
         if any(t.get("label", "").lower() == topic_name.lower() for t in topics_v2):
             raise HTTPException(status_code=400, detail="Topic already exists")
         
-        # Generate topic context for technical topics
-        if payload.category == "technical":
+        # ⭐ STEP 1: Auto-detect category based on topic content
+        # Check if topic is a programming language, SQL, or AIML → automatically technical
+        from .services.ai_topic_generator import CODING_LANGUAGES
+        from .services.ai_utils import _v2_is_aiml_execution_topic, _v2_is_sql_execution_topic
+        from .services.judge0_utils import contains_unsupported_framework
+        import re
+        
+        topic_lower = topic_name.lower().strip()
+        topic_clean = topic_name.strip()
+        
+        # Check if topic is a programming language, SQL, or AIML → must be technical
+        is_programming_lang = False
+        is_sql_topic = False
+        is_aiml_topic = False
+        
+        # Check for programming languages with aliases
+        LANGUAGE_ALIASES = {
+            "cpp": ["c++", "cpp", "c plus plus"],
+            "csharp": ["c#", "csharp", "c sharp"],
+            "c": ["c"],
+            "java": ["java"],
+            "kotlin": ["kotlin"],
+            "python": ["python"],
+            "javascript": ["javascript", "js"],
+            "typescript": ["typescript", "ts"],
+            "go": ["go", "golang"],
+            "rust": ["rust"]
+        }
+        
+        for lang in CODING_LANGUAGES:
+            lang_lower = lang.lower()
+            aliases = LANGUAGE_ALIASES.get(lang_lower, [lang_lower])
+            
+            for alias in aliases:
+                if lang_lower == "c":
+                    # Special handling for "C" - match standalone "C" or "C " at start
+                    if topic_clean.lower() == "c" or topic_clean.lower() == "c ":
+                        is_framework, _ = contains_unsupported_framework(topic_lower)
+                        if not is_framework:
+                            is_programming_lang = True
+                            break
+                    elif re.search(r'\bc\b(?![\+\#\w])', topic_lower):
+                        c_context = r'\bc\s+(programming|language|code)'
+                        if re.search(c_context, topic_lower) or re.search(r'^c\s+', topic_lower):
+                            is_framework, _ = contains_unsupported_framework(topic_lower)
+                            if not is_framework:
+                                is_programming_lang = True
+                                break
+                elif lang_lower == "cpp":
+                    # Match "C++", "cpp", "C Plus Plus", etc.
+                    if alias in topic_lower or "c++" in topic_lower or "c plus" in topic_lower:
+                        is_framework, _ = contains_unsupported_framework(topic_lower)
+                        if not is_framework:
+                            is_programming_lang = True
+                            break
+                elif lang_lower == "csharp":
+                    # Match "C#", "csharp", "C Sharp", etc.
+                    if alias in topic_lower or "c#" in topic_lower or "c sharp" in topic_lower:
+                        is_framework, _ = contains_unsupported_framework(topic_lower)
+                        if not is_framework:
+                            is_programming_lang = True
+                            break
+                else:
+                    # For other languages, match whole word
+                    pattern = r'\b' + re.escape(alias) + r'\b'
+                    if re.search(pattern, topic_lower):
+                        is_framework, _ = contains_unsupported_framework(topic_lower)
+                        if not is_framework:
+                            is_programming_lang = True
+                            break
+            
+            if is_programming_lang:
+                break
+        
+        # Check for SQL topics
+        is_sql_topic = _v2_is_sql_execution_topic(topic_lower)
+        
+        # Check for AIML topics (but exclude if non-Python language is mentioned)
+        if _v2_is_aiml_execution_topic(topic_lower):
+            # Only AIML if no non-Python language is mentioned
+            mentions_non_python = False
+            for lang in CODING_LANGUAGES:
+                if lang.lower() == "python":
+                    continue
+                pattern = r'\b' + re.escape(lang.lower()) + r'\b'
+                if re.search(pattern, topic_lower):
+                    mentions_non_python = True
+                    break
+            if not mentions_non_python:
+                is_aiml_topic = True
+        
+        # ⭐ If topic is programming language, SQL, or AIML → MUST be technical category
+        if is_programming_lang or is_sql_topic or is_aiml_topic:
+            detected_category = "technical"
+            logger.info(f"✅ Auto-detected category: technical (programming_lang={is_programming_lang}, sql={is_sql_topic}, aiml={is_aiml_topic})")
+        elif not detected_category or detected_category == "technical":
+            # Use AI to verify if it's actually technical
             try:
+                is_technical = await _is_technical_topic_ai(topic_name)
+                if is_technical:
+                    detected_category = "technical"
+                else:
+                    # If user said "technical" but topic is not technical, keep as technical (trust user)
+                    detected_category = payload.category or "technical"
+            except Exception as detect_err:
+                logger.warning(f"Failed to detect topic category: {detect_err}")
+                detected_category = payload.category or "technical"
+        
+        # ⭐ STEP 2: Generate topic context and detect question type
+        context_data = {}
+        if detected_category == "technical":
+            try:
+                # This function now properly detects Coding/SQL/AIML in correct order
                 context_data = await generate_topic_context_summary(topic_name, "technical")
                 suggested_question_type = context_data.get("suggestedQuestionType", "MCQ")
+                logger.info(f"✅ Detected question type: {suggested_question_type} for topic: {topic_name}")
             except Exception as ctx_err:
                 logger.warning(f"Failed to generate context for technical topic: {ctx_err}")
-                suggested_question_type = "MCQ"
+                # Fallback: Use detected types from above
+                if is_programming_lang:
+                    suggested_question_type = "Coding"
+                elif is_sql_topic:
+                    suggested_question_type = "SQL"
+                elif is_aiml_topic:
+                    suggested_question_type = "AIML"
+                else:
+                    suggested_question_type = "MCQ"
         else:
             suggested_question_type = "MCQ"
         
@@ -5360,11 +5733,11 @@ async def add_custom_topic_endpoint(
         new_topic = {
             "id": f"custom-{uuid.uuid4().hex[:12]}",
             "label": topic_name,
-            "category": payload.category,
+            "category": detected_category,  # ⭐ Use detected/validated category
             "locked": False,
             "source": "custom",
             "status": "pending",
-            "contextSummary": context_data.get("contextSummary", "") if payload.category == "technical" else "",
+            "contextSummary": context_data.get("contextSummary", "") if detected_category == "technical" else "",
             "suggestedQuestionType": suggested_question_type,
             "questionRows": []
         }

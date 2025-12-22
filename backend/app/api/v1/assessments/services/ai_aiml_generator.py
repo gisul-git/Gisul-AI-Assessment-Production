@@ -146,7 +146,9 @@ async def _generate_aiml_questions(
             libraries = ["Python", "NumPy", "Pandas", "Scikit-learn", "TensorFlow"]
     
     prompt = f"""You are an expert AI/ML and Data Science assessment writer for a Jupyter-style IDE platform.
-Generate {count} comprehensive AIML question(s) for the topic: {topic}.
+Generate EXACTLY {count} comprehensive AIML question(s) for the topic: {topic}.
+
+CRITICAL: You MUST generate EXACTLY {count} question(s). Do NOT generate fewer or more than {count} questions.
 
 Difficulty: {difficulty}
 Experience Mode: {experience_mode}
