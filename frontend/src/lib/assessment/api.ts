@@ -8,6 +8,7 @@ export const assessmentApi = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  timeout: 60000, // 60 seconds timeout for code execution
 })
 
 // Handle errors

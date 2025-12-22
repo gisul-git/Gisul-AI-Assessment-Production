@@ -11,9 +11,13 @@ import { useProctor, type ProctorViolation } from "@/hooks/useProctor";
 import { useCameraProctor, type CameraProctorViolation } from "@/hooks/useCameraProctor";
 import { useLiveProctor } from "@/hooks/useLiveProctor";
 import { ProctorToast, FullscreenWarningBanner } from "@/components/proctor";
-import { EditorContainer, type SubmissionTestcaseResult } from "@/components/dsa/test/EditorContainer";
-import { getLanguageId, JUDGE0_ID_TO_LANG_NAME } from "@/lib/dsa/judge0";
+import { EditorContainer, type SubmissionTestcaseResult } from "@/components/assessment/editors/DSAEditorContainer";
+import { SQLEditorContainer } from "@/components/assessment/editors/SQLEditorContainer";
+import AIMLNotebook from "@/components/assessment/editors/AIMLCompetencyNotebook";
+import { getLanguageId, JUDGE0_ID_TO_LANG_NAME, LANGUAGE_IDS } from "@/lib/dsa/judge0";
 import Split from 'react-split';
+import { QuestionSidebar } from "@/components/dsa/test/QuestionSidebar";
+import { QuestionTabs } from "@/components/dsa/test/QuestionTabs";
 
 // Lazy load Monaco Editor
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
@@ -51,8 +55,11 @@ const JUDGE0_TO_MONACO: { [key: string]: string } = {
 
 interface Question {
   _id?: string;
-  questionText: string;
+  questionText?: string;
+  title?: string;
+  description?: string;
   type: string;
+  question_type?: string; // Alternative type field (for SQL/AIML)
   difficulty: string;
   options?: string[];
   correctAnswer?: string;
@@ -62,6 +69,7 @@ interface Question {
   score?: number;
   topic?: string;
   language?: string;
+  languages?: string[];
   judge0_enabled?: boolean;
   coding_data?: {
     title?: string;
@@ -73,9 +81,26 @@ interface Question {
     starter_code?: string | Record<string, string>;
     function_signature?: string;
   };
-  starter_code?: string;
+  starter_code?: string | Record<string, string>;
+  starter_query?: string; // For SQL questions
   public_testcases?: Array<{ input: string; expected_output: string }>;
   hidden_testcases?: Array<{ input: string; expected_output: string }>;
+  // SQL-specific fields
+  sql_category?: string;
+  schemas?: Record<string, { columns: Record<string, string> }>;
+  sample_data?: Record<string, any[][]>;
+  hints?: string[];
+  // AIML-specific fields
+  library?: string;
+  tasks?: Array<string | { id: string; title: string; description: string }>;
+  dataset?: {
+    schema: Array<{ name: string; type: string }>;
+    rows: any[];
+    format?: string;
+  };
+  dataset_path?: string;
+  dataset_url?: string;
+  requires_dataset?: boolean;
 }
 
 interface Sections {
@@ -83,6 +108,8 @@ interface Sections {
   subjective: Question[];
   pseudocode: Question[];
   coding: Question[];
+  sql: Question[];
+  aiml: Question[];
 }
 
 type AppState = "loading" | "ready" | "saving" | "submitting" | "finished";
@@ -135,6 +162,8 @@ export default function CandidateAssessmentPage() {
     subjective: [],
     pseudocode: [],
     coding: [],
+    sql: [],
+    aiml: [],
   });
   const [currentSection, setCurrentSection] = useState<keyof Sections | null>(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
@@ -166,35 +195,47 @@ export default function CandidateAssessmentPage() {
       subjective: [],
       pseudocode: [],
       coding: [],
+      sql: [],
+      aiml: [],
     };
 
     questions.forEach((q) => {
       const rawType = (q.type || "").toLowerCase().trim();
+      const questionTypeField = (q.question_type || "").toLowerCase().trim();
       let normalizedType: keyof Sections | null = null;
 
-      switch (rawType) {
-        case "mcq":
-        case "multiple choice":
-        case "multiple_choice":
-          normalizedType = "mcq";
-          break;
-        case "subjective":
-        case "subjective question":
-          normalizedType = "subjective";
-          break;
-        case "pseudo":
-        case "pseudocode":
-        case "pseudo code":
-          normalizedType = "pseudocode";
-          break;
-        case "coding":
-        case "code":
-        case "programming":
-          normalizedType = "coding";
-          break;
-        default:
-          // Skip unknown types
-          return;
+      // Check question_type field first (for SQL/AIML)
+      if (questionTypeField === "sql" || rawType === "sql") {
+        normalizedType = "sql";
+      } else if (questionTypeField === "aiml" || rawType === "aiml") {
+        normalizedType = "aiml";
+      } else {
+        // Handle standard question types
+        switch (rawType) {
+          case "mcq":
+          case "multiple choice":
+          case "multiple_choice":
+            normalizedType = "mcq";
+            break;
+          case "subjective":
+          case "subjective question":
+            normalizedType = "subjective";
+            break;
+          case "pseudo":
+          case "pseudocode":
+          case "pseudo code":
+            normalizedType = "pseudocode";
+            break;
+          case "coding":
+          case "code":
+          case "programming":
+          case "dsa":
+            normalizedType = "coding";
+            break;
+          default:
+            // Skip unknown types
+            return;
+        }
       }
 
       if (normalizedType) {
@@ -338,7 +379,7 @@ export default function CandidateAssessmentPage() {
       logAnalyticsEvent("NAVIGATION_NEXT", { section: currentSection, index: currentQuestionIndex });
     } else {
       // Move to next section
-      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding"];
+      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
       const currentIndex = sectionOrder.indexOf(currentSection);
       if (currentIndex < sectionOrder.length - 1) {
         const nextSection = sectionOrder[currentIndex + 1];
@@ -358,7 +399,7 @@ export default function CandidateAssessmentPage() {
       logAnalyticsEvent("NAVIGATION_PREVIOUS", { section: currentSection, index: currentQuestionIndex });
     } else {
       // Move to previous section
-      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding"];
+      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
       const currentIndex = sectionOrder.indexOf(currentSection);
       if (currentIndex > 0) {
         const prevSection = sectionOrder[currentIndex - 1];
@@ -385,7 +426,7 @@ export default function CandidateAssessmentPage() {
       const allAnswers: Array<{ questionIndex: number; answer: string; timeSpent: number }> = [];
       let globalIndex = 0;
 
-      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding"];
+      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
       sectionOrder.forEach((section) => {
         sections[section].forEach((question) => {
           const questionId = question._id || `${section}-${globalIndex}`;
@@ -465,7 +506,7 @@ export default function CandidateAssessmentPage() {
         setSections(grouped);
 
         // Set first non-empty section as current
-        const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding"];
+        const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
         const firstSection = sectionOrder.find((section) => grouped[section].length > 0);
         if (firstSection) {
           setCurrentSection(firstSection);
@@ -561,6 +602,8 @@ export default function CandidateAssessmentPage() {
       subjective: "Subjective",
       pseudocode: "Pseudocode",
       coding: "Coding",
+      sql: "SQL",
+      aiml: "AIML",
     };
     return names[section] || section;
   };
@@ -630,8 +673,340 @@ export default function CandidateAssessmentPage() {
   const currentSectionQuestions = sections[currentSection];
   const questionId = getQuestionId(currentQuestion);
   const isFirstQuestion = currentQuestionIndex === 0 && currentSection === "mcq";
-  const isLastQuestion = currentQuestionIndex === currentSectionQuestions.length - 1 && currentSection === "coding";
+  const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
+  const isLastQuestion = currentQuestionIndex === currentSectionQuestions.length - 1 && 
+    currentSection === sectionOrder[sectionOrder.length - 1];
 
+  // Determine question type for layout
+  const questionType = (currentQuestion.type || currentQuestion.question_type || "").toLowerCase();
+  const isSQL = questionType === "sql";
+  const isAIML = questionType === "aiml";
+  const isCoding = questionType === "coding";
+  const isTextQuestion = ["mcq", "subjective", "pseudocode"].includes(questionType);
+
+  // Flatten all questions for QuestionSidebar (needs format: { id, title }[])
+  const allQuestionsFlat = sectionOrder.flatMap((section) => 
+    sections[section].map((q, idx) => ({
+      id: q._id || `${section}-${idx}`,
+      title: q.title || q.questionText || `${getSectionName(section)} Question ${idx + 1}`,
+    }))
+  );
+
+  // Calculate current question index in flattened list
+  const currentFlatIndex = sectionOrder
+    .slice(0, sectionOrder.indexOf(currentSection))
+    .reduce((acc, section) => acc + sections[section].length, 0) + currentQuestionIndex;
+
+  // For SQL and AIML: Full-page layout (they have their own internal layouts)
+  if (isSQL || isAIML) {
+    return (
+      <div className="h-screen flex flex-col bg-slate-950 overflow-hidden">
+        {/* Proctoring Overlays */}
+        {proctorEnabled && (
+          <>
+            <ProctorToast violation={proctorViolations[0] || cameraViolation || null} />
+            <FullscreenWarningBanner isVisible={!document.fullscreenElement && !(document as any).webkitFullscreenElement && !(document as any).msFullscreenElement} />
+          </>
+        )}
+
+        {/* Full-page SQL Editor */}
+        {isSQL && (() => {
+          // SQL data can be in sql_data nested object or at root level
+          const sqlData = (currentQuestion as any).sql_data || {};
+          const sqlQuestion = {
+            id: questionId,
+            title: currentQuestion.title || currentQuestion.questionText || "SQL Question",
+            description: currentQuestion.description || currentQuestion.questionText || "",
+            difficulty: currentQuestion.difficulty || "Medium",
+            question_type: 'SQL' as const,
+            sql_category: currentQuestion.sql_category || sqlData.sql_category,
+            schemas: currentQuestion.schemas || sqlData.schemas || {},
+            sample_data: currentQuestion.sample_data || sqlData.sample_data || {},
+            constraints: currentQuestion.constraints || sqlData.constraints || [],
+            starter_query: currentQuestion.starter_query || sqlData.starter_query || '-- Write your SQL query here\n\nSELECT ',
+            hints: currentQuestion.hints || sqlData.hints || [],
+          };
+          
+          return (
+            <div className="flex-1 overflow-hidden">
+              <SQLEditorContainer
+                code={codeAnswers.get(questionId) || sqlQuestion.starter_query || '-- Write your SQL query here\n\nSELECT '}
+                question={sqlQuestion}
+              onCodeChange={(code: string) => {
+                setCodeAnswers((prev) => {
+                  const updated = new Map(prev);
+                  updated.set(questionId, code);
+                  return updated;
+                });
+                saveAnswer(questionId, code, currentSection);
+              }}
+              onRun={() => {
+                logAnalyticsEvent("CODE_RUN", { questionId, type: "sql" });
+              }}
+              onSubmit={() => {
+                saveAnswer(questionId, codeAnswers.get(questionId) || '', currentSection);
+              }}
+              onReset={() => {
+                const resetCode = currentQuestion.starter_query || '-- Write your SQL query here\n\nSELECT ';
+                setCodeAnswers((prev) => {
+                  const updated = new Map(prev);
+                  updated.set(questionId, resetCode);
+                  return updated;
+                });
+              }}
+              running={false}
+              submitting={false}
+              output={{}}
+              submissions={[]}
+            />
+          </div>
+          );
+        })()}
+
+        {/* Full-page AIML Notebook */}
+        {isAIML && (() => {
+          // Extract AIML data - check both root level and aiml_data nested structure
+          const aimlData = (currentQuestion as any).aiml_data || {};
+          const questionTitle = currentQuestion.title || aimlData.title || currentQuestion.questionText || "AIML Question";
+          const questionDescription = currentQuestion.description || aimlData.description || currentQuestion.questionText || "";
+          const library = currentQuestion.library || aimlData.libraries?.[0] || aimlData.library || "numpy";
+          const tasks = currentQuestion.tasks || aimlData.tasks || [];
+          const publicTestcases = currentQuestion.public_testcases || aimlData.public_testcases || [];
+          const dataset = currentQuestion.dataset || aimlData.dataset || null;
+          const datasetPath = currentQuestion.dataset_path || aimlData.dataset_path || null;
+          const datasetUrl = currentQuestion.dataset_url || aimlData.dataset_url || null;
+          const requiresDataset = currentQuestion.requires_dataset !== undefined 
+            ? currentQuestion.requires_dataset 
+            : (aimlData.requires_dataset !== undefined ? aimlData.requires_dataset : false);
+          
+          // Handle starter_code - check both locations and formats
+          let starterCode: Record<string, string> = {};
+          if (currentQuestion.starter_code) {
+            starterCode = typeof currentQuestion.starter_code === 'object' 
+              ? currentQuestion.starter_code 
+              : { python3: currentQuestion.starter_code || '', python: currentQuestion.starter_code || '' };
+          } else if (aimlData.starter_code) {
+            starterCode = typeof aimlData.starter_code === 'object'
+              ? aimlData.starter_code
+              : { python3: aimlData.starter_code || '', python: aimlData.starter_code || '' };
+          } else {
+            starterCode = { python3: '', python: '' };
+          }
+
+          return (
+            <div className="flex-1 overflow-hidden h-full">
+              <AIMLNotebook
+                question={{
+                  id: questionId,
+                  title: questionTitle,
+                  description: questionDescription,
+                  library: library,
+                  starter_code: starterCode,
+                  tasks: tasks,
+                  public_testcases: publicTestcases,
+                  dataset: dataset,
+                  dataset_path: datasetPath,
+                  dataset_url: datasetUrl,
+                  requires_dataset: requiresDataset,
+                }}
+                sessionId={`assessment_${id}_question_${questionId}`}
+                testId={id as string}
+                userId={candidateEmail}
+                onCodeChange={(allCode: string) => {
+                  setCodeAnswers((prev) => {
+                    const updated = new Map(prev);
+                    updated.set(questionId, allCode);
+                    return updated;
+                  });
+                  saveAnswer(questionId, allCode, currentSection);
+                }}
+                onSubmit={(allCode: string, outputs: string[]) => {
+                  saveAnswer(questionId, allCode, currentSection);
+                }}
+                showSubmit={false}
+              />
+            </div>
+          );
+        })()}
+
+        {/* Navigation footer for SQL/AIML */}
+        <div className="border-t border-slate-700 bg-slate-900 p-4 flex justify-between items-center">
+          <button
+            type="button"
+            onClick={navigatePrevious}
+            disabled={isFirstQuestion || appState === "submitting"}
+            className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Previous
+          </button>
+          {isLastQuestion ? (
+            <button
+              type="button"
+              onClick={submitAssessment}
+              disabled={appState === "submitting"}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {appState === "submitting" ? "Submitting..." : "Submit Assessment"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={navigateNext}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded"
+            >
+              Next
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // For Coding/DSA questions: Use Split layout with QuestionSidebar, QuestionTabs, and EditorContainer
+  if (isCoding) {
+    // Get available languages
+    const availableLanguages = currentQuestion.languages || (currentQuestion.language ? [currentQuestion.language] : ['python']);
+    const currentLang = availableLanguages[0] || 'python';
+    
+    // Get starter code
+    let starterCodeObj: Record<string, string> = {};
+    if (typeof currentQuestion.starter_code === 'object' && currentQuestion.starter_code !== null) {
+      starterCodeObj = currentQuestion.starter_code;
+    } else if (typeof currentQuestion.starter_code === 'string') {
+      starterCodeObj = { python: currentQuestion.starter_code };
+    }
+
+    const currentCode = codeAnswers.get(questionId) || starterCodeObj[currentLang] || '';
+
+    // Extract test cases
+    const publicTestCases = currentQuestion.coding_data?.public_testcases || currentQuestion.public_testcases || [];
+    const visibleTestcases = publicTestCases.map((tc: any, idx: number) => ({
+      id: `tc-${idx}`,
+      input: tc.input || tc.stdin || '',
+      expected: tc.expected_output || tc.expected || '',
+    }));
+
+    return (
+      <div className="h-screen flex flex-col bg-slate-950 overflow-hidden">
+        {/* Proctoring Overlays */}
+        {proctorEnabled && (
+          <>
+            <ProctorToast violation={proctorViolations[0] || cameraViolation || null} />
+            <FullscreenWarningBanner isVisible={!document.fullscreenElement && !(document as any).webkitFullscreenElement && !(document as any).msFullscreenElement} />
+          </>
+        )}
+
+        <div className="flex-1 overflow-hidden">
+          <Split
+            className="flex h-full"
+            sizes={[20, 40, 40]}
+            minSize={[200, 300, 400]}
+            gutterSize={4}
+            gutterStyle={() => ({
+              backgroundColor: '#1e293b',
+              cursor: 'col-resize',
+            })}
+          >
+            {/* Left Panel - Question Sidebar */}
+            <div className="h-full overflow-hidden">
+              <QuestionSidebar
+                testTitle="Assessment"
+                questions={allQuestionsFlat}
+                currentQuestionIndex={currentFlatIndex}
+                onQuestionChange={(index) => {
+                  // Find which section and question index this corresponds to
+                  let sectionIdx = 0;
+                  let questionIdx = 0;
+                  let count = 0;
+                  for (const section of sectionOrder) {
+                    if (count + sections[section].length > index) {
+                      sectionIdx = sectionOrder.indexOf(section);
+                      questionIdx = index - count;
+                      break;
+                    }
+                    count += sections[section].length;
+                  }
+                  navigateToQuestion(sectionOrder[sectionIdx] as keyof Sections, questionIdx);
+                }}
+                onSubmit={submitAssessment}
+                submitting={appState === "submitting"}
+                questionStatus={{}}
+                submittedQuestions={{}}
+                timerMode="GLOBAL"
+              />
+            </div>
+
+            {/* Middle Panel - Question Description */}
+            <div className="h-full overflow-hidden bg-slate-900">
+              <QuestionTabs question={{
+                id: questionId,
+                title: currentQuestion.title || currentQuestion.questionText || currentQuestion.coding_data?.title || "Question",
+                description: currentQuestion.description || currentQuestion.questionText || currentQuestion.coding_data?.description || "",
+                difficulty: currentQuestion.difficulty || "Medium",
+                examples: currentQuestion.coding_data?.examples || [],
+                constraints: currentQuestion.coding_data?.constraints || [],
+                public_testcases: currentQuestion.coding_data?.public_testcases || currentQuestion.public_testcases,
+                hidden_testcases: currentQuestion.coding_data?.hidden_testcases || currentQuestion.hidden_testcases,
+              }} />
+            </div>
+
+            {/* Right Panel - Code Editor */}
+            <div className="h-full overflow-hidden bg-slate-950 flex flex-col">
+              <div className="flex-1 overflow-hidden">
+                <EditorContainer
+                  code={currentCode}
+                  language={currentLang}
+                  languages={availableLanguages}
+                  starterCode={starterCodeObj}
+                  onCodeChange={(newCode) => {
+                    setCodeAnswers((prev) => {
+                      const updated = new Map(prev);
+                      updated.set(questionId, newCode);
+                      return updated;
+                    });
+                    saveAnswer(questionId, newCode, currentSection);
+                  }}
+                  onLanguageChange={(newLang) => {
+                    const newStarterCode = starterCodeObj[newLang] || '';
+                    if (newStarterCode && (!codeAnswers.get(questionId) || codeAnswers.get(questionId) === starterCodeObj[currentLang])) {
+                      setCodeAnswers((prev) => {
+                        const updated = new Map(prev);
+                        updated.set(questionId, newStarterCode);
+                        return updated;
+                      });
+                    }
+                  }}
+                  onRun={async () => {
+                    logAnalyticsEvent("CODE_RUN", { questionId, language: currentLang });
+                  }}
+                  onSubmit={async () => {
+                    saveAnswer(questionId, codeAnswers.get(questionId) || '', currentSection);
+                  }}
+                  onReset={() => {
+                    const resetCode = starterCodeObj[currentLang] || '';
+                    setCodeAnswers((prev) => {
+                      const updated = new Map(prev);
+                      updated.set(questionId, resetCode);
+                      return updated;
+                    });
+                  }}
+                  running={false}
+                  submitting={false}
+                  output={{}}
+                  submissions={[]}
+                  visibleTestcases={visibleTestcases}
+                  publicResults={[]}
+                  hiddenSummary={null}
+                />
+              </div>
+            </div>
+          </Split>
+        </div>
+      </div>
+    );
+  }
+
+  // For MCQ/Subjective/Pseudocode: Simple layout (keep existing)
   return (
     <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", padding: "2rem" }}>
       {/* Proctoring Overlays */}
@@ -659,7 +1034,7 @@ export default function CandidateAssessmentPage() {
               Sections
             </h3>
             <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-              {(["mcq", "pseudocode", "subjective", "coding"] as (keyof Sections)[]).map((section) => {
+              {(["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"] as (keyof Sections)[]).map((section) => {
                 const sectionQuestions = sections[section];
                 if (sectionQuestions.length === 0) return null;
 
@@ -794,8 +1169,13 @@ export default function CandidateAssessmentPage() {
                 marginBottom: "1rem",
               }}>
                 <p style={{ color: "#1a1625", fontSize: "1rem", lineHeight: "1.6", whiteSpace: "pre-wrap" }}>
-                  {currentQuestion.questionText}
+                  {currentQuestion.title || currentQuestion.questionText || currentQuestion.description || "No question text available"}
                 </p>
+                {currentQuestion.description && currentQuestion.title && (
+                  <p style={{ color: "#64748b", fontSize: "0.875rem", lineHeight: "1.6", whiteSpace: "pre-wrap", marginTop: "0.5rem" }}>
+                    {currentQuestion.description}
+                  </p>
+                )}
               </div>
 
               {/* Answer Input Area */}
@@ -871,14 +1251,17 @@ export default function CandidateAssessmentPage() {
                 </div>
               )}
 
+              {/* DSA/Coding Questions - Note: SQL and AIML are handled in separate full-page layouts above */}
               {currentQuestion.type.toLowerCase() === "coding" && (
                 <div style={{ marginBottom: "1.5rem" }}>
                   {currentQuestion.judge0_enabled ? (
                     <EditorContainer
-                      code={codeAnswers.get(questionId) || currentQuestion.starter_code || ""}
+                      code={codeAnswers.get(questionId) || (typeof currentQuestion.starter_code === 'string' ? currentQuestion.starter_code : currentQuestion.starter_code?.python || "") || ""}
                       language={currentQuestion.language || "71"}
-                      languages={["71"]}
-                      starterCode={{ [currentQuestion.language || "71"]: currentQuestion.starter_code || "" }}
+                      languages={currentQuestion.languages || [currentQuestion.language || "71"]}
+                      starterCode={typeof currentQuestion.starter_code === 'object' 
+                        ? currentQuestion.starter_code 
+                        : { [currentQuestion.language || "71"]: currentQuestion.starter_code || "" }}
                       onCodeChange={(code: string) => {
                         setCodeAnswers((prev) => {
                           const updated = new Map(prev);
@@ -898,7 +1281,7 @@ export default function CandidateAssessmentPage() {
                     <MonacoEditor
                       height="400px"
                       language={JUDGE0_TO_MONACO[currentQuestion.language || "71"] || "python"}
-                      value={codeAnswers.get(questionId) || currentQuestion.starter_code || ""}
+                      value={codeAnswers.get(questionId) || (typeof currentQuestion.starter_code === 'string' ? currentQuestion.starter_code : currentQuestion.starter_code?.python || "") || ""}
                       onChange={(value) => {
                         const code = value || "";
                         setCodeAnswers((prev) => {
