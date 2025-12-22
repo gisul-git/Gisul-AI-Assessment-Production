@@ -2838,7 +2838,7 @@ export default function CandidateAssessmentPage() {
                 </div>
               )}
 
-              {currentQuestion.type && (currentQuestion.type.toLowerCase() === "subjective" || currentQuestion.type.toLowerCase() === "pseudocode") && (
+              {((currentQuestion.type && (currentQuestion.type.toLowerCase() === "subjective" || currentQuestion.type.toLowerCase() === "pseudocode" || currentQuestion.type.toLowerCase() === "pseudo code")) || currentSection === "subjective" || currentSection === "pseudocode") && (
                 <div style={{ marginBottom: "1.5rem" }}>
                 <textarea
                     value={answers.get(questionId) || ""}
@@ -2859,7 +2859,7 @@ export default function CandidateAssessmentPage() {
                     border: "1px solid #e2e8f0",
                     borderRadius: "0.5rem",
                     fontSize: "0.875rem",
-                      fontFamily: currentQuestion.type && currentQuestion.type.toLowerCase() === "pseudocode" ? "monospace" : "inherit",
+                      fontFamily: (currentQuestion.type && (currentQuestion.type.toLowerCase() === "pseudocode" || currentQuestion.type.toLowerCase() === "pseudo code")) || currentSection === "pseudocode" ? "monospace" : "inherit",
                     resize: "vertical",
                     }}
                   />
