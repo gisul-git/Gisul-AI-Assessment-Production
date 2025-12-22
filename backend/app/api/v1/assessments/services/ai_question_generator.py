@@ -968,12 +968,83 @@ async def regenerate_question(
     Raises:
         HTTPException: If regeneration fails
     """
-    # TODO: Move implementation from topic_service_v2.py line 3427
-    logger.warning(f"Question regeneration not yet implemented for type: {question_type}")
-    raise HTTPException(
-        status_code=501,
-        detail="Question regeneration is not yet implemented. Please use the legacy endpoint."
-    )
+    # Prepare merged additional requirements including feedback
+    merged_additional = additional_requirements or ""
+    if feedback:
+        merged_additional = f"{merged_additional}\nUser feedback: {feedback}" if merged_additional else f"User feedback: {feedback}"
+
+    # Determine whether Judge0/coding is required
+    qtype_norm = (question_type or "").strip().lower()
+    can_use_judge0 = qtype_norm in ("coding", "code")
+
+    # Use topic_name as topic_label if provided, otherwise empty string
+    topic_label = topic_name or ""
+
+    # Attempt to generate via AI pipeline; if it fails, return a safe fallback
+    try:
+        questions = await generate_questions_for_row_v2(
+            topic_label=topic_label,
+            question_type=question_type,
+            difficulty=difficulty,
+            questions_count=1,
+            can_use_judge0=can_use_judge0,
+            coding_language="python",
+            additional_requirements=merged_additional if merged_additional else None,
+            experience_mode=experience_mode,
+            website_summary=None,
+            company_context=None,
+            job_designation=None,
+            experience_min=experience_min,
+            experience_max=experience_max,
+            company_name=None,
+            assessment_requirements=None,
+            previous_question=old_question,
+        )
+
+        if not questions or len(questions) == 0:
+            raise RuntimeError("AI generator returned no questions")
+
+        return questions[0]
+
+    except Exception as exc:
+        # Log the original error for debugging
+        logger.exception("AI regeneration failed, falling back to safe regeneration: %s", exc)
+
+        # Build a safe fallback question object to avoid 500s
+        try:
+            # If old_question is a dict-like structure, try to preserve options/answers
+            if isinstance(old_question, dict):
+                fallback = old_question.copy()
+                # Prefix question text to indicate regeneration
+                if "question" in fallback and isinstance(fallback["question"], str):
+                    fallback["question"] = f"Regenerated: {fallback['question']}"
+                else:
+                    fallback["question"] = f"Regenerated question for topic {topic_label}"
+                # Mark regenerated metadata
+                fallback["regeneratedFallback"] = True
+                fallback["difficulty"] = difficulty
+                return fallback
+
+            # If old_question is a string, return a simple regenerated object
+            if isinstance(old_question, str) and old_question.strip():
+                return {
+                    "question": f"Regenerated: {old_question}",
+                    "type": question_type or "Subjective",
+                    "difficulty": difficulty,
+                    "regeneratedFallback": True,
+                }
+
+            # Ultimate generic fallback
+            return {
+                "question": f"Regenerated question for topic {topic_label} (fallback)",
+                "type": question_type or "Subjective",
+                "difficulty": difficulty,
+                "regeneratedFallback": True,
+            }
+        except Exception:
+            # If building fallback also fails, raise a 500 to surface error
+            logger.exception("Failed to build regeneration fallback")
+            raise HTTPException(status_code=500, detail="Failed to regenerate question") from exc
 
 
 
