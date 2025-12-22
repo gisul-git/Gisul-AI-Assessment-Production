@@ -138,7 +138,26 @@ async def _generate_coding_questions(
                 )
                 
                 if question_data:
-                    # ⭐ Return COMPLETE DSA format (no transformation)
+                    # ⭐ CRITICAL FIX: Build questionText for DSA-generated questions
+                    # DSA module returns description but frontend expects questionText
+                    # Build questionText from title + description + examples (same as fallback path)
+                    question_text_parts = []
+                    if question_data.get("title"):
+                        question_text_parts.append(f"**{question_data['title']}**")
+                    if question_data.get("description"):
+                        question_text_parts.append(question_data["description"])
+                    if question_data.get("examples"):
+                        question_text_parts.append("\n**Examples:**")
+                        for ex in question_data["examples"]:
+                            question_text_parts.append(f"Input: {ex.get('input', '')}")
+                            question_text_parts.append(f"Output: {ex.get('output', '')}")
+                            if ex.get("explanation"):
+                                question_text_parts.append(f"Explanation: {ex.get('explanation')}")
+                    
+                    question_text = "\n\n".join(question_text_parts) if question_text_parts else question_data.get("description", "")
+                    question_data["questionText"] = question_text
+                    
+                    # ⭐ Return COMPLETE DSA format (with questionText added)
                     # Keep ALL fields from DSA generator - this is what frontend expects!
                     question_data["type"] = "Coding"  # Add type field for frontend
                     question_data["difficulty"] = difficulty.capitalize()  # Normalize difficulty
@@ -152,6 +171,7 @@ async def _generate_coding_questions(
                         for tc in question_data["hidden_testcases"]:
                             tc["is_hidden"] = True
                     
+                    logger.info(f"✅ DSA question generated - Title: {question_data.get('title')}, Description length: {len(question_data.get('description', ''))}, QuestionText length: {len(question_text)}")
                     questions.append(question_data)
             
             if questions:
@@ -306,8 +326,12 @@ Return ONLY valid JSON, no markdown."""
         # Ensure required fields exist
         if "title" not in question_data:
             question_data["title"] = f"{topic} - Coding Challenge"
-        if "description" not in question_data:
-            raise HTTPException(status_code=500, detail="Question missing description")
+        if "description" not in question_data or not question_data.get("description"):
+            logger.error(f"❌ Question {question_num + 1} missing description field! Available keys: {list(question_data.keys())}")
+            raise HTTPException(status_code=500, detail="Question missing description - AI did not generate problem statement")
+        
+        # Log description for debugging
+        logger.info(f"✅ Question {question_num + 1} has description (length: {len(question_data.get('description', ''))})")
         if "function_signature" not in question_data:
             question_data["function_signature"] = {
                 "name": "solve",

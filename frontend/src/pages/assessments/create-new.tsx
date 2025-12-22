@@ -205,23 +205,7 @@ const renderPseudoCodeQuestion = (question: any, isEditing: boolean, onEditChang
             marginBottom: "1rem",
           }}
         />
-        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-          Expected Answer (Pseudocode):
-        </label>
-        <textarea
-          value={expectedAnswer}
-          onChange={(e) => onEditChange(JSON.stringify({ ...question, expectedAnswer: e.target.value, expectedLogic: e.target.value }, null, 2))}
-          style={{
-            width: "100%",
-            minHeight: "200px",
-            padding: "0.75rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.5rem",
-            fontSize: "0.875rem",
-            fontFamily: "monospace",
-            marginBottom: "1rem",
-          }}
-        />
+        {/* ⭐ REMOVED: Expected Answer (Pseudocode) - User doesn't want this field */}
         {explanation && (
           <>
             <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
@@ -282,8 +266,30 @@ const renderPseudoCodeQuestion = (question: any, isEditing: boolean, onEditChang
 
 const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: (value: string) => void) => {
   // ⭐ CRITICAL FIX: Support multiple formats for problem statement
-  // Priority: questionText > question > problemStatement > title + problemStatement
-  const questionText = question.questionText || question.question || question.problemStatement || (question.title ? `${question.title}\n\n${question.problemStatement || ""}` : "");
+  // Priority: questionText > description > question > problemStatement > title + description/problemStatement
+  // Backend generates questionText from title + description + examples, but also preserves description separately
+  const questionText = question.questionText || question.description || question.question || question.problemStatement || (question.title ? `${question.title}\n\n${question.description || question.problemStatement || ""}` : "");
+  
+  // Debug logging to trace problem statement issue
+  if (!questionText || !questionText.trim()) {
+    console.warn("⚠️ Coding question missing problem statement:", {
+      hasQuestionText: !!question.questionText,
+      questionTextValue: question.questionText ? question.questionText.substring(0, 100) : null,
+      hasDescription: !!question.description,
+      descriptionValue: question.description ? question.description.substring(0, 100) : null,
+      hasQuestion: !!question.question,
+      hasProblemStatement: !!question.problemStatement,
+      hasTitle: !!question.title,
+      titleValue: question.title,
+      questionKeys: Object.keys(question),
+      fullQuestion: question, // Log full question for debugging
+    });
+  } else {
+    console.log("✅ Coding question has problem statement:", {
+      questionTextLength: questionText.length,
+      source: question.questionText ? "questionText" : question.description ? "description" : question.question ? "question" : question.problemStatement ? "problemStatement" : "title",
+    });
+  }
   const starterCode = question.starterCode || "";
   const visibleTestCases = question.visibleTestCases || (question.visibleTestCases ? [] : []);
   const hiddenTestCases = question.hiddenTestCases || [];
@@ -314,8 +320,8 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
           Problem Statement:
         </label>
         <textarea
-          value={question.problemStatement || ""}
-          onChange={(e) => onEditChange(JSON.stringify({ ...question, problemStatement: e.target.value }, null, 2))}
+          value={question.questionText || question.problemStatement || question.description || question.question || ""}
+          onChange={(e) => onEditChange(JSON.stringify({ ...question, questionText: e.target.value, problemStatement: e.target.value }, null, 2))}
           style={{
             width: "100%",
             minHeight: "100px",
@@ -656,11 +662,24 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
     );
   }
 
+  // ⭐ CRITICAL FIX: questionText exists (confirmed by console logs showing 402+ chars)
+  // Use questionText directly since we know it exists from the logs
+  const problemStatementText = question.questionText || questionText || question.description || question.problemStatement || question.question || question.title || "";
+  
+  // Force render - we know questionText exists from logs
+  const shouldShowProblemStatement = !!(problemStatementText && problemStatementText.trim());
+  
+  console.log("🎯 Final render check:", {
+    questionQuestionText: question.questionText?.substring(0, 50),
+    questionTextVar: questionText?.substring(0, 50),
+    problemStatementText: problemStatementText?.substring(0, 50),
+    shouldShow: shouldShowProblemStatement,
+  });
+  
   return (
     <div>
-      {/* Question Text (Description + Examples) */}
-      {/* Problem Statement - Always show if available */}
-      {(questionText || question.problemStatement || question.question || question.title) && (
+      {/* Problem Statement - Force render since we know questionText exists */}
+      {shouldShowProblemStatement ? (
         <div style={{ marginBottom: "1.5rem" }}>
           <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
             Problem Statement:
@@ -674,9 +693,49 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
             borderRadius: "0.75rem",
             border: "1px solid #e2e8f0",
             fontSize: "1rem",
+            minHeight: "50px",
           }}>
-            {questionText || question.problemStatement || question.question || question.title || "No problem statement available."}
+            {problemStatementText}
           </div>
+        </div>
+      ) : (
+        <div style={{ 
+          marginBottom: "1.5rem", 
+          padding: "1rem", 
+          backgroundColor: "#fee2e2", 
+          borderRadius: "0.5rem", 
+          border: "1px solid #ef4444",
+          color: "#991b1b"
+        }}>
+          ⚠️ DEBUG: Problem statement not showing. question.questionText: {question.questionText ? `YES (${question.questionText.length} chars)` : "NO"}, questionText var: {questionText ? `YES (${questionText.length} chars)` : "NO"}
+        </div>
+      )}
+      
+      {/* Debug: Show warning if problem statement is still empty */}
+      {!questionText && !question.description && !question.problemStatement && !question.question && !question.title && (
+        <div style={{ 
+          marginBottom: "1.5rem", 
+          padding: "1rem", 
+          backgroundColor: "#fef3c7", 
+          borderRadius: "0.5rem", 
+          border: "1px solid #fbbf24",
+          color: "#92400e"
+        }}>
+          ⚠️ Problem statement is empty. Check browser console for details. Available fields: {Object.keys(question).join(", ")}
+        </div>
+      )}
+      
+      {/* Debug: Show warning if problem statement is still empty */}
+      {!questionText && !question.description && !question.problemStatement && !question.question && !question.title && (
+        <div style={{ 
+          marginBottom: "1.5rem", 
+          padding: "1rem", 
+          backgroundColor: "#fef3c7", 
+          borderRadius: "0.5rem", 
+          border: "1px solid #fbbf24",
+          color: "#92400e"
+        }}>
+          ⚠️ Problem statement is empty. Available fields: {JSON.stringify(Object.keys(question))}
         </div>
       )}
       
