@@ -5,7 +5,7 @@ import { GetServerSideProps } from "next";
 import { requireAuth } from "../lib/auth";
 import Link from "next/link";
 import Image from "next/image";
-import axios from "axios";
+import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
 import dsaApi from "../lib/dsa/api";
 import aimlApi from "../lib/aiml/api";
 

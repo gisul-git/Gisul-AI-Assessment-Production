@@ -3,7 +3,7 @@ import { useRouter } from "next/router";
 import { GetServerSideProps } from "next";
 import { requireAuth } from "../../../lib/auth";
 import Link from "next/link";
-import axios from "axios";
+import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
 import { BarChart3 } from "lucide-react";
 
 interface Question {

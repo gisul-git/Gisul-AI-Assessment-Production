@@ -4811,74 +4811,103 @@ async def regenerate_topic_endpoint_v2(
         logger.error(f"Error regenerating topic: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to regenerate topic: {str(exc)}") from exc
 
+async def _update_question_type_impl(
+    payload: dict,
+    current_user: Dict[str, Any],
+    db: AsyncIOMotorDatabase,
+):
+    """
+    Internal implementation for updating question type.
+    Shared by both POST and PUT endpoints.
+    """
+    assessment_id = payload.get("assessmentId")
+    topic_id = payload.get("topicId")
+    row_id = payload.get("rowId")
+    new_question_type = payload.get("questionType")
+    new_difficulty = payload.get("difficulty", "Medium")
+    can_use_judge0 = payload.get("canUseJudge0", False)
+    
+    if not all([assessment_id, topic_id, row_id, new_question_type]):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+    
+    # Get assessment
+    assessment = await db.assessments.find_one({
+        "_id": to_object_id(assessment_id)
+    })
+    
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    
+    # Verify user has access to this assessment
+    _check_assessment_access(assessment, current_user)
+    
+    # Update the specific row
+    topics_v2 = assessment.get("topics_v2", [])
+    row_updated = False
+    
+    for topic in topics_v2:
+        if topic.get("id") == topic_id:
+            for row in topic.get("questionRows", []):
+                if row.get("rowId") == row_id:
+                    row["questionType"] = new_question_type
+                    row["difficulty"] = new_difficulty
+                    row["canUseJudge0"] = can_use_judge0
+                    row["status"] = "pending"
+                    row["questions"] = []
+                    row["locked"] = False
+                    row["userEdited"] = True  # ⭐ Mark that user explicitly set this type
+                    row_updated = True
+                    logger.info(f"✅ Updated {topic.get('label')} to {new_question_type} (userEdited=True)")
+                    break
+            if row_updated:
+                topic["status"] = "pending"
+                topic["locked"] = False  # Unlock topic to allow regeneration
+                break
+    
+    if not row_updated:
+        raise HTTPException(status_code=404, detail="Row not found")
+    
+    # Save to database
+    await db.assessments.update_one(
+        {"_id": to_object_id(assessment_id)},
+        {"$set": {"topics_v2": topics_v2}}
+    )
+    
+    return success_response(
+        f"Updated to {new_question_type}",
+        {"topicId": topic_id, "rowId": row_id, "questionType": new_question_type}
+    )
+
+
 @router.post("/update-question-type")
-async def update_question_type(
+async def update_question_type_post(
     payload: dict = Body(...),
     current_user: Dict[str, Any] = Depends(require_editor),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
-    Update question type for a specific topic row.
+    Update question type for a specific topic row (POST).
     """
     try:
-        assessment_id = payload.get("assessmentId")
-        topic_id = payload.get("topicId")
-        row_id = payload.get("rowId")
-        new_question_type = payload.get("questionType")
-        new_difficulty = payload.get("difficulty", "Medium")
-        can_use_judge0 = payload.get("canUseJudge0", False)
-        
-        if not all([assessment_id, topic_id, row_id, new_question_type]):
-            raise HTTPException(status_code=400, detail="Missing required fields")
-        
-        # Get assessment
-        assessment = await db.assessments.find_one({
-            "_id": to_object_id(assessment_id)
-        })
-        
-        if not assessment:
-            raise HTTPException(status_code=404, detail="Assessment not found")
-        
-        # Verify user has access to this assessment
-        _check_assessment_access(assessment, current_user)
-        
-        # Update the specific row
-        topics_v2 = assessment.get("topics_v2", [])
-        row_updated = False
-        
-        for topic in topics_v2:
-            if topic.get("id") == topic_id:
-                for row in topic.get("questionRows", []):
-                    if row.get("rowId") == row_id:
-                        row["questionType"] = new_question_type
-                        row["difficulty"] = new_difficulty
-                        row["canUseJudge0"] = can_use_judge0
-                        row["status"] = "pending"
-                        row["questions"] = []
-                        row["locked"] = False
-                        row["userEdited"] = True  # ⭐ Mark that user explicitly set this type
-                        row_updated = True
-                        logger.info(f"✅ Updated {topic.get('label')} to {new_question_type} (userEdited=True)")
-                        break
-                if row_updated:
-                    topic["status"] = "pending"
-                    topic["locked"] = False  # Unlock topic to allow regeneration
-                    break
-        
-        if not row_updated:
-            raise HTTPException(status_code=404, detail="Row not found")
-        
-        # Save to database
-        await db.assessments.update_one(
-            {"_id": to_object_id(assessment_id)},
-            {"$set": {"topics_v2": topics_v2}}
-        )
-        
-        return success_response(
-            f"Updated to {new_question_type}",
-            {"topicId": topic_id, "rowId": row_id, "questionType": new_question_type}
-        )
-        
+        return await _update_question_type_impl(payload, current_user, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating question type: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/update-question-type")
+async def update_question_type_put(
+    payload: dict = Body(...),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Update question type for a specific topic row (PUT).
+    """
+    try:
+        return await _update_question_type_impl(payload, current_user, db)
     except HTTPException:
         raise
     except Exception as e:
