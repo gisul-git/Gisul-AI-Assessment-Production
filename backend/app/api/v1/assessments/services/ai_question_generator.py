@@ -466,10 +466,78 @@ Return ONLY a JSON object with questions array."""
                     "difficulty": difficulty
                 })
     
+    # ⭐ CRITICAL FIX: Ensure we generate the requested number of questions
+    if len(result) < count:
+        logger.warning(f"⚠️ AI generated only {len(result)}/{count} MCQ questions. Requested {count}, got {len(questions_list)} from AI.")
+        # If we got fewer questions than requested, retry to get the remaining ones
+        remaining = count - len(result)
+        logger.info(f"🔄 Retrying to generate {remaining} more MCQ question(s)...")
+        
+        # Retry with a more explicit prompt for the remaining count
+        retry_prompt = f"""You are an expert technical assessment writer. Generate EXACTLY {remaining} additional Multiple Choice Question(s) for the topic: {topic}.
+
+CRITICAL: You MUST generate EXACTLY {remaining} question(s). Do NOT generate fewer or more.
+
+{'=' * 80}
+CRITICAL: PERSONALIZATION CONTEXT (HIGHEST PRIORITY - MUST USE)
+{'=' * 80}
+{personalization_context if personalization_context else "(No specific personalization context provided - generate generic professional questions)"}
+{'=' * 80}
+
+IMPORTANT: These are ADDITIONAL questions. Make sure they are DIFFERENT from any previous questions.
+
+Each question MUST have exactly 4 options and one correct answer.
+Difficulty level: {difficulty}
+Experience mode: {experience_mode}
+
+Return ONLY a JSON object with questions array:
+{{
+  "questions": [
+    {{
+      "question": "<question text>",
+      "options": ["<option A>", "<option B>", "<option C>", "<option D>"],
+      "correctAnswer": "<option text that matches one of the options exactly>"
+    }}
+  ]
+}}"""
+        
+        try:
+            retry_response = await client.chat.completions.create(
+                model="gpt-4-turbo-preview",
+                messages=[{"role": "user", "content": retry_prompt}],
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            retry_content = retry_response.choices[0].message.content.strip() if retry_response.choices else ""
+            retry_data = _parse_json_response(retry_content)
+            
+            if isinstance(retry_data, dict) and "questions" in retry_data:
+                retry_questions = retry_data["questions"]
+            elif isinstance(retry_data, list):
+                retry_questions = retry_data
+            else:
+                retry_questions = []
+            
+            for q in retry_questions[:remaining]:
+                if isinstance(q, dict) and "question" in q and "options" in q and "correctAnswer" in q:
+                    if len(q["options"]) == 4:
+                        result.append({
+                            "question": q["question"],
+                            "options": q["options"],
+                            "correctAnswer": q["correctAnswer"],
+                            "type": "MCQ",
+                            "difficulty": difficulty
+                        })
+        except Exception as retry_exc:
+            logger.error(f"Error retrying MCQ generation: {retry_exc}")
+    
     if not result:
         raise HTTPException(status_code=500, detail="No valid MCQ questions generated")
     
-    return result
+    if len(result) < count:
+        logger.warning(f"⚠️ Generated {len(result)}/{count} MCQ questions after retry. Proceeding with available questions.")
+    
+    return result[:count]  # Return exactly the requested count (or fewer if generation failed)
 
 
 # ============================================================================
@@ -694,10 +762,69 @@ Return ONLY a JSON object with questions array."""
                 "difficulty": difficulty
             })
     
+    # ⭐ CRITICAL FIX: Ensure we generate the requested number of questions
+    if len(result) < count:
+        logger.warning(f"⚠️ AI generated only {len(result)}/{count} Subjective questions. Requested {count}, got {len(questions_list)} from AI.")
+        # Retry to get the remaining questions
+        remaining = count - len(result)
+        logger.info(f"🔄 Retrying to generate {remaining} more Subjective question(s)...")
+        
+        # Build retry prompt (reuse the same personalization context)
+        retry_prompt = f"""You are an expert technical assessment writer. Generate EXACTLY {remaining} additional scenario-based subjective question(s) for the topic: {topic}.
+
+CRITICAL: You MUST generate EXACTLY {remaining} question(s). Do NOT generate fewer or more.
+
+{'=' * 80}
+CRITICAL: PERSONALIZATION CONTEXT (HIGHEST PRIORITY - MUST USE)
+{'=' * 80}
+{personalization_context if personalization_context else "(No specific personalization context provided - generate generic professional questions)"}
+{'=' * 80}
+
+IMPORTANT: These are ADDITIONAL questions. Make sure they are DIFFERENT from any previous questions.
+
+Return ONLY a JSON object with questions array:
+{{
+  "questions": [
+    {{
+      "question": "<scenario-based question text>"
+    }}
+  ]
+}}"""
+        
+        try:
+            retry_response = await client.chat.completions.create(
+                model="gpt-4-turbo-preview",
+                messages=[{"role": "user", "content": retry_prompt}],
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            retry_content = retry_response.choices[0].message.content.strip() if retry_response.choices else ""
+            retry_data = _parse_json_response(retry_content)
+            
+            if isinstance(retry_data, dict) and "questions" in retry_data:
+                retry_questions = retry_data["questions"]
+            elif isinstance(retry_data, list):
+                retry_questions = retry_data
+            else:
+                retry_questions = []
+            
+            for q in retry_questions[:remaining]:
+                if isinstance(q, dict) and "question" in q:
+                    result.append({
+                        "question": q["question"],
+                        "type": "Subjective",
+                        "difficulty": difficulty
+                    })
+        except Exception as retry_exc:
+            logger.error(f"Error retrying Subjective generation: {retry_exc}")
+    
     if not result:
         raise HTTPException(status_code=500, detail="No valid subjective questions generated")
     
-    return result
+    if len(result) < count:
+        logger.warning(f"⚠️ Generated {len(result)}/{count} Subjective questions after retry. Proceeding with available questions.")
+    
+    return result[:count]  # Return exactly the requested count (or fewer if generation failed)
 
 
 # ============================================================================

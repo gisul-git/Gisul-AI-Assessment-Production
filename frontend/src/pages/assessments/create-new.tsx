@@ -6454,8 +6454,10 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     }
   };
   
-  const handleUpdateRow = (topicId: string, rowId: string, field: keyof QuestionRow, value: any) => {
-    setTopicsV2(prev => prev.map(t => {
+  const handleUpdateRow = async (topicId: string, rowId: string, field: keyof QuestionRow, value: any) => {
+    if (!assessmentId) return;
+    
+    const updatedTopics = topicsV2.map(t => {
       if (t.id === topicId) {
         const topic = t;
         const row = topic.questionRows.find(r => r.rowId === rowId);
@@ -6476,9 +6478,9 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
               }
             }
             
-            // If questionType or difficulty changes AFTER questions have been generated,
+            // If questionType, difficulty, or questionsCount changes AFTER questions have been generated,
             // mark row as pending and topic as pending so questions will regenerate
-            if (hasGeneratedQuestions && (field === "questionType" || field === "difficulty")) {
+            if (hasGeneratedQuestions && (field === "questionType" || field === "difficulty" || field === "questionsCount")) {
               updated.status = "pending";
               updated.questions = []; // Clear existing questions
             }
@@ -6489,7 +6491,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         });
         
         // If any row was modified and had generated questions, set topic status to "pending"
-        const shouldMarkTopicPending = row && hasGeneratedQuestions && (field === "questionType" || field === "difficulty");
+        const shouldMarkTopicPending = row && hasGeneratedQuestions && (field === "questionType" || field === "difficulty" || field === "questionsCount");
         
         return { 
           ...t, 
@@ -6498,7 +6500,25 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         };
       }
       return t;
-    }));
+    });
+    
+    // Update local state
+    setTopicsV2(updatedTopics);
+    
+    // ⭐ CRITICAL FIX: Save to database immediately when questionsCount changes
+    // This ensures the backend uses the correct count when generating questions
+    if (field === "questionsCount") {
+      try {
+        await axios.put("/api/assessments/update-draft", {
+          assessmentId: assessmentId,
+          topics_v2: updatedTopics,
+        });
+        console.log(`✅ Saved questionsCount=${value} to database for topic ${topicId}, row ${rowId}`);
+      } catch (err: any) {
+        console.error("Error saving questionsCount to database:", err);
+        // Don't show error to user - local state is updated, just DB save failed
+      }
+    }
   };
 
   const handleQuestionTypeChangeFromDropdown = async (
