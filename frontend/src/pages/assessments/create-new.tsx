@@ -264,25 +264,7 @@ const renderPseudoCodeQuestion = (question: any, isEditing: boolean, onEditChang
             No question text available. Please regenerate this question.
           </div>
         )}
-        {expectedAnswer && (
-          <div style={{ marginTop: "1rem" }}>
-            <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
-              Expected Answer (Pseudocode):
-            </div>
-            <div style={{
-              padding: "1rem",
-              backgroundColor: "#1e293b",
-              color: "#f1f5f9",
-              borderRadius: "0.5rem",
-              fontFamily: "monospace",
-              fontSize: "0.875rem",
-              whiteSpace: "pre-wrap",
-              overflowX: "auto",
-            }}>
-              {expectedAnswer}
-            </div>
-          </div>
-        )}
+        {/* ⭐ REMOVED: Expected Answer/Output - User doesn't want this displayed */}
         {explanation && (
           <div style={{ marginTop: "1rem" }}>
             <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
@@ -306,8 +288,9 @@ const renderPseudoCodeQuestion = (question: any, isEditing: boolean, onEditChang
 };
 
 const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: (value: string) => void) => {
-  // Support both old format (title, problemStatement, etc.) and new DSA format (questionText, starterCode, etc.)
-  const questionText = question.questionText || (question.title ? `${question.title}\n\n${question.problemStatement || ""}` : question.problemStatement || "");
+  // ⭐ CRITICAL FIX: Support multiple formats for problem statement
+  // Priority: questionText > question > problemStatement > title + problemStatement
+  const questionText = question.questionText || question.question || question.problemStatement || (question.title ? `${question.title}\n\n${question.problemStatement || ""}` : "");
   const starterCode = question.starterCode || "";
   const visibleTestCases = question.visibleTestCases || (question.visibleTestCases ? [] : []);
   const hiddenTestCases = question.hiddenTestCases || [];
@@ -420,8 +403,9 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
             marginBottom: "1rem",
           }}
         />
-        {/* ⭐ Only show Sample Input/Output if they have values (legacy support) */}
-        {(question.sampleInput || question.sampleOutput) && (
+        {/* ⭐ Only show Sample Input/Output if they have actual values AND no visibleTestCases (legacy support) */}
+        {(!visibleTestCases || visibleTestCases.length === 0) && 
+         (question.sampleInput?.trim() || question.sampleOutput?.trim()) && (
           <>
             <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
               Sample Input:
@@ -682,21 +666,23 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
   return (
     <div>
       {/* Question Text (Description + Examples) */}
-      {questionText && (
+      {/* Problem Statement - Always show if available */}
+      {(questionText || question.problemStatement || question.question || question.title) && (
         <div style={{ marginBottom: "1.5rem" }}>
           <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
-            Problem Description:
+            Problem Statement:
           </div>
           <div style={{ 
             color: "#1e293b", 
             whiteSpace: "pre-wrap", 
-            lineHeight: "1.6",
-            padding: "1rem",
-            backgroundColor: "#f8fafc",
-            borderRadius: "0.5rem",
+            lineHeight: "1.7",
+            padding: "1.25rem",
+            backgroundColor: "#ffffff",
+            borderRadius: "0.75rem",
             border: "1px solid #e2e8f0",
+            fontSize: "1rem",
           }}>
-            {questionText}
+            {questionText || question.problemStatement || question.question || question.title || "No problem statement available."}
           </div>
         </div>
       )}
@@ -760,22 +746,33 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
         </div>
       )}
       
-      {/* Legacy support for old format */}
+      {/* Problem Statement - Always show if available */}
+      {questionText && (
+        <div style={{ marginBottom: "1.5rem" }}>
+          <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
+            Problem Statement:
+          </div>
+          <div style={{
+            padding: "1.25rem",
+            backgroundColor: "#ffffff",
+            borderRadius: "0.75rem",
+            border: "1px solid #e2e8f0",
+            color: "#1e293b",
+            whiteSpace: "pre-wrap",
+            lineHeight: "1.7",
+            fontSize: "1rem",
+          }}>
+            {questionText}
+          </div>
+        </div>
+      )}
+      
+      {/* Fallback: Show title if questionText is empty */}
       {!questionText && question.title && (
         <div style={{ marginBottom: "1.5rem" }}>
           <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "#1e293b", marginBottom: "1rem" }}>
             {question.title}
           </h2>
-        </div>
-      )}
-      {!questionText && question.problemStatement && (
-        <div style={{ marginBottom: "1.5rem" }}>
-          <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
-            Problem Statement:
-          </div>
-          <div style={{ color: "#1e293b", whiteSpace: "pre-wrap", lineHeight: "1.6" }}>
-            {question.problemStatement}
-          </div>
         </div>
       )}
       {/* Constraints */}
@@ -872,8 +869,9 @@ const renderCodingQuestion = (question: any, isEditing: boolean, onEditChange?: 
         </div>
       )}
       
-      {/* Legacy support for old format test cases */}
-      {(!visibleTestCases || visibleTestCases.length === 0) && question.sampleInput && question.sampleOutput && (
+      {/* Legacy support for old format test cases - only show if no visibleTestCases AND legacy fields have actual content */}
+      {(!visibleTestCases || visibleTestCases.length === 0) && 
+       (question.sampleInput?.trim() || question.sampleOutput?.trim()) && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
           <div>
             <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "#64748b", marginBottom: "0.5rem" }}>
@@ -1021,9 +1019,14 @@ const renderSqlQuestion = (question: any, isEditing: boolean, onEditChange?: (va
   const hints: string[] = sqlData.hints || [];
   const sqlCategory: string = sqlData.sql_category || "select";
   const evaluation = sqlData.evaluation || {};
+  
+  // ⭐ ENHANCED: Also check for alternative data structures
+  const allSchemas = schemas || sqlData.database_schema || sqlData.schema || {};
+  const allSampleData = sampleData || sqlData.sample_data || sqlData.data || {};
+  const allTables = sqlData.tables || Object.keys(allSchemas);
 
-  const hasSchema = schemas && Object.keys(schemas).length > 0;
-  const hasSampleData = sampleData && Object.keys(sampleData).length > 0;
+  const hasSchema = allSchemas && Object.keys(allSchemas).length > 0;
+  const hasSampleData = allSampleData && Object.keys(allSampleData).length > 0;
   const hasConstraints = constraints && constraints.length > 0;
   const hasHints = hints && hints.length > 0;
 
@@ -1059,6 +1062,45 @@ const renderSqlQuestion = (question: any, isEditing: boolean, onEditChange?: (va
           {sqlCategory}
         </div>
       </div>
+
+      {/* Database Information Summary */}
+      {(hasSchema || hasSampleData) && (
+        <div
+          style={{
+            padding: "1rem 1.25rem",
+            backgroundColor: "#eff6ff",
+            borderRadius: "0.75rem",
+            border: "1px solid #bfdbfe",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "1rem",
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            <span style={{ fontSize: "1.5rem" }}>🗄️</span>
+            <div>
+              <div style={{ fontSize: "1rem", fontWeight: 700, color: "#1e40af" }}>Database Information</div>
+              <div style={{ fontSize: "0.875rem", color: "#3b82f6", marginTop: "0.25rem" }}>
+                {Object.keys(allSchemas).length} table{Object.keys(allSchemas).length !== 1 ? "s" : ""} available
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "1.5rem", fontSize: "0.875rem", color: "#1e40af" }}>
+            {hasSchema && (
+              <span>
+                <strong>{Object.keys(allSchemas).length}</strong> schema{Object.keys(allSchemas).length !== 1 ? "s" : ""}
+              </span>
+            )}
+            {hasSampleData && (
+              <span>
+                <strong>{Object.keys(allSampleData).length}</strong> table{Object.keys(allSampleData).length !== 1 ? "s" : ""} with data
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Description */}
       <div
@@ -1117,7 +1159,7 @@ const renderSqlQuestion = (question: any, isEditing: boolean, onEditChange?: (va
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-              {Object.entries<any>(schemas).map(([tableName, tableInfo]) => {
+              {Object.entries<any>(allSchemas).map(([tableName, tableInfo]) => {
                 const columns = (tableInfo && tableInfo.columns) || {};
                 return (
                   <div
@@ -1244,11 +1286,11 @@ const renderSqlQuestion = (question: any, isEditing: boolean, onEditChange?: (va
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-              {Object.entries<any>(sampleData).map(([tableName, rows]) => {
+              {Object.entries<any>(allSampleData).map(([tableName, rows]) => {
                 const tableRows: any[] = Array.isArray(rows) ? rows : [];
                 if (!tableRows.length) return null;
 
-                const schema = schemas[tableName] || {};
+                const schema = allSchemas[tableName] || {};
                 const schemaColumns = (schema && schema.columns) || {};
                 let columnNames: string[] = Object.keys(schemaColumns || {});
 
@@ -1550,16 +1592,21 @@ const renderAimlQuestion = (question: any, isEditing: boolean, onEditChange?: (v
   const tasks: string[] = aimlData.tasks || [];
   const constraints: string[] = aimlData.constraints || [];
   const libraries: string[] = aimlData.libraries || [];
-  const dataset = aimlData.dataset || null;
-  const schema = dataset?.schema || [];
-  const rows: any[] = dataset?.rows || [];
-  const executionEnv: string = aimlData.execution_environment || "jupyter_notebook";
+  // ⭐ ENHANCED: Check multiple possible dataset locations
+  const dataset = aimlData.dataset || aimlData.data || null;
+  const schema = dataset?.schema || dataset?.columns || aimlData.schema || [];
+  const rows: any[] = dataset?.rows || dataset?.data || aimlData.rows || [];
+  const executionEnv: string = aimlData.execution_environment || aimlData.environment || "jupyter_notebook";
   const requiresDataset: boolean = aimlData.requires_dataset || false;
+  
+  // ⭐ ENHANCED: Additional dataset metadata
+  const datasetName = dataset?.name || aimlData.dataset_name || "Dataset";
+  const datasetDescription = dataset?.description || aimlData.dataset_description || null;
 
   const hasTasks = tasks && tasks.length > 0;
   const hasConstraints = constraints && constraints.length > 0;
   const hasLibraries = libraries && libraries.length > 0;
-  const hasDataset = dataset && schema && rows && rows.length > 0;
+  const hasDataset = (schema && schema.length > 0) || (rows && rows.length > 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
@@ -1619,6 +1666,47 @@ const renderAimlQuestion = (question: any, isEditing: boolean, onEditChange?: (v
               <li key={idx} style={{ marginBottom: "0.25rem" }}>{task}</li>
             ))}
           </ol>
+        </div>
+      )}
+
+      {/* Dataset Information Header */}
+      {hasDataset && (
+        <div
+          style={{
+            padding: "1rem 1.25rem",
+            backgroundColor: "#f0fdf4",
+            borderRadius: "0.75rem",
+            border: "1px solid #86efac",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "1rem",
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            <span style={{ fontSize: "1.5rem" }}>📊</span>
+            <div>
+              <div style={{ fontSize: "1rem", fontWeight: 700, color: "#166534" }}>{datasetName}</div>
+              {datasetDescription && (
+                <div style={{ fontSize: "0.875rem", color: "#15803d", marginTop: "0.25rem" }}>
+                  {datasetDescription}
+                </div>
+              )}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "1.5rem", fontSize: "0.875rem", color: "#166534" }}>
+            {schema.length > 0 && (
+              <span>
+                <strong>{schema.length}</strong> column{schema.length > 1 ? "s" : ""}
+              </span>
+            )}
+            {rows.length > 0 && (
+              <span>
+                <strong>{rows.length}</strong> row{rows.length > 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
         </div>
       )}
 
@@ -3084,6 +3172,21 @@ export default function CreateNewAssessmentPage() {
                 row.status = row.questions && row.questions.length > 0 ? "generated" : "pending";
               }
               
+              // ⭐ CRITICAL FIX: Ensure questionType has a default value if missing
+              if (!row.questionType) {
+                row.questionType = "MCQ"; // Default to MCQ if not set
+              }
+              
+              // ⭐ CRITICAL FIX: Ensure difficulty has a default value if missing
+              if (!row.difficulty) {
+                row.difficulty = "Medium"; // Default to Medium if not set
+              }
+              
+              // ⭐ CRITICAL FIX: Ensure questionsCount has a default value if missing
+              if (!row.questionsCount || row.questionsCount < 1) {
+                row.questionsCount = 1; // Default to 1 if not set
+              }
+              
               // IMPORTANT: locked should ONLY be true if questions are generated AND exist
               // If status is "pending" or questions don't exist, locked MUST be false
               if (row.status === "pending" || !row.questions || row.questions.length === 0) {
@@ -3115,10 +3218,49 @@ export default function CreateNewAssessmentPage() {
             }
           });
           
+          // 🔍 DEBUG: Log restored topics data structure
+          console.log("🔍 DEBUG: restoredTopicsV2 structure:", {
+            count: restoredTopicsV2.length,
+            sampleTopic: restoredTopicsV2[0] ? {
+              id: restoredTopicsV2[0].id,
+              label: restoredTopicsV2[0].label,
+              questionRows: restoredTopicsV2[0].questionRows?.map((r: any) => ({
+                rowId: r.rowId,
+                questionType: r.questionType,
+                difficulty: r.difficulty,
+                questionsCount: r.questionsCount,
+              })) || [],
+            } : null,
+            allTopics: restoredTopicsV2.map((t: any) => ({
+              id: t.id,
+              label: t.label,
+              hasQuestionRows: !!t.questionRows,
+              questionRowsCount: t.questionRows?.length || 0,
+            })),
+          });
+          
           setTopicsV2(restoredTopicsV2);
           setFullTopicRegenLocked(assessment.fullTopicRegenLocked || false);
           setAllQuestionsGenerated(assessment.allQuestionsGenerated || false);
           setHasVisitedConfigureStation(true);
+          
+          // ⭐ CRITICAL FIX: Initialize topicInputValues with topic labels
+          const initialTopicInputValues: {[topicId: string]: string} = {};
+          restoredTopicsV2.forEach((topic: any) => {
+            if (topic.id && topic.label) {
+              initialTopicInputValues[topic.id] = topic.label;
+            }
+          });
+          
+          // 🔍 DEBUG: Log initialized topicInputValues
+          console.log("🔍 DEBUG: initialTopicInputValues:", initialTopicInputValues);
+          console.log("🔍 DEBUG: Sample topic input value:", {
+            firstTopicId: restoredTopicsV2[0]?.id,
+            firstTopicLabel: restoredTopicsV2[0]?.label,
+            inputValue: initialTopicInputValues[restoredTopicsV2[0]?.id],
+          });
+          
+          setTopicInputValues(initialTopicInputValues);
           
           // Auto-navigate to Station 2 if topics exist
           if (restoredTopicsV2.length > 0) {
@@ -3929,6 +4071,16 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
           status: "pending" as const // Newly generated topics are always "pending"
         }));
         setTopicsV2(topicsWithStatus);
+        
+        // ⭐ CRITICAL FIX: Initialize topicInputValues with topic labels
+        const initialTopicInputValues: {[topicId: string]: string} = {};
+        topicsWithStatus.forEach((topic: TopicV2) => {
+          if (topic.id && topic.label) {
+            initialTopicInputValues[topic.id] = topic.label;
+          }
+        });
+        setTopicInputValues(initialTopicInputValues);
+        
         setAssessmentId(response.data.data.assessmentId || assessmentId);
         setFullTopicRegenLocked(false);
         setAllQuestionsGenerated(false);
@@ -4162,6 +4314,16 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         // Update topics_v2 in the assessment
         if (topicsData.topics) {
           setTopicsV2(topicsData.topics);
+          
+          // ⭐ CRITICAL FIX: Initialize topicInputValues with topic labels
+          const initialTopicInputValues: {[topicId: string]: string} = {};
+          topicsData.topics.forEach((topic: TopicV2) => {
+            if (topic.id && topic.label) {
+              initialTopicInputValues[topic.id] = topic.label;
+            }
+          });
+          setTopicInputValues(initialTopicInputValues);
+          
           setFullTopicRegenLocked(false);
           setAllQuestionsGenerated(false);
         }
@@ -6340,6 +6502,67 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     }));
   };
 
+  const handleQuestionTypeChangeFromDropdown = async (
+    topicId: string, 
+    rowId: string, 
+    newQuestionType: "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML"
+  ) => {
+    if (!assessmentId) return;
+    
+    try {
+      // Find the current row to preserve difficulty
+      const topic = topicsV2.find(t => t.id === topicId);
+      const row = topic?.questionRows.find(r => r.rowId === rowId);
+      const currentDifficulty = row?.difficulty || "Medium";
+      
+      // Determine canUseJudge0 based on question type
+      const canUseJudge0 = newQuestionType === "Coding";
+      
+      // Call backend API to update question type
+      const response = await axios.post("/api/v1/assessments/update-question-type", {
+        assessmentId: assessmentId,
+        topicId: topicId,
+        rowId: rowId,
+        questionType: newQuestionType,
+        difficulty: currentDifficulty, // Keep existing difficulty
+        canUseJudge0: canUseJudge0,
+      });
+      
+      if (response.data?.success) {
+        // Update local state to reflect the change
+        setTopicsV2(prev => prev.map(t => {
+          if (t.id === topicId) {
+            return {
+              ...t,
+              questionRows: t.questionRows.map(r => {
+                if (r.rowId === rowId) {
+                  return {
+                    ...r,
+                    questionType: newQuestionType,
+                    difficulty: currentDifficulty, // Preserve existing difficulty
+                    canUseJudge0: canUseJudge0,
+                    status: "pending" as const,
+                    questions: [],
+                    locked: false, // Unlock row to allow regeneration
+                  };
+                }
+                return r;
+              }),
+              locked: false, // Unlock topic to allow regeneration
+            };
+          }
+          return t;
+        }));
+        
+        // Log for debugging
+        console.log(`✅ Question type updated: ${topic?.label} → ${newQuestionType}`);
+      }
+    } catch (err: any) {
+      console.error("Error updating question type:", err);
+      setError(err.response?.data?.message || "Failed to update question type");
+    }
+  };
+
   const handleAddQuestionType = (topicIndex: number) => {
     const updated = [...topicConfigs];
     const topic = updated[topicIndex];
@@ -8502,12 +8725,54 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                     </tr>
                   </thead>
                   <tbody>
+                    {(() => {
+                      // 🔍 DEBUG: Log before rendering
+                      if (topicsV2 && topicsV2.length > 0) {
+                        console.log("🔍 DEBUG: Rendering Configure Topics table:", {
+                          topicsV2Count: topicsV2.length,
+                          topicInputValues: topicInputValues,
+                          topicInputValuesKeys: Object.keys(topicInputValues),
+                          sampleTopic: topicsV2[0] ? {
+                            id: topicsV2[0].id,
+                            label: topicsV2[0].label,
+                            hasQuestionRows: !!topicsV2[0].questionRows,
+                            questionRowsCount: topicsV2[0].questionRows?.length || 0,
+                            firstRow: topicsV2[0].questionRows?.[0] ? {
+                              rowId: topicsV2[0].questionRows[0].rowId,
+                              questionType: topicsV2[0].questionRows[0].questionType,
+                              difficulty: topicsV2[0].questionRows[0].difficulty,
+                            } : null,
+                            inputValue: topicInputValues[topicsV2[0].id],
+                            computedValue: topicInputValues[topicsV2[0].id] ?? topicsV2[0].label ?? "",
+                          } : null,
+                        });
+                      }
+                      return null;
+                    })()}
                     {topicsV2 && topicsV2.length > 0 ? (
                       topicsV2.flatMap((topic) => {
+                        // 🔍 DEBUG: Log each topic being rendered
+                        const topicInputValue = topicInputValues[topic.id] ?? topic.label ?? "";
+                        console.log(`🔍 DEBUG: Rendering topic ${topic.id}:`, {
+                          topicId: topic.id,
+                          topicLabel: topic.label,
+                          topicInputValue: topicInputValue,
+                          topicInputValuesKey: topicInputValues[topic.id],
+                          questionRowsCount: topic.questionRows?.length || 0,
+                        });
+                        
                         const canRegenerate = !topic.locked && !fullTopicRegenLocked;
                         const canAddRow = !topic.locked && !allQuestionsGenerated;
                         
                         return topic.questionRows.map((row, rowIndex) => {
+                          // 🔍 DEBUG: Log each row being rendered
+                          console.log(`🔍 DEBUG: Rendering row ${row.rowId} for topic ${topic.id}:`, {
+                            rowId: row.rowId,
+                            questionType: row.questionType,
+                            questionTypeValue: row.questionType || "MCQ",
+                            difficulty: row.difficulty,
+                            questionsCount: row.questionsCount,
+                          });
                           const isFirstRow = rowIndex === 0;
                           const canPreview = !allQuestionsGenerated; // Allow preview even if locked (to view existing questions)
                           // Restrict question types for aptitude/communication/logical_reasoning
@@ -8556,8 +8821,23 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                             ];
                           }
                           
+                          // ⭐ CRITICAL FIX: If row already has a questionType that's not in available options, add it
+                          // This ensures the select dropdown can display the current value even if it's not normally available
+                          // This is ESSENTIAL because the questionType from database might not match the calculated available options
+                          if (row.questionType && !questionTypes.includes(row.questionType)) {
+                            questionTypes = [...questionTypes, row.questionType];
+                            console.log(`🔍 DEBUG: Added missing questionType "${row.questionType}" to available options for topic ${topic.id}, row ${row.rowId}`);
+                          }
+                          
+                          // ⭐ CRITICAL FIX: Also check if questionType is undefined/null and set a default
+                          // But ONLY if it's truly missing - don't override existing values
+                          if (!row.questionType) {
+                            // Don't set default here - let it be handled by the select value binding
+                            // This ensures we preserve the actual questionType from database
+                          }
+                          
                           return [
-                            <tr key={`${topic.id}-${row.rowId}`} style={{ borderBottom: "1px solid #e2e8f0" }}>
+                            <tr key={`${topic.id}-${row.rowId}-${topicInputValues[topic.id] || topic.label || ""}-${row.questionType || "MCQ"}`} style={{ borderBottom: "1px solid #e2e8f0" }}>
                               <td style={{ padding: "1rem", verticalAlign: "top" }}>
                                 {isFirstRow && (
                                   <>
@@ -8609,7 +8889,21 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                         id={`topic-input-${topic.id}`}
                                         name={`topic-input-${topic.id}`}
                                         type="text"
-                                        value={topicInputValues[topic.id] !== undefined ? (topicInputValues[topic.id] || "") : (topic.label || "")}
+                                        value={(() => {
+                                          const computedValue = topicInputValues[topic.id] ?? topic.label ?? "";
+                                          // 🔍 DEBUG: Log the exact value being set in the input
+                                          if (topic.id === topicsV2[0]?.id) {
+                                            console.log(`🔍 DEBUG: Input field value for ${topic.id}:`, {
+                                              topicId: topic.id,
+                                              topicInputValuesKey: topicInputValues[topic.id],
+                                              topicLabel: topic.label,
+                                              computedValue: computedValue,
+                                              valueType: typeof computedValue,
+                                              valueLength: computedValue?.length,
+                                            });
+                                          }
+                                          return computedValue;
+                                        })()}
                                         onChange={(e) => handleTopicNameChange(topic.id, e.target.value)}
                                         onFocus={() => {
                                           const specialCategories = ["aptitude", "communication", "logical_reasoning"] as const;
@@ -8630,6 +8924,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                           border: "1px solid #e2e8f0",
                                           borderRadius: "0.5rem",
                                           fontSize: "0.875rem",
+                                          color: "#1e293b", // ⭐ CRITICAL FIX: Explicit text color
                                           backgroundColor: topic.locked ? "#f1f5f9" : "#ffffff",
                                           cursor: topic.locked ? "not-allowed" : "text",
                                           opacity: topic.locked ? 0.6 : 1,
@@ -8692,19 +8987,39 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                   <select
                                     id={`question-type-${topic.id}-${row.rowId}`}
                                     name={`question-type-${topic.id}-${row.rowId}`}
-                                    value={row.questionType}
+                                    value={(() => {
+                                      // ⭐ CRITICAL FIX: Use row.questionType as the source of truth
+                                      // The questionType from the database is the authoritative value
+                                      const currentQuestionType = row.questionType || "MCQ";
+                                      const computedValue = String(currentQuestionType);
+                                      
+                                      // 🔍 DEBUG: Log the exact value being set in the select
+                                      if (topic.id === topicsV2[0]?.id && row.rowId === topic.questionRows[0]?.rowId) {
+                                        console.log(`🔍 DEBUG: Select field value for ${topic.id}/${row.rowId}:`, {
+                                          topicId: topic.id,
+                                          rowId: row.rowId,
+                                          rowQuestionType: row.questionType,
+                                          currentQuestionType: currentQuestionType,
+                                          computedValue: computedValue,
+                                          valueType: typeof computedValue,
+                                          availableOptions: questionTypes,
+                                          isInOptions: questionTypes.includes(computedValue),
+                                          topicLabel: topic.label,
+                                        });
+                                      }
+                                      
+                                      // ⭐ CRITICAL: Ensure the value is in the options list (should be handled above, but double-check)
+                                      if (!questionTypes.includes(computedValue)) {
+                                        console.error(`❌ ERROR: QuestionType "${computedValue}" not in available options for ${topic.id}/${row.rowId}. Available:`, questionTypes);
+                                      }
+                                      
+                                      return computedValue;
+                                    })()}
                                     onChange={(e) => {
                                       const newType = e.target.value as "MCQ" | "Subjective" | "PseudoCode" | "Coding" | "SQL" | "AIML";
-                                      handleUpdateRow(topic.id, row.rowId, "questionType", newType);
                                       
-                                      // If changing to Coding and canUseJudge0 is false, update it
-                                      if (newType === "Coding" && !row.canUseJudge0) {
-                                        handleUpdateRow(topic.id, row.rowId, "canUseJudge0", true);
-                                      }
-                                      // If changing away from Coding, set canUseJudge0 to false
-                                      if (newType !== "Coding" && row.canUseJudge0) {
-                                        handleUpdateRow(topic.id, row.rowId, "canUseJudge0", false);
-                                      }
+                                      // Call the new handler instead of just updating local state
+                                      handleQuestionTypeChangeFromDropdown(topic.id, row.rowId, newType);
                                     }}
                                     disabled={row.locked}
                                     style={{
@@ -8713,6 +9028,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                       border: "1px solid #e2e8f0",
                                       borderRadius: "0.5rem",
                                       fontSize: "0.875rem",
+                                      color: "#1e293b", // ⭐ CRITICAL FIX: Explicit text color
                                       backgroundColor: row.locked ? "#f1f5f9" : "#ffffff",
                                       cursor: row.locked ? "not-allowed" : "pointer",
                                       opacity: row.locked ? 0.6 : 1,
@@ -8898,7 +9214,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                             </tr>
                           ];
                         })
-                      }).flat()
+                      })
                     ) : (
                       <tr>
                         <td colSpan={6} style={{ padding: "2rem", textAlign: "center", color: "#64748b" }}>

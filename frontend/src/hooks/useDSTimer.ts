@@ -55,6 +55,7 @@ export function useDSTimer({
   const questionEndTimesRef = useRef<Record<string, Date>>({}) // Store end times for each question (PER_QUESTION mode)
   const questionStartTimesRef = useRef<Record<string, Date>>({}) // Store start times for each question (PER_QUESTION mode)
   const questionExpireCalledRef = useRef<Record<string, boolean>>({}) // Track if expire callback was called for each question
+  const questionTotalTimeRef = useRef<Record<string, number>>({}) // Store question total times for immediate access
 
   // Initialize timer
   useEffect(() => {
@@ -143,11 +144,17 @@ export function useDSTimer({
 
       setQuestionTimeRemaining(qTimeRemaining)
       setQuestionTotalTime(qTotalTime)
+      questionTotalTimeRef.current = qTotalTime // Store in ref for immediate access
       hasTickedRef.current = false
       expireCalledRef.current = false
       initializedRef.current = true
 
-      console.log('[DSTimer] PER_QUESTION initialized')
+      console.log('[DSTimer] PER_QUESTION initialized', {
+        questionCount: test.question_timings.length,
+        questionIds: test.question_timings.map(t => t.question_id),
+        qTotalTime: qTotalTime,
+        qTimeRemaining: qTimeRemaining
+      })
     }
   }, [test, testSubmission, enabled])
 
@@ -160,6 +167,7 @@ export function useDSTimer({
     questionEndTimesRef.current = {}
     questionStartTimesRef.current = {}
     questionExpireCalledRef.current = {}
+    questionTotalTimeRef.current = {}
     setIsExpired(false)
   }, [test?.timer_mode, testSubmission?.started_at])
 
@@ -220,18 +228,32 @@ export function useDSTimer({
       // PER_QUESTION countdown for current question
       const currentTime = questionTimeRemaining[currentQuestionId]
       
-      if (currentTime === undefined || currentTime <= 0) {
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current)
-          intervalRef.current = null
-        }
-        return
-      }
-
       // Initialize question timer if not already started
       if (!questionStartTimesRef.current[currentQuestionId]) {
+        // Get duration from questionTotalTimeRef first (for immediate access), then fallback to state, then currentTime
+        let durationSeconds = questionTotalTimeRef.current[currentQuestionId] || questionTotalTime[currentQuestionId]
+        
+        // If questionTotalTime doesn't have this question, try to get from currentTime
+        if (!durationSeconds && currentTime !== undefined && currentTime > 0) {
+          durationSeconds = currentTime
+        }
+        
+        // Validate duration - must be > 0
+        if (!durationSeconds || durationSeconds <= 0) {
+          console.error('[DSTimer] Invalid or missing duration for question:', currentQuestionId, {
+            questionTotalTimeRef: questionTotalTimeRef.current[currentQuestionId],
+            questionTotalTimeState: questionTotalTime[currentQuestionId],
+            currentTime,
+            questionTotalTimeRefKeys: Object.keys(questionTotalTimeRef.current),
+            questionTotalTimeStateKeys: Object.keys(questionTotalTime),
+            questionTimeRemainingKeys: Object.keys(questionTimeRemaining),
+            initialized: initializedRef.current
+          })
+          // Don't start timer if duration is invalid
+          return
+        }
+        
         const now = new Date()
-        const durationSeconds = questionTotalTime[currentQuestionId] || currentTime
         const questionEndTime = new Date(now.getTime() + durationSeconds * 1000)
         
         questionStartTimesRef.current[currentQuestionId] = now
@@ -244,9 +266,22 @@ export function useDSTimer({
           [currentQuestionId]: remaining
         }))
         
+        // Check if question already expired on initialization
+        if (remaining === 0 && !questionExpireCalledRef.current[currentQuestionId] && onQuestionExpire) {
+          questionExpireCalledRef.current[currentQuestionId] = true
+          // Clear interval before calling expire
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current)
+            intervalRef.current = null
+          }
+          onQuestionExpire(currentQuestionId)
+          return
+        }
+        
         console.log('[DSTimer] PER_QUESTION timer started for question:', currentQuestionId, {
           startTime: now.toISOString(),
           endTime: questionEndTime.toISOString(),
+          durationSeconds,
           remaining
         })
       } else {
@@ -260,7 +295,34 @@ export function useDSTimer({
             ...prev,
             [currentQuestionId]: remaining
           }))
+          
+          // Check if question already expired when switching back
+          if (remaining === 0 && !questionExpireCalledRef.current[currentQuestionId] && onQuestionExpire) {
+            questionExpireCalledRef.current[currentQuestionId] = true
+            // Clear interval before calling expire
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current)
+              intervalRef.current = null
+            }
+            onQuestionExpire(currentQuestionId)
+            return
+          }
         }
+      }
+
+      // Check if current time is already 0 or undefined (shouldn't happen after initialization, but safety check)
+      const finalTime = questionTimeRemaining[currentQuestionId]
+      if (finalTime === undefined || finalTime <= 0) {
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current)
+          intervalRef.current = null
+        }
+        // If not already called, call expire callback
+        if (!questionExpireCalledRef.current[currentQuestionId] && onQuestionExpire) {
+          questionExpireCalledRef.current[currentQuestionId] = true
+          onQuestionExpire(currentQuestionId)
+        }
+        return
       }
 
       if (intervalRef.current) {
@@ -285,6 +347,11 @@ export function useDSTimer({
               currentQuestionId
             ) {
               questionExpireCalledRef.current[currentQuestionId] = true
+              // Clear interval when question expires
+              if (intervalRef.current) {
+                clearInterval(intervalRef.current)
+                intervalRef.current = null
+              }
               onQuestionExpire(currentQuestionId)
             }
 
@@ -311,6 +378,11 @@ export function useDSTimer({
             currentQuestionId
           ) {
             questionExpireCalledRef.current[currentQuestionId] = true
+            // Clear interval when question expires
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current)
+              intervalRef.current = null
+            }
             onQuestionExpire(currentQuestionId)
           }
 
