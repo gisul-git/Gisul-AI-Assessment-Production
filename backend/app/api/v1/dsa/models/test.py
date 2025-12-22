@@ -27,6 +27,7 @@ class QuestionTiming(BaseModel):
 
 class ProctoringSettings(BaseModel):
     aiProctoringEnabled: Optional[bool] = None
+    liveProctoringEnabled: Optional[bool] = None
 
 
 class Test(BaseModel):

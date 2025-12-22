@@ -28,6 +28,22 @@ logger = logging.getLogger("backend")
 
 router = APIRouter(tags=["dsa"])
 
+def normalize_proctoring_settings(proctoring_settings: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+    """
+    Normalize proctoringSettings to ensure boolean values are always explicit.
+    Returns a dict with aiProctoringEnabled and liveProctoringEnabled as explicit booleans.
+    """
+    if not proctoring_settings:
+        return {
+            "aiProctoringEnabled": False,
+            "liveProctoringEnabled": False,
+        }
+    
+    return {
+        "aiProctoringEnabled": bool(proctoring_settings.get("aiProctoringEnabled", False)),
+        "liveProctoringEnabled": bool(proctoring_settings.get("liveProctoringEnabled", False)),
+    }
+
 @router.get("/debug/user-info", response_model=dict)
 async def debug_user_info(
     current_user: Dict[str, Any] = Depends(get_current_user)
@@ -231,6 +247,17 @@ async def create_test(
     test_dict["created_at"] = datetime.utcnow()  # Set creation timestamp
     test_dict["test_type"] = "dsa"  # Mark as DSA test to isolate from AIML tests
     
+    # Normalize proctoringSettings BEFORE saving to ensure both fields are always explicit
+    # This ensures the database always has both aiProctoringEnabled and liveProctoringEnabled as explicit booleans
+    if "proctoringSettings" in test_dict:
+        test_dict["proctoringSettings"] = normalize_proctoring_settings(test_dict.get("proctoringSettings"))
+    else:
+        # If not provided, set defaults
+        test_dict["proctoringSettings"] = normalize_proctoring_settings(None)
+    
+    # Debug: Log proctoringSettings being saved
+    logger.info(f"[create_test] ProctoringSettings being saved: {test_dict.get('proctoringSettings')}")
+    
     logger.info(f"[create_test] Creating test with created_by='{user_id}' (type: {type(user_id).__name__}), title={test_dict.get('title')}")
     logger.info(f"[create_test] Current user data: id={current_user.get('id')}, _id={current_user.get('_id')}, email={current_user.get('email')}")
     
@@ -249,6 +276,9 @@ async def create_test(
     # Fetch the created test
     created_test = await db.tests.find_one({"_id": result.inserted_id})
     if created_test:
+        # Debug: Log proctoringSettings from database
+        logger.info(f"[create_test] ProctoringSettings from database: {created_test.get('proctoringSettings')}")
+        
         # Convert ObjectId to string and ensure all fields are JSON serializable
         test_dict = {
             "id": str(created_test["_id"]),
@@ -264,7 +294,10 @@ async def create_test(
             "invited_users": created_test.get("invited_users", []),
             "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in created_test.get("question_ids", [])],
             "test_token": created_test.get("test_token"),
+            # Normalize to ensure boolean values are explicit
+            "proctoringSettings": normalize_proctoring_settings(created_test.get("proctoringSettings")),
         }
+        logger.info(f"[create_test] ProctoringSettings in response: {test_dict.get('proctoringSettings')}")
         # Add created_at if it exists
         if "created_at" in created_test and created_test.get("created_at"):
             test_dict["created_at"] = created_test.get("created_at").isoformat() if isinstance(created_test.get("created_at"), datetime) else created_test.get("created_at")
@@ -562,6 +595,8 @@ async def get_tests(
             "created_by": str(test.get("created_by", "")),  # CRITICAL: Include for client-side verification
             "examMode": test.get("examMode", "strict"),  # Include examMode for frontend display logic
             "schedule": formatted_schedule if formatted_schedule else schedule_data,  # Include formatted schedule
+            # Normalize to ensure boolean values are explicit
+            "proctoringSettings": normalize_proctoring_settings(test.get("proctoringSettings")),
         }
         if test.get("pausedAt"):
             paused_val = test.get("pausedAt")
@@ -619,10 +654,11 @@ async def get_test_public(
         "timer_mode": test.get("timer_mode", "GLOBAL"),
         "question_timings": test.get("question_timings", []),
         # Include proctoring settings for candidate runtime toggle (backward compatible)
-        "proctoringSettings": test.get("proctoringSettings"),
+        # Normalize to ensure boolean values are explicit
+        "proctoringSettings": normalize_proctoring_settings(test.get("proctoringSettings")),
     }
     
-    logger.info(f"[get_test_public] Returning test {test_id} for user {user_id}, duration_minutes={test_dict['duration_minutes']}")
+    logger.info(f"[get_test_public] Returning test {test_id} for user {user_id}, duration_minutes={test_dict['duration_minutes']}, proctoringSettings={test_dict.get('proctoringSettings')}")
     
     return test_dict
 
@@ -701,7 +737,12 @@ async def get_test(
         # Legacy field for backward compatibility (convert question_timings to old format)
         "question_time_limits": _convert_question_timings_to_limits(test.get("question_timings", [])) if test.get("question_timings") else test.get("question_time_limits"),
         "test_token": test.get("test_token"),
+        # Normalize to ensure boolean values are explicit
+        "proctoringSettings": normalize_proctoring_settings(test.get("proctoringSettings")),
     }
+    # Debug: Log proctoringSettings being returned
+    logger.info(f"[get_test] ProctoringSettings for test {test_id}: {test_dict.get('proctoringSettings')}")
+    
     # Include invitationTemplate if it exists
     if "invitationTemplate" in test:
         test_dict["invitationTemplate"] = test.get("invitationTemplate")
@@ -745,6 +786,13 @@ async def patch_test(
     if "invitationTemplate" in payload:
         update_data["invitationTemplate"] = payload["invitationTemplate"]
     
+    # Allow updating proctoringSettings
+    if "proctoringSettings" in payload:
+        proctoring_settings = payload["proctoringSettings"]
+        # Normalize to ensure boolean values are explicit
+        update_data["proctoringSettings"] = normalize_proctoring_settings(proctoring_settings)
+        logger.info(f"[patch_test] Updating proctoringSettings for test {test_id}: {update_data['proctoringSettings']}")
+    
     # Update the test
     result = await db.tests.update_one(
         {"_id": ObjectId(test_id)},
@@ -769,6 +817,8 @@ async def patch_test(
             "invited_users": updated_test.get("invited_users", []),
             "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in updated_test.get("question_ids", [])],
             "test_token": updated_test.get("test_token"),
+            # Normalize to ensure boolean values are explicit
+            "proctoringSettings": normalize_proctoring_settings(updated_test.get("proctoringSettings")),
         }
         # Include invitationTemplate if it exists
         if "invitationTemplate" in updated_test:
