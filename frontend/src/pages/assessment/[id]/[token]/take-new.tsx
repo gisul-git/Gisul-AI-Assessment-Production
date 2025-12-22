@@ -90,6 +90,7 @@ interface Question {
   schemas?: Record<string, { columns: Record<string, string> }>;
   sample_data?: Record<string, any[][]>;
   hints?: string[];
+  constraints?: string[];
   // AIML-specific fields
   library?: string;
   tasks?: Array<string | { id: string; title: string; description: string }>;
