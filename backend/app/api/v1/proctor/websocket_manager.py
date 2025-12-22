@@ -34,13 +34,22 @@ class WebSocketManager:
     
     async def connect_candidate(self, session_id: str, assessment_id: str, websocket: WebSocket):
         """Connect a candidate's WebSocket for a session."""
+        logger.info(f"[WebSocket] connect_candidate called: session_id={session_id}, assessment_id={assessment_id}")
+        logger.info(f"[WebSocket] Current candidate_connections before: {list(self.candidate_connections.keys())}")
+        
         await websocket.accept()
         self.candidate_connections[session_id] = websocket
         self.session_to_assessment[session_id] = assessment_id
-        logger.info(f"[WebSocket] Candidate connected: session={session_id}, assessment={assessment_id}")
+        
+        logger.info(f"[WebSocket] ✅ Candidate connected: session={session_id}, assessment={assessment_id}")
+        logger.info(f"[WebSocket] Current candidate_connections after: {list(self.candidate_connections.keys())}")
+        logger.info(f"[WebSocket] WebSocket state: client_state={websocket.client_state}, application_state={websocket.application_state}")
     
     async def disconnect_candidate(self, session_id: str):
         """Disconnect a candidate's WebSocket."""
+        logger.info(f"[WebSocket] disconnect_candidate called: session_id={session_id}")
+        logger.info(f"[WebSocket] Current candidate_connections before disconnect: {list(self.candidate_connections.keys())}")
+        
         if session_id in self.candidate_connections:
             try:
                 await self.candidate_connections[session_id].close()
@@ -49,7 +58,11 @@ class WebSocketManager:
             del self.candidate_connections[session_id]
             if session_id in self.session_to_assessment:
                 del self.session_to_assessment[session_id]
-            logger.info(f"[WebSocket] Candidate disconnected: session={session_id}")
+            logger.info(f"[WebSocket] ✅ Candidate disconnected: session={session_id}")
+        else:
+            logger.warning(f"[WebSocket] ⚠️ Attempted to disconnect candidate {session_id} but not in connections")
+        
+        logger.info(f"[WebSocket] Current candidate_connections after disconnect: {list(self.candidate_connections.keys())}")
     
     async def connect_admin(self, assessment_id: str, websocket: WebSocket):
         """Connect an admin's WebSocket for an assessment."""
@@ -136,7 +149,14 @@ class WebSocketManager:
     
     def is_candidate_connected(self, session_id: str) -> bool:
         """Check if a candidate is connected."""
-        return session_id in self.candidate_connections
+        is_connected = session_id in self.candidate_connections
+        logger.info(f"[WebSocket] is_candidate_connected({session_id}) = {is_connected}")
+        logger.info(f"[WebSocket] Current candidate_connections keys: {list(self.candidate_connections.keys())}")
+        if is_connected:
+            websocket = self.candidate_connections.get(session_id)
+            if websocket:
+                logger.info(f"[WebSocket] WebSocket state for {session_id}: client_state={websocket.client_state}, application_state={websocket.application_state}")
+        return is_connected
     
     def get_assessment_id_for_session(self, session_id: str) -> Optional[str]:
         """Get the assessment ID for a session."""
