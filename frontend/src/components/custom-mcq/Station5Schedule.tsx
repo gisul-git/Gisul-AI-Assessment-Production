@@ -40,6 +40,20 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   const [sendingEmails, setSendingEmails] = useState(false);
   const [invitationsSent, setInvitationsSent] = useState(false);
   const [candidateCountWhenSent, setCandidateCountWhenSent] = useState<number>(0);
+  
+  // Candidate Requirements
+  const [requireName, setRequireName] = useState(
+    (assessmentData as any)?.schedule?.candidateRequirements?.requireName ?? false
+  );
+  const [requireEmail, setRequireEmail] = useState(
+    (assessmentData as any)?.schedule?.candidateRequirements?.requireEmail ?? false
+  );
+  const [requireLinkedIn, setRequireLinkedIn] = useState(
+    (assessmentData as any)?.schedule?.candidateRequirements?.requireLinkedIn ?? false
+  );
+  const [requireGithub, setRequireGithub] = useState(
+    (assessmentData as any)?.schedule?.candidateRequirements?.requireGithub ?? false
+  );
 
   useEffect(() => {
     updateAssessmentData({
@@ -55,6 +69,15 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
         liveProctoringEnabled,
       } as CustomMCQAssessment["proctoringSettings"],
       showResultToCandidate,
+      schedule: {
+        ...(assessmentData as any)?.schedule,
+        candidateRequirements: {
+          requireName,
+          requireEmail,
+          requireLinkedIn,
+          requireGithub,
+        },
+      },
     } as any);
   }, [
     accessMode,
@@ -67,6 +90,10 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     aiProctoringEnabled,
     liveProctoringEnabled,
     showResultToCandidate,
+    requireName,
+    requireEmail,
+    requireLinkedIn,
+    requireGithub,
   ]);
 
   const handleSendInvitations = async (template: {
@@ -374,6 +401,52 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
               </div>
             </span>
           </label>
+        </div>
+
+        {/* Candidate Requirements */}
+        <div style={{ padding: "1.5rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
+          <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Candidate Requirements</h3>
+          <p style={{ marginBottom: "1rem", color: "#2D7A52", fontSize: "0.875rem" }}>
+            Select which information candidates must provide before taking the assessment.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={requireName}
+                onChange={(e) => setRequireName(e.target.checked)}
+                style={{ width: "18px", height: "18px", cursor: "pointer" }}
+              />
+              <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Name</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={requireEmail}
+                onChange={(e) => setRequireEmail(e.target.checked)}
+                style={{ width: "18px", height: "18px", cursor: "pointer" }}
+              />
+              <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Email</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={requireLinkedIn}
+                onChange={(e) => setRequireLinkedIn(e.target.checked)}
+                style={{ width: "18px", height: "18px", cursor: "pointer" }}
+              />
+              <span style={{ fontWeight: 600, color: "#1E5A3B" }}>LinkedIn URL</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={requireGithub}
+                onChange={(e) => setRequireGithub(e.target.checked)}
+                style={{ width: "18px", height: "18px", cursor: "pointer" }}
+              />
+              <span style={{ fontWeight: 600, color: "#1E5A3B" }}>GitHub URL</span>
+            </label>
+          </div>
         </div>
 
         {/* Result Visibility Settings */}

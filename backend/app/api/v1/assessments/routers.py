@@ -2933,22 +2933,39 @@ async def get_candidate_results(
                 if not isinstance(response, dict):
                     continue
                     
+                # Extract email and name from response or key
+                email = response.get("email", "")
+                name = response.get("name", "")
+                if not email or not name:
+                    # Try to extract from key format: "email_name"
+                    parts = key.split("_", 1)
+                    if len(parts) == 2:
+                        email = email or parts[0]
+                        name = name or parts[1].replace("_", " ").title()
+                
+                # Get evaluation results if available
+                evaluation = response.get("evaluation", {})
+                evaluation_results = evaluation.get("evaluation_results", {}) if evaluation else {}
+                
                 # Safely extract all fields with defaults
                 result_item = {
-                    "email": response.get("email", ""),
-                    "name": response.get("name", ""),
+                    "email": email,
+                    "name": name,
                     "score": response.get("score", 0),
                     "maxScore": response.get("maxScore", 0),
                     "attempted": response.get("attempted", 0),
                     "notAttempted": response.get("notAttempted", 0),
                     "correctAnswers": response.get("correctAnswers", 0),
-                    "submittedAt": response.get("submittedAt"),
+                    "submittedAt": response.get("submittedAt") or response.get("answers", {}).get("submittedAt"),
                     "startedAt": response.get("startedAt"),
                     # AI evaluation data
                     "aiScore": response.get("aiScore", 0),
                     "percentageScored": response.get("percentageScored", 0),
                     "passPercentage": response.get("passPercentage"),
                     "passed": response.get("passed", False),
+                    # Include evaluation results for detailed view
+                    "evaluation": evaluation if evaluation else None,
+                    "evaluationResults": evaluation_results,
                 }
                 results.append(result_item)
         
@@ -4284,22 +4301,39 @@ async def get_candidate_results(
                 if not isinstance(response, dict):
                     continue
                     
+                # Extract email and name from response or key
+                email = response.get("email", "")
+                name = response.get("name", "")
+                if not email or not name:
+                    # Try to extract from key format: "email_name"
+                    parts = key.split("_", 1)
+                    if len(parts) == 2:
+                        email = email or parts[0]
+                        name = name or parts[1].replace("_", " ").title()
+                
+                # Get evaluation results if available
+                evaluation = response.get("evaluation", {})
+                evaluation_results = evaluation.get("evaluation_results", {}) if evaluation else {}
+                
                 # Safely extract all fields with defaults
                 result_item = {
-                    "email": response.get("email", ""),
-                    "name": response.get("name", ""),
+                    "email": email,
+                    "name": name,
                     "score": response.get("score", 0),
                     "maxScore": response.get("maxScore", 0),
                     "attempted": response.get("attempted", 0),
                     "notAttempted": response.get("notAttempted", 0),
                     "correctAnswers": response.get("correctAnswers", 0),
-                    "submittedAt": response.get("submittedAt"),
+                    "submittedAt": response.get("submittedAt") or response.get("answers", {}).get("submittedAt"),
                     "startedAt": response.get("startedAt"),
                     # AI evaluation data
                     "aiScore": response.get("aiScore", 0),
                     "percentageScored": response.get("percentageScored", 0),
                     "passPercentage": response.get("passPercentage"),
                     "passed": response.get("passed", False),
+                    # Include evaluation results for detailed view
+                    "evaluation": evaluation if evaluation else None,
+                    "evaluationResults": evaluation_results,
                 }
                 results.append(result_item)
         
@@ -6885,5 +6919,4 @@ async def update_website_summary(
     # Fetch updated assessment
     updated_assessment = await _get_assessment(db, assessment_id)
     return success_response("Website summary updated successfully", updated_assessment.get("websiteSummary"))
-
 

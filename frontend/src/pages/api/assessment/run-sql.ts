@@ -7,65 +7,51 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ message: "Method Not Allowed" });
   }
 
-  // Support both old format (for backward compatibility) and new format
   const { 
     assessmentId, 
     assessment_id, 
     questionId, 
     question_id, 
-    sourceCode, 
-    source_code,
-    languageId, 
-    language_id,
-    token, 
-    questionIndex, 
-    testcases 
+    sqlQuery, 
+    sql_query
   } = req.body;
 
-  // Normalize field names - support both camelCase and snake_case
+  // Normalize field names
   const normalizedAssessmentId = assessmentId || assessment_id;
   const normalizedQuestionId = questionId || question_id;
-  const normalizedSourceCode = sourceCode || source_code;
-  const normalizedLanguageId = languageId || language_id;
+  const normalizedSqlQuery = sqlQuery || sql_query;
 
-  if (!normalizedAssessmentId || !normalizedQuestionId || !normalizedSourceCode || normalizedLanguageId === undefined) {
+  if (!normalizedAssessmentId || !normalizedQuestionId || !normalizedSqlQuery) {
     return res.status(400).json({ 
       success: false,
-      message: "Missing required fields: assessmentId, questionId, sourceCode, languageId" 
+      message: "Missing required fields: assessmentId, questionId, sqlQuery" 
     });
   }
 
   try {
-    // Call backend API to run code
-    // Backend endpoint: /api/v1/assessment/run (from code_execution.py)
-    console.log('[API Route] Calling backend /api/v1/assessment/run with:', {
+    // Call backend API to run SQL
+    // Backend endpoint: /api/v1/assessment/run-sql
+    console.log('[API Route] Calling backend /api/v1/assessment/run-sql with:', {
       question_id: normalizedQuestionId,
       assessment_id: normalizedAssessmentId,
-      language_id: normalizedLanguageId,
-      source_code_length: normalizedSourceCode.length
+      sql_query_length: normalizedSqlQuery.length
     });
     
-    const response = await fastApiClient.post("/api/v1/assessment/run", {
+    const response = await fastApiClient.post("/api/v1/assessment/run-sql", {
       question_id: normalizedQuestionId,
-      source_code: normalizedSourceCode,
-      language_id: parseInt(String(normalizedLanguageId)),
+      sql_query: normalizedSqlQuery,
       assessment_id: normalizedAssessmentId,
     });
 
     console.log('[API Route] Backend response status:', response.status);
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
-    console.error("Error in run-code API route:", error);
+    console.error("Error in run-sql API route:", error);
     console.error("Error details:", {
       message: error?.message,
       response: error?.response?.data,
       status: error?.response?.status,
       code: error?.code,
-      config: {
-        url: error?.config?.url,
-        method: error?.config?.method,
-        data: error?.config?.data ? JSON.parse(error?.config?.data) : null
-      }
     });
     
     const statusCode = error?.response?.status || 500;
@@ -73,7 +59,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       error?.response?.data?.detail ||
       error?.response?.data?.message ||
       error?.message ||
-      "Failed to run code";
+      "Failed to run SQL query";
     
     return res.status(statusCode).json({
       success: false,

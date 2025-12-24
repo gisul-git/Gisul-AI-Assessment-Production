@@ -251,6 +251,19 @@ export default function CandidatesPage() {
                     <div style={{ display: "flex", gap: "0.5rem" }}>
                       {candidate.submittedAt && (
                         <>
+                          <Link href={`/assessments/${assessmentId}/candidate-results/${encodeURIComponent(candidate.email)}`}>
+                            <button
+                              type="button"
+                              className="btn-primary"
+                              style={{ 
+                                padding: "0.5rem 1rem", 
+                                fontSize: "0.875rem",
+                                whiteSpace: "nowrap"
+                              }}
+                            >
+                              View Results
+                            </button>
+                          </Link>
                           <Link href={`/assessments/${assessmentId}/analytics?candidate=${encodeURIComponent(candidate.email)}`}>
                             <button
                               type="button"

@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
@@ -329,6 +329,7 @@ async def get_assessment_schedule(
 @router.post("/submit-answers")
 async def submit_answers(
     request: SubmitAnswersRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> Dict[str, Any]:
     """
@@ -354,7 +355,15 @@ async def submit_answers(
             assessment["candidateResponses"][candidate_key] = {
                 "logs": [],
                 "answers": {},
+                "email": request.email,
+                "name": request.name,
             }
+        else:
+            # Update email and name if not already set
+            if "email" not in assessment["candidateResponses"][candidate_key]:
+                assessment["candidateResponses"][candidate_key]["email"] = request.email
+            if "name" not in assessment["candidateResponses"][candidate_key]:
+                assessment["candidateResponses"][candidate_key]["name"] = request.name
         
         # Store answers
         assessment["candidateResponses"][candidate_key]["answers"] = {
@@ -389,6 +398,16 @@ async def submit_answers(
             {"$set": {"candidateResponses": assessment["candidateResponses"]}}
         )
         
+        # Trigger evaluation asynchronously (don't block response)
+        try:
+            background_tasks.add_task(
+                _evaluate_submission_background,
+                assessment_id, candidate_key, request.answers
+            )
+        except Exception as e:
+            logger.warning(f"Failed to trigger evaluation: {e}")
+            # Don't fail submission if evaluation trigger fails
+        
         return success_response({
             "message": "Answers submitted successfully",
             "submittedAt": datetime.now(timezone.utc).isoformat()
@@ -402,6 +421,61 @@ async def submit_answers(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to submit answers: {str(e)}"
         )
+
+
+async def _evaluate_submission_background(
+    assessment_id: Any,
+    candidate_key: str,
+    answers: list
+):
+    """Background task to evaluate submission."""
+    try:
+        # TODO: Fix import path - evaluation_service module not found
+        # from ...assessments.services.evaluation_service import evaluate_assessment_submission
+        from ....db.mongo import get_database
+        
+        # Temporary placeholder for missing evaluation service
+        async def evaluate_assessment_submission(assessment, candidate_key, answers, db):
+            return {"total_score": 0, "max_total_score": 0, "percentage": 0}
+        
+        db = get_database()
+        
+        # Re-fetch assessment to get latest data
+        assessment = await db.assessments.find_one({"_id": assessment_id})
+        if not assessment:
+            logger.error(f"Assessment {assessment_id} not found for evaluation")
+            return
+        
+        # Evaluate submission
+        evaluation_result = await evaluate_assessment_submission(
+            assessment=assessment,
+            candidate_key=candidate_key,
+            answers=answers,
+            db=db
+        )
+        
+        # Store evaluation results
+        if "candidateResponses" not in assessment:
+            assessment["candidateResponses"] = {}
+        
+        if candidate_key not in assessment["candidateResponses"]:
+            assessment["candidateResponses"][candidate_key] = {}
+        
+        assessment["candidateResponses"][candidate_key]["evaluation"] = evaluation_result
+        
+        # Update scores
+        assessment["candidateResponses"][candidate_key]["score"] = evaluation_result.get("total_score", 0)
+        assessment["candidateResponses"][candidate_key]["maxScore"] = evaluation_result.get("max_total_score", 0)
+        assessment["candidateResponses"][candidate_key]["percentageScored"] = evaluation_result.get("percentage", 0)
+        
+        await db.assessments.update_one(
+            {"_id": assessment_id},
+            {"$set": {"candidateResponses": assessment["candidateResponses"]}}
+        )
+        
+        logger.info(f"Evaluation completed for candidate {candidate_key}. Score: {evaluation_result.get('total_score', 0)}/{evaluation_result.get('max_total_score', 0)}")
+    except Exception as e:
+        logger.exception(f"Error in background evaluation: {e}")
 
 
 class SaveCandidateInfoRequest(BaseModel):

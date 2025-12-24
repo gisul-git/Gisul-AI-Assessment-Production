@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 import csv
 import io
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status, UploadFile, File
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status, UploadFile, File, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import ValidationError
 
@@ -268,6 +268,7 @@ async def create_custom_mcq_assessment(
     request: CreateCustomMCQAssessmentRequest,
     current_user: Dict[str, Any] = Depends(require_editor),
     db: AsyncIOMotorDatabase = Depends(get_db),
+    http_request: Request = None,
 ) -> Dict[str, Any]:
     """Create a new custom MCQ assessment (supports draft and scheduled status)"""
     try:
@@ -411,6 +412,18 @@ async def create_custom_mcq_assessment(
         # Use calculated endTime for strict mode, provided endTime for flexible mode
         final_end_time = calculated_end_time if request.examMode == "strict" else request.endTime
         
+        # Extract candidateRequirements from request body if available
+        candidate_requirements = {}
+        if http_request:
+            try:
+                body = await http_request.json()
+                if isinstance(body, dict) and "schedule" in body:
+                    schedule_data = body.get("schedule", {})
+                    if isinstance(schedule_data, dict) and "candidateRequirements" in schedule_data:
+                        candidate_requirements = schedule_data.get("candidateRequirements", {})
+            except Exception:
+                pass  # If parsing fails, use empty dict
+        
         # Create assessment document
         assessment_doc = {
             "title": request.title or "",
@@ -428,6 +441,7 @@ async def create_custom_mcq_assessment(
                 "startTime": to_iso_string(request.startTime),
                 "endTime": to_iso_string(final_end_time),
                 "duration": request.duration,  # In minutes
+                "candidateRequirements": candidate_requirements,
             },
             "accessTimeBeforeStart": request.accessTimeBeforeStart if request.accessTimeBeforeStart is not None else 15,  # Default 15 minutes
             "passPercentage": request.passPercentage,
@@ -558,6 +572,7 @@ async def get_custom_mcq_assessment(
                 "subjectiveTotal": submission_data.get("subjectiveTotal", 0),
                 "answerLogs": submission_data.get("answerLogs", {}),  # Include answer logs
                 "submissions": submission_data.get("submissions", []),  # Include graded submissions with marks
+                "candidateRequirements": submission_data.get("candidateRequirements", {}),  # Include candidate requirements
             })
         
         assessment_serialized["submissionsList"] = submissions_list
@@ -579,6 +594,7 @@ async def update_custom_mcq_assessment(
     request: UpdateCustomMCQAssessmentRequest,
     current_user: Dict[str, Any] = Depends(require_editor),
     db: AsyncIOMotorDatabase = Depends(get_db),
+    http_request: Request = None,
 ) -> Dict[str, Any]:
     """Update a custom MCQ assessment"""
     try:
@@ -708,7 +724,23 @@ async def update_custom_mcq_assessment(
             schedule["duration"] = request.duration
             schedule_updated = True
         
+        # Extract candidateRequirements from request body if available (for update endpoint)
+        candidate_requirements = schedule.get("candidateRequirements", {})
+        if http_request:
+            try:
+                body = await http_request.json()
+                if isinstance(body, dict) and "schedule" in body:
+                    schedule_data = body.get("schedule", {})
+                    if isinstance(schedule_data, dict) and "candidateRequirements" in schedule_data:
+                        candidate_requirements = schedule_data.get("candidateRequirements", {})
+            except Exception:
+                pass  # If parsing fails, preserve existing
+        
         if schedule_updated:
+            schedule["candidateRequirements"] = candidate_requirements
+            update_doc["schedule"] = schedule
+        elif candidate_requirements:  # If schedule not updated but candidateRequirements provided
+            schedule["candidateRequirements"] = candidate_requirements
             update_doc["schedule"] = schedule
         
         if request.passPercentage is not None:
@@ -1430,6 +1462,9 @@ async def submit_custom_mcq_assessment(
         existing_submission = submissions.get(candidate_key, {})
         existing_answer_logs = existing_submission.get("answerLogs", {})
         
+        # Log candidate requirements received
+        logger.info(f"Received candidate requirements for {candidate_key}: {request.candidateRequirements}")
+        
         # Save submission
         submission_data = {
             "candidateInfo": {
@@ -1450,7 +1485,10 @@ async def submit_custom_mcq_assessment(
             "subjectiveScore": subjective_score,
             "subjectiveTotal": subjective_total,
             "answerLogs": existing_answer_logs,  # Preserve answer logs from previous saves
+            "candidateRequirements": request.candidateRequirements if request.candidateRequirements else {},  # Store candidate requirements
         }
+        
+        logger.info(f"Storing candidate requirements in submission: {submission_data.get('candidateRequirements')}")
 
         submissions[candidate_key] = submission_data
 

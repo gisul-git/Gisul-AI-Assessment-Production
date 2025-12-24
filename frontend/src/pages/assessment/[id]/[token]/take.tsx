@@ -12,8 +12,8 @@ import dynamic from "next/dynamic";
 import axios from "axios";
 import { EditorContainer, SubmissionTestcaseResult } from "@/components/dsa/test/EditorContainer";
 import type { SubmissionHistoryEntry } from "@/components/dsa/test/EditorContainer";
-import { SQLEditorContainer } from "@/components/dsa/test/SQLEditorContainer";
-import AIMLCompetencyNotebook from "@/components/aiml/competency/AIMLCompetencyNotebook";
+import { SQLEditorContainer } from "@/components/assessment/editors/SQLEditorContainer";
+import AIMLCompetencyNotebook from "@/components/assessment/editors/AIMLCompetencyNotebook";
 import { QuestionSidebar } from "@/components/dsa/test/QuestionSidebar";
 import { QuestionTabs } from "@/components/dsa/test/QuestionTabs";
 import { JUDGE0_ID_TO_LANG_NAME, getLanguageId, LANGUAGE_IDS } from "@/lib/dsa/judge0";
@@ -112,6 +112,7 @@ interface Question {
   schemas?: Record<string, TableSchema>;
   sample_data?: Record<string, any[][]>;
   hints?: string[];
+  constraints?: string[];
   // AIML-specific fields
   library?: string;
   tasks?: Array<string | { id: string; title: string; description: string }>;
@@ -135,6 +136,7 @@ interface Sections {
   subjective: Question[];
   pseudocode: Question[];
   coding: Question[];
+  sql: Question[];
   aiml: Question[];
 }
 
@@ -188,6 +190,7 @@ export default function CandidateAssessmentPage() {
     subjective: [],
     pseudocode: [],
     coding: [],
+    sql: [],
     aiml: [],
   });
   const [currentSection, setCurrentSection] = useState<keyof Sections | null>(null);
@@ -450,6 +453,7 @@ export default function CandidateAssessmentPage() {
       subjective: [],
       pseudocode: [],
       coding: [],
+      sql: [],
       aiml: [],
     };
     const allQuestions: Question[] = [];
@@ -537,8 +541,8 @@ export default function CandidateAssessmentPage() {
           // Check for SQL or AIML in question_type field first
           const questionTypeField = (question.question_type || "").toLowerCase().trim();
           if (questionTypeField === "sql" || normalizedType === "sql") {
-            // SQL questions go into coding section but are rendered differently
-            sectionKey = "coding";
+            // SQL questions go into their own section
+            sectionKey = "sql";
           } else if (questionTypeField === "aiml" || normalizedType === "aiml") {
             // AIML questions go into their own section
             sectionKey = "aiml";
@@ -576,6 +580,7 @@ export default function CandidateAssessmentPage() {
       pseudocode: sections.pseudocode.length,
       subjective: sections.subjective.length,
       coding: sections.coding.length,
+      sql: sections.sql.length,
       aiml: sections.aiml.length,
       total: allQuestions.length,
     });
@@ -786,31 +791,39 @@ export default function CandidateAssessmentPage() {
         ? (qId as any).toString() 
         : String(qId);
       
-      console.log('[Run Code] Sending request:', {
-        question_id: questionIdStr,
-        language_id: languageId,
-        source_code_length: currentCode.length,
-        question: {
-          _id: question._id,
-          id: question.id,
-          type: question.type,
-          question_type: (question as any).question_type || (question as any).questionType,
-          topicId: (question as any).topicId,
-          rowId: (question as any).rowId,
-        }
-      });
-      
-      // Get assessment ID from router
+      // Get assessment ID from router - this is critical for finding the question
       const assessmentId = router.query.id as string;
       
-      const response = await assessmentApi.post('/run', {
-        question_id: questionIdStr,
-        source_code: currentCode,
-        language_id: languageId,
-        assessment_id: assessmentId,
+      if (!assessmentId) {
+        throw new Error('Assessment ID is missing');
+      }
+      
+      // Verify question has testcases before attempting to run
+      const publicTestCases = question.public_testcases || (question as any).coding_data?.public_testcases || [];
+      if (!publicTestCases || publicTestCases.length === 0) {
+        throw new Error('Question has no public test cases to run');
+      }
+      
+      // Use Next.js API route as proxy to handle CORS and errors better
+      const response = await fetch('/api/assessment/run-code', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          assessmentId: assessmentId,
+          questionId: questionIdStr,
+          sourceCode: currentCode,
+          languageId: languageId,
+        }),
       });
-
-      const result = response.data;
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+        throw new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
+      }
+      
+      const result = await response.json();
 
       const mappedResults: SubmissionTestcaseResult[] = (result.public_results || []).map((r: any) => ({
         visible: true,
@@ -842,7 +855,39 @@ export default function CandidateAssessmentPage() {
       setQuestionStatus(prev => ({ ...prev, [questionId]: 'attempted' }));
     } catch (error: any) {
       console.error('Run error:', error);
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to run code';
+      
+      // Handle network errors more gracefully
+      let errorMessage = 'Failed to run code';
+      
+      if (error.code === 'ECONNREFUSED' || error.code === 'ERR_NETWORK' || error.message?.includes('Network Error')) {
+        // Check if it's a CORS error (which often shows as Network Error)
+        if (error.message?.includes('CORS') || error.code === 'ERR_FAILED') {
+          errorMessage = 'CORS error: Backend may not be running or CORS is not configured. Please check backend logs.';
+        } else {
+          errorMessage = 'Unable to connect to code execution service. Please check your connection and try again.';
+        }
+      } else if (error.response) {
+        // Server responded with error status
+        const status = error.response?.status;
+        const detail = error.response?.data?.detail || error.response?.data?.message;
+        
+        if (status === 404) {
+          errorMessage = `Question not found. The question ID might be incorrect.`;
+        } else if (status === 400) {
+          errorMessage = detail || 'Invalid request. Please check if the question has test cases.';
+        } else if (status === 500) {
+          errorMessage = detail || 'Server error while executing code. Please check backend logs for details.';
+        } else {
+          errorMessage = detail || error.response?.statusText || `Server error: ${status}`;
+        }
+      } else if (error.request) {
+        // Request was made but no response received
+        errorMessage = 'No response from server. Please check if the backend service is running on port 8000.';
+      } else {
+        // Something else happened (like validation error)
+        errorMessage = error.message || 'Failed to run code';
+      }
+      
       setOutput(prev => ({
         ...prev,
         [questionId]: {
@@ -1046,7 +1091,7 @@ export default function CandidateAssessmentPage() {
       logAnalyticsEvent("NAVIGATION_NEXT", { section: currentSection, index: currentQuestionIndex });
       } else {
       // Move to next section
-      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
+      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
       const currentIndex = sectionOrder.indexOf(currentSection);
       if (currentIndex < sectionOrder.length - 1) {
         const nextSection = sectionOrder[currentIndex + 1];
@@ -1066,7 +1111,7 @@ export default function CandidateAssessmentPage() {
       logAnalyticsEvent("NAVIGATION_PREVIOUS", { section: currentSection, index: currentQuestionIndex });
       } else {
       // Move to previous section
-      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
+      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
       const currentIndex = sectionOrder.indexOf(currentSection);
       if (currentIndex > 0) {
         const prevSection = sectionOrder[currentIndex - 1];
@@ -1111,7 +1156,7 @@ export default function CandidateAssessmentPage() {
       // Step 1: Save all answers (force immediate save, clear debounce)
       // Save all pending answers - log each save attempt
       const savePromises: Promise<void>[] = [];
-      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
+      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
       sectionOrder.forEach((section) => {
         sections[section].forEach((question) => {
           const questionId = question._id || `${section}-${sections[section].indexOf(question)}`;
@@ -1189,6 +1234,8 @@ export default function CandidateAssessmentPage() {
           pseudocode: sections.pseudocode.length,
           subjective: sections.subjective.length,
           coding: sections.coding.length,
+          sql: sections.sql.length,
+          aiml: sections.aiml.length,
         },
         examSettings: {
           timerMode: examSettings.timerMode,
@@ -1385,6 +1432,8 @@ export default function CandidateAssessmentPage() {
           subjective: transformed.sections.subjective.length,
           pseudocode: transformed.sections.pseudocode.length,
           coding: transformed.sections.coding.length,
+          sql: transformed.sections.sql.length,
+          aiml: transformed.sections.aiml.length,
           allQuestions: transformed.allQuestions.length,
         });
 
@@ -1398,8 +1447,8 @@ export default function CandidateAssessmentPage() {
 
         setSections(transformed.sections);
 
-        // Set first non-empty section as current (order: MCQ → PseudoCode → Subjective → Coding)
-        const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
+        // Set first non-empty section as current (order: MCQ → PseudoCode → Subjective → Coding → SQL → AIML)
+        const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
         const firstSection = sectionOrder.find((section) => transformed.sections[section].length > 0);
         console.log("[take.tsx] First section:", firstSection);
         if (firstSection) {
@@ -1421,6 +1470,8 @@ export default function CandidateAssessmentPage() {
             pseudocode: transformed.sections.pseudocode.length,
             subjective: transformed.sections.subjective.length,
             coding: transformed.sections.coding.length,
+            sql: transformed.sections.sql.length,
+            aiml: transformed.sections.aiml.length,
           },
         });
         
@@ -1505,6 +1556,7 @@ export default function CandidateAssessmentPage() {
       subjective: "Subjective",
       pseudocode: "Pseudocode",
       coding: "Coding",
+      sql: "SQL",
       aiml: "AIML",
     };
     return names[section] || section;
@@ -1600,69 +1652,60 @@ export default function CandidateAssessmentPage() {
     });
 
     return (
-      <>
-        <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
-          <div style={{ textAlign: "center", maxWidth: "600px" }}>
-            <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem", color: "#1a1625", fontWeight: 700 }}>No Question Available</h1>
-            <p style={{ color: "#64748b", marginBottom: "1rem" }}>
-              {questions.length === 0 
-                ? "No questions were loaded from the assessment." 
-                : `Questions loaded: ${questions.length}, but no current question could be found.`}
-            </p>
-            {questions.length > 0 && (
-              <div style={{ marginTop: "1rem", padding: "1rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", textAlign: "left" }}>
-                <p style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.5rem" }}>Debug Info:</p>
-                <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Current Section: {currentSection || "null"}</p>
-                <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Question Index: {currentQuestionIndex}</p>
-                <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Sections:</p>
-                <ul style={{ fontSize: "0.75rem", color: "#64748b", marginLeft: "1rem" }}>
-                  <li>MCQ: {sections.mcq.length}</li>
-                  <li>Subjective: {sections.subjective.length}</li>
-                  <li>Pseudocode: {sections.pseudocode.length}</li>
-                  <li>Coding: {sections.coding.length}</li>
-                </ul>
-            </div>
-            )}
-            <button
-              onClick={() => {
-                console.log("[take.tsx] Full state:", {
-                  questions,
-                  sections,
-                  currentSection,
-                  currentQuestionIndex,
-                });
-                // Try to set first available section
-                const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
-                const firstSection = sectionOrder.find((section) => sections[section].length > 0);
-                if (firstSection) {
-                  setCurrentSection(firstSection);
-                  setCurrentQuestionIndex(0);
-                }
-              }}
-              style={{
-                marginTop: "1rem",
-                padding: "0.75rem 1.5rem",
-                backgroundColor: "#6953a3",
-                color: "#ffffff",
-                border: "none",
-                borderRadius: "0.5rem",
-                cursor: "pointer",
-                fontSize: "0.875rem",
-                fontWeight: 600,
-              }}
-            >
-              Retry Loading
-            </button>
+      <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
+        <div style={{ textAlign: "center", maxWidth: "600px" }}>
+          <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem", color: "#1a1625", fontWeight: 700 }}>No Question Available</h1>
+          <p style={{ color: "#64748b", marginBottom: "1rem" }}>
+            {questions.length === 0 
+              ? "No questions were loaded from the assessment." 
+              : `Questions loaded: ${questions.length}, but no current question could be found.`}
+          </p>
+          {questions.length > 0 && (
+            <div style={{ marginTop: "1rem", padding: "1rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", textAlign: "left" }}>
+              <p style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.5rem" }}>Debug Info:</p>
+              <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Current Section: {currentSection || "null"}</p>
+              <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Question Index: {currentQuestionIndex}</p>
+              <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Sections:</p>
+              <ul style={{ fontSize: "0.75rem", color: "#64748b", marginLeft: "1rem" }}>
+                <li>MCQ: {sections.mcq.length}</li>
+                <li>Subjective: {sections.subjective.length}</li>
+                <li>Pseudocode: {sections.pseudocode.length}</li>
+                <li>Coding: {sections.coding.length}</li>
+              </ul>
           </div>
+          )}
+          <button
+            onClick={() => {
+              console.log("[take.tsx] Full state:", {
+                questions,
+                sections,
+                currentSection,
+                currentQuestionIndex,
+              });
+              // Try to set first available section
+              const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
+              const firstSection = sectionOrder.find((section) => sections[section].length > 0);
+              if (firstSection) {
+                setCurrentSection(firstSection);
+                setCurrentQuestionIndex(0);
+              }
+            }}
+            style={{
+              marginTop: "1rem",
+              padding: "0.75rem 1.5rem",
+              backgroundColor: "#6953a3",
+              color: "#ffffff",
+              border: "none",
+              borderRadius: "0.5rem",
+              cursor: "pointer",
+              fontSize: "0.875rem",
+              fontWeight: 600,
+            }}
+          >
+            Retry Loading
+          </button>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the assessment."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
-      </>
+      </div>
     );
   }
 
@@ -1726,7 +1769,7 @@ export default function CandidateAssessmentPage() {
               Sections
             </h3>
             <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-              {(["mcq", "pseudocode", "subjective", "coding", "aiml"] as (keyof Sections)[]).map((section) => {
+              {(["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"] as (keyof Sections)[]).map((section) => {
                 const sectionQuestions = sections[section];
                 if (sectionQuestions.length === 0) return null;
 
@@ -1789,8 +1832,8 @@ export default function CandidateAssessmentPage() {
                     </p>
                   </div>
 
-            {/* Question Navigator - Hide for coding and aiml sections (they have their own navigation) */}
-            {currentSection !== "coding" && currentSection !== "aiml" && (
+            {/* Question Navigator - Hide for coding, sql and aiml sections (they have their own navigation) */}
+            {currentSection !== "coding" && currentSection !== "sql" && currentSection !== "aiml" && (
               <div style={{ marginBottom: "1.5rem", padding: "1rem", backgroundColor: "#f8fafc", borderRadius: "0.5rem", border: "1px solid #e2e8f0" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", justifyContent: "center", flexWrap: "wrap" }}>
                 {currentSectionQuestions.map((_, idx) => {
@@ -1843,29 +1886,69 @@ export default function CandidateAssessmentPage() {
             {/* Question Content */}
             {currentSection === "aiml" ? (
               /* AIML Interface - Direct notebook rendering */
-              <div style={{ flex: 1, minHeight: "600px", overflow: "hidden" }}>
+              <div style={{ flex: 1, height: "100%", overflow: "hidden" }}>
                 {(() => {
                   const questionIdStr = questionId;
+                  // Extract AIML data - check both root level and aiml_data nested structure
+                  const aimlData = (currentQuestion as any).aiml_data || {};
+                  const questionTitle = currentQuestion.title || aimlData.title || currentQuestion.questionText || "Question";
+                  // Use questionText if available (contains full formatted content), otherwise use description
+                  // questionText typically contains the full question with Tasks, Constraints, Dataset Schema, etc.
+                  // Also check for 'question' field which might contain the full formatted text
+                  const questionDescription = (currentQuestion as any).question || currentQuestion.questionText || currentQuestion.description || aimlData.description || "";
+                  
+                  console.log('[Assessment Take] AIML Question fields:', {
+                    hasQuestion: !!(currentQuestion as any).question,
+                    hasQuestionText: !!currentQuestion.questionText,
+                    hasDescription: !!currentQuestion.description,
+                    questionLength: ((currentQuestion as any).question || '').length,
+                    questionTextLength: (currentQuestion.questionText || '').length,
+                    descriptionLength: (currentQuestion.description || '').length,
+                  });
+                  const library = currentQuestion.library || aimlData.libraries?.[0] || aimlData.library || "numpy";
+                  const tasks = currentQuestion.tasks || aimlData.tasks || [];
+                  const publicTestcases = currentQuestion.public_testcases || aimlData.public_testcases || [];
+                  const dataset = currentQuestion.dataset || aimlData.dataset || null;
+                  const datasetPath = currentQuestion.dataset_path || aimlData.dataset_path || null;
+                  const datasetUrl = currentQuestion.dataset_url || aimlData.dataset_url || null;
+                  const requiresDataset = currentQuestion.requires_dataset !== undefined 
+                    ? currentQuestion.requires_dataset 
+                    : (aimlData.requires_dataset !== undefined ? aimlData.requires_dataset : false);
+                  
+                  // Handle starter_code - check both locations and formats
+                  let starterCode: Record<string, string> = {};
+                  if (currentQuestion.starter_code) {
+                    starterCode = typeof currentQuestion.starter_code === 'object' 
+                      ? currentQuestion.starter_code 
+                      : { python3: currentQuestion.starter_code || '', python: currentQuestion.starter_code || '' };
+                  } else if (aimlData.starter_code) {
+                    starterCode = typeof aimlData.starter_code === 'object'
+                      ? aimlData.starter_code
+                      : { python3: aimlData.starter_code || '', python: aimlData.starter_code || '' };
+                  } else {
+                    starterCode = { python3: '', python: '' };
+                  }
+
                   const aimlQuestion = {
                     id: questionIdStr,
-                    title: currentQuestion.title || currentQuestion.questionText || "Question",
-                    description: currentQuestion.description || currentQuestion.questionText || "",
-                    library: currentQuestion.library,
-                    starter_code: typeof currentQuestion.starter_code === 'object' 
-                      ? currentQuestion.starter_code 
-                      : { python3: currentQuestion.starter_code || '', python: currentQuestion.starter_code || '' },
-                    tasks: currentQuestion.tasks,
-                    public_testcases: currentQuestion.public_testcases,
-                    dataset: currentQuestion.dataset,
-                    dataset_path: currentQuestion.dataset_path,
-                    dataset_url: currentQuestion.dataset_url,
-                    requires_dataset: currentQuestion.requires_dataset,
+                    title: questionTitle,
+                    description: questionDescription,
+                    library: library,
+                    starter_code: starterCode,
+                    tasks: tasks,
+                    public_testcases: publicTestcases,
+                    dataset: dataset,
+                    dataset_path: datasetPath,
+                    dataset_url: datasetUrl,
+                    requires_dataset: requiresDataset,
                   };
 
                   return (
                     <AIMLCompetencyNotebook
                       question={aimlQuestion}
                       sessionId={`assessment_${id}_question_${questionIdStr}`}
+                      testId={id as string}
+                      userId={candidateEmail}
                       onCodeChange={(allCode) => {
                         setCode({ ...code, [questionIdStr]: allCode });
                         setCodeAnswers((prev) => {
@@ -1882,6 +1965,349 @@ export default function CandidateAssessmentPage() {
                     />
                   );
                 })()}
+              </div>
+            ) : currentSection === "sql" ? (
+              /* SQL Interface - Description and SQL Editor side by side */
+              <div style={{ flex: 1, minHeight: "600px", overflow: "hidden", display: "flex", height: "100%" }}>
+                <Split
+                  className="flex h-full w-full"
+                  sizes={[40, 60]}
+                  minSize={[300, 400]}
+                  gutterSize={8}
+                  gutterStyle={() => ({ backgroundColor: "#334155" })}
+                >
+                  {/* Left Panel - Question Description */}
+                  <div className="h-full overflow-hidden bg-slate-900">
+                    {(() => {
+                      // Extract only the problem statement part from description
+                      // Backend stores full formatted text in 'question' field: "**{title}**\n\n{description}\n\n**Database Schema:**\n...\n**Sample Data:**\n...\n**Requirements:**\n...\n**Hints:**\n..."
+                      // Check all possible fields: question (backend stores here), questionText, description
+                      let problemDescription = (currentQuestion as any).question || currentQuestion.questionText || currentQuestion.description || "";
+                      
+                      // Extract title from the question text (format: **{title}**\n\n{description}...)
+                      // The title field might contain the full question text, so extract just the title part
+                      let questionTitle = "SQL Question";
+                      if (problemDescription) {
+                        // Extract title from markdown format: **Title** at the start
+                        const titleMatch = problemDescription.match(/^\*\*([^*]+)\*\*\s*\n\n/i);
+                        if (titleMatch && titleMatch[1]) {
+                          questionTitle = titleMatch[1].trim();
+                        } else if (currentQuestion.title) {
+                          // If title field exists, check if it's just the title or full text
+                          // If it contains newlines or is very long, it's probably the full text
+                          if (currentQuestion.title.length < 200 && !currentQuestion.title.includes('\n\n')) {
+                            questionTitle = currentQuestion.title;
+                          } else {
+                            // Extract title from the title field itself
+                            const titleFromTitleField = currentQuestion.title.match(/^\*\*([^*]+)\*\*/i);
+                            if (titleFromTitleField && titleFromTitleField[1]) {
+                              questionTitle = titleFromTitleField[1].trim();
+                            }
+                          }
+                        }
+                      } else if (currentQuestion.title && currentQuestion.title.length < 200 && !currentQuestion.title.includes('\n\n')) {
+                        questionTitle = currentQuestion.title;
+                      }
+                      
+                      // ALWAYS extract if we have any description - don't skip extraction
+                      if (problemDescription && problemDescription.trim().length > 0) {
+                        // Step 1: Remove title from description if it's included (backend format: **{title}**\n\n{description})
+                        // Try flexible pattern first - remove any markdown title at the start
+                        const flexibleTitlePattern = /^\*\*[^*]+\*\*\s*\n\n/i;
+                        if (flexibleTitlePattern.test(problemDescription)) {
+                          problemDescription = problemDescription.replace(flexibleTitlePattern, '').trim();
+                        }
+                        
+                        // Step 2: Find the first occurrence of any section marker and extract only text before it
+                        // Backend format (from ai_sql_generator.py):
+                        // - "\n\n**Database Schema:**\n" (double newline before Database Schema)
+                        // - "\n**Sample Data:**\n" (single newline before Sample Data)
+                        // - "\n**Requirements:**\n" (single newline before Requirements)
+                        // - "\n**Hints:**\n" (single newline before Hints)
+                        const sectionPatterns = [
+                          // Database Schema patterns (most common first - backend uses double newline)
+                          /\n\n\*\*Database\s+Schema\*\*:?\s*\n/i,
+                          /\n\*\*Database\s+Schema\*\*:?\s*\n/i,
+                          /\*\*Database\s+Schema\*\*:?\s*\n/i,
+                          /Database\s+Schema:?\s*\n/i,
+                          // Sample Data patterns (backend uses single newline)
+                          /\n\*\*Sample\s+Data\*\*:?\s*\n/i,
+                          /\n\n\*\*Sample\s+Data\*\*:?\s*\n/i,
+                          /\*\*Sample\s+Data\*\*:?\s*\n/i,
+                          /Sample\s+Data:?\s*\n/i,
+                          // Requirements patterns (backend uses single newline)
+                          /\n\*\*Requirements?\*\*:?\s*\n/i,
+                          /\n\n\*\*Requirements?\*\*:?\s*\n/i,
+                          /\*\*Requirements?\*\*:?\s*\n/i,
+                          /Requirements?:?\s*\n/i,
+                          // Hints patterns (backend uses single newline)
+                          /\n\*\*Hints?\*\*:?\s*\n/i,
+                          /\n\n\*\*Hints?\*\*:?\s*\n/i,
+                          /\*\*Hints?\*\*:?\s*\n/i,
+                          /Hints?:?\s*\n/i,
+                        ];
+                        
+                        // Find the first occurrence of any section marker
+                        let minIndex = problemDescription.length;
+                        for (const pattern of sectionPatterns) {
+                          const match = problemDescription.search(pattern);
+                          if (match !== -1) {
+                            minIndex = Math.min(minIndex, match);
+                          }
+                        }
+                        
+                        // Also check for table name patterns that might appear in schema/data sections
+                        // These appear as: \n**Table: `table_name`**\n (in schema section)
+                        // But only match if they appear after a reasonable description length (to avoid matching titles)
+                        if (problemDescription.length > 100) {
+                          const tablePattern = /\n\*\*Table:\s*`[^`]+`\*\*\s*\n/i;
+                          const tableMatch = problemDescription.search(tablePattern);
+                          if (tableMatch !== -1 && tableMatch > 50) {
+                            minIndex = Math.min(minIndex, tableMatch);
+                          }
+                        }
+                        
+                        // If we found a section marker, extract only text before it
+                        if (minIndex < problemDescription.length && minIndex > 0) {
+                          problemDescription = problemDescription.substring(0, minIndex).trim();
+                        }
+                        
+                        // Step 3: Final cleanup pass - remove any remaining section markers or content
+                        // This handles cases where patterns might have been missed
+                        problemDescription = problemDescription
+                          .replace(/\*\*Database\s+Schema\*\*:?[\s\S]*$/i, '')
+                          .replace(/\*\*Sample\s+Data\*\*:?[\s\S]*$/i, '')
+                          .replace(/\*\*Requirements?\*\*:?[\s\S]*$/i, '')
+                          .replace(/\*\*Hints?\*\*:?[\s\S]*$/i, '')
+                          .replace(/Database\s+Schema:?[\s\S]*$/i, '')
+                          .replace(/Sample\s+Data:?[\s\S]*$/i, '')
+                          .replace(/Requirements?:?[\s\S]*$/i, '')
+                          .replace(/Hints?:?[\s\S]*$/i, '')
+                          .trim();
+                        
+                        // Step 4: Remove duplicate paragraphs (if the same text appears twice)
+                        // Split by double newlines to get paragraphs
+                        const paragraphs = problemDescription.split(/\n\s*\n/).filter((p: string) => p.trim().length > 0);
+                        const uniqueParagraphs: string[] = [];
+                        const seenNormalized = new Set<string>();
+                        
+                        for (const para of paragraphs) {
+                          // Normalize: lowercase, remove extra spaces, remove markdown formatting
+                          const normalized = para
+                            .trim()
+                            .toLowerCase()
+                            .replace(/\*\*/g, '') // Remove bold markdown
+                            .replace(/`/g, '') // Remove code markdown
+                            .replace(/\s+/g, ' ') // Normalize whitespace
+                            .substring(0, 200); // Only compare first 200 chars for performance
+                          
+                          // Check if this normalized paragraph is very similar to any we've seen
+                          let isDuplicate = false;
+                          const seenArray = Array.from(seenNormalized);
+                          for (const seen of seenArray) {
+                            // Simple similarity check: if one contains the other (80% overlap), consider it duplicate
+                            const shorter = normalized.length < seen.length ? normalized : seen;
+                            const longer = normalized.length >= seen.length ? normalized : seen;
+                            if (longer.includes(shorter) && shorter.length / longer.length > 0.8) {
+                              isDuplicate = true;
+                              break;
+                            }
+                            // Also check if they're very similar in length and content
+                            if (Math.abs(normalized.length - seen.length) < 10 && 
+                                normalized.substring(0, Math.min(50, normalized.length)) === seen.substring(0, Math.min(50, seen.length))) {
+                              isDuplicate = true;
+                              break;
+                            }
+                          }
+                          
+                          if (!isDuplicate) {
+                            uniqueParagraphs.push(para.trim());
+                            seenNormalized.add(normalized);
+                          }
+                        }
+                        
+                        problemDescription = uniqueParagraphs.join('\n\n');
+                        
+                        // Step 5: Clean up any trailing markdown or formatting
+                        problemDescription = problemDescription.replace(/\*\*+$/, '').trim();
+                        problemDescription = problemDescription.replace(/\n{3,}/g, '\n\n'); // Normalize multiple newlines
+                        problemDescription = problemDescription.replace(/[-=]{3,}$/, '').trim();
+                        // Remove any trailing bullet points or list markers that might be from removed sections
+                        problemDescription = problemDescription.replace(/\n[-*]\s+[^\n]*$/gm, '').trim();
+                      }
+                      
+                      // Get constraints from structured data, but don't pass them to QuestionTabs if they're already in description
+                      // The SQLEditorContainer will display constraints separately
+                      const sqlData = (currentQuestion as any).sql_data || {};
+                      const structuredConstraints = currentQuestion.constraints || sqlData.constraints || [];
+                      
+                      // If we have structured constraints, don't pass them to QuestionTabs to avoid duplication
+                      // QuestionTabs will only show constraints if they're not already in the description
+                      const constraintsForTabs = structuredConstraints.length > 0 ? [] : (currentQuestion.constraints || []);
+                      
+                      return (
+                        <QuestionTabs question={{
+                          id: questionId,
+                          title: questionTitle,
+                          description: problemDescription,
+                          difficulty: currentQuestion.difficulty || "Medium",
+                          examples: [],
+                          constraints: constraintsForTabs,
+                          public_testcases: currentQuestion.public_testcases || [],
+                          hidden_testcases: currentQuestion.hidden_testcases || [],
+                        }} />
+                      );
+                    })()}
+                  </div>
+
+                  {/* Right Panel - SQL Editor */}
+                  <div className="h-full overflow-hidden bg-slate-950 flex flex-col" style={{ minHeight: 0, display: "flex", flexDirection: "column" }}>
+                    <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+                      {(() => {
+                        const questionIdStr = questionId;
+                        const currentCode = code[questionIdStr] || codeAnswers.get(questionIdStr) || currentQuestion.starter_query || '-- Write your SQL query here\n\nSELECT ';
+                        
+                        // Prepare SQL question data with schemas and sample_data
+                        // SQLEditorContainer expects: id, title, description, schemas, sample_data, sql_category, constraints, starter_query
+                        // SQL data can be in sql_data nested object or at root level
+                        const sqlData = (currentQuestion as any).sql_data || {};
+                        const sqlQuestion: any = {
+                          id: questionIdStr,
+                          title: currentQuestion.title || currentQuestion.questionText || "SQL Question",
+                          description: currentQuestion.description || currentQuestion.questionText || "",
+                          difficulty: currentQuestion.difficulty || "Medium",
+                          question_type: 'SQL' as const,
+                          schemas: currentQuestion.schemas || sqlData.schemas || {},
+                          sample_data: currentQuestion.sample_data || sqlData.sample_data || {},
+                          sql_category: currentQuestion.sql_category || sqlData.sql_category,
+                          constraints: currentQuestion.constraints || sqlData.constraints || [],
+                          starter_query: currentQuestion.starter_query || sqlData.starter_query || '-- Write your SQL query here\n\nSELECT ',
+                          hints: currentQuestion.hints || sqlData.hints || [],
+                        };
+
+                        return (
+                          <SQLEditorContainer
+                            code={currentCode}
+                            question={sqlQuestion}
+                            onCodeChange={(newCode) => {
+                              const updatedCode = { ...code, [questionIdStr]: newCode };
+                              setCode(updatedCode);
+                              setCodeAnswers((prev) => {
+                                const updated = new Map(prev);
+                                updated.set(questionIdStr, newCode);
+                                return updated;
+                              });
+                              saveAnswer(questionIdStr, newCode, currentSection);
+                            }}
+                            onRun={async () => {
+                              const questionId = questionIdStr;
+                              const currentCode = code[questionId] || codeAnswers.get(questionId) || '';
+                              
+                              if (!currentCode || currentCode.trim() === '') {
+                                setOutput(prev => ({
+                                  ...prev,
+                                  [questionId]: {
+                                    stderr: 'Please write a SQL query before running.',
+                                    status: 'error'
+                                  }
+                                }));
+                                return;
+                              }
+                              
+                              setRunning(true);
+                              setOutput(prev => ({ ...prev, [questionId]: {} }));
+                              
+                              try {
+                                // Get assessment ID from router
+                                const assessmentId = router.query.id as string;
+                                
+                                if (!assessmentId) {
+                                  throw new Error('Assessment ID is missing');
+                                }
+                                
+                                // Call SQL run endpoint via Next.js API route
+                                const response = await fetch('/api/assessment/run-sql', {
+                                  method: 'POST',
+                                  headers: {
+                                    'Content-Type': 'application/json',
+                                  },
+                                  body: JSON.stringify({
+                                    assessmentId: assessmentId,
+                                    questionId: questionIdStr,
+                                    sqlQuery: currentCode,
+                                  }),
+                                });
+                                
+                                if (!response.ok) {
+                                  const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+                                  throw new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
+                                }
+                                
+                                const result = await response.json();
+                                
+                                // Format output based on result
+                                if (result.status === 'executed') {
+                                  setOutput(prev => ({
+                                    ...prev,
+                                    [questionId]: {
+                                      stdout: result.output || 'Query executed successfully',
+                                      status: 'success'
+                                    }
+                                  }));
+                                } else if (result.status === 'syntax_error') {
+                                  setOutput(prev => ({
+                                    ...prev,
+                                    [questionId]: {
+                                      stderr: result.error || result.message || 'SQL syntax error',
+                                      status: 'error'
+                                    }
+                                  }));
+                                } else {
+                                  setOutput(prev => ({
+                                    ...prev,
+                                    [questionId]: {
+                                      stderr: result.error || result.message || 'Execution failed',
+                                      status: 'error'
+                                    }
+                                  }));
+                                }
+                              } catch (error: any) {
+                                console.error('SQL run error:', error);
+                                setOutput(prev => ({
+                                  ...prev,
+                                  [questionId]: {
+                                    stderr: error.message || 'Failed to run SQL query',
+                                    status: 'error'
+                                  }
+                                }));
+                              } finally {
+                                setRunning(false);
+                              }
+                            }}
+                            onSubmit={async () => {
+                              const currentCode = code[questionIdStr] || codeAnswers.get(questionIdStr) || '';
+                              if (currentCode) {
+                                await saveAnswer(questionIdStr, currentCode, currentSection);
+                              }
+                            }}
+                            onReset={() => {
+                              const starterQuery = currentQuestion.starter_query || '-- Write your SQL query here\n\nSELECT ';
+                              setCode({ ...code, [questionIdStr]: starterQuery });
+                              setCodeAnswers((prev) => {
+                                const updated = new Map(prev);
+                                updated.set(questionIdStr, starterQuery);
+                                return updated;
+                              });
+                            }}
+                            running={running}
+                            submitting={submitting}
+                            output={output[questionIdStr] || {}}
+                          />
+                        );
+                      })()}
+                    </div>
+                  </div>
+                </Split>
               </div>
             ) : currentSection === "coding" ? (
               /* DSA-style layout for coding questions - Description and Editor side by side */
@@ -2199,7 +2625,7 @@ export default function CandidateAssessmentPage() {
                 </div>
               )}
 
-              {currentQuestion.type && (currentQuestion.type.toLowerCase() === "subjective" || currentQuestion.type.toLowerCase() === "pseudocode") && (
+              {((currentQuestion.type && (currentQuestion.type.toLowerCase() === "subjective" || currentQuestion.type.toLowerCase() === "pseudocode" || currentQuestion.type.toLowerCase() === "pseudo code")) || currentSection === "subjective" || currentSection === "pseudocode") && (
                 <div style={{ marginBottom: "1.5rem" }}>
                 <textarea
                     value={answers.get(questionId) || ""}
@@ -2220,7 +2646,7 @@ export default function CandidateAssessmentPage() {
                     border: "1px solid #e2e8f0",
                     borderRadius: "0.5rem",
                     fontSize: "0.875rem",
-                      fontFamily: currentQuestion.type && currentQuestion.type.toLowerCase() === "pseudocode" ? "monospace" : "inherit",
+                      fontFamily: (currentQuestion.type && (currentQuestion.type.toLowerCase() === "pseudocode" || currentQuestion.type.toLowerCase() === "pseudo code")) || currentSection === "pseudocode" ? "monospace" : "inherit",
                     resize: "vertical",
                     }}
                   />
