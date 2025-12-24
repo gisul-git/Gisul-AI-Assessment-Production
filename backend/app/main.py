@@ -236,6 +236,9 @@ app = FastAPI(
     description="Backend API for AI-powered assessment platform",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None,    # Disables /docs
+    redoc_url=None    # Disables /redoc
+ 
 )
 
 # CORS middleware

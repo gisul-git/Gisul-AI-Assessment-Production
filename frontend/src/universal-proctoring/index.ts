@@ -106,7 +106,7 @@ export {
   isBlinking,
   calculateGazeDirection,
   extractEyeLandmarks,
-  createThrottleTracker,
+  // createThrottleTracker - REMOVED: Legacy helper replaced by incident-based state machines
   createConsecutiveCounter,
   getTimestamp,
   FACE_MESH_LANDMARKS,
@@ -156,3 +156,6 @@ export {
   getAdminLiveService,
   resetAdminLiveService,
 } from "./live";
+
+// Utilities
+export { resolveUserIdForProctoring } from "./utils/resolveUserId";

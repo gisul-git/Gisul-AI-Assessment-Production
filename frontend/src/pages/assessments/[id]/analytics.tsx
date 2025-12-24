@@ -9,6 +9,7 @@ import Link from 'next/link'
 import axios from 'axios'
 import { ArrowLeft, AlertTriangle, Clock, Video, Eye, Loader2 } from 'lucide-react'
 import LiveProctoringDashboard from '../../../components/proctor/LiveProctoringDashboard'
+import ProctorLogsReview from '../../../components/admin/ProctorLogsReview'
 
 interface AnswerLog {
   answer: string
@@ -93,49 +94,22 @@ export default function AnalyticsPage() {
     }
   }
 
-  const fetchProctorLogs = async (email: string) => {
-    if (!assessmentId || typeof assessmentId !== 'string') return
+  const fetchProctorLogs = async (userId: string) => {
+    if (!assessmentId || typeof assessmentId !== 'string' || !userId) return
     
     setLoadingProctorLogs(true)
     try {
-      // First try with email
-      let response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(email)}`)
-      let data = await response.json()
+      console.log('[Analytics] Fetching proctor logs with userId:', userId)
       
-      if (data.success && data.data && data.data.logs && data.data.logs.length > 0) {
+      const response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(userId)}`)
+      const data = await response.json()
+      
+      if (data.success && data.data && data.data.logs) {
         setProctorLogs(data.data.logs)
         setEventTypeLabels(data.data.eventTypeLabels || {})
       } else {
-        // If no logs found with email, try fetching all logs for this assessment
-        // and filter by candidate name or email pattern
-        console.log('[Analytics] No logs found with email, trying assessment-wide search...')
-        
-        // Try to get all logs for this assessment (backend may need update for this)
-        response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=*`)
-        data = await response.json()
-        
-        if (data.success && data.data && data.data.logs) {
-          // Filter logs that might belong to this candidate
-          const allLogs = data.data.logs || []
-          const candidateLogs = allLogs.filter((log: any) => {
-            const userId = log.userId || ''
-            return userId === email || 
-                   userId.includes(email.split('@')[0]) ||
-                   userId.startsWith('candidate-')
-          })
-          
-          if (candidateLogs.length > 0) {
-            console.log(`[Analytics] Found ${candidateLogs.length} logs via pattern matching`)
-            setProctorLogs(candidateLogs)
-            setEventTypeLabels(data.data.eventTypeLabels || {})
-          } else {
-            setProctorLogs([])
-            setEventTypeLabels({})
-          }
-        } else {
-          setProctorLogs([])
-          setEventTypeLabels({})
-        }
+        setProctorLogs([])
+        setEventTypeLabels({})
       }
     } catch (error) {
       console.error('Error fetching proctor logs:', error)
@@ -1155,63 +1129,10 @@ export default function AnalyticsPage() {
                       No proctoring violations detected
                     </div>
                   ) : showProctorLogs ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "400px", overflowY: "auto" }}>
-                      {proctorLogs.map((log, index) => (
-                        <div
-                          key={log._id || index}
-                          style={{
-                            border: "1px solid #fecaca",
-                            borderRadius: "0.5rem",
-                            padding: "1rem",
-                            backgroundColor: "#fef2f2",
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "0.5rem" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                              <AlertTriangle style={{ width: "16px", height: "16px", color: "#dc2626" }} />
-                              <span style={{ fontWeight: 600, color: "#dc2626", fontSize: "0.875rem" }}>
-                                {eventTypeLabels[log.eventType] || log.eventType || 'Unknown Violation'}
-                              </span>
-                            </div>
-                            <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", color: "#64748b" }}>
-                              <Clock style={{ width: "12px", height: "12px" }} />
-                              <span>{formatDate(log.timestamp)}</span>
-                            </div>
-                          </div>
-                          
-                          {log.metadata && Object.keys(log.metadata).length > 0 && (
-                            <div style={{ marginTop: "0.5rem", fontSize: "0.875rem" }}>
-                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Details:</div>
-                              <div style={{ backgroundColor: "#f8fafc", borderRadius: "0.375rem", padding: "0.5rem", fontFamily: "monospace", fontSize: "0.75rem" }}>
-                                {Object.entries(log.metadata).map(([key, value]) => (
-                                  <div key={key} style={{ marginBottom: "0.25rem" }}>
-                                    <span style={{ color: "#64748b" }}>{key}:</span>{' '}
-                                    <span style={{ color: "#1e293b" }}>
-                                      {typeof value === 'object' ? JSON.stringify(value) : String(value)}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {log.snapshotBase64 && (
-                            <div style={{ marginTop: "0.75rem" }}>
-                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.5rem" }}>Evidence Snapshot:</div>
-                              <img
-                                src={log.snapshotBase64.startsWith("data:") ? log.snapshotBase64 : `data:image/png;base64,${log.snapshotBase64}`}
-                                alt="Violation snapshot"
-                                style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #e2e8f0", maxHeight: "200px" }}
-                                onError={(e) => {
-                                  console.error("Error loading snapshot image:", e);
-                                  (e.target as HTMLImageElement).style.display = "none";
-                                }}
-                              />
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
+                    <ProctorLogsReview 
+                      logs={proctorLogs}
+                      candidateName={userData?.user_name || userData?.email}
+                    />
                   ) : null}
                 </div>
 
