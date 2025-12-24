@@ -23,7 +23,11 @@ interface EvaluationResult {
   total_tests?: number
   ai_feedback?: any
   error?: string
+  strengths?: string[]
+  improvements?: string[]
+  candidate_code?: string
 }
+
 
 interface CandidateResult {
   email: string

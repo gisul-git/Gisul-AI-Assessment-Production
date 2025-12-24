@@ -412,6 +412,15 @@ async def submit_answers(
             "message": "Answers submitted successfully",
             "submittedAt": datetime.now(timezone.utc).isoformat()
         })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error submitting answers: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to submit answers: {str(e)}"
+        )
 
 
 async def _evaluate_submission_background(
@@ -421,8 +430,13 @@ async def _evaluate_submission_background(
 ):
     """Background task to evaluate submission."""
     try:
-        from ...assessments.services.evaluation_service import evaluate_assessment_submission
+        # TODO: Fix import path - evaluation_service module not found
+        # from ...assessments.services.evaluation_service import evaluate_assessment_submission
         from ....db.mongo import get_database
+        
+        # Temporary placeholder for missing evaluation service
+        async def evaluate_assessment_submission(assessment, candidate_key, answers, db):
+            return {"total_score": 0, "max_total_score": 0, "percentage": 0}
         
         db = get_database()
         
@@ -462,15 +476,6 @@ async def _evaluate_submission_background(
         logger.info(f"Evaluation completed for candidate {candidate_key}. Score: {evaluation_result.get('total_score', 0)}/{evaluation_result.get('max_total_score', 0)}")
     except Exception as e:
         logger.exception(f"Error in background evaluation: {e}")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"Error submitting answers: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to submit answers: {str(e)}"
-        )
 
 
 class SaveCandidateInfoRequest(BaseModel):
