@@ -3,8 +3,7 @@ import { useRouter } from "next/router";
 import { GetServerSideProps } from "next";
 import { requireAuth } from "../../lib/auth";
 import Link from "next/link";
-import axios from "axios";
-import AIMLCompetencyNotebook from "@/components/assessment/editors/AIMLCompetencyNotebook";
+import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
 
 // ============================================
 // QUESTION RENDERING COMPONENTS
@@ -1546,94 +1545,41 @@ const renderSqlQuestion = (question: any, isEditing: boolean, onEditChange?: (va
   );
 };
 
-// Helper function to transform question data to AIML editor format
-const transformQuestionForAIMLEditor = (question: any) => {
-  const aimlData = question.aiml_data || {};
-  const questionId = question.id || question._id || `aiml-${Date.now()}`;
-  const title = question.title || question.question || question.questionText || "AIML Question";
-  const description = aimlData.description || question.question || question.questionText || "";
-  const library = aimlData.libraries?.[0] || question.library || "numpy";
-  const starterCode = question.starter_code || aimlData.starter_code || {};
-  const tasks = aimlData.tasks || [];
-  const dataset = aimlData.dataset || question.dataset || null;
-  const datasetPath = question.dataset_path || aimlData.dataset_path || null;
-  const datasetUrl = question.dataset_url || aimlData.dataset_url || null;
-  const requiresDataset = aimlData.requires_dataset || question.requires_dataset || false;
-
-  return {
-    id: questionId,
-    title: title,
-    description: description,
-    library: library,
-    starter_code: starterCode,
-    tasks: tasks,
-    dataset: dataset,
-    dataset_path: datasetPath,
-    dataset_url: datasetUrl,
-    requires_dataset: requiresDataset,
-    public_testcases: question.public_testcases || aimlData.public_testcases || [],
-  };
-};
-
-// Helper function to transform AIML editor data back to question format
-const transformAIMLEditorDataToQuestion = (editorData: any, originalQuestion: any) => {
-  // Extract data from editor (if it provides structured data)
-  // For now, we'll preserve the original structure and update what we can
-  const aimlData = originalQuestion.aiml_data || {};
-  
-  return {
-    ...originalQuestion,
-    aiml_data: {
-      ...aimlData,
-      description: editorData.description || aimlData.description,
-      tasks: editorData.tasks || aimlData.tasks || [],
-      libraries: editorData.library ? [editorData.library] : aimlData.libraries || [],
-      dataset: editorData.dataset || aimlData.dataset,
-      dataset_path: editorData.dataset_path || aimlData.dataset_path,
-      dataset_url: editorData.dataset_url || aimlData.dataset_url,
-      requires_dataset: editorData.requires_dataset !== undefined ? editorData.requires_dataset : aimlData.requires_dataset,
-      starter_code: editorData.starter_code || aimlData.starter_code,
-    },
-    title: editorData.title || originalQuestion.title,
-    question: editorData.description || originalQuestion.question,
-    questionText: editorData.description || originalQuestion.questionText,
-    starter_code: editorData.starter_code || originalQuestion.starter_code,
-    library: editorData.library || originalQuestion.library,
-  };
-};
-
-// AIML Question Renderer - uses AIML editor when editing, pretty UI when viewing
+// AIML Question Renderer - pretty UI using dataset when available
 const renderAimlQuestion = (question: any, isEditing: boolean, onEditChange?: (value: string) => void) => {
-  // When editing, use the full AIML editor
+  // When editing, fall back to simple subjective-style text editing for now
   if (isEditing && onEditChange) {
-    const editorQuestion = transformQuestionForAIMLEditor(question);
-    const sessionId = `assessment-edit-${question.id || question._id || 'new'}`;
-
+    const questionText = question.question || question.questionText || "";
     return (
-      <div style={{ height: "600px", border: "1px solid #e2e8f0", borderRadius: "0.5rem", overflow: "hidden" }}>
-        <AIMLCompetencyNotebook
-          question={editorQuestion}
-          sessionId={sessionId}
-          onCodeChange={(allCode: string) => {
-            // Update starter_code when code changes
-            const updatedQuestion = {
-              ...question,
-              starter_code: {
-                python3: allCode,
-                python: allCode,
-              },
-              aiml_data: {
-                ...(question.aiml_data || {}),
-                starter_code: {
-                  python3: allCode,
-                  python: allCode,
+      <div>
+        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+          Question text (shown to candidates):
+        </label>
+        <textarea
+          value={questionText}
+          onChange={(e) =>
+            onEditChange(
+              JSON.stringify(
+                {
+                  ...question,
+                  question: e.target.value,
+                  questionText: e.target.value,
                 },
-              },
-            };
-            onEditChange(JSON.stringify(updatedQuestion, null, 2));
+                null,
+                2
+              )
+            )
+          }
+          style={{
+            width: "100%",
+            minHeight: "160px",
+            padding: "0.75rem",
+            border: "1px solid #e2e8f0",
+            borderRadius: "0.5rem",
+            fontSize: "0.875rem",
+            fontFamily: "monospace",
           }}
-          readOnly={false}
-          showSubmit={false}
+          placeholder="Edit the AIML question text..."
         />
       </div>
     );
