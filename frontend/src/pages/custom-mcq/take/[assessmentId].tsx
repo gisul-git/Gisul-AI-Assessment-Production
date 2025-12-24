@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/router";
 import { customMCQApi } from "../../../lib/custom-mcq/api";
 import { CustomMCQAssessment, MCQQuestion, SubjectiveQuestion, Question } from "../../../types/custom-mcq";
-import { useUniversalProctoring, CandidateLiveService, type ProctoringViolation } from "@/universal-proctoring";
+import { useUniversalProctoring, CandidateLiveService, resolveUserIdForProctoring, type ProctoringViolation } from "@/universal-proctoring";
 import WebcamPreview from "../../../components/WebcamPreview";
 import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
 import { FullscreenLockOverlay } from "@/components/FullscreenLockOverlay";
@@ -93,13 +93,13 @@ export default function CustomMCQTakePage() {
       timestamp: violation.timestamp,
     });
 
-    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
-    if (violation.eventType === 'FULLSCREEN_EXIT') {
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay (only when AI Proctoring enabled)
+    if (violation.eventType === 'FULLSCREEN_EXIT' && cameraProctorEnabled) {
       console.log('[Custom MCQ Take] FULLSCREEN_EXIT violation - locking screen');
       setFullscreenLocked(true);
       incrementFullscreenExitCount();
     }
-  }, [setFullscreenLocked, incrementFullscreenExitCount]);
+  }, [setFullscreenLocked, incrementFullscreenExitCount, cameraProctorEnabled]);
 
   // Handle fullscreen re-entry - unlock the screen
   const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
@@ -196,6 +196,9 @@ export default function CustomMCQTakePage() {
       debugMode: debugMode,
     });
 
+    // Get existing webcam stream from video element (if camera already started by Universal Proctoring)
+    const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
+
     liveService.start(
       {
         onStateChange: (state) => {
@@ -205,7 +208,8 @@ export default function CustomMCQTakePage() {
           console.error('[Custom MCQ Take] Live Proctoring error:', error);
         },
       },
-      liveProctorScreenStream
+      liveProctorScreenStream,
+      existingWebcamStream
     ).then((success) => {
       if (success) {
         console.log('[Custom MCQ Take] ✅ Live Proctoring started');
@@ -729,13 +733,16 @@ export default function CustomMCQTakePage() {
         <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div>Loading assessment...</div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the assessment."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the assessment."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     );
   }
@@ -749,13 +756,16 @@ export default function CustomMCQTakePage() {
             <p>Assessment not found</p>
           </div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the assessment."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the assessment."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     );
   }
@@ -792,13 +802,16 @@ export default function CustomMCQTakePage() {
               </div>
             </div>
           </div>
-          <FullscreenLockOverlay
-            isLocked={isFullscreenLocked}
-            onRequestFullscreen={handleRequestFullscreen}
-            exitCount={fullscreenExitCount}
-            message="You must be in fullscreen mode to continue the assessment."
-            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-          />
+          {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+          {cameraProctorEnabled && (
+            <FullscreenLockOverlay
+              isLocked={isFullscreenLocked}
+              onRequestFullscreen={handleRequestFullscreen}
+              exitCount={fullscreenExitCount}
+              message="You must be in fullscreen mode to continue the assessment."
+              warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+            />
+          )}
         </>
       );
     }
@@ -812,13 +825,16 @@ export default function CustomMCQTakePage() {
             <p style={{ color: "#2D7A52", fontSize: "1.125rem" }}>{error || "You cannot access this assessment at this time."}</p>
           </div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the assessment."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the assessment."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     );
   }
@@ -1391,14 +1407,16 @@ export default function CustomMCQTakePage() {
         </div>
       </div>
       
-      {/* FULLSCREEN LOCK OVERLAY - blocks UI when not in fullscreen */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="Fullscreen mode is required during the assessment."
-        warningText="Please return to fullscreen to continue your exam. Repeated exits are logged and may affect your assessment."
-      />
+      {/* FULLSCREEN LOCK OVERLAY - only when AI Proctoring enabled */}
+      {cameraProctorEnabled && (
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="Fullscreen mode is required during the assessment."
+          warningText="Please return to fullscreen to continue your exam. Repeated exits are logged and may affect your assessment."
+        />
+      )}
     </div>
   );
 }

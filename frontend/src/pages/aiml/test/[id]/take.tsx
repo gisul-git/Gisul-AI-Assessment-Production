@@ -1,9 +1,11 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useRouter } from 'next/router'import { useSession } from 'next-auth/react'import dynamic from 'next/dynamic'
+import { useRouter } from 'next/router'
+import { useSession } from 'next-auth/react'
+import dynamic from 'next/dynamic'
 import axios from 'axios'
-import { useUniversalProctoring, CandidateLiveService, type ProctoringViolation } from '@/universal-proctoring'
+import { useUniversalProctoring, CandidateLiveService, resolveUserIdForProctoring, type ProctoringViolation } from '@/universal-proctoring'
 import WebcamPreview from '../../../../components/WebcamPreview'
 import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
 
@@ -119,13 +121,13 @@ export default function AIMLTestTakePage() {
       timestamp: violation.timestamp,
     })
 
-    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
-    if (violation.eventType === 'FULLSCREEN_EXIT') {
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay (only when AI Proctoring enabled)
+    if (violation.eventType === 'FULLSCREEN_EXIT' && cameraProctorEnabled) {
       console.log('[AIML Take] FULLSCREEN_EXIT violation - locking screen');
       setFullscreenLocked(true);
       incrementFullscreenExitCount();
     }
-  }, [setFullscreenLocked, incrementFullscreenExitCount])
+  }, [setFullscreenLocked, incrementFullscreenExitCount, cameraProctorEnabled])
 
   // Handle fullscreen re-entry - unlock the screen
   const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
@@ -266,6 +268,9 @@ export default function AIMLTestTakePage() {
       debugMode: debugMode,
     })
 
+    // Get existing webcam stream from video element (if camera already started by Universal Proctoring)
+    const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null
+
     liveService.start(
       {
         onStateChange: (state) => {
@@ -275,7 +280,8 @@ export default function AIMLTestTakePage() {
           console.error('[AIML Take] Live Proctoring error:', error)
         },
       },
-      liveProctorScreenStream
+      liveProctorScreenStream,
+      existingWebcamStream
     ).then((success) => {
       if (success) {
         console.log('[AIML Take] ✅ Live Proctoring started')
@@ -527,13 +533,16 @@ export default function AIMLTestTakePage() {
             <p className="text-gray-600">Loading test...</p>
           </div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -576,13 +585,16 @@ export default function AIMLTestTakePage() {
             <p className="text-sm">Please check the link and try again.</p>
           </div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -692,14 +704,16 @@ export default function AIMLTestTakePage() {
         )}
       </main>
 
-      {/* Fullscreen Lock Overlay - Blocks ALL interaction when not in fullscreen */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="You must be in fullscreen mode to continue the test. All your progress is saved."
-        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-      />
+      {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+      {cameraProctorEnabled && (
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the test. All your progress is saved."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      )}
     </div>
   )
 }

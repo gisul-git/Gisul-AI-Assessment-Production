@@ -1131,7 +1131,7 @@ export default function AnalyticsPage() {
                   ) : showProctorLogs ? (
                     <ProctorLogsReview 
                       logs={proctorLogs}
-                      candidateName={userData?.user_name || userData?.email}
+                      candidateName={selectedCandidateData?.name || selectedCandidateData?.email}
                     />
                   ) : null}
                 </div>

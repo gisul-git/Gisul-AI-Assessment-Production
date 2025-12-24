@@ -475,13 +475,13 @@ export default function TestTakePage() {
       timestamp: violation.timestamp,
     });
 
-    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
-    if (violation.eventType === 'FULLSCREEN_EXIT') {
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay (only when AI Proctoring enabled)
+    if (violation.eventType === 'FULLSCREEN_EXIT' && aiProctoringEnabled) {
       console.log('[DSA Take] FULLSCREEN_EXIT violation - locking screen');
       setFullscreenLocked(true);
       incrementFullscreenExitCount();
     }
-  }, [setFullscreenLocked, incrementFullscreenExitCount]);
+  }, [setFullscreenLocked, incrementFullscreenExitCount, aiProctoringEnabled]);
 
   // Handle fullscreen re-entry - unlock the screen
   const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
@@ -573,6 +573,9 @@ export default function TestTakePage() {
       debugMode: debugMode,
     });
 
+    // Get existing webcam stream from video element (if camera already started by Universal Proctoring)
+    const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
+
     liveService.start(
       {
         onStateChange: (state) => {
@@ -582,7 +585,8 @@ export default function TestTakePage() {
           console.error('[DSA Take] Live Proctoring error:', error);
         },
       },
-      liveProctorScreenStream
+      liveProctorScreenStream,
+      existingWebcamStream
     ).then((success) => {
       if (success) {
         console.log('[DSA Take] ✅ Live Proctoring started');
@@ -2002,14 +2006,16 @@ export default function TestTakePage() {
           candidateName={candidateName || undefined}
           isLoading={false}
         />
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {aiProctoringEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -2073,14 +2079,16 @@ export default function TestTakePage() {
             )}
           </div>
         </div>
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {aiProctoringEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -2095,14 +2103,16 @@ export default function TestTakePage() {
             <p className="text-slate-400">Loading questions...</p>
           </div>
         </div>
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={requestFullscreenLock}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {aiProctoringEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={requestFullscreenLock}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -2248,14 +2258,16 @@ export default function TestTakePage() {
           )}
         </div>
       </div>
-      {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="You must be in fullscreen mode to continue the test."
-        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-      />
+      {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+      {aiProctoringEnabled && (
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the test."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      )}
     </>
     )
   }
@@ -2426,14 +2438,16 @@ export default function TestTakePage() {
         </Split>
       </div>
 
-      {/* Fullscreen Lock Overlay - Blocks ALL interaction when not in fullscreen */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="You must be in fullscreen mode to continue the test. All your progress is saved."
-        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-      />
+      {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+      {aiProctoringEnabled && (
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the test. All your progress is saved."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      )}
     </div>
   )
 }

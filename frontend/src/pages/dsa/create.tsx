@@ -372,12 +372,9 @@ export default function CreateDSACompetencyPage() {
                   type="checkbox"
                   checked={proctoringSettings.aiProctoringEnabled}
                   onChange={(e) => {
-                    const checked = e.target.checked;
                     setProctoringSettings((prev) => ({
                       ...prev,
-                      aiProctoringEnabled: checked,
-                      // If Live Proctoring is enabled, AI Proctoring should also be enabled
-                      liveProctoringEnabled: prev.liveProctoringEnabled && checked ? prev.liveProctoringEnabled : (prev.liveProctoringEnabled && !checked ? false : prev.liveProctoringEnabled),
+                      aiProctoringEnabled: e.target.checked,
                     }));
                   }}
                   style={{ 
@@ -408,12 +405,9 @@ export default function CreateDSACompetencyPage() {
                   type="checkbox"
                   checked={proctoringSettings.liveProctoringEnabled}
                   onChange={(e) => {
-                    const checked = e.target.checked;
                     setProctoringSettings((prev) => ({
                       ...prev,
-                      liveProctoringEnabled: checked,
-                      // When Live Proctoring is enabled, AI Proctoring should also be enabled
-                      aiProctoringEnabled: checked ? true : prev.aiProctoringEnabled,
+                      liveProctoringEnabled: e.target.checked,
                     }));
                   }}
                   style={{ 

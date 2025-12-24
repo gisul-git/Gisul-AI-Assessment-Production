@@ -298,12 +298,13 @@ export default function CandidateAssessmentPage() {
     });
 
     // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
-    if (violation.eventType === 'FULLSCREEN_EXIT') {
-      console.log('[Assessment Take] FULLSCREEN_EXIT violation - locking screen');
+    // ONLY when AI Proctoring is enabled (Live-only mode should not lock)
+    if (violation.eventType === 'FULLSCREEN_EXIT' && aiProctoringEnabled) {
+      console.log('[Assessment Take] FULLSCREEN_EXIT violation - locking screen (AI mode)');
       setFullscreenLocked(true);
       incrementFullscreenExitCount();
     }
-  }, [setFullscreenLocked, incrementFullscreenExitCount]);
+  }, [aiProctoringEnabled, setFullscreenLocked, incrementFullscreenExitCount]);
 
   // Handle fullscreen re-entry - unlock the screen
   const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
@@ -395,6 +396,9 @@ export default function CandidateAssessmentPage() {
       debugMode: debugMode,
     });
 
+    // Get existing webcam stream from video element (if camera already started by Universal Proctoring)
+    const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
+
     liveService.start(
       {
         onStateChange: (state) => {
@@ -404,7 +408,8 @@ export default function CandidateAssessmentPage() {
           console.error('[Assessment Take] Live Proctoring error:', error);
         },
       },
-      liveProctorScreenStream
+      liveProctorScreenStream,
+      existingWebcamStream
     ).then((success) => {
       if (success) {
         console.log('[Assessment Take] ✅ Live Proctoring started');
@@ -2299,22 +2304,26 @@ export default function CandidateAssessmentPage() {
         </div>
         
         {/* Proctoring Components */}
-        <WebcamPreview
-          ref={thumbVideoRef}
-          cameraOn={proctoringState.isCameraOn}
-          faceMeshStatus={proctoringState.isModelLoaded ? 'loaded' : proctoringState.modelError ? 'error' : 'loading'}
-          facesCount={proctoringState.facesCount}
-        />
         <ViolationToast />
+        {aiProctoringEnabled && (
+          <WebcamPreview
+            ref={thumbVideoRef}
+            cameraOn={proctoringState.isCameraOn}
+            faceMeshStatus={proctoringState.isModelLoaded ? 'loaded' : proctoringState.modelError ? 'error' : 'loading'}
+            facesCount={proctoringState.facesCount}
+          />
+        )}
 
-        {/* Fullscreen Lock Overlay - Blocks ALL interaction when not in fullscreen */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the assessment. All your progress is saved."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - Only shown when AI Proctoring is enabled */}
+        {aiProctoringEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the assessment. All your progress is saved."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </div>
   );
 }
