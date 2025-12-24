@@ -18,12 +18,18 @@ import dsaApi from "@/lib/dsa/api";
 import assessmentApi from "@/lib/assessment/api";
 import Split from 'react-split';  
 
-// Proctoring imports
-import { useFaceMesh, type DetectionResult } from "@/hooks/useFaceMesh";
-import { useProctorUpload } from "@/hooks/useProctorUpload";
+// Universal Proctoring imports
+import {
+  useUniversalProctoring,
+  CandidateLiveService,
+  type ProctoringViolation,
+} from "@/universal-proctoring";
 import WebcamPreview from "@/components/WebcamPreview";
 import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
-import { useLiveProctoring } from "@/hooks/useLiveProctoring";
+
+// Fullscreen Lock imports
+import { FullscreenLockOverlay } from "@/components/FullscreenLockOverlay";
+import { useFullscreenLock } from "@/hooks/useFullscreenLock";
 
 // Lazy load Monaco Editor
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
@@ -219,28 +225,19 @@ export default function CandidateAssessmentPage() {
   const lastSavedAnswerRef = useRef<Map<string, string>>(new Map());
 
   // ============================================================================
-  // PROCTORING STATE & REFS
+  // PROCTORING STATE & REFS (Universal Proctoring System)
   // ============================================================================
 
-  const [webcamLive, setWebcamLive] = useState(false);
-  const [faceMeshStatus, setFaceMeshStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
-  const [displayedFacesCount, setDisplayedFacesCount] = useState(0);
-  const [proctoringEnabled, setProctoringEnabled] = useState(false);
   // AI (camera-based) proctoring toggle from schedule.proctoringSettings
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(false);
   const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(false);
   const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
-  // Proctoring refs
+  
+  // Universal proctoring hook
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
-  const webcamStreamRef = useRef<MediaStream | null>(null);
-  const screenStreamRef = useRef<MediaStream | null>(null);
-  const screenVideoRef = useRef<HTMLVideoElement | null>(null);
-  const noFaceCountRef = useRef(0);
-  const multipleFacesCooldownRef = useRef(0);
-
-  // Cooldown constants
-  const NO_FACE_FRAMES_THRESHOLD = 5;
-  const MULTIPLE_FACES_COOLDOWN_MS = 15000; // 15 seconds
+  const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
+  const liveProctoringStartedRef = useRef(false);
+  const [debugMode, setDebugMode] = useState(false);
 
   // Get client-side values safely
   const isClient = typeof window !== 'undefined';
@@ -248,7 +245,6 @@ export default function CandidateAssessmentPage() {
   const tokenStr = typeof token === 'string' ? token : '';
   
   // Try multiple sources for candidateId
-  // Priority: state > sessionStorage email > sessionStorage name > token-based > anonymous
   const getCandidateId = (): string => {
     if (candidateEmail && candidateEmail.trim() !== '') {
       return candidateEmail.trim();
@@ -270,162 +266,6 @@ export default function CandidateAssessmentPage() {
   };
   
   const candidateIdStr = getCandidateId();
-  
-  // Log the candidateId being used for debugging
-  useEffect(() => {
-    if (isClient && appState === 'ready') {
-      console.log('[Proctor] Using candidateId:', candidateIdStr, {
-        fromState: candidateEmail,
-        fromSessionEmail: sessionStorage.getItem('candidateEmail'),
-        fromSessionName: sessionStorage.getItem('candidateName'),
-        token: tokenStr,
-      });
-    }
-  }, [isClient, appState, candidateIdStr, candidateEmail, tokenStr]);
-
-  // Proctor upload hook
-  const { uploadSnapshot, recordViolation } = useProctorUpload({
-    assessmentId: assessmentIdStr,
-    candidateId: candidateIdStr,
-  });
-
-  // Get screen stream from window.__screenStream (set by identity-verify gate)
-  useEffect(() => {
-    if (typeof window !== 'undefined' && (window as any).__screenStream) {
-      const stream = (window as any).__screenStream as MediaStream;
-      if (stream && stream.active && stream.getVideoTracks().length > 0) {
-        setLiveProctorScreenStream(stream);
-        console.log('[AI Assessment Take] Found global screen stream for Live Proctoring');
-      }
-    }
-  }, []);
-
-  // Get webcam stream from webcamStreamRef
-  const webcamStreamForLiveProctor = webcamLive && webcamStreamRef.current 
-    ? webcamStreamRef.current
-    : null;
-
-  const {
-    isStreaming: isLiveProctoringStreaming,
-    connectionState: liveProctoringConnectionState,
-    error: liveProctoringError,
-    sessionId: liveProctoringSessionId,
-    startStreaming: startLiveProctoring,
-    stopStreaming: stopLiveProctoring,
-  } = useLiveProctoring({
-    assessmentId: assessmentIdStr,
-    candidateId: candidateIdStr,
-    enabled: liveProctoringEnabled,
-    preScreenStream: liveProctorScreenStream,
-    onError: (error) => {
-      console.error('[AI Assessment Take] Live Proctoring error:', error);
-    },
-    debugMode: false,
-  });
-
-  // Start Live Proctoring when assessment starts
-  useEffect(() => {
-    if (appState === 'ready' && liveProctoringEnabled && liveProctorScreenStream && webcamStreamForLiveProctor) {
-      console.log('[AI Assessment Take] Starting Live Proctoring...');
-      startLiveProctoring().catch(err => {
-        console.error('[AI Assessment Take] Failed to start Live Proctoring:', err);
-      });
-    }
-  }, [appState, liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
-
-  // Stop Live Proctoring when assessment ends
-  useEffect(() => {
-    if (appState === 'finished') {
-      stopLiveProctoring();
-    }
-    return () => {
-      if (appState === 'finished') {
-        stopLiveProctoring();
-      }
-    };
-  }, [appState, stopLiveProctoring]);
-
-  // ============================================================================
-  // PROCTORING FUNCTIONS
-  // ============================================================================
-
-  // Handle violation events
-  const handleViolation = useCallback(async (eventType: string) => {
-    const now = Date.now();
-    const timestamp = new Date().toISOString();
-
-    // Cooldown for multiple faces
-    if (eventType === 'MULTIPLE_FACES_DETECTED') {
-      if (now - multipleFacesCooldownRef.current < MULTIPLE_FACES_COOLDOWN_MS) {
-        console.log('[Proctor] Multiple faces cooldown active, skipping');
-        return;
-      }
-      multipleFacesCooldownRef.current = now;
-    }
-
-    // Get candidateId - try multiple sources
-    const currentCandidateId = candidateIdStr || 
-      candidateEmail || 
-      (typeof window !== 'undefined' ? sessionStorage.getItem('candidateEmail') : null) || 
-      '';
-    
-    const currentAssessmentId = assessmentIdStr || (typeof id === 'string' ? id : '');
-
-    console.log('[Proctor] Handling violation:', {
-      eventType,
-      assessmentId: currentAssessmentId,
-      candidateId: currentCandidateId,
-      webcamLive,
-      hasVideoRef: !!thumbVideoRef.current,
-    });
-
-    // Warn if missing data but still try to send
-    if (!currentCandidateId || !currentAssessmentId) {
-      console.warn('[Proctor] Warning: Missing data but still sending:', { 
-        candidateId: currentCandidateId, 
-        assessmentId: currentAssessmentId 
-      });
-    }
-
-    // Determine which video element to use for snapshot
-    // Snapshots disabled for TAB_SWITCH and FOCUS_LOST per request
-    const isScreenEvent = false;
-    let videoForSnapshot: HTMLVideoElement | null = null;
-    
-    if (isScreenEvent) {
-      console.log('[Proctor] Screen capture requested for', eventType);
-      videoForSnapshot = await getScreenVideoForSnapshot();
-      if (videoForSnapshot) {
-        console.log('[Proctor] ✓ Using SCREEN capture for', eventType, `(${videoForSnapshot.videoWidth}x${videoForSnapshot.videoHeight})`);
-      } else if (webcamLive && thumbVideoRef.current) {
-        console.log('[Proctor] ✗ Screen not ready; falling back to webcam for', eventType);
-        videoForSnapshot = thumbVideoRef.current;
-      }
-    } else if (webcamLive && thumbVideoRef.current) {
-      videoForSnapshot = thumbVideoRef.current;
-    }
-
-    // Record violation with snapshot (snapshot captured inside recordViolation)
-    const success = await recordViolation(
-      {
-        eventType,
-        timestamp,
-        assessmentId: currentAssessmentId,
-        candidateId: currentCandidateId,
-      },
-      videoForSnapshot
-    );
-
-    console.log('[Proctor] Violation recorded:', { eventType, success });
-
-    // Show toast
-    pushViolationToast({
-      id: `${eventType}-${now}`,
-      eventType,
-      message: getViolationMessage(eventType),
-      timestamp,
-    });
-  }, [webcamLive, recordViolation, assessmentIdStr, candidateIdStr, candidateEmail, id]);
 
   // Get violation message
   const getViolationMessage = (eventType: string): string => {
@@ -440,217 +280,172 @@ export default function CandidateAssessmentPage() {
     return messages[eventType] || 'Violation detected';
   };
 
-  // Face detection callback
-  const handleDetection = useCallback((result: DetectionResult) => {
-    setDisplayedFacesCount(result.facesCount);
+  // ============================================================================
+  // FULLSCREEN LOCK - Violation-driven lock state (SIMPLIFIED)
+  // ============================================================================
+  const {
+    isLocked: isFullscreenLocked,
+    setIsLocked: setFullscreenLocked,
+    exitCount: fullscreenExitCount,
+    incrementExitCount: incrementFullscreenExitCount,
+    requestFullscreen: requestFullscreenLock,
+  } = useFullscreenLock();
 
-    // No face detection
-    if (result.facesCount === 0) {
-      noFaceCountRef.current++;
-      if (noFaceCountRef.current >= NO_FACE_FRAMES_THRESHOLD) {
-        handleViolation('NO_FACE_DETECTED');
-        noFaceCountRef.current = 0; // Reset after triggering
-      }
-    } else {
-      noFaceCountRef.current = 0;
+  // Handle violation callback from universal proctoring
+  // THIS IS THE SINGLE SOURCE OF TRUTH for fullscreen lock triggering
+  const handleUniversalViolation = useCallback((violation: ProctoringViolation) => {
+    console.log('[Assessment Take] Universal proctoring violation:', violation);
+    
+    // Show toast for all violations
+    pushViolationToast({
+      id: `${violation.eventType}-${Date.now()}`,
+      eventType: violation.eventType,
+      message: getViolationMessage(violation.eventType),
+      timestamp: violation.timestamp,
+    });
+
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
+    if (violation.eventType === 'FULLSCREEN_EXIT') {
+      console.log('[Assessment Take] FULLSCREEN_EXIT violation - locking screen');
+      setFullscreenLocked(true);
+      incrementFullscreenExitCount();
     }
+  }, [setFullscreenLocked, incrementFullscreenExitCount]);
 
-    // Multiple faces
-    if (result.multiFace) {
-      handleViolation('MULTIPLE_FACES_DETECTED');
+  // Handle fullscreen re-entry - unlock the screen
+  const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
+    console.log('[Assessment Take] Requesting fullscreen re-entry...');
+    const success = await requestFullscreenLock();
+    if (success) {
+      console.log('[Assessment Take] Fullscreen re-entered - unlocking screen');
+      setFullscreenLocked(false);
     }
+    return success;
+  }, [requestFullscreenLock, setFullscreenLocked]);
 
-    // Gaze away
-    if (result.gazeAway) {
-      handleViolation('GAZE_AWAY');
-    }
-  }, [handleViolation]);
-
-  // FaceMesh hook
-  const { isModelLoaded, modelError, facesCount } = useFaceMesh({
-    videoRef: thumbVideoRef,
-    onDetection: handleDetection,
-    // Camera-based AI proctoring only runs when the AI toggle is enabled
-    enabled: aiProctoringEnabled && webcamLive,
+  // Universal proctoring hook - handles AI proctoring, tab switch, fullscreen
+  const {
+    state: proctoringState,
+    isRunning: isProctoringRunning,
+    violations,
+    startProctoring: startUniversalProctoring,
+    stopProctoring: stopUniversalProctoring,
+    requestFullscreen: requestUniversalFullscreen,
+    isFullscreen,
+  } = useUniversalProctoring({
+    onViolation: handleUniversalViolation,
+    debug: debugMode,
   });
 
-
-  // Update FaceMesh status
+  // Unlock fullscreen when assessment is submitted/finished
   useEffect(() => {
-    if (modelError) {
-      setFaceMeshStatus('error');
-    } else if (isModelLoaded) {
-      setFaceMeshStatus('loaded');
-    } else {
-      setFaceMeshStatus('loading');
+    if (appState === 'finished' || appState === 'submitting') {
+      console.log('[Assessment Take] Assessment finished - unlocking fullscreen');
+      setFullscreenLocked(false);
     }
-  }, [isModelLoaded, modelError]);
+  }, [appState, setFullscreenLocked]);
 
-  // Start webcam
-  const startWebcam = useCallback(async () => {
-    if (!isClient) return;
+  // Get screen stream from window.__screenStream (set by identity-verify gate)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && (window as any).__screenStream) {
+      const stream = (window as any).__screenStream as MediaStream;
+      if (stream && stream.active && stream.getVideoTracks().length > 0) {
+        setLiveProctorScreenStream(stream);
+        console.log('[Assessment Take] Found global screen stream for Live Proctoring');
+      }
+    }
+  }, []);
 
-    console.log('[Webcam] Starting webcam...');
-
-    try {
-      // Reuse existing stream if available
-      if (webcamStreamRef.current && webcamStreamRef.current.active) {
-        console.log('[Webcam] Reusing existing stream');
-        if (thumbVideoRef.current) {
-          thumbVideoRef.current.srcObject = webcamStreamRef.current;
-          await thumbVideoRef.current.play();
+  // Start proctoring when assessment is ready (AI proctoring + tab switch + fullscreen)
+  useEffect(() => {
+    if (appState === 'ready' && !isProctoringRunning && isClient && thumbVideoRef.current) {
+      console.log('[Assessment Take] Starting Universal Proctoring...');
+      
+      startUniversalProctoring({
+        settings: {
+          aiProctoringEnabled: aiProctoringEnabled,
+          liveProctoringEnabled: liveProctoringEnabled,
+        },
+        session: {
+          userId: candidateIdStr,
+          assessmentId: assessmentIdStr,
+        },
+        videoElement: aiProctoringEnabled ? thumbVideoRef.current : null,
+      }).then((success) => {
+        if (success) {
+          console.log('[Assessment Take] ✅ Universal Proctoring started');
+        } else {
+          console.error('[Assessment Take] ❌ Failed to start Universal Proctoring');
         }
-        setWebcamLive(true);
-        return;
-      }
-
-      // Request camera access
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480 },
-        audio: false,
       });
-
-      webcamStreamRef.current = stream;
-      console.log('[Webcam] Stream acquired');
-
-      // Wait for video element
-      let retries = 10;
-      while (!thumbVideoRef.current && retries > 0) {
-        await new Promise((r) => setTimeout(r, 100));
-        retries--;
-      }
-
-      if (thumbVideoRef.current) {
-        thumbVideoRef.current.srcObject = stream;
-
-        // Wait for video to be ready
-        await new Promise<void>((resolve) => {
-          const video = thumbVideoRef.current!;
-          if (video.readyState >= 2) {
-            resolve();
-          } else {
-            video.onloadeddata = () => resolve();
-          }
-        });
-
-        await thumbVideoRef.current.play();
-        console.log('[Webcam] Video playing');
-        setWebcamLive(true);
-      }
-    } catch (err) {
-      console.error('[Webcam] Error starting webcam:', err);
-      setWebcamLive(false);
     }
-  }, [isClient]);
+  }, [appState, isProctoringRunning, isClient, aiProctoringEnabled, liveProctoringEnabled, candidateIdStr, assessmentIdStr, startUniversalProctoring]);
 
-  // Stop webcam
-  const stopWebcam = useCallback(() => {
-    if (webcamStreamRef.current) {
-      webcamStreamRef.current.getTracks().forEach((track) => track.stop());
-      webcamStreamRef.current = null;
-    }
-    setWebcamLive(false);
-    console.log('[Webcam] Stopped');
-  }, []);
-
-  // Helper: wait for screen video to be ready with valid dimensions
-  const getScreenVideoForSnapshot = useCallback(async (): Promise<HTMLVideoElement | null> => {
-    const screenVideo = screenVideoRef.current;
-    const screenStream = screenStreamRef.current;
-
-    if (!screenVideo || !screenStream || !screenStream.active) {
-      console.warn('[Proctor] Screen video not available/active');
-      return null;
-    }
-
-    // Ensure video is playing
-    if (screenVideo.paused) {
-      try {
-        await screenVideo.play();
-      } catch (err) {
-        console.warn('[Proctor] Failed to play screen video before snapshot:', err);
-      }
-    }
-
-    // Wait up to ~1s for valid dimensions
-    const maxChecks = 5;
-    for (let i = 0; i < maxChecks; i++) {
-      if (screenVideo.readyState >= 2 && screenVideo.videoWidth > 0 && screenVideo.videoHeight > 0) {
-        return screenVideo;
-      }
-      await new Promise((r) => setTimeout(r, 200));
-    }
-
-    console.warn('[Proctor] Screen video not ready after waits; skipping screen snapshot');
-    return null;
-  }, []);
-
-  // Screen stream is now managed by useLiveProctoring hook
-  // The old setup code has been removed as it's no longer needed
-
-  // Start AI/tab proctoring when assessment is ready
+  // Start Live Proctoring (separate from AI proctoring)
   useEffect(() => {
-    if (appState === 'ready' && !proctoringEnabled && isClient) {
-      console.log('[Proctor] Starting proctoring...');
-      // Always enable overall proctoring (TAB_SWITCH / FOCUS_LOST etc.)
-      setProctoringEnabled(true);
+    if (!liveProctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
+      return;
+    }
 
-      if (aiProctoringEnabled) {
-        // Start webcam only when AI camera proctoring is enabled for this assessment
-        startWebcam();
+    // Only start when assessment is ready
+    if (appState !== 'ready') {
+      return;
+    }
+
+    console.log('[Assessment Take] Starting Live Proctoring service...');
+    liveProctoringStartedRef.current = true;
+
+    // Create and start the live proctoring service
+    const liveService = new CandidateLiveService({
+      assessmentId: assessmentIdStr,
+      candidateId: candidateIdStr,
+      debugMode: debugMode,
+    });
+
+    liveService.start(
+      {
+        onStateChange: (state) => {
+          console.log('[Assessment Take] Live proctoring state:', state);
+        },
+        onError: (error) => {
+          console.error('[Assessment Take] Live Proctoring error:', error);
+        },
+      },
+      liveProctorScreenStream
+    ).then((success) => {
+      if (success) {
+        console.log('[Assessment Take] ✅ Live Proctoring started');
+        liveProctoringServiceRef.current = liveService;
       } else {
-        console.log(
-          '[Proctor] AI proctoring disabled for this assessment; skipping webcam/FaceMesh'
-        );
+        console.error('[Assessment Take] ❌ Failed to start Live Proctoring');
+        liveProctoringStartedRef.current = false;
+      }
+    });
+  }, [liveProctoringEnabled, liveProctorScreenStream, appState, assessmentIdStr, candidateIdStr, debugMode]);
+
+  // Stop proctoring when assessment ends
+  useEffect(() => {
+    if (appState === 'finished') {
+      console.log('[Assessment Take] Assessment finished, stopping proctoring');
+      stopUniversalProctoring();
+      
+      if (liveProctoringServiceRef.current) {
+        liveProctoringServiceRef.current.stop();
+        liveProctoringServiceRef.current = null;
       }
     }
-  }, [appState, proctoringEnabled, isClient, aiProctoringEnabled, startWebcam]);
-
-
-  // Safety: if proctoring is already enabled and we later discover AI flag is ON,
-  // ensure webcam starts as soon as possible.
-  useEffect(() => {
-    if (
-      appState === 'ready' &&
-      proctoringEnabled &&
-      aiProctoringEnabled &&
-      !webcamLive &&
-      isClient
-    ) {
-      console.log('[Proctor] AI flag enabled after proctor start; starting webcam now...');
-      startWebcam();
-    }
-  }, [appState, proctoringEnabled, aiProctoringEnabled, webcamLive, isClient, startWebcam]);
+  }, [appState, stopUniversalProctoring]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopWebcam();
-    };
-  }, [stopWebcam]);
-
-  // Tab visibility detection
-  useEffect(() => {
-    if (!isClient || !proctoringEnabled) return;
-
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        handleViolation('TAB_SWITCH');
+      stopUniversalProctoring();
+      if (liveProctoringServiceRef.current) {
+        liveProctoringServiceRef.current.stop();
+        liveProctoringServiceRef.current = null;
       }
     };
-
-    const handleBlur = () => {
-      handleViolation('FOCUS_LOST');
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('blur', handleBlur);
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('blur', handleBlur);
-    };
-  }, [isClient, proctoringEnabled, handleViolation]);
+  }, [stopUniversalProctoring]);
 
   // ============================================================================
   // TRANSFORM topics_v2 TO SECTIONS
@@ -1697,8 +1492,6 @@ export default function CandidateAssessmentPage() {
     };
   }, [appState, timerRemaining, submitAssessment]);
 
-  const [isFullscreen, setIsFullscreen] = useState(false);
-
   // ============================================================================
   // RENDERING
   // ============================================================================
@@ -1724,78 +1517,81 @@ export default function CandidateAssessmentPage() {
     return names[section] || section;
   };
 
-  // Check if in fullscreen mode
-  useEffect(() => {
-    const checkFullscreen = () => {
-      const fullscreen = !!document.fullscreenElement || 
-                        !!(document as any).webkitFullscreenElement ||
-                        !!(document as any).mozFullScreenElement ||
-                        !!(document as any).msFullscreenElement;
-      setIsFullscreen(fullscreen);
-    };
-    
-    checkFullscreen();
-    document.addEventListener('fullscreenchange', checkFullscreen);
-    document.addEventListener('webkitfullscreenchange', checkFullscreen);
-    document.addEventListener('mozfullscreenchange', checkFullscreen);
-    document.addEventListener('MSFullscreenChange', checkFullscreen);
-    
-    return () => {
-      document.removeEventListener('fullscreenchange', checkFullscreen);
-      document.removeEventListener('webkitfullscreenchange', checkFullscreen);
-      document.removeEventListener('mozfullscreenchange', checkFullscreen);
-      document.removeEventListener('MSFullscreenChange', checkFullscreen);
-    };
-  }, []);
-
   // Loading state
   if (appState === "loading") {
     return (
-      <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ width: "50px", height: "50px", border: "4px solid #6953a3", borderTop: "4px solid transparent", borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto 1rem" }} />
-          <p style={{ color: "#1a1625", fontSize: "1.125rem" }}>Loading assessment...</p>
+      <>
+        <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ width: "50px", height: "50px", border: "4px solid #6953a3", borderTop: "4px solid transparent", borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto 1rem" }} />
+            <p style={{ color: "#1a1625", fontSize: "1.125rem" }}>Loading assessment...</p>
+          </div>
         </div>
-      </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the assessment."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     );
   }
 
   // Error state
   if (error && appState !== "ready") {
     return (
-      <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
-        <div className="card" style={{ maxWidth: "600px", width: "100%", textAlign: "center" }}>
-          <h1 style={{ marginBottom: "1rem", fontSize: "2rem", color: "#1a1625", fontWeight: 700 }}>Error</h1>
-          <p style={{ color: "#64748b", marginBottom: "2rem" }}>{error}</p>
-          <button
-            onClick={() => router.back()}
-            style={{
-              padding: "0.75rem 1.5rem",
-              backgroundColor: "#6953a3",
-              color: "#ffffff",
-              border: "none",
-              borderRadius: "0.5rem",
-              cursor: "pointer",
-              fontSize: "1rem",
-              fontWeight: 600,
-            }}
-          >
-            Go Back
-          </button>
+      <>
+        <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
+          <div className="card" style={{ maxWidth: "600px", width: "100%", textAlign: "center" }}>
+            <h1 style={{ marginBottom: "1rem", fontSize: "2rem", color: "#1a1625", fontWeight: 700 }}>Error</h1>
+            <p style={{ color: "#64748b", marginBottom: "2rem" }}>{error}</p>
+            <button
+              onClick={() => router.back()}
+              style={{
+                padding: "0.75rem 1.5rem",
+                backgroundColor: "#6953a3",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "0.5rem",
+                cursor: "pointer",
+                fontSize: "1rem",
+                fontWeight: 600,
+              }}
+            >
+              Go Back
+            </button>
+          </div>
         </div>
-      </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the assessment."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     );
   }
 
   // No questions
   if (questions.length === 0) {
     return (
-      <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
-        <div className="card" style={{ maxWidth: "600px", width: "100%", textAlign: "center" }}>
-          <h1 style={{ marginBottom: "1rem", fontSize: "2rem", color: "#1a1625", fontWeight: 700 }}>No Questions Available</h1>
-          <p style={{ color: "#64748b", marginBottom: "2rem" }}>This assessment does not have any questions configured.</p>
+      <>
+        <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
+          <div className="card" style={{ maxWidth: "600px", width: "100%", textAlign: "center" }}>
+            <h1 style={{ marginBottom: "1rem", fontSize: "2rem", color: "#1a1625", fontWeight: 700 }}>No Questions Available</h1>
+            <p style={{ color: "#64748b", marginBottom: "2rem" }}>This assessment does not have any questions configured.</p>
+          </div>
         </div>
-      </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the assessment."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     );
   }
 
@@ -1811,60 +1607,69 @@ export default function CandidateAssessmentPage() {
     });
 
     return (
-      <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
-        <div style={{ textAlign: "center", maxWidth: "600px" }}>
-          <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem", color: "#1a1625", fontWeight: 700 }}>No Question Available</h1>
-          <p style={{ color: "#64748b", marginBottom: "1rem" }}>
-            {questions.length === 0 
-              ? "No questions were loaded from the assessment." 
-              : `Questions loaded: ${questions.length}, but no current question could be found.`}
-          </p>
-          {questions.length > 0 && (
-            <div style={{ marginTop: "1rem", padding: "1rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", textAlign: "left" }}>
-              <p style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.5rem" }}>Debug Info:</p>
-              <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Current Section: {currentSection || "null"}</p>
-              <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Question Index: {currentQuestionIndex}</p>
-              <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Sections:</p>
-              <ul style={{ fontSize: "0.75rem", color: "#64748b", marginLeft: "1rem" }}>
-                <li>MCQ: {sections.mcq.length}</li>
-                <li>Subjective: {sections.subjective.length}</li>
-                <li>Pseudocode: {sections.pseudocode.length}</li>
-                <li>Coding: {sections.coding.length}</li>
-              </ul>
+      <>
+        <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
+          <div style={{ textAlign: "center", maxWidth: "600px" }}>
+            <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem", color: "#1a1625", fontWeight: 700 }}>No Question Available</h1>
+            <p style={{ color: "#64748b", marginBottom: "1rem" }}>
+              {questions.length === 0 
+                ? "No questions were loaded from the assessment." 
+                : `Questions loaded: ${questions.length}, but no current question could be found.`}
+            </p>
+            {questions.length > 0 && (
+              <div style={{ marginTop: "1rem", padding: "1rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", textAlign: "left" }}>
+                <p style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.5rem" }}>Debug Info:</p>
+                <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Current Section: {currentSection || "null"}</p>
+                <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Question Index: {currentQuestionIndex}</p>
+                <p style={{ fontSize: "0.75rem", color: "#64748b" }}>Sections:</p>
+                <ul style={{ fontSize: "0.75rem", color: "#64748b", marginLeft: "1rem" }}>
+                  <li>MCQ: {sections.mcq.length}</li>
+                  <li>Subjective: {sections.subjective.length}</li>
+                  <li>Pseudocode: {sections.pseudocode.length}</li>
+                  <li>Coding: {sections.coding.length}</li>
+                </ul>
+            </div>
+            )}
+            <button
+              onClick={() => {
+                console.log("[take.tsx] Full state:", {
+                  questions,
+                  sections,
+                  currentSection,
+                  currentQuestionIndex,
+                });
+                // Try to set first available section
+                const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
+                const firstSection = sectionOrder.find((section) => sections[section].length > 0);
+                if (firstSection) {
+                  setCurrentSection(firstSection);
+                  setCurrentQuestionIndex(0);
+                }
+              }}
+              style={{
+                marginTop: "1rem",
+                padding: "0.75rem 1.5rem",
+                backgroundColor: "#6953a3",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "0.5rem",
+                cursor: "pointer",
+                fontSize: "0.875rem",
+                fontWeight: 600,
+              }}
+            >
+              Retry Loading
+            </button>
           </div>
-          )}
-          <button
-            onClick={() => {
-              console.log("[take.tsx] Full state:", {
-                questions,
-                sections,
-                currentSection,
-                currentQuestionIndex,
-              });
-              // Try to set first available section
-              const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
-              const firstSection = sectionOrder.find((section) => sections[section].length > 0);
-              if (firstSection) {
-                setCurrentSection(firstSection);
-                setCurrentQuestionIndex(0);
-              }
-            }}
-            style={{
-              marginTop: "1rem",
-              padding: "0.75rem 1.5rem",
-              backgroundColor: "#6953a3",
-              color: "#ffffff",
-              border: "none",
-              borderRadius: "0.5rem",
-              cursor: "pointer",
-              fontSize: "0.875rem",
-              fontWeight: 600,
-            }}
-          >
-            Retry Loading
-          </button>
         </div>
-      </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the assessment."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     );
   }
 
@@ -2503,11 +2308,20 @@ export default function CandidateAssessmentPage() {
         {/* Proctoring Components */}
         <WebcamPreview
           ref={thumbVideoRef}
-          cameraOn={webcamLive}
-          faceMeshStatus={faceMeshStatus}
-          facesCount={displayedFacesCount}
+          cameraOn={proctoringState.isCameraOn}
+          faceMeshStatus={proctoringState.isModelLoaded ? 'loaded' : proctoringState.modelError ? 'error' : 'loading'}
+          facesCount={proctoringState.facesCount}
         />
         <ViolationToast />
+
+        {/* Fullscreen Lock Overlay - Blocks ALL interaction when not in fullscreen */}
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the assessment. All your progress is saved."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
       </div>
   );
 }

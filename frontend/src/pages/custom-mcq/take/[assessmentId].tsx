@@ -2,11 +2,11 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/router";
 import { customMCQApi } from "../../../lib/custom-mcq/api";
 import { CustomMCQAssessment, MCQQuestion, SubjectiveQuestion, Question } from "../../../types/custom-mcq";
-import { useCameraProctor } from "../../../hooks/useCameraProctor";
+import { useUniversalProctoring, CandidateLiveService, type ProctoringViolation } from "@/universal-proctoring";
 import WebcamPreview from "../../../components/WebcamPreview";
 import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
-import { useProctorUpload } from "@/hooks/useProctorUpload";
-import { useLiveProctoring } from "../../../hooks/useLiveProctoring";
+import { FullscreenLockOverlay } from "@/components/FullscreenLockOverlay";
+import { useFullscreenLock } from "@/hooks/useFullscreenLock";
 // (import kept intentionally for future gateContext-based routing; currently enforced via sessionStorage flags)
 
 export default function CustomMCQTakePage() {
@@ -50,7 +50,12 @@ export default function CustomMCQTakePage() {
   const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
   const [showMCQLockWarning, setShowMCQLockWarning] = useState(false);
   const [pendingNavigationIndex, setPendingNavigationIndex] = useState<number | null>(null);
-  const cameraStartRequestedRef = useRef(false);
+  const [debugMode, setDebugMode] = useState(false);
+
+  // Proctoring refs
+  const thumbVideoRef = useRef<HTMLVideoElement>(null);
+  const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
+  const liveProctoringStartedRef = useRef(false);
 
   const getViolationMessage = (eventType: string): string => {
     const messages: Record<string, string> = {
@@ -64,137 +69,178 @@ export default function CustomMCQTakePage() {
     return messages[eventType] || "Violation detected";
   };
 
-  const { recordViolation: recordProctorViolation } = useProctorUpload({
-    assessmentId: String(assessmentId || ""),
-    candidateId: candidateInfo?.email || "",
-  });
-
+  // ========================
+  // FULLSCREEN LOCK - Violation-driven lock state (SIMPLIFIED)
+  // ========================
   const {
-    isCameraOn,
-    isModelLoaded,
-    facesCount,
-    errors: cameraErrors,
-    startCamera,
-    stopCamera,
-    videoRef,
-    canvasRef,
-  } = useCameraProctor({
-    userId: candidateInfo?.email || "",
-    assessmentId: String(assessmentId || ""),
-    enabled: cameraProctorEnabled,
-    debugMode: false,
-    onViolation: (violation) => {
-      pushViolationToast({
-        id: `${violation.eventType}-${Date.now()}`,
-        eventType: violation.eventType,
-        message: getViolationMessage(violation.eventType),
-        timestamp: violation.timestamp || new Date().toISOString(),
-      });
-    },
-  });
+    isLocked: isFullscreenLocked,
+    setIsLocked: setFullscreenLocked,
+    exitCount: fullscreenExitCount,
+    incrementExitCount: incrementFullscreenExitCount,
+    requestFullscreen: requestFullscreenLock,
+  } = useFullscreenLock();
 
-  // Get webcam stream from useCameraProctor
-  const webcamStreamForLiveProctor = isCameraOn && videoRef.current?.srcObject 
-    ? (videoRef.current.srcObject as MediaStream)
-    : null;
+  // Handle violation callback from universal proctoring
+  // THIS IS THE SINGLE SOURCE OF TRUTH for fullscreen lock triggering
+  const handleUniversalViolation = useCallback((violation: ProctoringViolation) => {
+    console.log('[Custom MCQ Take] Universal proctoring violation:', violation);
+    
+    // Show toast for all violations
+    pushViolationToast({
+      id: `${violation.eventType}-${Date.now()}`,
+      eventType: violation.eventType,
+      message: getViolationMessage(violation.eventType),
+      timestamp: violation.timestamp,
+    });
 
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
+    if (violation.eventType === 'FULLSCREEN_EXIT') {
+      console.log('[Custom MCQ Take] FULLSCREEN_EXIT violation - locking screen');
+      setFullscreenLocked(true);
+      incrementFullscreenExitCount();
+    }
+  }, [setFullscreenLocked, incrementFullscreenExitCount]);
+
+  // Handle fullscreen re-entry - unlock the screen
+  const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
+    console.log('[Custom MCQ Take] Requesting fullscreen re-entry...');
+    const success = await requestFullscreenLock();
+    if (success) {
+      console.log('[Custom MCQ Take] Fullscreen re-entered - unlocking screen');
+      setFullscreenLocked(false);
+    }
+    return success;
+  }, [requestFullscreenLock, setFullscreenLocked]);
+
+  // Universal proctoring hook - handles AI proctoring, tab switch, fullscreen
   const {
-    isStreaming: isLiveProctoringStreaming,
-    connectionState: liveProctoringConnectionState,
-    error: liveProctoringError,
-    sessionId: liveProctoringSessionId,
-    startStreaming: startLiveProctoring,
-    stopStreaming: stopLiveProctoring,
-  } = useLiveProctoring({
-    assessmentId: String(assessmentId || ''),
-    candidateId: candidateInfo?.email || '',
-    enabled: proctoringEnabled,
-    preScreenStream: liveProctorScreenStream,
-    onError: (error) => {
-      console.error('[Custom MCQ Take] Live Proctoring error:', error);
-    },
-    debugMode: false,
+    state: proctoringState,
+    isRunning: isProctoringRunning,
+    violations,
+    startProctoring: startUniversalProctoring,
+    stopProctoring: stopUniversalProctoring,
+    requestFullscreen: requestUniversalFullscreen,
+    isFullscreen,
+  } = useUniversalProctoring({
+    onViolation: handleUniversalViolation,
+    debug: debugMode,
   });
 
-  // Start Live Proctoring when exam starts
+  // Get screen stream from window.__screenStream (set by identity-verify gate)
   useEffect(() => {
-    if (examStarted && proctoringEnabled && liveProctorScreenStream && webcamStreamForLiveProctor) {
-      console.log('[Custom MCQ Take] Starting Live Proctoring...');
-      startLiveProctoring().catch(err => {
-        console.error('[Custom MCQ Take] Failed to start Live Proctoring:', err);
+    if (typeof window !== 'undefined' && (window as any).__screenStream) {
+      const stream = (window as any).__screenStream as MediaStream;
+      if (stream && stream.active && stream.getVideoTracks().length > 0) {
+        setLiveProctorScreenStream(stream);
+        console.log('[Custom MCQ Take] Found global screen stream for Live Proctoring');
+      }
+    }
+  }, []);
+
+  // Start proctoring when exam starts (AI proctoring + tab switch + fullscreen)
+  useEffect(() => {
+    const assessmentIdStr = String(assessmentId || '');
+    const candidateIdStr = candidateInfo?.email || '';
+    
+    if (examStarted && !isProctoringRunning && !submitting && assessmentIdStr && thumbVideoRef.current) {
+      console.log('[Custom MCQ Take] Starting Universal Proctoring...');
+      
+      startUniversalProctoring({
+        settings: {
+          aiProctoringEnabled: cameraProctorEnabled,
+          liveProctoringEnabled: proctoringEnabled,
+        },
+        session: {
+          userId: candidateIdStr,
+          assessmentId: assessmentIdStr,
+        },
+        videoElement: cameraProctorEnabled ? thumbVideoRef.current : null,
+      }).then((success) => {
+        if (success) {
+          console.log('[Custom MCQ Take] ✅ Universal Proctoring started');
+        } else {
+          console.error('[Custom MCQ Take] ❌ Failed to start Universal Proctoring');
+        }
       });
     }
-  }, [examStarted, proctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
+  }, [examStarted, isProctoringRunning, submitting, assessmentId, candidateInfo?.email, cameraProctorEnabled, proctoringEnabled, startUniversalProctoring]);
 
-  // Stop Live Proctoring when assessment ends
+  // Start Live Proctoring (separate from AI proctoring)
+  useEffect(() => {
+    const assessmentIdStr = String(assessmentId || '');
+    const candidateIdStr = candidateInfo?.email || '';
+
+    if (!proctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
+      return;
+    }
+
+    // Only start when exam has started and not submitting
+    if (!examStarted || submitting) {
+      return;
+    }
+
+    console.log('[Custom MCQ Take] Starting Live Proctoring service...');
+    liveProctoringStartedRef.current = true;
+
+    // Create and start the live proctoring service
+    const liveService = new CandidateLiveService({
+      assessmentId: assessmentIdStr,
+      candidateId: candidateIdStr,
+      debugMode: debugMode,
+    });
+
+    liveService.start(
+      {
+        onStateChange: (state) => {
+          console.log('[Custom MCQ Take] Live proctoring state:', state);
+        },
+        onError: (error) => {
+          console.error('[Custom MCQ Take] Live Proctoring error:', error);
+        },
+      },
+      liveProctorScreenStream
+    ).then((success) => {
+      if (success) {
+        console.log('[Custom MCQ Take] ✅ Live Proctoring started');
+        liveProctoringServiceRef.current = liveService;
+      } else {
+        console.error('[Custom MCQ Take] ❌ Failed to start Live Proctoring');
+        liveProctoringStartedRef.current = false;
+      }
+    });
+  }, [proctoringEnabled, liveProctorScreenStream, examStarted, submitting, assessmentId, candidateInfo?.email, debugMode]);
+
+  // Stop proctoring when assessment ends
   useEffect(() => {
     if (submitting) {
-      stopLiveProctoring();
+      console.log('[Custom MCQ Take] Assessment submitting, stopping proctoring');
+      stopUniversalProctoring();
+      
+      if (liveProctoringServiceRef.current) {
+        liveProctoringServiceRef.current.stop();
+        liveProctoringServiceRef.current = null;
+      }
     }
+  }, [submitting, stopUniversalProctoring]);
+
+  // Cleanup on unmount
+  useEffect(() => {
     return () => {
-      if (submitting) {
-        stopLiveProctoring();
+      stopUniversalProctoring();
+      if (liveProctoringServiceRef.current) {
+        liveProctoringServiceRef.current.stop();
+        liveProctoringServiceRef.current = null;
       }
     };
-  }, [submitting, stopLiveProctoring]);
+  }, [stopUniversalProctoring]);
 
-  // Enable proctoring (tab switch / focus lost) only once exam has started
-  // Note: proctoringEnabled is now set from liveProctoringEnabled in proctoringSettings
+  // Unlock fullscreen when assessment is being submitted
   useEffect(() => {
-    if (!assessmentId) return;
-    // Keep existing logic for tab switch detection, but Live Proctoring is controlled separately
-  }, [assessmentId, candidateInfo, examStarted, submitting]);
-
-  // Tab visibility + focus detection (same as AI take page)
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!proctoringEnabled) return;
-
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        recordProctorViolation(
-          {
-            eventType: "TAB_SWITCH",
-            timestamp: new Date().toISOString(),
-            assessmentId: String(assessmentId || ""),
-            candidateId: candidateInfo?.email || "",
-          },
-          null
-        );
-        pushViolationToast({
-          id: `TAB_SWITCH-${Date.now()}`,
-          eventType: "TAB_SWITCH",
-          message: getViolationMessage("TAB_SWITCH"),
-          timestamp: new Date().toISOString(),
-        });
-      }
-    };
-
-    const handleBlur = () => {
-      recordProctorViolation(
-        {
-          eventType: "FOCUS_LOST",
-          timestamp: new Date().toISOString(),
-          assessmentId: String(assessmentId || ""),
-          candidateId: candidateInfo?.email || "",
-        },
-        null
-      );
-      pushViolationToast({
-        id: `FOCUS_LOST-${Date.now()}`,
-        eventType: "FOCUS_LOST",
-        message: getViolationMessage("FOCUS_LOST"),
-        timestamp: new Date().toISOString(),
-      });
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("blur", handleBlur);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("blur", handleBlur);
-    };
-  }, [proctoringEnabled, recordProctorViolation, assessmentId, candidateInfo?.email]);
+    if (submitting) {
+      console.log('[Custom MCQ Take] Assessment submitting - unlocking fullscreen');
+      setFullscreenLocked(false);
+    }
+  }, [submitting, setFullscreenLocked]);
 
   // Format date and time for display
   const formatDateTime = (date: Date) => {
@@ -312,23 +358,6 @@ export default function CustomMCQTakePage() {
 
     loadAssessment();
   }, [assessmentId, token, router]);
-
-  // Start/stop camera only after the exam actually starts (avoids "Camera OFF" pre-start states)
-  useEffect(() => {
-    if (!assessmentId) return;
-    if (!cameraProctorEnabled) {
-      stopCamera();
-      cameraStartRequestedRef.current = false;
-      return;
-    }
-    if (assessment && candidateInfo && examStarted && !submitting) {
-      if (!cameraStartRequestedRef.current) {
-        cameraStartRequestedRef.current = true;
-        setTimeout(() => startCamera(), 200);
-      }
-      return;
-    }
-  }, [assessmentId, cameraProctorEnabled, assessment, candidateInfo, examStarted, submitting, startCamera, stopCamera]);
 
   // Auto-transition when exam time arrives (strict mode only - for pre-check to exam start)
   useEffect(() => {
@@ -689,20 +718,38 @@ export default function CustomMCQTakePage() {
 
   if (loading) {
     return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div>Loading assessment...</div>
-      </div>
+      <>
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div>Loading assessment...</div>
+        </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the assessment."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     );
   }
 
   if (!assessment) {
     return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
-        <div style={{ textAlign: "center" }}>
-          <h1>Error</h1>
-          <p>Assessment not found</p>
+      <>
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
+          <div style={{ textAlign: "center" }}>
+            <h1>Error</h1>
+            <p>Assessment not found</p>
+          </div>
         </div>
-      </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the assessment."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     );
   }
 
@@ -716,38 +763,56 @@ export default function CustomMCQTakePage() {
     // If in strict mode pre-check phase, show pre-check screen
     if (waitingForStart && isStrictMode && startTimeDate) {
       return (
-        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#E8FAF0" }}>
-          <div style={{ textAlign: "center", maxWidth: "600px" }}>
-            <h1 style={{ color: "#1E5A3B", marginBottom: "1rem" }}>Pre-Check Phase</h1>
-            <p style={{ color: "#2D7A52", fontSize: "1.125rem", marginBottom: "2rem" }}>
-              You can complete pre-checks now. The assessment will start automatically at the scheduled time.
-            </p>
-            <div style={{ padding: "1.5rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", border: "2px solid #2D7A52", marginBottom: "2rem" }}>
-              <p style={{ color: "#1E5A3B", fontSize: "1.25rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-                Assessment starts at
+        <>
+          <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#E8FAF0" }}>
+            <div style={{ textAlign: "center", maxWidth: "600px" }}>
+              <h1 style={{ color: "#1E5A3B", marginBottom: "1rem" }}>Pre-Check Phase</h1>
+              <p style={{ color: "#2D7A52", fontSize: "1.125rem", marginBottom: "2rem" }}>
+                You can complete pre-checks now. The assessment will start automatically at the scheduled time.
               </p>
-              <p style={{ color: "#2D7A52", fontSize: "1.5rem", fontWeight: 700 }}>
-                {formatDateTime(startTimeDate)}
-              </p>
-            </div>
-            <div style={{ padding: "1rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", border: "1px solid #A8E8BC" }}>
-              <p style={{ color: "#4A9A6A", fontSize: "0.875rem" }}>
-                The assessment will automatically start when the scheduled time arrives. This page will refresh automatically.
-              </p>
+              <div style={{ padding: "1.5rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", border: "2px solid #2D7A52", marginBottom: "2rem" }}>
+                <p style={{ color: "#1E5A3B", fontSize: "1.25rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                  Assessment starts at
+                </p>
+                <p style={{ color: "#2D7A52", fontSize: "1.5rem", fontWeight: 700 }}>
+                  {formatDateTime(startTimeDate)}
+                </p>
+              </div>
+              <div style={{ padding: "1rem", backgroundColor: "#ffffff", borderRadius: "0.5rem", border: "1px solid #A8E8BC" }}>
+                <p style={{ color: "#4A9A6A", fontSize: "0.875rem" }}>
+                  The assessment will automatically start when the scheduled time arrives. This page will refresh automatically.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the assessment."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        </>
       );
     }
     
     // Otherwise show error/access denied screen
     return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#E8FAF0" }}>
-        <div style={{ textAlign: "center", maxWidth: "600px" }}>
-          <h1 style={{ color: "#1E5A3B", marginBottom: "1rem" }}>Access Denied</h1>
-          <p style={{ color: "#2D7A52", fontSize: "1.125rem" }}>{error || "You cannot access this assessment at this time."}</p>
+      <>
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", backgroundColor: "#E8FAF0" }}>
+          <div style={{ textAlign: "center", maxWidth: "600px" }}>
+            <h1 style={{ color: "#1E5A3B", marginBottom: "1rem" }}>Access Denied</h1>
+            <p style={{ color: "#2D7A52", fontSize: "1.125rem" }}>{error || "You cannot access this assessment at this time."}</p>
+          </div>
         </div>
-      </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the assessment."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     );
   }
 
@@ -825,14 +890,12 @@ export default function CustomMCQTakePage() {
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#ffffff", padding: "2rem" }}>
       <ViolationToast />
-      {/* Hidden canvas used by useCameraProctor to capture snapshots */}
-      <canvas ref={canvasRef} style={{ display: "none" }} />
       {cameraProctorEnabled && (
         <WebcamPreview
-          ref={videoRef}
-          cameraOn={isCameraOn}
-          faceMeshStatus={cameraErrors?.length ? "error" : isModelLoaded ? "loaded" : "loading"}
-          facesCount={facesCount}
+          ref={thumbVideoRef}
+          cameraOn={proctoringState.isCameraOn}
+          faceMeshStatus={proctoringState.isModelLoaded ? "loaded" : proctoringState.modelError ? "error" : "loading"}
+          facesCount={proctoringState.facesCount}
         />
       )}
       
@@ -1320,6 +1383,15 @@ export default function CustomMCQTakePage() {
         )}
         </div>
       </div>
+      
+      {/* FULLSCREEN LOCK OVERLAY - blocks UI when not in fullscreen */}
+      <FullscreenLockOverlay
+        isLocked={isFullscreenLocked}
+        onRequestFullscreen={handleRequestFullscreen}
+        exitCount={fullscreenExitCount}
+        message="Fullscreen mode is required during the assessment."
+        warningText="Please return to fullscreen to continue your exam. Repeated exits are logged and may affect your assessment."
+      />
     </div>
   );
 }
