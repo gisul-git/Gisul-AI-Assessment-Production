@@ -8,7 +8,6 @@ import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clo
 import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
 import { useSession } from 'next-auth/react'
 import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
-import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
 
 interface AIFeedback {
   overall_score: number
@@ -980,7 +979,7 @@ export default function AnalyticsPage() {
                   ) : showProctorLogs ? (
                     <ProctorLogsReview 
                       logs={proctorLogs}
-                      candidateName={analytics.user_name}
+                      candidateName={analytics.candidate.name}
                     />
                   ) : null}
                 </div>

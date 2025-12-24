@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/router";
 import { customMCQApi } from "../../../lib/custom-mcq/api";
 import { CustomMCQAssessment, MCQQuestion, SubjectiveQuestion, Question } from "../../../types/custom-mcq";
-import { useUniversalProctoring, CandidateLiveService, type ProctoringViolation } from "@/universal-proctoring";
+import { useUniversalProctoring, CandidateLiveService, resolveUserIdForProctoring, type ProctoringViolation } from "@/universal-proctoring";
 import WebcamPreview from "../../../components/WebcamPreview";
 import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
 import { FullscreenLockOverlay } from "@/components/FullscreenLockOverlay";

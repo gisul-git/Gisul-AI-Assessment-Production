@@ -8,7 +8,6 @@ import { requireAuth } from '../../../../lib/auth'
 import axios from 'axios'
 import { ArrowLeft, AlertTriangle, Clock } from 'lucide-react'
 import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
-import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
 
 interface AnswerLog {
   answer: string

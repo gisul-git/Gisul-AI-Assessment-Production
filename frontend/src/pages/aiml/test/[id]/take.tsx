@@ -1,9 +1,11 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useRouter } from 'next/router'import { useSession } from 'next-auth/react'import dynamic from 'next/dynamic'
+import { useRouter } from 'next/router'
+import { useSession } from 'next-auth/react'
+import dynamic from 'next/dynamic'
 import axios from 'axios'
-import { useUniversalProctoring, CandidateLiveService, type ProctoringViolation } from '@/universal-proctoring'
+import { useUniversalProctoring, CandidateLiveService, resolveUserIdForProctoring, type ProctoringViolation } from '@/universal-proctoring'
 import WebcamPreview from '../../../../components/WebcamPreview'
 import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
 
