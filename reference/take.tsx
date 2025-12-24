@@ -14,22 +14,18 @@ import { EditorContainer, SubmissionTestcaseResult } from '../../../components/d
 import type { SubmissionHistoryEntry } from '../../../components/dsa/test/EditorContainer'
 import { SQLEditorContainer } from '../../../components/dsa/test/SQLEditorContainer'
 import { OutputConsole } from '../../../components/dsa/test/OutputConsole'
-// Universal Proctoring imports
-import {
-  useUniversalProctoring,
-  CandidateLiveService,
-  type ProctoringViolation,
-} from "@/universal-proctoring";
+// Proctoring imports
+import { useFaceMesh, type DetectionResult } from "@/hooks/useFaceMesh";
+import { useProctorUpload } from "@/hooks/useProctorUpload";
 import WebcamPreview from "@/components/WebcamPreview";
 import { ViolationToast, pushViolationToast } from "@/components/ViolationToast";
+import { useLiveProctoring } from "@/hooks/useLiveProctoring";
 import { useDSTimer } from '../../../hooks/useDSTimer'
 import { 
+  FullscreenWarningBanner, 
   FullscreenPrompt
 } from '../../../components/proctor'
 
-// Fullscreen Lock imports
-import { FullscreenLockOverlay } from "@/components/FullscreenLockOverlay";
-import { useFullscreenLock } from "@/hooks/useFullscreenLock";
 interface Example {
   input: string
   output: string
@@ -147,7 +143,6 @@ export default function TestTakePage() {
   
   // Sequential question progression state (for PER_QUESTION mode only)
   const [submittedQuestions, setSubmittedQuestions] = useState<Record<string, boolean>>({})
-  const [autoSubmittedQuestions, setAutoSubmittedQuestions] = useState<Record<string, boolean>>({})
   
   const [testSubmission, setTestSubmission] = useState<any>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -156,25 +151,33 @@ export default function TestTakePage() {
   const [candidateEmail, setCandidateEmail] = useState<string | null>(null)
   const [candidateName, setCandidateName] = useState<string | null>(null)
   const [precheckMode, setPrecheckMode] = useState<{start_time: string, message: string} | null>(null)
-  const [canStartNow, setCanStartNow] = useState(false)
-  const [timeUntilStart, setTimeUntilStart] = useState<number>(0)
-  const [testReadyToStart, setTestReadyToStart] = useState(false)
   // ============================================================================
-  // PROCTORING STATE & REFS (Universal Proctoring System)
+  // PROCTORING STATE & REFS
   // ============================================================================
 
+  const [webcamLive, setWebcamLive] = useState(false);
+  const [faceMeshStatus, setFaceMeshStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
+  const [displayedFacesCount, setDisplayedFacesCount] = useState(0);
+  const [proctoringEnabled, setProctoringEnabled] = useState(false);
   // AI (camera-based) proctoring toggle from schedule.proctoringSettings
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(false);
   const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(false);
   const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null);
-  
-  // Universal proctoring hook
+  // Proctoring refs
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
-  const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
-  const liveProctoringStartedRef = useRef(false);
+  const webcamStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const noFaceCountRef = useRef(0);
+  const multipleFacesCooldownRef = useRef(0);
+
+  // Cooldown constants
+  const NO_FACE_FRAMES_THRESHOLD = 5;
+  const MULTIPLE_FACES_COOLDOWN_MS = 15000; // 15 seconds
 
   const editorRef = useRef<HTMLDivElement>(null);
   const [debugMode, setDebugMode] = useState(false);
+  const [showFullscreenWarning, setShowFullscreenWarning] = useState(false);
   const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false);
 
   const getViolationMessage = (eventType: string): string => {
@@ -423,14 +426,13 @@ export default function TestTakePage() {
   const assessmentIdStr = typeof testId === 'string' ? testId : '';
   
   // Try multiple sources for candidateId
-  // Priority: userId from URL (for DSA tests) > candidateEmail > anonymous
-  // This ensures unique sessions even if same email is used across multiple tabs
+  // Priority: candidateEmail > userId from URL > anonymous
   const getCandidateId = (): string => {
-    if (userId && userId.trim() !== '') {
-      return userId.trim();
-    }
     if (candidateEmail && candidateEmail.trim() !== '') {
       return candidateEmail.trim();
+    }
+    if (userId && userId.trim() !== '') {
+      return userId.trim();
     }
     return 'anonymous';
   };
@@ -453,74 +455,11 @@ export default function TestTakePage() {
     }
   }, [isClient, test, questions.length, candidateIdStr, candidateEmail, userId, assessmentIdStr, aiProctoringEnabled, liveProctoringEnabled]);
 
-  // ============================================================================
-  // UNIVERSAL PROCTORING INTEGRATION
-  // ============================================================================
-
-  // ============================================================================
-  // FULLSCREEN LOCK - Violation-driven lock state (SIMPLIFIED)
-  // ============================================================================
-  const {
-    isLocked: isFullscreenLocked,
-    setIsLocked: setFullscreenLocked,
-    exitCount: fullscreenExitCount,
-    incrementExitCount: incrementFullscreenExitCount,
-    requestFullscreen: requestFullscreenLock,
-  } = useFullscreenLock();
-
-  // Handle violation callback from universal proctoring
-  // THIS IS THE SINGLE SOURCE OF TRUTH for fullscreen lock triggering
-  const handleUniversalViolation = useCallback((violation: ProctoringViolation) => {
-    console.log('[DSA Take] Universal proctoring violation:', violation);
-    
-    // Show toast for all violations
-    pushViolationToast({
-      id: `${violation.eventType}-${Date.now()}`,
-      eventType: violation.eventType,
-      message: getViolationMessage(violation.eventType),
-      timestamp: violation.timestamp,
-    });
-
-    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
-    if (violation.eventType === 'FULLSCREEN_EXIT') {
-      console.log('[DSA Take] FULLSCREEN_EXIT violation - locking screen');
-      setFullscreenLocked(true);
-      incrementFullscreenExitCount();
-    }
-  }, [setFullscreenLocked, incrementFullscreenExitCount]);
-
-  // Handle fullscreen re-entry - unlock the screen
-  const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
-    console.log('[DSA Take] Requesting fullscreen re-entry...');
-    const success = await requestFullscreenLock();
-    if (success) {
-      console.log('[DSA Take] Fullscreen re-entered - unlocking screen');
-      setFullscreenLocked(false);
-    }
-    return success;
-  }, [requestFullscreenLock, setFullscreenLocked]);
-
-  // Universal proctoring hook - handles AI proctoring, tab switch, fullscreen
-  const {
-    state: proctoringState,
-    isRunning: isProctoringRunning,
-    violations,
-    startProctoring: startUniversalProctoring,
-    stopProctoring: stopUniversalProctoring,
-    requestFullscreen: requestUniversalFullscreen,
-    isFullscreen,
-  } = useUniversalProctoring({
-    onViolation: handleUniversalViolation,
-    debug: debugMode,
+  // Proctor upload hook
+  const { uploadSnapshot, recordViolation } = useProctorUpload({
+    assessmentId: assessmentIdStr,
+    candidateId: candidateIdStr,
   });
-
-  // Unlock fullscreen when test is submitted
-  useEffect(() => {
-    if (testSubmission) {
-      console.log('[DSA Take] Test submitted - unlocking fullscreen');
-      setFullscreenLocked(false);
-    }
-  }, [testSubmission, setFullscreenLocked]);
 
   // Get screen stream from window.__screenStream (set by identity-verify gate)
   useEffect(() => {
@@ -533,96 +472,295 @@ export default function TestTakePage() {
     }
   }, []);
 
-  // Start proctoring when test is ready (AI proctoring + tab switch + fullscreen)
+  // Get webcam stream from webcamStreamRef
+  const webcamStreamForLiveProctor = webcamLive && webcamStreamRef.current 
+    ? webcamStreamRef.current
+    : null;
+
+  const {
+    isStreaming: isLiveProctoringStreaming,
+    connectionState: liveProctoringConnectionState,
+    error: liveProctoringError,
+    sessionId: liveProctoringSessionId,
+    startStreaming: startLiveProctoring,
+    stopStreaming: stopLiveProctoring,
+  } = useLiveProctoring({
+    assessmentId: assessmentIdStr,
+    candidateId: candidateIdStr,
+    enabled: liveProctoringEnabled,
+    preScreenStream: liveProctorScreenStream,
+    onError: (error) => {
+      console.error('[DSA Take] Live Proctoring error:', error);
+    },
+    debugMode: false,
+  });
+
+  // Start Live Proctoring immediately when streams are ready (before timer starts)
+  // This ensures connection is ready when admin opens dashboard
   useEffect(() => {
-    if (test && questions.length > 0 && !isProctoringRunning && isClient && thumbVideoRef.current) {
-      console.log('[DSA Take] Starting Universal Proctoring...');
-      
-      startUniversalProctoring({
-        settings: {
-          aiProctoringEnabled: aiProctoringEnabled,
-          liveProctoringEnabled: liveProctoringEnabled,
-        },
-        session: {
-          userId: candidateIdStr,
-          assessmentId: assessmentIdStr,
-        },
-        videoElement: aiProctoringEnabled ? thumbVideoRef.current : null,
-      }).then((success) => {
-        if (success) {
-          console.log('[DSA Take] ✅ Universal Proctoring started');
-        } else {
-          console.error('[DSA Take] ❌ Failed to start Universal Proctoring');
-        }
+    if (liveProctoringEnabled && liveProctorScreenStream && webcamStreamForLiveProctor) {
+      console.log('[DSA Take] Starting Live Proctoring (streams ready, starting immediately)...');
+      startLiveProctoring().catch(err => {
+        console.error('[DSA Take] Failed to start Live Proctoring:', err);
       });
     }
-  }, [test, questions.length, isProctoringRunning, isClient, aiProctoringEnabled, liveProctoringEnabled, candidateIdStr, assessmentIdStr, startUniversalProctoring]);
+  }, [liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
 
-  // Start Live Proctoring (separate from AI proctoring)
-  useEffect(() => {
-    if (!liveProctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
-      return;
-    }
-
-    // Only start when test is ready
-    if (!test || questions.length === 0) {
-      return;
-    }
-
-    console.log('[DSA Take] Starting Live Proctoring service...');
-    liveProctoringStartedRef.current = true;
-
-    // Create and start the live proctoring service
-    const liveService = new CandidateLiveService({
-      assessmentId: assessmentIdStr,
-      candidateId: candidateIdStr,
-      debugMode: debugMode,
-    });
-
-    liveService.start(
-      {
-        onStateChange: (state) => {
-          console.log('[DSA Take] Live proctoring state:', state);
-        },
-        onError: (error) => {
-          console.error('[DSA Take] Live Proctoring error:', error);
-        },
-      },
-      liveProctorScreenStream
-    ).then((success) => {
-      if (success) {
-        console.log('[DSA Take] ✅ Live Proctoring started');
-        liveProctoringServiceRef.current = liveService;
-      } else {
-        console.error('[DSA Take] ❌ Failed to start Live Proctoring');
-        liveProctoringStartedRef.current = false;
-      }
-    });
-  }, [liveProctoringEnabled, liveProctorScreenStream, test, questions.length, assessmentIdStr, candidateIdStr, debugMode]);
-
-  // Stop proctoring when assessment ends
+  // Stop Live Proctoring when assessment ends
   useEffect(() => {
     if (submitting || (testSubmission && testSubmission.ended_at)) {
-      console.log('[DSA Take] Assessment ending, stopping proctoring');
-      stopUniversalProctoring();
-      
-      if (liveProctoringServiceRef.current) {
-        liveProctoringServiceRef.current.stop();
-        liveProctoringServiceRef.current = null;
+      stopLiveProctoring();
+    }
+    return () => {
+      if (submitting || (testSubmission && testSubmission.ended_at)) {
+        stopLiveProctoring();
+      }
+    };
+  }, [submitting, testSubmission, stopLiveProctoring]);
+
+  // ============================================================================
+  // PROCTORING FUNCTIONS
+  // ============================================================================
+
+  // Handle violation events
+  const handleViolation = useCallback(async (eventType: string) => {
+    const now = Date.now();
+    const timestamp = new Date().toISOString();
+
+    // Cooldown for multiple faces
+    if (eventType === 'MULTIPLE_FACES_DETECTED') {
+      if (now - multipleFacesCooldownRef.current < MULTIPLE_FACES_COOLDOWN_MS) {
+        console.log('[Proctor] Multiple faces cooldown active, skipping');
+        return;
+      }
+      multipleFacesCooldownRef.current = now;
+    }
+
+    console.log('[Proctor] Handling violation:', {
+      eventType,
+      assessmentId: assessmentIdStr,
+      candidateId: candidateIdStr,
+      webcamLive,
+      hasVideoRef: !!thumbVideoRef.current,
+    });
+
+    // Determine which video element to use for snapshot
+    // Snapshots disabled for TAB_SWITCH and FOCUS_LOST per request
+    const isScreenEvent = false;
+    let videoForSnapshot: HTMLVideoElement | null = null;
+    
+    if (isScreenEvent) {
+      console.log('[Proctor] Screen capture requested for', eventType);
+      // Screen capture logic would go here if needed
+    } else if (webcamLive && thumbVideoRef.current) {
+      videoForSnapshot = thumbVideoRef.current;
+    }
+
+    // Record violation with snapshot (snapshot captured inside recordViolation)
+    const success = await recordViolation(
+      {
+        eventType,
+        timestamp,
+        assessmentId: assessmentIdStr,
+        candidateId: candidateIdStr,
+      },
+      videoForSnapshot
+    );
+
+    console.log('[Proctor] Violation recorded:', { eventType, success });
+
+    // Show toast
+    pushViolationToast({
+      id: `${eventType}-${now}`,
+      eventType,
+      message: getViolationMessage(eventType),
+      timestamp,
+    });
+  }, [webcamLive, recordViolation, assessmentIdStr, candidateIdStr]);
+
+  // Face detection callback
+  const handleDetection = useCallback((result: DetectionResult) => {
+    setDisplayedFacesCount(result.facesCount);
+
+    // No face detection
+    if (result.facesCount === 0) {
+      noFaceCountRef.current++;
+      if (noFaceCountRef.current >= NO_FACE_FRAMES_THRESHOLD) {
+        handleViolation('NO_FACE_DETECTED');
+        noFaceCountRef.current = 0; // Reset after triggering
+      }
+    } else {
+      noFaceCountRef.current = 0;
+    }
+
+    // Multiple faces
+    if (result.multiFace) {
+      handleViolation('MULTIPLE_FACES_DETECTED');
+    }
+
+    // Gaze away
+    if (result.gazeAway) {
+      handleViolation('GAZE_AWAY');
+    }
+  }, [handleViolation]);
+
+  // FaceMesh hook
+  const { isModelLoaded, modelError, facesCount } = useFaceMesh({
+    videoRef: thumbVideoRef,
+    onDetection: handleDetection,
+    // Camera-based AI proctoring only runs when the AI toggle is enabled
+    enabled: aiProctoringEnabled && webcamLive,
+  });
+
+  // Update FaceMesh status
+  useEffect(() => {
+    if (modelError) {
+      setFaceMeshStatus('error');
+    } else if (isModelLoaded) {
+      setFaceMeshStatus('loaded');
+    } else {
+      setFaceMeshStatus('loading');
+    }
+  }, [isModelLoaded, modelError]);
+
+  // Start webcam
+  const startWebcam = useCallback(async () => {
+    if (!isClient) return;
+
+    console.log('[Webcam] Starting webcam...');
+
+    try {
+      // Reuse existing stream if available
+      if (webcamStreamRef.current && webcamStreamRef.current.active) {
+        console.log('[Webcam] Reusing existing stream');
+        if (thumbVideoRef.current) {
+          thumbVideoRef.current.srcObject = webcamStreamRef.current;
+          await thumbVideoRef.current.play();
+        }
+        setWebcamLive(true);
+        return;
+      }
+
+      // Request camera access
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+        audio: false,
+      });
+
+      webcamStreamRef.current = stream;
+      console.log('[Webcam] Stream acquired');
+
+      // Wait for video element
+      let retries = 10;
+      while (!thumbVideoRef.current && retries > 0) {
+        await new Promise((r) => setTimeout(r, 100));
+        retries--;
+      }
+
+      if (thumbVideoRef.current) {
+        thumbVideoRef.current.srcObject = stream;
+
+        // Wait for video to be ready
+        await new Promise<void>((resolve) => {
+          const video = thumbVideoRef.current!;
+          if (video.readyState >= 2) {
+            resolve();
+          } else {
+            video.onloadeddata = () => resolve();
+          }
+        });
+
+        await thumbVideoRef.current.play();
+        console.log('[Webcam] Video playing');
+        setWebcamLive(true);
+      }
+    } catch (err) {
+      console.error('[Webcam] Error starting webcam:', err);
+      setWebcamLive(false);
+    }
+  }, [isClient]);
+
+  // Stop webcam
+  const stopWebcam = useCallback(() => {
+    if (webcamStreamRef.current) {
+      webcamStreamRef.current.getTracks().forEach((track) => track.stop());
+      webcamStreamRef.current = null;
+    }
+    setWebcamLive(false);
+    console.log('[Webcam] Stopped');
+  }, []);
+
+  // Start AI/tab proctoring when test is ready
+  useEffect(() => {
+    if (test && questions.length > 0 && !proctoringEnabled && isClient) {
+      console.log('[Proctor] Starting proctoring...');
+      // Always enable overall proctoring (TAB_SWITCH / FOCUS_LOST etc.)
+      setProctoringEnabled(true);
+
+      if (aiProctoringEnabled) {
+        // Start webcam only when AI camera proctoring is enabled for this test
+        startWebcam();
+      } else {
+        console.log(
+          '[Proctor] AI proctoring disabled for this test; skipping webcam/FaceMesh'
+        );
       }
     }
-  }, [submitting, testSubmission, stopUniversalProctoring]);
+  }, [test, questions.length, proctoringEnabled, isClient, aiProctoringEnabled, startWebcam]);
+
+  // Safety: if proctoring is already enabled and we later discover AI flag is ON,
+  // ensure webcam starts as soon as possible.
+  useEffect(() => {
+    if (
+      test &&
+      questions.length > 0 &&
+      proctoringEnabled &&
+      aiProctoringEnabled &&
+      !webcamLive &&
+      isClient
+    ) {
+      console.log('[Proctor] AI flag enabled after proctor start; starting webcam now...');
+      startWebcam();
+    }
+  }, [test, questions.length, proctoringEnabled, aiProctoringEnabled, webcamLive, isClient, startWebcam]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopUniversalProctoring();
-      if (liveProctoringServiceRef.current) {
-        liveProctoringServiceRef.current.stop();
-        liveProctoringServiceRef.current = null;
+      stopWebcam();
+    };
+  }, [stopWebcam]);
+
+  // Tab visibility detection
+  useEffect(() => {
+    if (!isClient || !proctoringEnabled) return;
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        handleViolation('TAB_SWITCH');
       }
     };
-  }, [stopUniversalProctoring]);
+
+    const handleBlur = () => {
+      handleViolation('FOCUS_LOST');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleBlur);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [isClient, proctoringEnabled, handleViolation]);
+
+  // Check if fullscreen was refused
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const fullscreenAccepted = sessionStorage.getItem('fullscreenAccepted')
+      setShowFullscreenWarning(fullscreenAccepted === 'false')
+    }
+  }, [])
 
   // Auto-enter fullscreen after test data loads if test was already in progress (refresh case)
   // Flow: Load page -> Load test data -> Auto-enter fullscreen if was already in progress -> Start timer
@@ -728,7 +866,49 @@ export default function TestTakePage() {
   }
 
   // Listen for fullscreen exit and re-enter (to prevent accidental exits)
-  // Now handled by useFullscreenLock hook - legacy code removed
+  // Check both shouldStartTest and fullscreenAccepted to handle cases after fullscreen is entered
+  useEffect(() => {
+    const shouldBeFullscreen = sessionStorage.getItem('shouldStartTest') === 'true' || 
+                               sessionStorage.getItem('fullscreenAccepted') === 'true'
+    if (!shouldBeFullscreen) return
+
+    const handleFullscreenExit = () => {
+      const isFullscreen = !!document.fullscreenElement || 
+                          !!(document as any).webkitFullscreenElement ||
+                          !!(document as any).mozFullScreenElement ||
+                          !!(document as any).msFullscreenElement
+      
+      // If fullscreen is exited, show warning
+      if (!isFullscreen) {
+        setShowFullscreenWarning(true)
+        console.log('[Fullscreen] Detected fullscreen exit')
+      } else if (isFullscreen) {
+        setShowFullscreenWarning(false)
+      }
+    }
+    
+    // Listen for fullscreen changes
+    document.addEventListener('fullscreenchange', handleFullscreenExit)
+    document.addEventListener('webkitfullscreenchange', handleFullscreenExit)
+    document.addEventListener('mozfullscreenchange', handleFullscreenExit)
+    document.addEventListener('MSFullscreenChange', handleFullscreenExit)
+    
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenExit)
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenExit)
+      document.removeEventListener('mozfullscreenchange', handleFullscreenExit)
+      document.removeEventListener('MSFullscreenChange', handleFullscreenExit)
+    }
+  }, [])
+
+  // Handle fullscreen request from warning banner
+  const handleEnterFullscreenFromBanner = async () => {
+    const success = await requestFullscreen()
+    if (success) {
+      setShowFullscreenWarning(false)
+      sessionStorage.setItem('fullscreenAccepted', 'true')
+    }
+  }
   
   // Get candidate info from session storage or API (non-blocking)
   useEffect(() => {
@@ -811,8 +991,13 @@ export default function TestTakePage() {
     return () => clearTimeout(checkParams)
   }, [testId, token, userId, router])
 
-  // Reusable function to load test data (can be called from useEffect or manually)
-  const loadTestData = useCallback(async (skipInitialCheck: boolean = false) => {
+  // NEW: simple, from-scratch test + question loading flow
+  // 1) Ensure submission (existing or start)
+  // 2) Fetch public test data
+  // 3) Fetch all questions in parallel (Promise.allSettled)
+  useEffect(() => {
+    if (!router.isReady) return
+
     const safeTestId =
       typeof testId === 'string'
         ? testId
@@ -826,499 +1011,254 @@ export default function TestTakePage() {
         hasToken: !!token,
         userId,
       })
-      if (!skipInitialCheck) {
-        setCheckingParams(false)
-      }
+      setCheckingParams(false)
       return
     }
-
-    try {
-      if (!skipInitialCheck) {
-        setCheckingParams(false)
-      }
-      setQuestionsLoading(true)
-
-      // --- Step 1: Ensure submission exists ---
-      let submissionData: any = null
-
-      try {
-        const subRes = await dsaApi.get(`/tests/${safeTestId}/submission?user_id=${userId}`)
-        submissionData = subRes.data
-
-        if (submissionData.is_completed) {
-          router.push('/dashboard')
-          return
-        }
-
-        // If submission exists and test has started (has started_at and no precheck_mode), clear precheck mode
-        if (submissionData.started_at && !submissionData.precheck_mode) {
-          setPrecheckMode(null)
-          setTestReadyToStart(false)
-        }
-      } catch (err: any) {
-        if (err?.response?.status === 404) {
-          // No submission yet -> start test
-          try {
-            const startRes = await dsaApi.post(`/tests/${safeTestId}/start?user_id=${userId}`)
-            const data = startRes.data
-
-            if (data.precheck_mode === true) {
-              setPrecheckMode({
-                start_time: data.start_time,
-                message:
-                  data.message ||
-                  'Test has not started yet. Please complete pre-checks and wait.',
-              })
-
-              submissionData = {
-                started_at: null,
-                is_completed: false,
-                precheck_mode: true,
-              }
-            } else {
-              submissionData = {
-                started_at: data.started_at,
-                is_completed: false,
-                submissions: [],
-              }
-              // Clear precheck mode when test starts
-              setPrecheckMode(null)
-              setTestReadyToStart(false)
-            }
-          } catch (startErr: any) {
-            const detail =
-              startErr?.response?.data?.detail ||
-              startErr?.response?.data?.message ||
-              'Failed to start test. Please try again.'
-            alert(detail)
-            router.push('/dashboard')
-            return
-          }
-        } else {
-          console.error('[Test Load] Error fetching submission', err)
-          alert('Error loading test. Please try again.')
-          router.push('/dashboard')
-          return
-        }
-      }
-
-      // --- Step 2: Fetch public test data ---
-      const testRes = await dsaApi.get(`/tests/${safeTestId}/public?user_id=${userId}`)
-      const testData = testRes.data
-
-      if (!testData) {
-        alert('Error: Could not load test data. Please refresh the page.')
-        return
-      }
-
-      setTest(testData)
-      setTestSubmission(submissionData)
-
-      // Load proctoring settings from test data (consistent with reference implementation)
-      if (testData?.proctoringSettings) {
-        console.log('[DSA Take] Loading proctoring settings:', testData.proctoringSettings);
-        setProctoringSettings(testData.proctoringSettings);
-        setAiProctoringEnabled(testData.proctoringSettings.aiProctoringEnabled === true);
-        setLiveProctoringEnabled(testData.proctoringSettings.liveProctoringEnabled === true);
-      } else {
-        console.log('[DSA Take] No proctoring settings found in test data');
-        setProctoringSettings({ aiProctoringEnabled: false, liveProctoringEnabled: false });
-        setAiProctoringEnabled(false);
-        setLiveProctoringEnabled(false);
-      }
-
-      const isPrecheck = submissionData?.precheck_mode === true
-      if (!isPrecheck && submissionData?.is_completed) {
-        router.push('/dashboard')
-        return
-      }
-
-      // --- Step 3: Fetch all questions in parallel ---
-      const questionIds: string[] = testData.question_ids || []
-      if (questionIds.length === 0) {
-        alert('This test has no questions configured. Please contact the administrator.')
-        router.push('/dashboard')
-        return
-      }
-
-      const questionPromises = questionIds.map((qId: string) =>
-        dsaApi.get(`/tests/${safeTestId}/question/${qId}?user_id=${userId}`).then((res) => res.data as Question)
-      )
-
-      const results = await Promise.allSettled(questionPromises)
-      const questionsData: Question[] = []
-
-      results.forEach((result, index) => {
-        const qId = questionIds[index]
-        if (result.status === 'fulfilled' && result.value) {
-          questionsData.push(result.value)
-        } else if (result.status === 'rejected') {
-          const err: any = result.reason
-          console.error('[Test Load] Question fetch failed', {
-            questionId: qId,
-            status: err?.response?.status,
-            data: err?.response?.data,
-            message: err?.message,
-          })
-        }
-      })
-
-      if (questionsData.length === 0) {
-        alert('This test has no valid questions. Please contact the administrator.')
-        router.push('/dashboard')
-        return
-      }
-
-      // Initialize visible testcases
-      const visibleMap: Record<string, VisibleTestcase[]> = {}
-      questionsData.forEach((q) => {
-        visibleMap[q.id] =
-          q.public_testcases?.map((tc: { input: string; expected_output: string }, idx: number) => ({
-            id: `${q.id}-public-${idx}`,
-            input: tc.input,
-            expected: tc.expected_output,
-          })) || []
-      })
-
-      // Initialize code and language (no preloading/localStorage merging)
-      const initialCode: Record<string, string> = {}
-      const initialLanguage: Record<string, string> = {}
-      questionsData.forEach((q) => {
-        if (q.question_type?.toUpperCase() === 'SQL') {
-          initialCode[q.id] = q.starter_query || '-- Write your SQL query here\n\nSELECT '
-          initialLanguage[q.id] = 'sql'
-        } else {
-          const defaultLang = q.languages[0] || 'python'
-          let starterCode = ''
-          if (q.function_signature) {
-            starterCode = generateBoilerplate(defaultLang, q)
-          } else if (q.starter_code && q.starter_code[defaultLang]) {
-            starterCode = q.starter_code[defaultLang]
-          } else {
-            starterCode = generateBoilerplate(defaultLang, q)
-          }
-          initialCode[q.id] = starterCode
-          initialLanguage[q.id] = defaultLang
-        }
-      })
-
-      setQuestions(questionsData)
-      setVisibleTestcasesMap(visibleMap)
-      setCode(initialCode)
-      setLanguage(initialLanguage)
-      setQuestionsLoading(false)
-
-      // Initialize submittedQuestions from existing submissions (if any)
-      const initialSubmittedQuestions: Record<string, boolean> = {}
-      if (submissionData?.submissions && Array.isArray(submissionData.submissions) && submissionData.submissions.length > 0) {
-        try {
-          // Fetch all submissions to get question_ids
-          // Note: We'll fetch submissions individually since we only have IDs
-          const submissionPromises = submissionData.submissions.map((subId: string) =>
-            dsaApi.get(`/submissions/${subId}`).then((res) => res.data).catch(() => null)
-          )
-          const submissionResults = await Promise.allSettled(submissionPromises)
-          
-          submissionResults.forEach((result) => {
-            if (result.status === 'fulfilled' && result.value?.question_id) {
-              initialSubmittedQuestions[result.value.question_id] = true
-            }
-          })
-          
-          console.log('[Test Load] Initialized submittedQuestions from existing submissions:', initialSubmittedQuestions)
-        } catch (err) {
-          console.error('[Test Load] Error fetching submissions for initialization:', err)
-          // Continue without initialization if fetching fails
-        }
-      }
-      
-      setSubmittedQuestions(initialSubmittedQuestions)
-
-      // Find the first unlocked question index
-      let firstUnlockedIndex = 0
-      if (testData?.timer_mode === 'PER_QUESTION') {
-        // First question is always accessible
-        firstUnlockedIndex = 0
-        
-        // Find the first question that should be unlocked (where all previous questions are submitted)
-        for (let i = 1; i < questionsData.length; i++) {
-          const previousQuestionId = questionsData[i - 1]?.id
-          if (previousQuestionId && initialSubmittedQuestions[previousQuestionId]) {
-            // Previous question is submitted, this question is unlocked
-            firstUnlockedIndex = i
-          } else {
-            // Previous question not submitted, stop here (this question is locked)
-            break
-          }
-        }
-      }
-      
-      setCurrentQuestionIndex(firstUnlockedIndex)
-
-      const now = new Date().toISOString()
-      setTestStartedAt(now)
-      setQuestionStartTimes({ [questionsData[firstUnlockedIndex].id]: now })
-    } catch (err) {
-      console.error('[Test Load] Fatal error while loading test', err)
-      alert('An error occurred while loading the test. Please try again.')
-      router.push('/dashboard')
-    }
-  }, [testId, token, userId, router])
-
-  // NEW: simple, from-scratch test + question loading flow
-  // 1) Ensure submission (existing or start)
-  // 2) Fetch public test data
-  // 3) Fetch all questions in parallel (Promise.allSettled)
-  useEffect(() => {
-    if (!router.isReady) return
-    loadTestData(false)
-  }, [router.isReady, loadTestData])
-
-  // Live countdown update for precheck mode
-  useEffect(() => {
-    if (!precheckMode) {
-      setTimeUntilStart(0)
-      setCanStartNow(false)
-      return
-    }
-
-    const startTime = new Date(precheckMode.start_time)
-    const updateCountdown = () => {
-      const now = new Date()
-      const timeUntil = Math.max(0, Math.floor((startTime.getTime() - now.getTime()) / 1000))
-      setTimeUntilStart(timeUntil)
-      
-      if (timeUntil <= 0 && !canStartNow) {
-        setCanStartNow(true)
-      }
-    }
-
-    // Update immediately
-    updateCountdown()
-
-    // Update every second
-    const interval = setInterval(updateCountdown, 1000)
-
-    return () => clearInterval(interval)
-  }, [precheckMode, canStartNow])
-
-  // Poll backend to check if test can start (every 5 seconds when in precheck mode)
-  useEffect(() => {
-    if (!precheckMode || !testId || !userId || !token) return
-    if (!canStartNow) return // Only poll when countdown has reached 0
 
     let cancelled = false
-    const pollInterval = setInterval(async () => {
-      if (cancelled) return
 
+    const load = async () => {
       try {
-        // Check if test can start by calling start endpoint
-        const startRes = await dsaApi.post(`/tests/${testId}/start?user_id=${userId}`)
-        const data = startRes.data
+        setCheckingParams(false)
+        setQuestionsLoading(true)
 
-        // If no longer in precheck mode, test can start - set flag to show button
-        if (!data.precheck_mode && !cancelled) {
-          setTestReadyToStart(true)
-          clearInterval(pollInterval)
+        // --- Step 1: Ensure submission exists ---
+        let submissionData: any = null
+
+        try {
+          const subRes = await dsaApi.get(`/tests/${testId}/submission?user_id=${userId}`)
+          submissionData = subRes.data
+
+          if (submissionData.is_completed) {
+            if (!cancelled) {
+              alert('You have already submitted this test. You cannot attempt it again.')
+              router.push('/dashboard')
+            }
+            return
+          }
+        } catch (err: any) {
+          if (err?.response?.status === 404) {
+            // No submission yet -> start test
+            try {
+              const startRes = await dsaApi.post(`/tests/${testId}/start?user_id=${userId}`)
+              const data = startRes.data
+
+              if (data.precheck_mode === true) {
+                if (!cancelled) {
+                  setPrecheckMode({
+                    start_time: data.start_time,
+                    message:
+                      data.message ||
+                      'Test has not started yet. Please complete pre-checks and wait.',
+                  })
+                }
+
+                submissionData = {
+                  started_at: null,
+                  is_completed: false,
+                  precheck_mode: true,
+                }
+              } else {
+                submissionData = {
+                  started_at: data.started_at,
+                  is_completed: false,
+                  submissions: [],
+                }
+              }
+            } catch (startErr: any) {
+              if (!cancelled) {
+                const detail =
+                  startErr?.response?.data?.detail ||
+                  startErr?.response?.data?.message ||
+                  'Failed to start test. Please try again.'
+                alert(detail)
+                router.push('/dashboard')
+              }
+              return
+            }
+          } else {
+            if (!cancelled) {
+              console.error('[Test Load] Error fetching submission', err)
+              alert('Error loading test. Please try again.')
+              router.push('/dashboard')
+            }
+            return
+          }
         }
-      } catch (err: any) {
-        // If error, continue polling (test might not be ready yet)
-        console.log('[Precheck] Polling for test start...', err?.response?.status)
+
+        if (cancelled) return
+
+        // --- Step 2: Fetch public test data ---
+        const testRes = await dsaApi.get(`/tests/${testId}/public?user_id=${userId}`)
+        const testData = testRes.data
+
+        if (!testData) {
+          if (!cancelled) {
+            alert('Error: Could not load test data. Please refresh the page.')
+          }
+          return
+        }
+
+        if (!cancelled) {
+          setTest(testData)
+          setTestSubmission(submissionData)
+
+          // Load proctoring settings from test data
+          const proctoringSettingsFromTest = testData?.proctoringSettings || {};
+          // Ensure boolean values (backend should normalize, but be defensive)
+          const aiProctoringEnabledValue = proctoringSettingsFromTest.aiProctoringEnabled === true;
+          const liveProctoringEnabledValue = proctoringSettingsFromTest.liveProctoringEnabled === true;
+          
+          console.log('[DSA Take] Proctoring settings received from backend:', {
+            proctoringSettingsFromTest,
+            rawTestData: testData,
+            aiProctoringEnabled: proctoringSettingsFromTest.aiProctoringEnabled,
+            liveProctoringEnabled: proctoringSettingsFromTest.liveProctoringEnabled,
+            aiProctoringEnabledType: typeof proctoringSettingsFromTest.aiProctoringEnabled,
+            liveProctoringEnabledType: typeof proctoringSettingsFromTest.liveProctoringEnabled,
+            normalizedAiProctoringEnabled: aiProctoringEnabledValue,
+            normalizedLiveProctoringEnabled: liveProctoringEnabledValue,
+          });
+          
+          // Normalize proctoringSettings to ensure boolean values
+          const normalizedProctoringSettings = {
+            aiProctoringEnabled: aiProctoringEnabledValue,
+            liveProctoringEnabled: liveProctoringEnabledValue,
+          };
+          
+          setProctoringSettings(normalizedProctoringSettings);
+          setAiProctoringEnabled(aiProctoringEnabledValue);
+          setLiveProctoringEnabled(liveProctoringEnabledValue);
+          
+          console.log('[DSA Take] State updated:', {
+            aiProctoringEnabled: aiProctoringEnabledValue,
+            liveProctoringEnabled: liveProctoringEnabledValue,
+          });
+          
+          // Warn if live proctoring is not enabled
+          if (!liveProctoringEnabledValue) {
+            console.warn('[DSA Take] ⚠️ Live Proctoring is NOT enabled for this test. Enable it in test settings to use live proctoring.');
+          }
+        }
+
+        const isPrecheck = submissionData?.precheck_mode === true
+        if (!isPrecheck && submissionData?.is_completed) {
+          if (!cancelled) {
+            alert('You have already submitted this test. You cannot attempt it again.')
+            router.push('/dashboard')
+          }
+          return
+        }
+
+        // --- Step 3: Fetch all questions in parallel ---
+        const questionIds: string[] = testData.question_ids || []
+        if (questionIds.length === 0) {
+          if (!cancelled) {
+            alert('This test has no questions configured. Please contact the administrator.')
+            router.push('/dashboard')
+          }
+          return
+        }
+
+        const questionPromises = questionIds.map((qId: string) =>
+          dsaApi.get(`/tests/${testId}/question/${qId}?user_id=${userId}`).then((res) => res.data as Question)
+        )
+
+        const results = await Promise.allSettled(questionPromises)
+        const questionsData: Question[] = []
+
+        results.forEach((result, index) => {
+          const qId = questionIds[index]
+          if (result.status === 'fulfilled' && result.value) {
+            questionsData.push(result.value)
+          } else if (result.status === 'rejected') {
+            const err: any = result.reason
+            console.error('[Test Load] Question fetch failed', {
+              questionId: qId,
+              status: err?.response?.status,
+              data: err?.response?.data,
+              message: err?.message,
+            })
+          }
+        })
+
+        if (cancelled) return
+
+        if (questionsData.length === 0) {
+          alert('This test has no valid questions. Please contact the administrator.')
+          router.push('/dashboard')
+          return
+        }
+
+        // Initialize visible testcases
+        const visibleMap: Record<string, VisibleTestcase[]> = {}
+        questionsData.forEach((q) => {
+          visibleMap[q.id] =
+            q.public_testcases?.map((tc: { input: string; expected_output: string }, idx: number) => ({
+              id: `${q.id}-public-${idx}`,
+              input: tc.input,
+              expected: tc.expected_output,
+            })) || []
+        })
+
+        // Initialize code and language (no preloading/localStorage merging)
+        const initialCode: Record<string, string> = {}
+        const initialLanguage: Record<string, string> = {}
+        questionsData.forEach((q) => {
+          if (q.question_type?.toUpperCase() === 'SQL') {
+            initialCode[q.id] = q.starter_query || '-- Write your SQL query here\n\nSELECT '
+            initialLanguage[q.id] = 'sql'
+          } else {
+            const defaultLang = q.languages[0] || 'python'
+            let starterCode = ''
+            if (q.function_signature) {
+              starterCode = generateBoilerplate(defaultLang, q)
+            } else if (q.starter_code && q.starter_code[defaultLang]) {
+              starterCode = q.starter_code[defaultLang]
+            } else {
+              starterCode = generateBoilerplate(defaultLang, q)
+            }
+            initialCode[q.id] = starterCode
+            initialLanguage[q.id] = defaultLang
+          }
+        })
+
+        if (!cancelled) {
+          setQuestions(questionsData)
+          setVisibleTestcasesMap(visibleMap)
+          setCode(initialCode)
+          setLanguage(initialLanguage)
+          setQuestionsLoading(false)
+
+          const now = new Date().toISOString()
+          setTestStartedAt(now)
+          setQuestionStartTimes({ [questionsData[0].id]: now })
+        }
+      } catch (err) {
+        console.error('[Test Load] Fatal error while loading test', err)
+        if (!cancelled) {
+          alert('An error occurred while loading the test. Please try again.')
+          router.push('/dashboard')
+        }
+      } finally {
+        // nothing to reset; effect can safely re-run if params change
       }
-    }, 5000)
+    }
+
+    load()
 
     return () => {
       cancelled = true
-      clearInterval(pollInterval)
     }
-  }, [precheckMode, canStartNow, testId, userId, token])
+  }, [router, router.isReady, testId, token, userId])
 
-  // Auto-start after 3 seconds if testReadyToStart is true and user hasn't clicked
-  useEffect(() => {
-    if (!testReadyToStart || !precheckMode || !testId || !userId) return
-
-    const autoStartTimer = setTimeout(async () => {
-      // Reload test data without full page reload (preserves fullscreen)
-      await loadTestData(true)
-    }, 3000)
-
-    return () => clearTimeout(autoStartTimer)
-  }, [testReadyToStart, precheckMode, testId, userId, loadTestData])
-
-  // Handle manual start assessment button click
-  const handleStartAssessment = async () => {
-    if (!testId || !userId) return
-
-    try {
-      // Ensure test is started (should already be started from polling, but confirm)
-      await dsaApi.post(`/tests/${testId}/start?user_id=${userId}`)
-      // Reload test data without full page reload (preserves fullscreen)
-      await loadTestData(true)
-    } catch (err: any) {
-      console.error('[Precheck] Start assessment failed:', err)
-      const errorMessage = err?.response?.data?.detail || err?.response?.data?.message || 'Failed to start assessment. Please try again.'
-      alert(errorMessage)
-    }
-  }
-
-  const handleAutoSubmit = () => {
+  const handleAutoSubmit = async () => {
     // Extra safety: only auto-submit when the test is fully in-progress and UI is ready.
-    if (submitting) return
+      if (submitting) return
     if (precheckMode) return
     if (!test || questions.length === 0) return
 
-    handleSubmit(true)
-  }
-
-  // Auto-submit a specific question when its timer expires
-  const handleAutoSubmitQuestion = async (questionId: string): Promise<boolean> => {
-    if (!userId) {
-      console.error('[AutoSubmit] Missing userId')
-      return false
-    }
-    if (autoSubmittedQuestions[questionId]) {
-      console.log('[AutoSubmit] Question already auto-submitted:', questionId)
-      return true // Already auto-submitted, consider it success
-    }
-    
-    const question = questions.find(q => q.id === questionId)
-    if (!question) {
-      console.error('[AutoSubmit] Question not found:', questionId)
-      return false
-    }
-
-    // Mark as auto-submitted and submitted immediately to prevent duplicate submissions and lock the question
-    setAutoSubmittedQuestions(prev => ({ ...prev, [questionId]: true }))
-    setSubmittedQuestions(prev => ({ ...prev, [questionId]: true }))
-
-    const isSQLQuestion = question.question_type?.toUpperCase() === 'SQL'
-
-    try {
-      if (isSQLQuestion) {
-        const sqlQuery = code[questionId] || question.starter_query || ''
-        const startedAt = questionStartTimes[questionId] || new Date().toISOString()
-        const submittedAt = new Date().toISOString()
-        const startTime = new Date(startedAt).getTime()
-        const endTime = new Date(submittedAt).getTime()
-        const timeSpentSeconds = Math.floor((endTime - startTime) / 1000)
-        
-        const response = await dsaApi.post('/assessment/submit-sql', {
-          question_id: questionId,
-          sql_query: sqlQuery,
-          started_at: startedAt,
-          submitted_at: submittedAt,
-          time_spent_seconds: timeSpentSeconds,
-        }, {
-          params: { user_id: userId },
-        })
-
-        const result = response.data
-        
-        // Add to submission history
-        const historyEntry: SubmissionHistoryEntry = {
-          id: result.submission_id || `sql-${questionId}-${Date.now()}`,
-          status: result.status,
-          passed: result.passed ? 1 : 0,
-          total: 1,
-          score: result.score || 0,
-          max_score: result.max_score || 100,
-          created_at: new Date().toISOString(),
-          results: [],
-        }
-        
-        setSubmissionHistory((prev) => {
-          const existing = prev[questionId] || []
-          const updated = [historyEntry, ...existing].slice(0, 5)
-          return { ...prev, [questionId]: updated }
-        })
-
-        if (result.passed) {
-          setQuestionStatus(prev => ({ ...prev, [questionId]: 'solved' }))
-        } else {
-          setQuestionStatus(prev => ({ ...prev, [questionId]: 'attempted' }))
-        }
-      } else {
-        const currentLang = language[questionId] || 'python'
-        const currentCode = code[questionId] || ''
-        const languageId = getLanguageId(currentLang)
-
-        if (!languageId) {
-          console.error(`Unsupported language: ${currentLang}`)
-          return false
-        }
-
-        const startedAt = questionStartTimes[questionId] || new Date().toISOString()
-        const submittedAt = new Date().toISOString()
-        const startTime = new Date(startedAt).getTime()
-        const endTime = new Date(submittedAt).getTime()
-        const timeSpentSeconds = Math.floor((endTime - startTime) / 1000)
-        
-        const response = await dsaApi.post('/assessment/submit', {
-          question_id: questionId,
-          source_code: currentCode,
-          language_id: languageId,
-          started_at: startedAt,
-          submitted_at: submittedAt,
-          time_spent_seconds: timeSpentSeconds,
-        }, {
-          params: { user_id: userId },
-        })
-
-        const result = response.data
-        
-        const mappedResults: SubmissionTestcaseResult[] = (result.public_results || []).map((r: any) => ({
-          visible: true,
-          input: r.input,
-          expected: r.expected_output,
-          output: r.user_output || r.stdout || '',
-          stdout: r.user_output || r.stdout || '',
-          stderr: r.stderr || '',
-          compile_output: r.compile_output || '',
-          time: r.time,
-          memory: r.memory,
-          status: r.status,
-          passed: r.passed,
-        }))
-        
-        setPublicResults(prev => ({ ...prev, [questionId]: mappedResults }))
-        setHiddenSummary(prev => ({ ...prev, [questionId]: result.hidden_summary || null }))
-
-        if (result.status === 'accepted') {
-          setQuestionStatus(prev => ({ ...prev, [questionId]: 'solved' }))
-        } else {
-          setQuestionStatus(prev => ({ ...prev, [questionId]: 'attempted' }))
-        }
-
-        const historyEntry: SubmissionHistoryEntry = {
-          id: result.submission_id || `${questionId}-${Date.now()}`,
-          status: result.status,
-          passed: result.total_passed,
-          total: result.total_tests,
-          score: result.score,
-          max_score: result.max_score,
-          created_at: new Date().toISOString(),
-          results: [],
-          public_results: result.public_results,
-          hidden_results: result.hidden_results,
-          hidden_summary: result.hidden_summary,
-        }
-
-        setSubmissionHistory((prev) => {
-          const questionIdKey = questionId
-          const existing = prev[questionIdKey] || []
-          const updated = [historyEntry, ...existing].slice(0, 5)
-          return { ...prev, [questionIdKey]: updated }
-        })
-      }
-      
-      console.log('[AutoSubmit] Successfully auto-submitted question:', questionId)
-      return true
-    } catch (error: any) {
-      console.error('[AutoSubmit] Error auto-submitting question:', questionId, error)
-      // Even if submission fails, keep the question marked as submitted to prevent re-submission
-      // The question is already locked via state updates above
-      return false
-    }
+    await handleSubmit(true)
   }
 
   // ============================================
@@ -1335,46 +1275,22 @@ export default function TestTakePage() {
     questions,
     currentQuestionId: timerCurrentQuestion?.id || null,
     onExpire: handleAutoSubmit,
-    onQuestionExpire: async (questionId: string) => {
-      console.log('[Timer] Question expired:', questionId)
+    onQuestionExpire: (questionId: string) => {
+      // Mark question as submitted
+      setSubmittedQuestions(prev => ({ ...prev, [questionId]: true }))
       
-      if (test?.timer_mode === 'PER_QUESTION') {
-        // Check if question was already submitted manually
-        if (submittedQuestions[questionId]) {
-          console.log('[Timer] Question already submitted manually, skipping auto-lock')
-          return
-        }
-        
-        if (questions.length === 1) {
-          // Single question: Lock it and submit whole test immediately
-          console.log('[Timer] Single question expired, locking and submitting test')
-          setSubmittedQuestions(prev => ({ ...prev, [questionId]: true }))
-          handleAutoSubmit()
-        } else {
-          // Multiple questions (2+): Lock current question and navigate to next
-          // Do NOT auto-submit code, just lock the question
-          console.log('[Timer] Locking question and navigating to next:', questionId)
-          setSubmittedQuestions(prev => ({ ...prev, [questionId]: true }))
-          
-          // Wait a brief moment to ensure state updates are applied before navigation
-          await new Promise(resolve => setTimeout(resolve, 100))
-          
-          // Move to next question or submit if last
-          const currentIndex = questions.findIndex(q => q.id === questionId)
-          if (currentIndex < questions.length - 1) {
-            console.log('[Timer] Moving to next question:', currentIndex + 1)
-            handleQuestionChange(currentIndex + 1)
-          } else {
-            console.log('[Timer] Last question expired, submitting test')
-            handleAutoSubmit()
-          }
-        }
+      // Move to next question or submit if last
+      const currentIndex = questions.findIndex(q => q.id === questionId)
+      if (currentIndex < questions.length - 1) {
+        handleQuestionChange(currentIndex + 1)
+      } else {
+        handleAutoSubmit()
       }
     },
     enabled: !precheckMode && questions.length > 0,
   })
 
-  const handleSubmit = (isAuto: boolean = false) => {
+  const handleSubmit = async (isAuto: boolean = false) => {
     if (submitting) {
       console.log('[Submit] Already submitting, ignoring click')
       return
@@ -1393,64 +1309,74 @@ export default function TestTakePage() {
       return
     }
 
-    // Navigate IMMEDIATELY - before any data preparation to avoid "submitting" state
-    // This ensures user sees completed page instantly
-    window.location.href = `/test/${testId}/completed`
 
-    // Prepare submission data AFTER navigation (browser will handle navigation first)
-    // We need to prepare it now so we can send the API call
-    const questionSubmissions = questions.map((q) => ({
-      question_id: q.id,
-      code: code[q.id] || '',
-      language: language[q.id] || 'python',
-    }))
+    // Confirmation alert removed - submit directly
+    setSubmitting(true)
 
-    const activityLogs: any[] = []
-    
-    questions.forEach((q) => {
-      if (questionStartTimes[q.id]) {
-        const startTime = new Date(questionStartTimes[q.id])
-        const endTime = new Date()
-        const timeSpent = Math.floor((endTime.getTime() - startTime.getTime()) / 1000)
-        
-        activityLogs.push({
-          type: 'question_time',
-          question_id: q.id,
-          time_spent_seconds: timeSpent,
-          timestamp: endTime.toISOString(),
-        })
+    try {
+      const questionSubmissions = questions.map((q) => ({
+        question_id: q.id,
+        code: code[q.id] || '',
+        language: language[q.id] || 'python',
+      }))
+
+      const activityLogs: any[] = []
+      
+      questions.forEach((q) => {
+        if (questionStartTimes[q.id]) {
+          const startTime = new Date(questionStartTimes[q.id])
+          const endTime = new Date()
+          const timeSpent = Math.floor((endTime.getTime() - startTime.getTime()) / 1000)
+          
+          activityLogs.push({
+            type: 'question_time',
+            question_id: q.id,
+            time_spent_seconds: timeSpent,
+            timestamp: endTime.toISOString(),
+          })
+        }
+      })
+
+      questions.forEach((q) => {
+        const runCount = publicResults[q.id]?.length || 0
+        if (runCount > 0) {
+          activityLogs.push({
+            type: 'run_attempts',
+            question_id: q.id,
+            count: runCount,
+            timestamp: new Date().toISOString(),
+          })
+        }
+      })
+
+      console.log('[Submit] Submitting test:', { testId, userId, questionCount: questionSubmissions.length })
+      
+      const response = await dsaApi.post(`/tests/${testId}/final-submit?user_id=${userId}`, {
+        question_submissions: questionSubmissions,
+        activity_logs: activityLogs,
+      })
+
+      console.log('[Submit] Submission successful:', response.data)
+
+      // Redirect to completed page
+      try {
+        await router.push(`/test/${testId}/completed`)
+      } catch (routerError: any) {
+        console.error('[Submit] Router push failed:', routerError)
+        // If router push fails, try window.location as fallback
+        window.location.href = `/test/${testId}/completed`
       }
-    })
-
-    questions.forEach((q) => {
-      const runCount = publicResults[q.id]?.length || 0
-      if (runCount > 0) {
-        activityLogs.push({
-          type: 'run_attempts',
-          question_id: q.id,
-          count: runCount,
-          timestamp: new Date().toISOString(),
-        })
-      }
-    })
-
-    // Send API call immediately (fire-and-forget, but initiate it before navigation)
-    // The browser will continue this request even during navigation
-    console.log('[Submit] Submitting test (background):', { testId, userId, questionCount: questionSubmissions.length })
-    
-    dsaApi.post(`/tests/${testId}/final-submit?user_id=${userId}`, {
-      question_submissions: questionSubmissions,
-      activity_logs: activityLogs,
-    }).then((response) => {
-      console.log('[Submit] Submission successful (background):', response.data)
-    }).catch((error: any) => {
-      console.error('[Submit] Background submission error (non-blocking):', error)
-      // Backend will handle retries if needed
-    })
-    
-    // Note: Navigation already happened at the top of this function (line 1456)
-    // The browser may still execute this code before actually navigating,
-    // which allows the API call to be initiated
+    } catch (error: any) {
+      console.error('[Submit] Failed to submit test:', error)
+      const errorMessage = error.response?.data?.detail || error.response?.data?.message || error.message || 'Failed to submit test. Please try again.'
+      
+      // Show user-friendly error message
+      alert(`Submission failed: ${errorMessage}`)
+      
+      // Don't set submitted to true on error - let user retry
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const handleQuestionChange = (index: number) => {
@@ -1460,30 +1386,11 @@ export default function TestTakePage() {
     // Check if navigation is allowed (sequential mode)
     // Only enforce sequential locking for PER_QUESTION mode
     // For GLOBAL mode, all questions are accessible
-    if (test?.timer_mode === 'PER_QUESTION') {
-      // For forward navigation (index > currentQuestionIndex), ensure current question is submitted
-      if (index > currentQuestionIndex) {
-        const currentQuestionId = questions[currentQuestionIndex]?.id
-        if (currentQuestionId && !submittedQuestions[currentQuestionId]) {
-          // Current question not submitted - block forward navigation silently
-          return
-        }
-      }
-      
-      // For any navigation (forward or backward), ensure all previous questions are submitted
-      if (index > 0) {
-        const previousQuestionId = questions[index - 1]?.id
-        if (previousQuestionId && !submittedQuestions[previousQuestionId]) {
-          // Previous question not submitted - block navigation silently
-          return
-        }
-      }
-    }
-
-    // Prevent navigation back to expired/auto-submitted questions (only backward navigation)
-    if (test?.timer_mode === 'PER_QUESTION' && newQuestion && index < currentQuestionIndex) {
-      if (autoSubmittedQuestions[newQuestion.id] || submittedQuestions[newQuestion.id]) {
-        // Prevent going back to submitted/expired question
+    if (test?.timer_mode === 'PER_QUESTION' && index > 0) {
+      const previousQuestionId = questions[index - 1]?.id
+      if (previousQuestionId && !submittedQuestions[previousQuestionId]) {
+        // Previous question not submitted - block navigation
+        alert(`Please submit Question ${index} before moving to Question ${index + 1}`)
         return
       }
     }
@@ -1669,11 +1576,6 @@ export default function TestTakePage() {
     const currentQuestion = questions[currentQuestionIndex]
     if (!currentQuestion) return
 
-    // Prevent manual submission if question was already auto-submitted
-    if (autoSubmittedQuestions[currentQuestion.id]) {
-      return
-    }
-
     // Handle SQL questions - submit via Judge0 SQLite
     const isSQLQuestion = currentQuestion.question_type?.toUpperCase() === 'SQL'
     if (isSQLQuestion) {
@@ -1757,18 +1659,6 @@ export default function TestTakePage() {
           ...prev,
           [currentQuestion.id]: true
         }))
-
-        // Auto-navigate to next question after successful submission
-        if (questions.length > 1) {
-          const currentIndex = questions.findIndex(q => q.id === currentQuestion.id)
-          if (currentIndex < questions.length - 1) {
-            console.log('[Submit] Auto-navigating to next question:', currentIndex + 1)
-            // Small delay to ensure UI updates before navigation
-            setTimeout(() => {
-              handleQuestionChange(currentIndex + 1)
-            }, 300)
-          }
-        }
 
       } catch (error: any) {
         console.error('SQL Submit error:', error)
@@ -1894,18 +1784,6 @@ export default function TestTakePage() {
         ...prev,
         [currentQuestion.id]: true
       }))
-
-      // Auto-navigate to next question after successful submission
-      if (questions.length > 1) {
-        const currentIndex = questions.findIndex(q => q.id === currentQuestion.id)
-        if (currentIndex < questions.length - 1) {
-          console.log('[Submit] Auto-navigating to next question:', currentIndex + 1)
-          // Small delay to ensure UI updates before navigation
-          setTimeout(() => {
-            handleQuestionChange(currentIndex + 1)
-          }, 300)
-        }
-      }
     } catch (error: any) {
       console.error('Submit error:', error)
       setOutput(prev => ({
@@ -1998,25 +1876,15 @@ export default function TestTakePage() {
   // This should appear before the editor UI
   if (showFullscreenPrompt && test && questions.length > 0) {
     return (
-      <>
-        <FullscreenPrompt
-          isOpen={showFullscreenPrompt}
-          onEnterFullscreen={handleEnterFullscreenFromPrompt}
-          onFullscreenFailed={() => {
-            console.error('[Fullscreen] Failed to enter fullscreen')
-          }}
-          candidateName={candidateName || undefined}
-          isLoading={false}
-        />
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
-      </>
+      <FullscreenPrompt
+        isOpen={showFullscreenPrompt}
+        onEnterFullscreen={handleEnterFullscreenFromPrompt}
+        onFullscreenFailed={() => {
+          console.error('[Fullscreen] Failed to enter fullscreen')
+        }}
+        candidateName={candidateName || undefined}
+        isLoading={false}
+      />
     )
   }
   
@@ -2035,81 +1903,45 @@ export default function TestTakePage() {
 
   // Show pre-check mode message if applicable
   if (precheckMode && test) {
+    const startTime = new Date(precheckMode.start_time)
+    const now = new Date()
+    const timeUntilStart = Math.max(0, Math.floor((startTime.getTime() - now.getTime()) / 1000))
     const minutes = Math.floor(timeUntilStart / 60)
     const seconds = timeUntilStart % 60
     
     return (
-      <>
-        <div className="min-h-screen flex items-center justify-center bg-slate-950">
-          <div className="text-center max-w-md mx-auto p-6">
-            <div className="mb-4">
-              {!canStartNow && (
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-              )}
-              <h2 className="text-xl font-semibold text-slate-200 mb-2">Pre-Check Mode</h2>
-              <p className="text-slate-400 mb-4">{precheckMode.message}</p>
-              {timeUntilStart > 0 && (
-                <div className="text-2xl font-bold text-blue-400 mb-2">
-                  {String(minutes).padStart(2, '0')}:{String(seconds).padStart(2, '0')}
-                </div>
-              )}
-              {testReadyToStart && (
-                <div className="mt-6">
-                  <button
-                    onClick={handleStartAssessment}
-                    className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition-colors text-lg"
-                  >
-                    Start Assessment
-                  </button>
-                  <p className="text-slate-400 text-sm mt-3">
-                    The test will start automatically in a few seconds...
-                  </p>
-                </div>
-              )}
-              {!canStartNow && (
-                <p className="text-slate-500 text-sm">
-                  Please complete pre-checks (screen sharing, camera access) while waiting for the test to start.
-                </p>
-              )}
-            </div>
-            {!canStartNow && (
-              <p className="text-slate-600 text-xs mt-4">
-                The test will automatically start when the start time is reached.
-              </p>
+      <div className="min-h-screen flex items-center justify-center bg-slate-950">
+        <div className="text-center max-w-md mx-auto p-6">
+          <div className="mb-4">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+            <h2 className="text-xl font-semibold text-slate-200 mb-2">Pre-Check Mode</h2>
+            <p className="text-slate-400 mb-4">{precheckMode.message}</p>
+            {timeUntilStart > 0 && (
+              <div className="text-2xl font-bold text-blue-400 mb-2">
+                {String(minutes).padStart(2, '0')}:{String(seconds).padStart(2, '0')}
+              </div>
             )}
+            <p className="text-slate-500 text-sm">
+              Please complete pre-checks (screen sharing, camera access) while waiting for the test to start.
+            </p>
           </div>
+          <p className="text-slate-600 text-xs mt-4">
+            The test will automatically start when the start time is reached.
+          </p>
         </div>
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
-      </>
+      </div>
     )
   }
 
   // If we have no questions yet, show loading screen
   if (questions.length === 0) {
     return (
-      <>
-        <div className="min-h-screen flex items-center justify-center bg-slate-950">
-          <div className="text-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
-            <p className="text-slate-400">Loading questions...</p>
-          </div>
+      <div className="min-h-screen flex items-center justify-center bg-slate-950">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
+          <p className="text-slate-400">Loading questions...</p>
         </div>
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={requestFullscreenLock}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
-      </>
+      </div>
     )
   }
   
@@ -2131,18 +1963,22 @@ export default function TestTakePage() {
 
   if (isMobile) {
     return (
-      <>
       <div className="h-screen flex flex-col bg-slate-950 overflow-hidden">
         {/* Proctoring Components */}
         <ViolationToast />
+        <FullscreenWarningBanner
+          isVisible={showFullscreenWarning}
+          onEnterFullscreen={handleEnterFullscreenFromBanner}
+        />
         {aiProctoringEnabled && (
           <WebcamPreview
             ref={thumbVideoRef}
-            cameraOn={proctoringState.isCameraOn}
-            faceMeshStatus={proctoringState.isModelLoaded ? "loaded" : proctoringState.errors.length > 0 ? "error" : "loading"}
-            facesCount={proctoringState.facesCount}
+            cameraOn={webcamLive}
+            faceMeshStatus={faceMeshStatus}
+            facesCount={displayedFacesCount}
           />
         )}
+        
 
         <TimerBar
           timeRemaining={timer.timeRemaining} 
@@ -2254,15 +2090,6 @@ export default function TestTakePage() {
           )}
         </div>
       </div>
-      {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="You must be in fullscreen mode to continue the test."
-        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-      />
-    </>
     )
   }
 
@@ -2270,16 +2097,42 @@ export default function TestTakePage() {
     <div className="h-screen flex flex-col bg-slate-950 overflow-hidden">
       {/* Proctoring Components */}
       <ViolationToast />
-      
-      {/* Webcam Preview - only show when AI proctoring is enabled */}
+      <FullscreenWarningBanner
+        isVisible={showFullscreenWarning}
+        onEnterFullscreen={handleEnterFullscreenFromBanner}
+      />
       {aiProctoringEnabled && (
-        <WebcamPreview
-          ref={thumbVideoRef}
-          cameraOn={proctoringState.isCameraOn}
-          faceMeshStatus={proctoringState.isModelLoaded ? "loaded" : proctoringState.errors.length > 0 ? "error" : "loading"}
-          facesCount={proctoringState.facesCount}
-        />
+        <>
+          <WebcamPreview
+            ref={thumbVideoRef}
+            cameraOn={webcamLive}
+            faceMeshStatus={faceMeshStatus}
+            facesCount={displayedFacesCount}
+          />
+          {/* If camera fails to start, surface the reason (permissions/device busy) */}
+          {faceMeshStatus === 'error' ? (
+            <div
+              style={{
+                position: "fixed",
+                bottom: 148,
+                right: 16,
+                width: 260,
+                background: "rgba(0,0,0,0.75)",
+                color: "#fff",
+                padding: "8px 10px",
+                borderRadius: 8,
+                zIndex: 9999,
+                fontSize: 12,
+                lineHeight: 1.3,
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>Camera error</div>
+              <div>FaceMesh model failed to load</div>
+            </div>
+          ) : null}
+        </>
       )}
+      
 
       <TimerBar 
         timeRemaining={timer.timeRemaining} 
@@ -2431,15 +2284,7 @@ export default function TestTakePage() {
           </div>
         </Split>
       </div>
-
-      {/* Fullscreen Lock Overlay - Blocks ALL interaction when not in fullscreen */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="You must be in fullscreen mode to continue the test. All your progress is saved."
-        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-      />
     </div>
   )
 }
+

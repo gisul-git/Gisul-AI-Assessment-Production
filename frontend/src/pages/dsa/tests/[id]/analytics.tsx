@@ -152,7 +152,7 @@ export default function AnalyticsPage() {
     assessmentId: proctorAssessmentId,
     adminId: proctorAdminId,
     onError: handleProctorError,
-    debugMode: false, // Disable debug mode in production
+    debugMode: true, // Enable debug mode to troubleshoot stream issues
   })
   
   // Start monitoring when live proctor panel opens

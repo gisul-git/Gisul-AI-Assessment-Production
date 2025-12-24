@@ -7,4 +7,5 @@ export { ProctorStatusWidget } from "./ProctorStatusWidget";
 export { LiveProctorConsent } from "./LiveProctorConsent";
 export { MultiProctorGrid } from "./MultiProctorGrid";
 export { ProctoringConsentModal } from "./ProctoringConsentModal";
+export { LiveProctoringDashboard } from "./LiveProctoringDashboard";
 
