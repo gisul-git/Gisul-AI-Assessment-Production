@@ -4,6 +4,7 @@ from datetime import datetime
 
 class ProctoringSettings(BaseModel):
     aiProctoringEnabled: Optional[bool] = None
+    liveProctoringEnabled: Optional[bool] = None
 TimerMode = Literal["GLOBAL", "PER_QUESTION"]
 ExamMode = Literal["strict", "flexible"]
 

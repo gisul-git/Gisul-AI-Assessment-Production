@@ -4,11 +4,13 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/router'
 import dynamic from 'next/dynamic'
 import axios from 'axios'
-import { useCameraProctor } from '../../../../hooks/useCameraProctor'
+import { useUniversalProctoring, CandidateLiveService, type ProctoringViolation } from '@/universal-proctoring'
 import WebcamPreview from '../../../../components/WebcamPreview'
 import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
-import { useProctorUpload } from '@/hooks/useProctorUpload'
-import { useLiveProctoring } from '../../../../hooks/useLiveProctoring'
+
+// Fullscreen Lock imports
+import { FullscreenLockOverlay } from "@/components/FullscreenLockOverlay";
+import { useFullscreenLock } from "@/hooks/useFullscreenLock";
 
 const AIMLCompetencyNotebook = dynamic(
   () => import('../../../../components/aiml/competency/AIMLCompetencyNotebook'),
@@ -70,10 +72,14 @@ export default function AIMLTestTakePage() {
   const autoSaveRef = useRef<NodeJS.Timeout | null>(null)
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true)
   const [candidateEmail, setCandidateEmail] = useState<string | null>(null)
-  const [proctoringEnabled, setProctoringEnabled] = useState(false)
   const [proctoringSettings, setProctoringSettings] = useState<any>({})
   const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null)
-  const cameraStartRequestedRef = useRef(false)
+  const [debugMode, setDebugMode] = useState(false)
+
+  // Proctoring refs
+  const thumbVideoRef = useRef<HTMLVideoElement>(null)
+  const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null)
+  const liveProctoringStartedRef = useRef(false)
 
   const getViolationMessage = (eventType: string): string => {
     const messages: Record<string, string> = {
@@ -87,10 +93,73 @@ export default function AIMLTestTakePage() {
     return messages[eventType] || 'Violation detected'
   }
 
-  const { recordViolation: recordProctorViolation } = useProctorUpload({
-    assessmentId: String(testId || ''),
-    candidateId: candidateEmail || userId || '',
+  // ============================================================================
+  // FULLSCREEN LOCK - Violation-driven lock state (SIMPLIFIED)
+  // ============================================================================
+  const assessmentIdStr = String(testId || '')
+  const candidateIdStr = candidateEmail || userId || ''
+  
+  const {
+    isLocked: isFullscreenLocked,
+    setIsLocked: setFullscreenLocked,
+    exitCount: fullscreenExitCount,
+    incrementExitCount: incrementFullscreenExitCount,
+    requestFullscreen: requestFullscreenLock,
+  } = useFullscreenLock();
+
+  // Handle violation callback from universal proctoring
+  // THIS IS THE SINGLE SOURCE OF TRUTH for fullscreen lock triggering
+  const handleUniversalViolation = useCallback((violation: ProctoringViolation) => {
+    console.log('[AIML Take] Universal proctoring violation:', violation)
+    
+    // Show toast for all violations
+    pushViolationToast({
+      id: `${violation.eventType}-${Date.now()}`,
+      eventType: violation.eventType,
+      message: getViolationMessage(violation.eventType),
+      timestamp: violation.timestamp,
+    })
+
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
+    if (violation.eventType === 'FULLSCREEN_EXIT') {
+      console.log('[AIML Take] FULLSCREEN_EXIT violation - locking screen');
+      setFullscreenLocked(true);
+      incrementFullscreenExitCount();
+    }
+  }, [setFullscreenLocked, incrementFullscreenExitCount])
+
+  // Handle fullscreen re-entry - unlock the screen
+  const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
+    console.log('[AIML Take] Requesting fullscreen re-entry...');
+    const success = await requestFullscreenLock();
+    if (success) {
+      console.log('[AIML Take] Fullscreen re-entered - unlocking screen');
+      setFullscreenLocked(false);
+    }
+    return success;
+  }, [requestFullscreenLock, setFullscreenLocked]);
+
+  // Universal proctoring hook - handles AI proctoring, tab switch, fullscreen
+  const {
+    state: proctoringState,
+    isRunning: isProctoringRunning,
+    violations,
+    startProctoring: startUniversalProctoring,
+    stopProctoring: stopUniversalProctoring,
+    requestFullscreen: requestUniversalFullscreen,
+    isFullscreen,
+  } = useUniversalProctoring({
+    onViolation: handleUniversalViolation,
+    debug: debugMode,
   })
+
+  // Unlock fullscreen when test is submitted
+  useEffect(() => {
+    if (submitted) {
+      console.log('[AIML Take] Test submitted - unlocking fullscreen');
+      setFullscreenLocked(false);
+    }
+  }, [submitted, setFullscreenLocked]);
 
   useEffect(() => {
     if (!testId) return
@@ -124,30 +193,6 @@ export default function AIMLTestTakePage() {
     fetchTestData(urlToken, urlUserId)
   }, [testId])
 
-  const {
-    isCameraOn,
-    isModelLoaded,
-    facesCount,
-    errors: cameraErrors,
-    startCamera,
-    stopCamera,
-    videoRef,
-    canvasRef,
-  } = useCameraProctor({
-    userId: candidateEmail || userId || "",
-    assessmentId: String(testId || ""),
-    enabled: cameraProctorEnabled,
-    debugMode: false,
-    onViolation: (violation) => {
-      pushViolationToast({
-        id: `${violation.eventType}-${Date.now()}`,
-        eventType: violation.eventType,
-        message: getViolationMessage(violation.eventType),
-        timestamp: violation.timestamp || new Date().toISOString(),
-      })
-    },
-  })
-
   // Get screen stream from window.__screenStream (set by identity-verify gate)
   useEffect(() => {
     if (typeof window !== 'undefined' && (window as any).__screenStream) {
@@ -159,111 +204,104 @@ export default function AIMLTestTakePage() {
     }
   }, []);
 
-  // Get webcam stream from useCameraProctor
-  const webcamStreamForLiveProctor = isCameraOn && videoRef.current?.srcObject 
-    ? (videoRef.current.srcObject as MediaStream)
-    : null;
-
-  const {
-    isStreaming: isLiveProctoringStreaming,
-    connectionState: liveProctoringConnectionState,
-    error: liveProctoringError,
-    sessionId: liveProctoringSessionId,
-    startStreaming: startLiveProctoring,
-    stopStreaming: stopLiveProctoring,
-  } = useLiveProctoring({
-    assessmentId: String(testId || ''),
-    candidateId: candidateEmail || userId || '',
-    enabled: proctoringSettings?.liveProctoringEnabled === true,
-    preScreenStream: liveProctorScreenStream,
-    onError: (error) => {
-      console.error('[AIML Take] Live Proctoring error:', error);
-    },
-    debugMode: false,
-  });
-
-  // Start Live Proctoring when test starts
+  // Start proctoring when test is loaded and ready (AI proctoring + tab switch + fullscreen)
   useEffect(() => {
-    if (timeRemaining > 0 && !submitted && proctoringSettings?.liveProctoringEnabled === true && liveProctorScreenStream && webcamStreamForLiveProctor) {
-      console.log('[AIML Take] Starting Live Proctoring...');
-      startLiveProctoring().catch(err => {
-        console.error('[AIML Take] Failed to start Live Proctoring:', err);
-      });
-    }
-  }, [timeRemaining, submitted, proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, webcamStreamForLiveProctor, startLiveProctoring]);
-
-  // Stop Live Proctoring when assessment ends
-  useEffect(() => {
-    if (submitted) {
-      stopLiveProctoring();
-    }
-    return () => {
-      if (submitted) {
-        stopLiveProctoring();
-      }
-    };
-  }, [submitted, stopLiveProctoring]);
-
-  // Enable proctoring (tab switch / focus lost) once exam is in progress
-  useEffect(() => {
-    if (!testId) return
-    if ((candidateEmail || userId) && questions.length > 0 && !submitted) {
-      setProctoringEnabled(true)
-    }
-  }, [testId, candidateEmail, userId, questions.length, submitted])
-
-  // Tab visibility + focus detection (same as AI take page)
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    if (!proctoringEnabled) return
-
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        // Persist to admin analytics
-        recordProctorViolation(
-          {
-            eventType: 'TAB_SWITCH',
-            timestamp: new Date().toISOString(),
-            assessmentId: String(testId || ''),
-            candidateId: candidateEmail || userId || '',
-          },
-          null
-        )
-        pushViolationToast({
-          id: `TAB_SWITCH-${Date.now()}`,
-          eventType: 'TAB_SWITCH',
-          message: getViolationMessage('TAB_SWITCH'),
-          timestamp: new Date().toISOString(),
-        })
-      }
-    }
-
-    const handleBlur = () => {
-      // Persist to admin analytics
-      recordProctorViolation(
-        {
-          eventType: 'FOCUS_LOST',
-          timestamp: new Date().toISOString(),
-          assessmentId: String(testId || ''),
-          candidateId: candidateEmail || userId || '',
+    const localAssessmentIdStr = String(testId || '')
+    const localCandidateIdStr = candidateEmail || userId || ''
+    const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
+    
+    if (questions.length > 0 && !isProctoringRunning && !submitted && localCandidateIdStr && thumbVideoRef.current) {
+      console.log('[AIML Take] Starting Universal Proctoring...')
+      
+      startUniversalProctoring({
+        settings: {
+          aiProctoringEnabled: cameraProctorEnabled,
+          liveProctoringEnabled: liveProctoringEnabled,
         },
-        null
-      )
-      pushViolationToast({
-        id: `FOCUS_LOST-${Date.now()}`,
-        eventType: 'FOCUS_LOST',
-        message: getViolationMessage('FOCUS_LOST'),
-        timestamp: new Date().toISOString(),
+        session: {
+          userId: localCandidateIdStr,
+          assessmentId: localAssessmentIdStr,
+        },
+        videoElement: cameraProctorEnabled ? thumbVideoRef.current : null,
+      }).then((success) => {
+        if (success) {
+          console.log('[AIML Take] ✅ Universal Proctoring started')
+        } else {
+          console.error('[AIML Take] ❌ Failed to start Universal Proctoring')
+        }
       })
     }
+  }, [questions.length, isProctoringRunning, submitted, testId, candidateEmail, userId, cameraProctorEnabled, proctoringSettings?.liveProctoringEnabled, startUniversalProctoring])
 
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    window.addEventListener('blur', handleBlur)
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-      window.removeEventListener('blur', handleBlur)
+  // Start Live Proctoring (separate from AI proctoring)
+  useEffect(() => {
+    const localAssessmentIdStr = String(testId || '')
+    const localCandidateIdStr = candidateEmail || userId || ''
+    const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
+
+    if (!liveProctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
+      return
     }
-  }, [proctoringEnabled, recordProctorViolation, testId, candidateEmail, userId])
+
+    // Only start when test has started and not submitted
+    if (timeRemaining <= 0 || submitted) {
+      return
+    }
+
+    console.log('[AIML Take] Starting Live Proctoring service...')
+    liveProctoringStartedRef.current = true
+
+    // Create and start the live proctoring service
+    const liveService = new CandidateLiveService({
+      assessmentId: localAssessmentIdStr,
+      candidateId: localCandidateIdStr,
+      debugMode: debugMode,
+    })
+
+    liveService.start(
+      {
+        onStateChange: (state) => {
+          console.log('[AIML Take] Live proctoring state:', state)
+        },
+        onError: (error) => {
+          console.error('[AIML Take] Live Proctoring error:', error)
+        },
+      },
+      liveProctorScreenStream
+    ).then((success) => {
+      if (success) {
+        console.log('[AIML Take] ✅ Live Proctoring started')
+        liveProctoringServiceRef.current = liveService
+      } else {
+        console.error('[AIML Take] ❌ Failed to start Live Proctoring')
+        liveProctoringStartedRef.current = false
+      }
+    })
+  }, [proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, timeRemaining, submitted, testId, candidateEmail, userId, debugMode])
+
+  // Stop proctoring when test is submitted
+  useEffect(() => {
+    if (submitted) {
+      console.log('[AIML Take] Test submitted, stopping proctoring')
+      stopUniversalProctoring()
+      
+      if (liveProctoringServiceRef.current) {
+        liveProctoringServiceRef.current.stop()
+        liveProctoringServiceRef.current = null
+      }
+    }
+  }, [submitted, stopUniversalProctoring])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopUniversalProctoring()
+      if (liveProctoringServiceRef.current) {
+        liveProctoringServiceRef.current.stop()
+        liveProctoringServiceRef.current = null
+      }
+    }
+  }, [stopUniversalProctoring])
 
   // Timer
   useEffect(() => {
@@ -344,33 +382,16 @@ export default function AIMLTestTakePage() {
     }
   }
 
-  // Start/stop camera once test data is ready
-  useEffect(() => {
-    if (!testId) return
-    if (!cameraProctorEnabled) {
-      stopCamera()
-      cameraStartRequestedRef.current = false
-      return
-    }
-    if (questions.length > 0 && (candidateEmail || userId) && !submitted) {
-      if (!cameraStartRequestedRef.current) {
-        cameraStartRequestedRef.current = true
-        setTimeout(() => startCamera(), 200)
-      }
-      return
-    }
-  }, [testId, cameraProctorEnabled, questions.length, candidateEmail, userId, submitted, startCamera, stopCamera])
-
   const currentQuestion = questions[currentQuestionIndex]
 
   // Webcam preview tile (same as AI/DSA when enabled)
   // Rendered at the top-level so it overlays the notebook IDE.
   const webcamTile = cameraProctorEnabled ? (
     <WebcamPreview
-      ref={videoRef}
-      cameraOn={isCameraOn}
-      faceMeshStatus={cameraErrors?.length ? "error" : isModelLoaded ? "loaded" : "loading"}
-      facesCount={facesCount}
+      ref={thumbVideoRef}
+      cameraOn={proctoringState.isCameraOn}
+      faceMeshStatus={proctoringState.isModelLoaded ? "loaded" : proctoringState.modelError ? "error" : "loading"}
+      facesCount={proctoringState.facesCount}
     />
   ) : null
 
@@ -491,26 +512,36 @@ export default function AIMLTestTakePage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading test...</p>
+      <>
+        <div className="min-h-screen flex items-center justify-center bg-gray-50">
+          <div className="text-center">
+            <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+            <p className="text-gray-600">Loading test...</p>
+          </div>
         </div>
-      </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the test."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     )
   }
 
   if (submitted) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-50 to-teal-50">
-        <div className="text-center bg-white p-8 rounded-2xl shadow-lg max-w-md">
-          <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-6">
-            <svg className="w-10 h-10 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <h1 className="text-2xl font-bold text-gray-800 mb-2">Test Submitted!</h1>
-          <p className="text-gray-600 mb-4">Your answers have been recorded and are being evaluated by AI.</p>
+      <>
+        <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-50 to-teal-50">
+          <div className="text-center bg-white p-8 rounded-2xl shadow-lg max-w-md">
+            <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-6">
+              <svg className="w-10 h-10 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h1 className="text-2xl font-bold text-gray-800 mb-2">Test Submitted!</h1>
+            <p className="text-gray-600 mb-4">Your answers have been recorded and are being evaluated by AI.</p>
           
           <div className="bg-emerald-50 rounded-lg p-4 mb-6">
             <p className="text-sm text-emerald-700">
@@ -524,25 +555,33 @@ export default function AIMLTestTakePage() {
           <p className="text-sm text-gray-500">You may close this window now.</p>
         </div>
       </div>
+      </>
     )
   }
 
   if (!test || questions.length === 0) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center text-gray-600">
-          <p className="text-xl mb-2">Test not found</p>
-          <p className="text-sm">Please check the link and try again.</p>
+      <>
+        <div className="min-h-screen flex items-center justify-center bg-gray-50">
+          <div className="text-center text-gray-600">
+            <p className="text-xl mb-2">Test not found</p>
+            <p className="text-sm">Please check the link and try again.</p>
+          </div>
         </div>
-      </div>
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the test."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      </>
     )
   }
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50">
       <ViolationToast />
-      {/* Hidden canvas used by useCameraProctor to capture snapshots */}
-      <canvas ref={canvasRef} style={{ display: 'none' }} />
       {webcamTile}
       {/* Header with Timer and Navigation */}
       <header className="bg-white border-b border-emerald-200 shadow-sm">
@@ -644,6 +683,15 @@ export default function AIMLTestTakePage() {
           />
         )}
       </main>
+
+      {/* Fullscreen Lock Overlay - Blocks ALL interaction when not in fullscreen */}
+      <FullscreenLockOverlay
+        isLocked={isFullscreenLocked}
+        onRequestFullscreen={handleRequestFullscreen}
+        exitCount={fullscreenExitCount}
+        message="You must be in fullscreen mode to continue the test. All your progress is saved."
+        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+      />
     </div>
   )
 }

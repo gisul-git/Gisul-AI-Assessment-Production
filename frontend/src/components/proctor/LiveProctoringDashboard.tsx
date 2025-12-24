@@ -1,13 +1,17 @@
 /**
- * LiveProctoringDashboard Component
+ * LiveProctoringDashboard - COMPLETE REBUILD
  * 
- * Admin dashboard for monitoring multiple candidate streams in real-time.
- * Uses useMultiLiveProctorAdmin hook for WebRTC streaming.
+ * Admin dashboard for viewing live candidate streams.
+ * 
+ * Features:
+ * - Shows all active candidates with their webcam and screen streams
+ * - Auto-connects when opened
+ * - Handles stream updates and reconnections
  */
 
-import React, { useEffect, useRef, useState } from "react";
-import { useMultiLiveProctorAdmin } from "../../hooks/useMultiLiveProctorAdmin";
-import { X, RefreshCw, Video, Monitor } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { X, Video, Monitor, RefreshCw, User } from "lucide-react";
+import { useMultiLiveProctorAdmin } from "@/hooks/useMultiLiveProctorAdmin";
 
 interface LiveProctoringDashboardProps {
   isOpen: boolean;
@@ -16,376 +20,232 @@ interface LiveProctoringDashboardProps {
   adminId: string;
 }
 
-interface CandidateCardProps {
-  sessionId: string;
-  candidateId: string;
-  status: "connecting" | "connected" | "disconnected" | "failed";
-  webcamStream: MediaStream | null;
-  screenStream: MediaStream | null;
-  error: string | null;
-  onRefresh: () => void;
-  isExpanded: boolean;
-  onExpandToggle: () => void;
+// Video stream component - handles attaching MediaStream to video element
+function VideoStream({ 
+  stream, 
+  label, 
+  icon: Icon 
+}: { 
+  stream: MediaStream | null; 
+  label: string; 
+  icon: React.ComponentType<{ className?: string }>;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const lastStreamIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    // Check if this is a new stream
+    const currentStreamId = stream?.id || null;
+    if (currentStreamId === lastStreamIdRef.current) {
+      // Same stream, don't re-attach
+      return;
+    }
+    lastStreamIdRef.current = currentStreamId;
+
+    // Reset state
+    setIsPlaying(false);
+    setHasError(false);
+
+    if (!stream || !stream.active) {
+      video.srcObject = null;
+      console.log(`[VideoStream] ${label}: No active stream`);
+      return;
+    }
+
+    const tracks = stream.getTracks();
+    console.log(`[VideoStream] ${label}: Attaching stream`, {
+      id: stream.id,
+      active: stream.active,
+      tracks: tracks.map(t => ({ kind: t.kind, readyState: t.readyState, enabled: t.enabled })),
+    });
+
+    // Attach stream to video element
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+
+    // Play function with retry logic
+    let playAttempts = 0;
+    const maxAttempts = 5;
+
+    const attemptPlay = async () => {
+      if (playAttempts >= maxAttempts) {
+        console.log(`[VideoStream] ${label}: Max play attempts reached`);
+        setHasError(true);
+        return;
+      }
+      playAttempts++;
+
+      try {
+        console.log(`[VideoStream] ${label}: Play attempt ${playAttempts}`);
+        await video.play();
+        console.log(`[VideoStream] ✅ ${label}: Playing! Size: ${video.videoWidth}x${video.videoHeight}`);
+        setIsPlaying(true);
+        setHasError(false);
+      } catch (err) {
+        console.log(`[VideoStream] ${label}: Play failed:`, err);
+        // Retry after short delay
+        setTimeout(attemptPlay, 500);
+      }
+    };
+
+    // Event handlers
+    const onLoadedMetadata = () => {
+      console.log(`[VideoStream] ${label}: Metadata loaded, size: ${video.videoWidth}x${video.videoHeight}`);
+      attemptPlay();
+    };
+
+    const onCanPlay = () => {
+      console.log(`[VideoStream] ${label}: Can play`);
+      if (!isPlaying) attemptPlay();
+    };
+
+    const onPlaying = () => {
+      console.log(`[VideoStream] ${label}: Playing event`);
+      setIsPlaying(true);
+      setHasError(false);
+    };
+
+    const onError = (e: Event) => {
+      console.error(`[VideoStream] ${label}: Error`, e);
+      setHasError(true);
+    };
+
+    video.addEventListener('loadedmetadata', onLoadedMetadata);
+    video.addEventListener('canplay', onCanPlay);
+    video.addEventListener('playing', onPlaying);
+    video.addEventListener('error', onError);
+
+    // Initial play attempt
+    setTimeout(attemptPlay, 100);
+
+    return () => {
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
+      video.removeEventListener('canplay', onCanPlay);
+      video.removeEventListener('playing', onPlaying);
+      video.removeEventListener('error', onError);
+    };
+  }, [stream, label, isPlaying]);
+
+  return (
+    <div className="relative bg-gray-900 rounded-lg overflow-hidden aspect-video">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="w-full h-full object-cover"
+      />
+      
+      {/* Label */}
+      <div className="absolute top-2 left-2 bg-black/70 px-2 py-1 rounded text-xs text-white flex items-center gap-1">
+        <Icon className="w-3 h-3" />
+        {label}
+      </div>
+      
+      {/* Loading/Error indicator */}
+      {!isPlaying && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-800/80">
+          <span className="text-gray-400 text-sm">
+            {hasError ? "Error loading stream" : stream ? "Loading..." : "No stream"}
+          </span>
+        </div>
+      )}
+    </div>
+  );
 }
 
+// Candidate card component
 function CandidateCard({
   sessionId,
   candidateId,
+  candidateName,
+  candidateEmail,
   status,
   webcamStream,
   screenStream,
   error,
   onRefresh,
-  isExpanded,
-  onExpandToggle,
-}: CandidateCardProps) {
-  const webcamRef = useRef<HTMLVideoElement>(null);
-  const screenRef = useRef<HTMLVideoElement>(null);
-
-  // Attach webcam stream
-  useEffect(() => {
-    const video = webcamRef.current;
-    if (!video) return;
-    
-    if (webcamStream) {
-      // Check if stream is already attached to avoid unnecessary re-assignment
-      if (video.srcObject !== webcamStream) {
-        video.srcObject = webcamStream;
-      }
-      // Only try to play if video is not already playing
-      if (video.paused) {
-        video.play().catch(err => {
-          // Ignore AbortError - it happens when video element is removed during play
-          if (err.name !== "AbortError") {
-            console.error("[LiveProctoringDashboard] Error playing webcam:", err);
-          }
-        });
-      }
-    } else {
-      // Only clear if there's actually a stream attached
-      if (video.srcObject) {
-        video.srcObject = null;
-      }
-    }
-    
-    // Cleanup: don't clear srcObject on unmount if stream is still active
-    return () => {
-      // Only clear if component is unmounting and stream is no longer available
-      if (video && !webcamStream) {
-        video.srcObject = null;
-      }
-    };
-  }, [webcamStream]);
-
-  // Attach screen stream
-  useEffect(() => {
-    const video = screenRef.current;
-    if (!video) return;
-    
-    if (screenStream) {
-      // Check if stream is already attached to avoid unnecessary re-assignment
-      if (video.srcObject !== screenStream) {
-        video.srcObject = screenStream;
-      }
-      // Only try to play if video is not already playing
-      if (video.paused) {
-        video.play().catch(err => {
-          // Ignore AbortError - it happens when video element is removed during play
-          if (err.name !== "AbortError") {
-            console.error("[LiveProctoringDashboard] Error playing screen:", err);
-          }
-        });
-      }
-    } else {
-      // Only clear if there's actually a stream attached
-      if (video.srcObject) {
-        video.srcObject = null;
-      }
-    }
-    
-    // Cleanup: don't clear srcObject on unmount if stream is still active
-    return () => {
-      // Only clear if component is unmounting and stream is no longer available
-      if (video && !screenStream) {
-        video.srcObject = null;
-      }
-    };
-  }, [screenStream]);
-
-  const getStatusColor = () => {
-    switch (status) {
-      case "connected":
-        return "#10b981"; // green
-      case "connecting":
-        return "#f59e0b"; // amber
-      case "disconnected":
-      case "failed":
-        return "#ef4444"; // red
-      default:
-        return "#64748b"; // gray
-    }
-  };
-
-  const getStatusText = () => {
-    switch (status) {
-      case "connected":
-        return "Connected";
-      case "connecting":
-        return "Connecting...";
-      case "disconnected":
-        return "Disconnected";
-      case "failed":
-        return "Failed";
-      default:
-        return "Unknown";
-    }
-  };
+}: {
+  sessionId: string;
+  candidateId: string;
+  candidateName?: string;
+  candidateEmail?: string;
+  status: string;
+  webcamStream: MediaStream | null;
+  screenStream: MediaStream | null;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  // Display name priority: name > email > id
+  const displayName = candidateName || candidateEmail || candidateId;
+  
+  // Status indicator color
+  const statusColor = {
+    connecting: "bg-yellow-500",
+    connected: "bg-green-500",
+    disconnected: "bg-gray-500",
+    failed: "bg-red-500",
+  }[status] || "bg-gray-500";
 
   return (
-    <div
-      style={{
-        backgroundColor: "#ffffff",
-        borderRadius: "0.75rem",
-        border: "1px solid #e2e8f0",
-        overflow: "hidden",
-        display: "flex",
-        flexDirection: "column",
-        width: isExpanded ? "100%" : "auto",
-        height: isExpanded ? "100%" : "auto",
-        minHeight: isExpanded ? "100%" : "auto",
-      }}
-    >
+    <div className="bg-white rounded-xl shadow-lg overflow-hidden">
       {/* Header */}
-      <div
-        style={{
-          padding: "1rem",
-          backgroundColor: "#f8fafc",
-          borderBottom: "1px solid #e2e8f0",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 600, color: "#1e293b", marginBottom: "0.25rem" }}>
-            {candidateId || sessionId}
+      <div className="px-4 py-3 bg-gray-50 border-b flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+            <User className="w-4 h-4 text-blue-600" />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <div
-              style={{
-                width: "8px",
-                height: "8px",
-                borderRadius: "50%",
-                backgroundColor: getStatusColor(),
-              }}
-            />
-            <span style={{ fontSize: "0.875rem", color: "#64748b" }}>
-              {getStatusText()}
-            </span>
+          <div>
+            <p className="font-medium text-gray-900 text-sm truncate max-w-[200px]">
+              {displayName}
+            </p>
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${statusColor}`} />
+              <span className="text-xs text-gray-500 capitalize">{status}</span>
+            </div>
           </div>
         </div>
+        
         <button
           onClick={onRefresh}
-          style={{
-            padding: "0.5rem",
-            backgroundColor: "#f1f5f9",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.375rem",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
+          className="p-1.5 hover:bg-gray-200 rounded-full transition-colors"
           title="Refresh connection"
         >
-          <RefreshCw size={16} color="#64748b" />
+          <RefreshCw className="w-4 h-4 text-gray-600" />
         </button>
       </div>
-
+      
+      {/* Streams */}
+      <div className="p-3 grid grid-cols-2 gap-2">
+        <VideoStream stream={webcamStream} label="Webcam" icon={Video} />
+        <VideoStream stream={screenStream} label="Screen" icon={Monitor} />
+      </div>
+      
       {/* Error message */}
       {error && (
-        <div
-          style={{
-            padding: "0.75rem 1rem",
-            backgroundColor: "#fef2f2",
-            borderBottom: "1px solid #e2e8f0",
-            color: "#dc2626",
-            fontSize: "0.875rem",
-          }}
-        >
-          {error}
+        <div className="px-3 pb-3">
+          <p className="text-xs text-red-500 bg-red-50 px-2 py-1 rounded">{error}</p>
         </div>
       )}
-
-      {/* Video streams */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: isExpanded ? "1rem" : "0.5rem",
-          padding: isExpanded ? "1rem" : "0.5rem",
-          flex: isExpanded ? 1 : "none",
-          minHeight: isExpanded ? "0" : "200px",
-          height: isExpanded ? "100%" : "auto",
-        }}
-      >
-        {/* Webcam */}
-        <div
-          style={{
-            backgroundColor: "#1e293b",
-            borderRadius: "0.5rem",
-            overflow: "hidden",
-            position: "relative",
-            aspectRatio: isExpanded ? undefined : "16/9",
-            height: isExpanded ? "100%" : "auto",
-            minHeight: isExpanded ? "400px" : "auto",
-          }}
-        >
-          <div
-            style={{
-              position: "absolute",
-              top: "0.5rem",
-              left: "0.5rem",
-              backgroundColor: "rgba(0,0,0,0.7)",
-              color: "#fff",
-              padding: "0.25rem 0.5rem",
-              borderRadius: "0.25rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              zIndex: 1,
-              display: "flex",
-              alignItems: "center",
-              gap: "0.25rem",
-            }}
-          >
-            <Video size={12} />
-            Webcam
-          </div>
-          {webcamStream ? (
-            <video
-              ref={webcamRef}
-              autoPlay
-              playsInline
-              muted
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "contain",
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                width: "100%",
-                height: "100%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#64748b",
-                fontSize: "0.875rem",
-              }}
-            >
-              Waiting for webcam...
-            </div>
-          )}
-        </div>
-
-        {/* Screen */}
-        <div
-          style={{
-            backgroundColor: "#1e293b",
-            borderRadius: "0.5rem",
-            overflow: "hidden",
-            position: "relative",
-            aspectRatio: isExpanded ? undefined : "16/9",
-            height: isExpanded ? "100%" : "auto",
-            minHeight: isExpanded ? "400px" : "auto",
-          }}
-        >
-          <div
-            style={{
-              position: "absolute",
-              top: "0.5rem",
-              left: "0.5rem",
-              backgroundColor: "rgba(0,0,0,0.7)",
-              color: "#fff",
-              padding: "0.25rem 0.5rem",
-              borderRadius: "0.25rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              zIndex: 1,
-              display: "flex",
-              alignItems: "center",
-              gap: "0.25rem",
-            }}
-          >
-            <Monitor size={12} />
-            Screen
-          </div>
-          {screenStream ? (
-            <video
-              ref={screenRef}
-              autoPlay
-              playsInline
-              muted
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "contain",
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                width: "100%",
-                height: "100%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#64748b",
-                fontSize: "0.875rem",
-              }}
-            >
-              Waiting for screen...
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Expand/Collapse button */}
-      <div
-        style={{
-          padding: "0.5rem",
-          borderTop: "1px solid #e2e8f0",
-          display: "flex",
-          justifyContent: "center",
-        }}
-      >
-        <button
-          onClick={onExpandToggle}
-          style={{
-            padding: "0.375rem 0.75rem",
-            backgroundColor: "#f1f5f9",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.375rem",
-            cursor: "pointer",
-            fontSize: "0.875rem",
-            color: "#475569",
-          }}
-        >
-          {isExpanded ? "Show Grid" : "Expand View"}
-        </button>
-      </div>
     </div>
   );
 }
 
+// Main dashboard component
 export function LiveProctoringDashboard({
   isOpen,
   onClose,
   assessmentId,
   adminId,
 }: LiveProctoringDashboardProps) {
+  const hasStartedRef = useRef(false);
+  
   const {
     candidateStreams,
     activeCandidates,
@@ -397,292 +257,97 @@ export function LiveProctoringDashboard({
     assessmentId,
     adminId,
     debugMode: true,
+    onError: (err) => console.error("[Dashboard] Error:", err),
   });
-
-  // Track which candidate card is expanded
-  const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
-
-  // Use refs to store stable function references
-  const startMonitoringRef = useRef(startMonitoring);
-  const stopMonitoringRef = useRef(stopMonitoring);
-  
-  // Update refs when functions change
-  useEffect(() => {
-    startMonitoringRef.current = startMonitoring;
-    stopMonitoringRef.current = stopMonitoring;
-  }, [startMonitoring, stopMonitoring]);
 
   // Start monitoring when dashboard opens
   useEffect(() => {
-    if (isOpen) {
-      startMonitoringRef.current().catch(err => {
-        console.error("[LiveProctoringDashboard] Error starting monitoring:", err);
-      });
-    } else {
-      stopMonitoringRef.current();
-      // Reset expanded state when closing
-      setExpandedSessionId(null);
+    if (!isOpen) return;
+    
+    if (hasStartedRef.current) {
+      console.log("[Dashboard] Already started, skipping");
+      return;
     }
+    
+    hasStartedRef.current = true;
+    console.log("[Dashboard] ✅ Starting monitoring...");
+    startMonitoring();
+  }, [isOpen, startMonitoring]);
 
-    return () => {
-      if (isOpen) {
-        stopMonitoringRef.current();
-      }
-    };
-  }, [isOpen]); // Only depend on isOpen, not the functions
-
-  // Convert Map to array for rendering
-  const streamsArray = Array.from(candidateStreams.values());
-  
-  // Debug logging
+  // Stop when closed
   useEffect(() => {
-    streamsArray.forEach(s => {
-      console.log(`[LiveProctoringDashboard] Candidate ${s.sessionId}:`, {
-        candidateId: s.candidateId,
-        status: s.status,
-        hasWebcam: !!s.webcamStream,
-        hasScreen: !!s.screenStream,
-        webcamActive: s.webcamStream?.active,
-        screenActive: s.screenStream?.active,
-        webcamTracks: s.webcamStream?.getVideoTracks().length || 0,
-        screenTracks: s.screenStream?.getVideoTracks().length || 0,
-        webcamStreamId: s.webcamStream?.id,
-        screenStreamId: s.screenStream?.id,
-        webcamStreamReadyState: s.webcamStream?.getVideoTracks()[0]?.readyState,
-        screenStreamReadyState: s.screenStream?.getVideoTracks()[0]?.readyState,
-      });
-    });
-    console.log('[LiveProctoringDashboard] Summary:', {
-      activeCandidatesCount: activeCandidates.length,
-      candidateStreamsSize: candidateStreams.size,
-      streamsArrayLength: streamsArray.length,
-    });
-  }, [activeCandidates, candidateStreams, streamsArray]);
+    if (!isOpen && hasStartedRef.current) {
+      console.log("[Dashboard] Closed, stopping monitoring");
+      hasStartedRef.current = false;
+      stopMonitoring();
+    }
+  }, [isOpen, stopMonitoring]);
 
-  // Handle expand toggle
-  const handleExpandToggle = (sessionId: string) => {
-    setExpandedSessionId(prev => prev === sessionId ? null : sessionId);
-  };
+  // Handle close button
+  const handleClose = useCallback(() => {
+    console.log("[Dashboard] Close button clicked");
+    hasStartedRef.current = false;
+    stopMonitoring();
+    onClose();
+  }, [onClose, stopMonitoring]);
 
-  if (!isOpen) {
-    return null;
-  }
+  if (!isOpen) return null;
+
+  const candidates = Array.from(candidateStreams.values());
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: "rgba(0,0,0,0.75)",
-        zIndex: 9999,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "2rem",
-      }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <div
-        style={{
-          backgroundColor: "#ffffff",
-          borderRadius: "1rem",
-          width: "100%",
-          maxWidth: "1400px",
-          maxHeight: "90vh",
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)",
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="bg-gray-100 rounded-xl shadow-2xl w-[95vw] max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
-        <div
-          style={{
-            padding: "1.5rem",
-            borderBottom: "1px solid #e2e8f0",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
+        <div className="bg-white px-6 py-4 border-b flex items-center justify-between">
           <div>
-            <h2
-              style={{
-                margin: 0,
-                fontSize: "1.5rem",
-                fontWeight: 700,
-                color: "#1e293b",
-              }}
-            >
-              Live Proctoring Dashboard
-            </h2>
-            <p
-              style={{
-                margin: "0.5rem 0 0 0",
-                fontSize: "0.875rem",
-                color: "#64748b",
-              }}
-            >
-              Monitoring {activeCandidates.length} active candidate{activeCandidates.length !== 1 ? "s" : ""}
+            <h2 className="text-xl font-semibold">Live Proctoring Dashboard</h2>
+            <p className="text-sm text-green-600">
+              Monitoring {candidates.length} active candidate{candidates.length !== 1 ? "s" : ""}
             </p>
           </div>
+          
           <button
-            onClick={onClose}
-            style={{
-              padding: "0.5rem",
-              backgroundColor: "#f1f5f9",
-              border: "1px solid #e2e8f0",
-              borderRadius: "0.5rem",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-            title="Close dashboard"
+            onClick={handleClose}
+            className="p-2 hover:bg-gray-100 rounded-full transition-colors"
           >
-            <X size={20} color="#64748b" />
+            <X className="w-5 h-5" />
           </button>
         </div>
-
+        
         {/* Content */}
-        <div
-          style={{
-            flex: 1,
-            overflow: "auto",
-            padding: expandedSessionId ? "0" : "1.5rem",
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
+        <div className="flex-1 overflow-auto p-6">
           {isLoading ? (
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                height: "400px",
-                color: "#64748b",
-              }}
-            >
-              <div
-                style={{
-                  width: "48px",
-                  height: "48px",
-                  border: "4px solid #e2e8f0",
-                  borderTopColor: "#3b82f6",
-                  borderRadius: "50%",
-                  animation: "spin 1s linear infinite",
-                }}
-              />
-              <p style={{ marginTop: "1rem", fontSize: "0.875rem" }}>
-                Loading active sessions...
-              </p>
+            <div className="flex items-center justify-center h-64">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
+              <span className="ml-3 text-gray-600">Connecting...</span>
             </div>
-          ) : streamsArray.length === 0 ? (
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                height: "400px",
-                color: "#94a3b8",
-              }}
-            >
-              <svg
-                width="64"
-                height="64"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-              >
-                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                <circle cx="9" cy="7" r="4" />
-                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-              </svg>
-              <p style={{ marginTop: "1rem", fontSize: "1.125rem", fontWeight: 600 }}>
-                No Active Candidates
-              </p>
-              <p
-                style={{
-                  color: "#64748b",
-                  fontSize: "0.875rem",
-                  marginTop: "0.5rem",
-                  textAlign: "center",
-                  maxWidth: "400px",
-                }}
-              >
-                There are no active candidates taking the test. Candidates will appear here when they start their assessment.
-              </p>
-            </div>
-          ) : expandedSessionId ? (
-            // Expanded view - show only the expanded card in full screen
-            <div style={{ flex: 1, display: "flex", padding: "1.5rem" }}>
-              {streamsArray
-                .filter(stream => stream.sessionId === expandedSessionId)
-                .map((stream) => (
-                  <CandidateCard
-                    key={stream.sessionId}
-                    sessionId={stream.sessionId}
-                    candidateId={stream.candidateId}
-                    status={stream.status}
-                    webcamStream={stream.webcamStream}
-                    screenStream={stream.screenStream}
-                    error={stream.error}
-                    onRefresh={() => refreshCandidate(stream.sessionId)}
-                    isExpanded={true}
-                    onExpandToggle={() => handleExpandToggle(stream.sessionId)}
-                  />
-                ))}
+          ) : candidates.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-64 text-gray-500">
+              <Video className="w-12 h-12 mb-3 opacity-50" />
+              <p className="text-lg">No active candidates</p>
+              <p className="text-sm">Candidates will appear here when they start their test</p>
             </div>
           ) : (
-            // Grid view - show all cards
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(400px, 1fr))",
-                gap: "1.5rem",
-              }}
-            >
-              {streamsArray.map((stream) => (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {candidates.map((candidate) => (
                 <CandidateCard
-                  key={stream.sessionId}
-                  sessionId={stream.sessionId}
-                  candidateId={stream.candidateId}
-                  status={stream.status}
-                  webcamStream={stream.webcamStream}
-                  screenStream={stream.screenStream}
-                  error={stream.error}
-                  onRefresh={() => refreshCandidate(stream.sessionId)}
-                  isExpanded={false}
-                  onExpandToggle={() => handleExpandToggle(stream.sessionId)}
+                  key={candidate.sessionId}
+                  sessionId={candidate.sessionId}
+                  candidateId={candidate.candidateId}
+                  candidateName={candidate.candidateName}
+                  candidateEmail={candidate.candidateEmail}
+                  status={candidate.status}
+                  webcamStream={candidate.webcamStream}
+                  screenStream={candidate.screenStream}
+                  error={candidate.error}
+                  onRefresh={() => refreshCandidate(candidate.sessionId)}
                 />
               ))}
             </div>
           )}
         </div>
       </div>
-
-      <style jsx>{`
-        @keyframes spin {
-          from {
-            transform: rotate(0deg);
-          }
-          to {
-            transform: rotate(360deg);
-          }
-        }
-      `}</style>
     </div>
   );
 }

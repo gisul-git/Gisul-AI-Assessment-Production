@@ -466,10 +466,78 @@ Return ONLY a JSON object with questions array."""
                     "difficulty": difficulty
                 })
     
+    # ⭐ CRITICAL FIX: Ensure we generate the requested number of questions
+    if len(result) < count:
+        logger.warning(f"⚠️ AI generated only {len(result)}/{count} MCQ questions. Requested {count}, got {len(questions_list)} from AI.")
+        # If we got fewer questions than requested, retry to get the remaining ones
+        remaining = count - len(result)
+        logger.info(f"🔄 Retrying to generate {remaining} more MCQ question(s)...")
+        
+        # Retry with a more explicit prompt for the remaining count
+        retry_prompt = f"""You are an expert technical assessment writer. Generate EXACTLY {remaining} additional Multiple Choice Question(s) for the topic: {topic}.
+
+CRITICAL: You MUST generate EXACTLY {remaining} question(s). Do NOT generate fewer or more.
+
+{'=' * 80}
+CRITICAL: PERSONALIZATION CONTEXT (HIGHEST PRIORITY - MUST USE)
+{'=' * 80}
+{personalization_context if personalization_context else "(No specific personalization context provided - generate generic professional questions)"}
+{'=' * 80}
+
+IMPORTANT: These are ADDITIONAL questions. Make sure they are DIFFERENT from any previous questions.
+
+Each question MUST have exactly 4 options and one correct answer.
+Difficulty level: {difficulty}
+Experience mode: {experience_mode}
+
+Return ONLY a JSON object with questions array:
+{{
+  "questions": [
+    {{
+      "question": "<question text>",
+      "options": ["<option A>", "<option B>", "<option C>", "<option D>"],
+      "correctAnswer": "<option text that matches one of the options exactly>"
+    }}
+  ]
+}}"""
+        
+        try:
+            retry_response = await client.chat.completions.create(
+                model="gpt-4-turbo-preview",
+                messages=[{"role": "user", "content": retry_prompt}],
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            retry_content = retry_response.choices[0].message.content.strip() if retry_response.choices else ""
+            retry_data = _parse_json_response(retry_content)
+            
+            if isinstance(retry_data, dict) and "questions" in retry_data:
+                retry_questions = retry_data["questions"]
+            elif isinstance(retry_data, list):
+                retry_questions = retry_data
+            else:
+                retry_questions = []
+            
+            for q in retry_questions[:remaining]:
+                if isinstance(q, dict) and "question" in q and "options" in q and "correctAnswer" in q:
+                    if len(q["options"]) == 4:
+                        result.append({
+                            "question": q["question"],
+                            "options": q["options"],
+                            "correctAnswer": q["correctAnswer"],
+                            "type": "MCQ",
+                            "difficulty": difficulty
+                        })
+        except Exception as retry_exc:
+            logger.error(f"Error retrying MCQ generation: {retry_exc}")
+    
     if not result:
         raise HTTPException(status_code=500, detail="No valid MCQ questions generated")
     
-    return result
+    if len(result) < count:
+        logger.warning(f"⚠️ Generated {len(result)}/{count} MCQ questions after retry. Proceeding with available questions.")
+    
+    return result[:count]  # Return exactly the requested count (or fewer if generation failed)
 
 
 # ============================================================================
@@ -694,10 +762,69 @@ Return ONLY a JSON object with questions array."""
                 "difficulty": difficulty
             })
     
+    # ⭐ CRITICAL FIX: Ensure we generate the requested number of questions
+    if len(result) < count:
+        logger.warning(f"⚠️ AI generated only {len(result)}/{count} Subjective questions. Requested {count}, got {len(questions_list)} from AI.")
+        # Retry to get the remaining questions
+        remaining = count - len(result)
+        logger.info(f"🔄 Retrying to generate {remaining} more Subjective question(s)...")
+        
+        # Build retry prompt (reuse the same personalization context)
+        retry_prompt = f"""You are an expert technical assessment writer. Generate EXACTLY {remaining} additional scenario-based subjective question(s) for the topic: {topic}.
+
+CRITICAL: You MUST generate EXACTLY {remaining} question(s). Do NOT generate fewer or more.
+
+{'=' * 80}
+CRITICAL: PERSONALIZATION CONTEXT (HIGHEST PRIORITY - MUST USE)
+{'=' * 80}
+{personalization_context if personalization_context else "(No specific personalization context provided - generate generic professional questions)"}
+{'=' * 80}
+
+IMPORTANT: These are ADDITIONAL questions. Make sure they are DIFFERENT from any previous questions.
+
+Return ONLY a JSON object with questions array:
+{{
+  "questions": [
+    {{
+      "question": "<scenario-based question text>"
+    }}
+  ]
+}}"""
+        
+        try:
+            retry_response = await client.chat.completions.create(
+                model="gpt-4-turbo-preview",
+                messages=[{"role": "user", "content": retry_prompt}],
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            retry_content = retry_response.choices[0].message.content.strip() if retry_response.choices else ""
+            retry_data = _parse_json_response(retry_content)
+            
+            if isinstance(retry_data, dict) and "questions" in retry_data:
+                retry_questions = retry_data["questions"]
+            elif isinstance(retry_data, list):
+                retry_questions = retry_data
+            else:
+                retry_questions = []
+            
+            for q in retry_questions[:remaining]:
+                if isinstance(q, dict) and "question" in q:
+                    result.append({
+                        "question": q["question"],
+                        "type": "Subjective",
+                        "difficulty": difficulty
+                    })
+        except Exception as retry_exc:
+            logger.error(f"Error retrying Subjective generation: {retry_exc}")
+    
     if not result:
         raise HTTPException(status_code=500, detail="No valid subjective questions generated")
     
-    return result
+    if len(result) < count:
+        logger.warning(f"⚠️ Generated {len(result)}/{count} Subjective questions after retry. Proceeding with available questions.")
+    
+    return result[:count]  # Return exactly the requested count (or fewer if generation failed)
 
 
 # ============================================================================
@@ -786,11 +913,13 @@ async def _generate_pseudocode_questions(
     
     # Use legacy implementation with context awareness
     if _legacy_generate_questions:
-        config = {
-            "numQuestions": count,
-            "Q1type": "Pseudo Code",
-            "Q1difficulty": difficulty
-        }
+        # Build a full config so every requested slot is explicitly pseudocode; otherwise
+        # the legacy generator defaults Q2..Qn to Subjective and we end up with only one pseudocode.
+        config = {"numQuestions": count}
+        for i in range(1, count + 1):
+            config[f"Q{i}type"] = "Pseudo Code"
+            config[f"Q{i}difficulty"] = difficulty
+
         questions = await _legacy_generate_questions(topic, config, coding_supported=False, experience_mode=experience_mode)
         # Filter to only PseudoCode questions and ensure proper format
         pseudocode_questions = []
@@ -841,12 +970,83 @@ async def regenerate_question(
     Raises:
         HTTPException: If regeneration fails
     """
-    # TODO: Move implementation from topic_service_v2.py line 3427
-    logger.warning(f"Question regeneration not yet implemented for type: {question_type}")
-    raise HTTPException(
-        status_code=501,
-        detail="Question regeneration is not yet implemented. Please use the legacy endpoint."
-    )
+    # Prepare merged additional requirements including feedback
+    merged_additional = additional_requirements or ""
+    if feedback:
+        merged_additional = f"{merged_additional}\nUser feedback: {feedback}" if merged_additional else f"User feedback: {feedback}"
+
+    # Determine whether Judge0/coding is required
+    qtype_norm = (question_type or "").strip().lower()
+    can_use_judge0 = qtype_norm in ("coding", "code")
+
+    # Use topic_name as topic_label if provided, otherwise empty string
+    topic_label = topic_name or ""
+
+    # Attempt to generate via AI pipeline; if it fails, return a safe fallback
+    try:
+        questions = await generate_questions_for_row_v2(
+            topic_label=topic_label,
+            question_type=question_type,
+            difficulty=difficulty,
+            questions_count=1,
+            can_use_judge0=can_use_judge0,
+            coding_language="python",
+            additional_requirements=merged_additional if merged_additional else None,
+            experience_mode=experience_mode,
+            website_summary=None,
+            company_context=None,
+            job_designation=None,
+            experience_min=experience_min,
+            experience_max=experience_max,
+            company_name=None,
+            assessment_requirements=None,
+            previous_question=old_question,
+        )
+
+        if not questions or len(questions) == 0:
+            raise RuntimeError("AI generator returned no questions")
+
+        return questions[0]
+
+    except Exception as exc:
+        # Log the original error for debugging
+        logger.exception("AI regeneration failed, falling back to safe regeneration: %s", exc)
+
+        # Build a safe fallback question object to avoid 500s
+        try:
+            # If old_question is a dict-like structure, try to preserve options/answers
+            if isinstance(old_question, dict):
+                fallback = old_question.copy()
+                # Prefix question text to indicate regeneration
+                if "question" in fallback and isinstance(fallback["question"], str):
+                    fallback["question"] = f"Regenerated: {fallback['question']}"
+                else:
+                    fallback["question"] = f"Regenerated question for topic {topic_label}"
+                # Mark regenerated metadata
+                fallback["regeneratedFallback"] = True
+                fallback["difficulty"] = difficulty
+                return fallback
+
+            # If old_question is a string, return a simple regenerated object
+            if isinstance(old_question, str) and old_question.strip():
+                return {
+                    "question": f"Regenerated: {old_question}",
+                    "type": question_type or "Subjective",
+                    "difficulty": difficulty,
+                    "regeneratedFallback": True,
+                }
+
+            # Ultimate generic fallback
+            return {
+                "question": f"Regenerated question for topic {topic_label} (fallback)",
+                "type": question_type or "Subjective",
+                "difficulty": difficulty,
+                "regeneratedFallback": True,
+            }
+        except Exception:
+            # If building fallback also fails, raise a 500 to surface error
+            logger.exception("Failed to build regeneration fallback")
+            raise HTTPException(status_code=500, detail="Failed to regenerate question") from exc
 
 
 

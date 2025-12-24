@@ -482,18 +482,47 @@ async def start_live_proctoring_session(
     """
     try:
         import uuid
+        from bson import ObjectId
         session_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
+        
+        # Fetch candidate info (name, email) from users collection
+        candidate_name = None
+        candidate_email = None
+        try:
+            if ObjectId.is_valid(payload.candidateId):
+                user_doc = await db.users.find_one({"_id": ObjectId(payload.candidateId)})
+                if user_doc:
+                    candidate_name = user_doc.get("name", user_doc.get("fullName"))
+                    candidate_email = user_doc.get("email")
+                    logger.info(f"[Live Proctoring] Found candidate info: {candidate_name} ({candidate_email})")
+        except Exception as e:
+            logger.warning(f"[Live Proctoring] Could not fetch candidate info: {e}")
+        
+        # CRITICAL FIX: Clean up any existing sessions for this candidate+assessment
+        # This prevents duplicate/old sessions from cluttering the admin dashboard
+        existing_sessions_result = await db.live_proctor_sessions.delete_many({
+            "assessmentId": payload.assessmentId,
+            "candidateId": payload.candidateId,
+            "status": {"$in": ["candidate_initiated", "offer_sent", "active"]}
+        })
+        
+        if existing_sessions_result.deleted_count > 0:
+            logger.info(f"[Live Proctoring] Cleaned up {existing_sessions_result.deleted_count} old sessions for candidate {payload.candidateId} in assessment {payload.assessmentId}")
         
         session_doc = {
             "sessionId": session_id,
             "assessmentId": payload.assessmentId,
             "candidateId": payload.candidateId,
+            "candidateName": candidate_name,
+            "candidateEmail": candidate_email,
             "status": "candidate_initiated",
             "offer": None,
             "answer": None,
             "candidateICE": [],
             "adminICE": [],
+            "wsConnected": False,  # WebSocket connection status (persisted in DB)
+            "wsLastSeen": None,  # Last heartbeat timestamp
             "createdAt": now,
             "updatedAt": now,
             "endedAt": None,
@@ -501,7 +530,7 @@ async def start_live_proctoring_session(
         
         await db.live_proctor_sessions.insert_one(session_doc)
         
-        logger.info(f"[Live Proctoring] Session started: {session_id} for candidate {payload.candidateId}")
+        logger.info(f"[Live Proctoring] Session started: {session_id} for candidate {candidate_name or payload.candidateId}")
         
         return success_response(
             "Live Proctoring session started",
@@ -649,14 +678,55 @@ async def websocket_candidate(
     
     assessment_id = session["assessmentId"]
     
+    logger.info(f"[Live Proctoring] Candidate WebSocket connecting: session_id={session_id}, candidate_id={candidate_id}, assessment_id={assessment_id}")
+    logger.info(f"[Live Proctoring] Session document from DB: sessionId={session.get('sessionId')}, status={session.get('status')}, candidateId={session.get('candidateId')}")
+    
     # Connect candidate
     await connection_manager.connect_candidate(session_id, assessment_id, websocket)
+    
+    # CRITICAL: Mark WebSocket as connected in MongoDB (persists across restarts)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.live_proctor_sessions.update_one(
+        {"sessionId": session_id},
+        {
+            "$set": {
+                "wsConnected": True,
+                "wsLastSeen": now,
+                "updatedAt": now,
+            }
+        }
+    )
+    logger.info(f"[Live Proctoring] ✅ Marked session {session_id} as wsConnected=True in MongoDB")
+    
+    # Verify connection was registered
+    is_registered = connection_manager.is_candidate_connected(session_id)
+    logger.info(f"[Live Proctoring] After connect_candidate, is_candidate_connected({session_id}) = {is_registered}")
+    logger.info(f"[Live Proctoring] All registered candidate connections: {list(connection_manager.candidate_connections.keys())}")
     
     try:
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
             msg_type = message.get("type")
+            
+            # Handle heartbeat ping (frontend sends this periodically)
+            if msg_type == "ping":
+                # Update last seen timestamp
+                now = datetime.now(timezone.utc).isoformat()
+                await db.live_proctor_sessions.update_one(
+                    {"sessionId": session_id},
+                    {
+                        "$set": {
+                            "wsLastSeen": now,
+                            "wsConnected": True,  # Ensure it's still marked as connected
+                            "updatedAt": now,
+                        }
+                    }
+                )
+                # Send pong response
+                await websocket.send_text(json.dumps({"type": "pong"}))
+                logger.debug(f"[Live Proctoring] Received ping from {session_id}, sent pong")
+                continue
             
             if msg_type == "offer":
                 # Candidate sent offer
@@ -674,6 +744,11 @@ async def websocket_candidate(
                     )
                     logger.info(f"[Live Proctoring] Offer received from candidate {candidate_id}")
                     
+                    # Fetch candidate name/email for notification
+                    session_doc = await db.live_proctor_sessions.find_one({"sessionId": session_id})
+                    candidate_name = session_doc.get("candidateName") if session_doc else None
+                    candidate_email = session_doc.get("candidateEmail") if session_doc else None
+                    
                     # Notify admins that new offer is available
                     await connection_manager.send_to_admins(
                         assessment_id,
@@ -681,26 +756,20 @@ async def websocket_candidate(
                             "type": "new_session",
                             "sessionId": session_id,
                             "candidateId": candidate_id,
+                            "candidateName": candidate_name,
+                            "candidateEmail": candidate_email,
                         }
                     )
             
             elif msg_type == "ice":
-                # Candidate sent ICE candidate
+                # Candidate sent ICE candidate - forward to admins immediately (don't store in DB)
                 candidate_ice = {
                     "candidate": message.get("candidate"),
                     "sdpMid": message.get("sdpMid"),
                     "sdpMLineIndex": message.get("sdpMLineIndex"),
                 }
                 
-                await db.live_proctor_sessions.update_one(
-                    {"sessionId": session_id},
-                    {
-                        "$push": {"candidateICE": candidate_ice},
-                        "$set": {"updatedAt": datetime.now(timezone.utc).isoformat()}
-                    }
-                )
-                
-                # Forward to admins
+                # Forward to admins immediately (real-time only, no DB storage)
                 await connection_manager.send_to_admins(
                     assessment_id,
                     {
@@ -711,11 +780,28 @@ async def websocket_candidate(
                 )
     
     except WebSocketDisconnect:
-        logger.info(f"[Live Proctoring] Candidate disconnected: {session_id}")
+        logger.info(f"[Live Proctoring] Candidate WebSocket disconnected: {session_id}")
     except Exception as exc:
         logger.exception(f"[Live Proctoring] Error in candidate WebSocket: {exc}")
     finally:
+        logger.info(f"[Live Proctoring] Cleaning up candidate connection: {session_id}")
+        logger.info(f"[Live Proctoring] Before disconnect, is_candidate_connected({session_id}) = {connection_manager.is_candidate_connected(session_id)}")
+        
+        # CRITICAL: Mark WebSocket as disconnected in MongoDB (persists across restarts)
+        now = datetime.now(timezone.utc).isoformat()
+        await db.live_proctor_sessions.update_one(
+            {"sessionId": session_id},
+            {
+                "$set": {
+                    "wsConnected": False,
+                    "updatedAt": now,
+                }
+            }
+        )
+        logger.info(f"[Live Proctoring] ✅ Marked session {session_id} as wsConnected=False in MongoDB")
+        
         await connection_manager.disconnect_candidate(session_id)
+        logger.info(f"[Live Proctoring] After disconnect, is_candidate_connected({session_id}) = {connection_manager.is_candidate_connected(session_id)}")
 
 
 @router.websocket("/ws/live/admin/{assessment_id}")
@@ -735,24 +821,74 @@ async def websocket_admin(
     try:
         # Send active sessions immediately
         # CRITICAL: Only include sessions where candidate WebSocket is actually connected
+        logger.info(f"[Live Proctoring] Admin connecting for assessment {assessment_id}, querying active sessions...")
+        
+        # IMPROVEMENT: Clean up old disconnected sessions (older than 1 hour)
+        from datetime import timedelta
+        one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        cleanup_result = await db.live_proctor_sessions.delete_many({
+            "assessmentId": assessment_id,
+            "wsConnected": False,
+            "updatedAt": {"$lt": one_hour_ago}
+        })
+        if cleanup_result.deleted_count > 0:
+            logger.info(f"[Live Proctoring] Cleaned up {cleanup_result.deleted_count} old disconnected sessions")
+        
+        # Query for currently active sessions only (connected WebSocket + active status)
         cursor = db.live_proctor_sessions.find({
             "assessmentId": assessment_id,
-            "status": {"$in": ["candidate_initiated", "offer_sent", "active"]}
+            "status": {"$in": ["candidate_initiated", "offer_sent", "active"]},
+            "wsConnected": True  # Only include sessions that are actually connected
         })
         
         sessions = []
+        all_sessions_in_db = []
+        connected_session_ids = list(connection_manager.candidate_connections.keys())
+        
         async for doc in cursor:
             session_id = doc["sessionId"]
-            # Only include if candidate WebSocket is connected
-            if connection_manager.is_candidate_connected(session_id):
-                sessions.append({
-                    "sessionId": session_id,
-                    "candidateId": doc["candidateId"],
-                    "status": doc["status"],
-                    "createdAt": doc["createdAt"],
-                })
+            candidate_id = doc.get("candidateId", "unknown")
+            status = doc.get("status", "unknown")
+            ws_connected_db = doc.get("wsConnected", False)  # Already filtered for True above
+            
+            all_sessions_in_db.append({
+                "sessionId": session_id,
+                "candidateId": candidate_id,
+                "status": status,
+                "wsConnected": ws_connected_db,
+            })
+            
+            # Double-check: Verify WebSocket is still connected in memory
+            is_connected_memory = connection_manager.is_candidate_connected(session_id)
+            
+            # If DB says connected but memory doesn't, candidate may have disconnected
+            if ws_connected_db and not is_connected_memory:
+                logger.warning(f"[Live Proctoring] ⚠️  Session {session_id} marked connected in DB but not in memory - marking as disconnected")
+                # Update DB to reflect reality
+                await db.live_proctor_sessions.update_one(
+                    {"sessionId": session_id},
+                    {"$set": {"wsConnected": False, "updatedAt": datetime.now(timezone.utc).isoformat()}}
+                )
+                continue  # Skip this session
+            
+            # Include session (already filtered for wsConnected=True from DB query)
+            sessions.append({
+                "sessionId": session_id,
+                "candidateId": candidate_id,
+                "candidateName": doc.get("candidateName"),
+                "candidateEmail": doc.get("candidateEmail"),
+                "status": status,
+                "createdAt": doc["createdAt"],
+            })
+            logger.info(f"[Live Proctoring] ✅ INCLUDED: Session {session_id} (candidate: {doc.get('candidateName') or candidate_id}, status: {status}) - WebSocket connected")
         
-        logger.info(f"[Live Proctoring] Admin connected, sending {len(sessions)} active sessions (with connected candidates) for assessment {assessment_id}")
+        logger.info(f"[Live Proctoring] ===== Admin Connection Summary =====")
+        logger.info(f"[Live Proctoring] Assessment ID: {assessment_id}")
+        logger.info(f"[Live Proctoring] Total sessions in DB: {len(all_sessions_in_db)}")
+        logger.info(f"[Live Proctoring] Sessions with connected WebSocket: {len(sessions)}")
+        logger.info(f"[Live Proctoring] Currently connected candidate sessions: {connected_session_ids}")
+        logger.info(f"[Live Proctoring] Sessions being sent to admin: {[s['sessionId'] for s in sessions]}")
+        logger.info(f"[Live Proctoring] =====================================")
         
         await websocket.send_text(json.dumps({
             "type": "active_sessions",
@@ -772,6 +908,8 @@ async def websocket_admin(
                 
                 if session:
                     offer = session.get("offer")
+                    candidate_id = session.get("candidateId", "unknown")
+                    
                     # If no offer or offer is old, request candidate to send new offer
                     if not offer or not connection_manager.is_candidate_connected(session_id):
                         # Candidate not connected or no offer - send empty session_data
@@ -779,16 +917,16 @@ async def websocket_admin(
                         await websocket.send_text(json.dumps({
                             "type": "session_data",
                             "sessionId": session_id,
+                            "candidateId": candidate_id,
                             "offer": None,
-                            "candidateICE": [],
                         }))
                         logger.info(f"[Live Proctoring] Admin requested session {session_id} but candidate not connected or no offer")
                     else:
                         await websocket.send_text(json.dumps({
                             "type": "session_data",
                             "sessionId": session_id,
+                            "candidateId": candidate_id,
                             "offer": offer,
-                            "candidateICE": session.get("candidateICE", []),
                         }))
                         logger.info(f"[Live Proctoring] Sent session data for {session_id} to admin")
                 else:
@@ -824,7 +962,7 @@ async def websocket_admin(
                     )
             
             elif msg_type == "ice":
-                # Admin sent ICE candidate
+                # Admin sent ICE candidate - forward to candidate immediately (don't store in DB)
                 session_id = message.get("sessionId")
                 admin_ice = {
                     "candidate": message.get("candidate"),
@@ -832,15 +970,7 @@ async def websocket_admin(
                     "sdpMLineIndex": message.get("sdpMLineIndex"),
                 }
                 
-                await db.live_proctor_sessions.update_one(
-                    {"sessionId": session_id},
-                    {
-                        "$push": {"adminICE": admin_ice},
-                        "$set": {"updatedAt": datetime.now(timezone.utc).isoformat()}
-                    }
-                )
-                
-                # Forward to candidate
+                # Forward to candidate immediately (real-time only, no DB storage)
                 await connection_manager.send_to_candidate(
                     session_id,
                     {
