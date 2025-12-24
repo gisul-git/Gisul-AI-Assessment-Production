@@ -3,8 +3,8 @@ import os
 import sys
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
+ 
+ 
 class Settings(BaseSettings):
     app_name: str = "AI Assessment Platform API"
     debug: bool = False
@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     jwt_exp_minutes: int = 60  # 1 hour (reduced from 7 days for security)
     jwt_refresh_exp_days: int = 30  # 30 days for refresh tokens
     # CORS Configuration
-    # Development (default)
-    cors_origins: str = "http://localhost:3000"
-    # Production (uncomment and set when deploying to production)
-    # cors_origins: str = "https://your-vercel-app.vercel.app,https://yourdomain.com"
+    # Multiple origins separated by comma (localhost for dev + production domains)
+    cors_origins: str = "http://localhost:3000,https://gisul-ai-assessment.vercel.app"
+    # Add more production domains as needed:
+    # cors_origins: str = "http://localhost:3000,https://gisul-ai-assessment.vercel.app,https://yourdomain.com"
     # RSA Keys (only needed if using RS256)
     jwt_rsa_private_key_path: str | None = None
     jwt_rsa_public_key_path: str | None = None
@@ -59,9 +59,9 @@ class Settings(BaseSettings):
     # OTP and Email Verification
     otp_ttl_minutes: int = 5
     email_verification_code_ttl_minutes: int = 1
-
+ 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-
+ 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Validate JWT secret on startup
@@ -75,10 +75,8 @@ class Settings(BaseSettings):
             print("Generate one using: openssl rand -base64 32", file=sys.stderr)
             print("=" * 80, file=sys.stderr)
             sys.exit(1)
-
-
+ 
+ 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-
-
