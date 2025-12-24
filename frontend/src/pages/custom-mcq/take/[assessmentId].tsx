@@ -140,7 +140,11 @@ export default function CustomMCQTakePage() {
   // Start proctoring when exam starts (AI proctoring + tab switch + fullscreen)
   useEffect(() => {
     const assessmentIdStr = String(assessmentId || '');
-    const candidateIdStr = candidateInfo?.email || '';
+    // Resolve userId with priority: email > anonymous
+    // Note: session.user.id would be ideal but requires SessionProvider context
+    const candidateIdStr = resolveUserIdForProctoring(null, {
+      email: candidateInfo?.email,
+    });
     
     if (examStarted && !isProctoringRunning && !submitting && assessmentIdStr && thumbVideoRef.current) {
       console.log('[Custom MCQ Take] Starting Universal Proctoring...');
@@ -168,7 +172,10 @@ export default function CustomMCQTakePage() {
   // Start Live Proctoring (separate from AI proctoring)
   useEffect(() => {
     const assessmentIdStr = String(assessmentId || '');
-    const candidateIdStr = candidateInfo?.email || '';
+    // Resolve userId with priority: email > anonymous
+    const candidateIdStr = resolveUserIdForProctoring(null, {
+      email: candidateInfo?.email,
+    });
 
     if (!proctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
       return;

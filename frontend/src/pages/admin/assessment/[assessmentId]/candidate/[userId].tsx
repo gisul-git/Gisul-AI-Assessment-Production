@@ -6,6 +6,7 @@ import { requireAuth } from "../../../../../lib/auth";
 import Link from "next/link";
 import axios from "axios";
 import ProctorSummaryCard from "../../../../../components/admin/ProctorSummaryCard";
+import ProctorLogsReview from "../../../../../components/admin/ProctorLogsReview";
 import { useProctorPolling, EVENT_TYPE_LABELS, type ProctorLog } from "../../../../../hooks/useProctorPolling";
 
 interface CandidateData {
@@ -649,74 +650,13 @@ export default function CandidateProctorPage() {
           />
         )}
 
-        {/* Violation Timeline */}
+        {/* Proctoring Logs Review */}
         {proctorLogs.length > 0 && (
-          <div
-            style={{
-              backgroundColor: "#ffffff",
-              borderRadius: "0.75rem",
-              padding: "1.5rem 2rem",
-              marginBottom: "1.5rem",
-              boxShadow: "0 1px 3px rgba(0, 0, 0, 0.1)",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#6953a3" strokeWidth="2">
-                <circle cx="12" cy="12" r="10" />
-                <polyline points="12 6 12 12 16 14" />
-              </svg>
-              <h2 style={{ margin: 0, fontSize: "1.25rem", color: "#1a1625", fontWeight: 700 }}>
-                Violation Timeline ({proctorLogs.length})
-              </h2>
-            </div>
-
-            <div style={{ maxHeight: "200px", overflowY: "auto" }}>
-              {proctorLogs.map((log, index) => (
-                <div
-                  key={log._id || index}
-                  style={{
-                    display: "flex",
-                    gap: "1rem",
-                    padding: "0.75rem 0",
-                    borderBottom: index < proctorLogs.length - 1 ? "1px solid #e2e8f0" : "none",
-                    alignItems: "center",
-                  }}
-                >
-                  <div style={{ minWidth: "140px", fontSize: "0.75rem", color: "#64748b" }}>
-                    {formatTimestamp(log.timestamp)}
-                  </div>
-                  <span
-                    style={{
-                      backgroundColor: "#fecaca",
-                      color: "#dc2626",
-                      padding: "0.25rem 0.75rem",
-                      borderRadius: "9999px",
-                      fontSize: "0.75rem",
-                      fontWeight: 600,
-                    }}
-                  >
-                    {eventTypeLabels[log.eventType] || log.eventType}
-                  </span>
-                  {log.snapshotBase64 && (
-                    <button
-                      type="button"
-                      onClick={() => setSelectedSnapshot(log)}
-                      style={{
-                        background: "none",
-                        border: "1px solid #e2e8f0",
-                        borderRadius: "0.25rem",
-                        padding: "0.25rem 0.5rem",
-                        fontSize: "0.75rem",
-                        color: "#3b82f6",
-                        cursor: "pointer",
-                      }}
-                    >
-                      View Snapshot
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
+          <div style={{ marginBottom: "1.5rem" }}>
+            <ProctorLogsReview 
+              logs={proctorLogs}
+              candidateName={candidateData?.name || candidateData?.email}
+            />
           </div>
         )}
 
