@@ -296,115 +296,198 @@ export default function IdentityVerificationPage() {
       
       // Determine which API endpoint to use based on assessment type
       const ctx = getGateContext(id as string);
-      const isDSATest = ctx?.flowType === "dsa";
-      const apiBase = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1`;
-      const testEndpoint = isDSATest ? `/dsa/tests/${id}/public?user_id=${userId}` : `/aiml/tests/${id}/public?user_id=${userId}`;
+      const flowType = ctx?.flowType || "ai"; // Default to "ai" if not set
+      const isDSATest = flowType === "dsa";
+      const isAIMLTest = flowType === "aiml";
+      const isAIAssessment = flowType === "ai" || !flowType;
       
-      // CRITICAL: Always check test start time FIRST before attempting to start
-      // This ensures the popup shows on this page itself
       let startTimeStr: string | null = null;
       let testHasStarted = false;
       
-      try {
-        const testResponse = await fetch(`${apiBase}${testEndpoint}`);
-        if (testResponse.ok) {
-          const testData = await testResponse.json();
-          startTimeStr = testData.schedule?.startTime || testData.start_time || null;
-          
-          if (startTimeStr) {
-            // Normalize timezone - ensure we parse as UTC if it has 'Z' or timezone info
-            let startTime: Date;
-            if (startTimeStr.endsWith('Z') || startTimeStr.includes('+') || startTimeStr.includes('-', 10)) {
-              // Has timezone info, parse as-is
-              startTime = new Date(startTimeStr);
-            } else {
-              // No timezone info, assume UTC and append 'Z'
-              startTime = new Date(startTimeStr + 'Z');
-            }
+      // For DSA and AIML tests, check start time via test endpoints
+      if (isDSATest || isAIMLTest) {
+        const apiBase = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1`;
+        const testEndpoint = isDSATest ? `/dsa/tests/${id}/public?user_id=${userId}` : `/aiml/tests/${id}/public?user_id=${userId}`;
+        
+        // CRITICAL: Always check test start time FIRST before attempting to start
+        // This ensures the popup shows on this page itself
+        try {
+          const testResponse = await fetch(`${apiBase}${testEndpoint}`);
+          if (testResponse.ok) {
+            const testData = await testResponse.json();
+            startTimeStr = testData.schedule?.startTime || testData.start_time || null;
             
-            const now = new Date();
-            
-            // Check if test start time has been reached
-            if (now < startTime) {
-              // Test hasn't started yet - show modal and STOP here (don't proceed)
-              console.log(`[Identity] Test not started yet. Current: ${now.toISOString()}, Start: ${startTime.toISOString()}`);
-              setTestStartTime(startTimeStr);
-              setShowStartTimeModal(true);
-              setIsStarting(false); // Reset loading state
-              return; // CRITICAL: Return early to prevent navigation
+            if (startTimeStr) {
+              // Normalize timezone - ensure we parse as UTC if it has 'Z' or timezone info
+              let startTime: Date;
+              if (startTimeStr.endsWith('Z') || startTimeStr.includes('+') || startTimeStr.includes('-', 10)) {
+                // Has timezone info, parse as-is
+                startTime = new Date(startTimeStr);
+              } else {
+                // No timezone info, assume UTC and append 'Z'
+                startTime = new Date(startTimeStr + 'Z');
+              }
+              
+              const now = new Date();
+              
+              // Check if test start time has been reached
+              if (now < startTime) {
+                // Test hasn't started yet - show modal and STOP here (don't proceed)
+                console.log(`[Identity] Test not started yet. Current: ${now.toISOString()}, Start: ${startTime.toISOString()}`);
+                setTestStartTime(startTimeStr);
+                setShowStartTimeModal(true);
+                setIsStarting(false); // Reset loading state
+                return; // CRITICAL: Return early to prevent navigation
+              } else {
+                testHasStarted = true;
+              }
             } else {
+              // No start time configured - allow to proceed
               testHasStarted = true;
             }
           } else {
-            // No start time configured - allow to proceed
-            testHasStarted = true;
+            console.warn("[Identity] Could not fetch test details, proceeding with start attempt");
+            // If we can't fetch test details, proceed to backend validation
           }
-        } else {
-          console.warn("[Identity] Could not fetch test details, proceeding with start attempt");
-          // If we can't fetch test details, proceed to backend validation
+        } catch (err) {
+          console.error("[Identity] Error fetching test details:", err);
+          // If fetch fails, proceed to backend validation as fallback
         }
-      } catch (err) {
-        console.error("[Identity] Error fetching test details:", err);
-        // If fetch fails, proceed to backend validation as fallback
-      }
-      
-      // Only proceed to start test if we've confirmed it has started (or no start time configured)
-      // If test hasn't started, we should have already returned above
-      if (startTimeStr && !testHasStarted) {
-        // This shouldn't happen, but double-check
-        setTestStartTime(startTimeStr);
-        setShowStartTimeModal(true);
-        return;
-      }
-      
-      // Try to start the test - backend will also validate start time
-      const startEndpoint = isDSATest ? `/dsa/tests/${id}/start?user_id=${userId}` : `/aiml/tests/${id}/start?user_id=${userId}`;
-      const response = await fetch(`${apiBase}${startEndpoint}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const errorMessage = errorData.detail || errorData.message || "Failed to start test";
         
-        // Check if it's a "test not started yet" error (backend validation)
-        if (response.status === 403 && (
-          errorMessage.includes("will start at") || 
-          errorMessage.includes("not available yet") || 
-          errorMessage.includes("not started") || 
-          errorMessage.includes("Test will start") ||
-          errorMessage.includes("Test not available")
-        )) {
-          // Backend also says test hasn't started - show modal
-          if (!startTimeStr) {
-            // Try to fetch start time again if we don't have it
-            try {
-              const testResponse = await fetch(`${apiBase}${testEndpoint}`);
-              if (testResponse.ok) {
-                const testData = await testResponse.json();
-                startTimeStr = testData.schedule?.startTime || testData.start_time || null;
-              }
-            } catch (err) {
-              console.error("[Identity] Error fetching test details:", err);
-            }
-          }
-          
+        // Only proceed to start test if we've confirmed it has started (or no start time configured)
+        // If test hasn't started, we should have already returned above
+        if (startTimeStr && !testHasStarted) {
+          // This shouldn't happen, but double-check
           setTestStartTime(startTimeStr);
           setShowStartTimeModal(true);
-          setIsStarting(false); // Reset loading state
-          return; // Stop here, don't navigate
+          return;
         }
-        
-        // For other errors, just log and don't navigate
-        console.error("[Identity] Error starting test:", errorMessage);
-        setIsStarting(false); // Reset loading state
-        return;
+      } else if (isAIAssessment) {
+        // For AI assessments, check schedule via assessment endpoint
+        try {
+          const scheduleResponse = await fetch(`/api/assessment/get-schedule?assessmentId=${id}&token=${token}`);
+          if (scheduleResponse.ok) {
+            const scheduleData = await scheduleResponse.json();
+            if (scheduleData.success && scheduleData.data?.schedule?.startTime) {
+              startTimeStr = scheduleData.data.schedule.startTime;
+              
+              // Normalize timezone
+              if (!startTimeStr) {
+                // If startTimeStr is null, skip time check
+                return;
+              }
+              
+              let startTime: Date;
+              if (startTimeStr.endsWith('Z') || startTimeStr.includes('+') || startTimeStr.includes('-', 10)) {
+                startTime = new Date(startTimeStr);
+              } else {
+                startTime = new Date(startTimeStr + 'Z');
+              }
+              
+              const now = new Date();
+              
+              if (now < startTime) {
+                console.log(`[Identity] Assessment not started yet. Current: ${now.toISOString()}, Start: ${startTime.toISOString()}`);
+                setTestStartTime(startTimeStr);
+                setShowStartTimeModal(true);
+                setIsStarting(false);
+                return;
+              } else {
+                testHasStarted = true;
+              }
+            } else {
+              testHasStarted = true;
+            }
+          }
+        } catch (err) {
+          console.error("[Identity] Error fetching assessment schedule:", err);
+          // Proceed if schedule check fails
+        }
       }
       
-      // Test can start - proceed with navigation
+      // Try to start the test/assessment - backend will also validate start time
+      let response: Response | null = null;
+      
+      if (isAIAssessment) {
+        // For AI assessments, attempt to call start-session (optional - may not exist)
+        // If it fails, we'll proceed anyway since attempt is created when fetching questions
+        try {
+          response = await fetch("/api/assessment/start-session", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              assessmentId: id,
+              token,
+              email,
+              name,
+            }),
+          });
+          
+          if (!response.ok) {
+            // If start-session fails (404 or other error), log but continue
+            // The attempt will be created when fetching questions in take-new.tsx
+            console.warn("[Identity] Start-session endpoint returned error, but proceeding anyway:", response.status);
+            response = null; // Treat as success - we'll proceed
+          }
+        } catch (err) {
+          // If fetch fails (e.g., 404), that's okay - proceed anyway
+          console.warn("[Identity] Start-session endpoint not available, proceeding to assessment:", err);
+          response = null; // Treat as success - we'll proceed
+        }
+      } else {
+        // Use DSA or AIML test start endpoint
+        const apiBase = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1`;
+        const startEndpoint = isDSATest ? `/dsa/tests/${id}/start?user_id=${userId}` : `/aiml/tests/${id}/start?user_id=${userId}`;
+        response = await fetch(`${apiBase}${startEndpoint}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          const errorMessage = errorData.detail || errorData.message || "Failed to start test";
+          
+          // Check if it's a "test not started yet" error (backend validation)
+          if (response.status === 403 && (
+            errorMessage.includes("will start at") || 
+            errorMessage.includes("not available yet") || 
+            errorMessage.includes("not started") || 
+            errorMessage.includes("Test will start") ||
+            errorMessage.includes("Test not available")
+          )) {
+            // Backend also says test hasn't started - show modal
+            if (!startTimeStr) {
+              // Try to fetch start time again if we don't have it
+              try {
+                const testEndpoint = isDSATest ? `/dsa/tests/${id}/public?user_id=${userId}` : `/aiml/tests/${id}/public?user_id=${userId}`;
+                const testResponse = await fetch(`${apiBase}${testEndpoint}`);
+                if (testResponse.ok) {
+                  const testData = await testResponse.json();
+                  startTimeStr = testData.schedule?.startTime || testData.start_time || null;
+                }
+              } catch (err) {
+                console.error("[Identity] Error fetching test details:", err);
+              }
+            }
+            
+            setTestStartTime(startTimeStr);
+            setShowStartTimeModal(true);
+            setIsStarting(false); // Reset loading state
+            return; // Stop here, don't navigate
+          }
+          
+          // For other errors, just log and don't navigate
+          console.error("[Identity] Error starting test:", errorMessage);
+          setIsStarting(false); // Reset loading state
+          return;
+        }
+      }
+      
+      // Test/Assessment can start - proceed with navigation
       // Store verification completion
       sessionStorage.setItem(`identityVerificationCompleted_${id}`, "true");
       

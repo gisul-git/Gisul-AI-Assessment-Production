@@ -235,6 +235,7 @@ class SubmitCustomMCQRequest(BaseModel):
     submissions: List[CandidateSubmission] = Field(..., description="List of question submissions")
     startedAt: Optional[datetime] = Field(None, description="Start time")
     submittedAt: Optional[datetime] = Field(None, description="Submit time")
+    candidateRequirements: Optional[Dict[str, Any]] = Field(None, description="Candidate requirements details (phone, linkedIn, github, etc.)")
 
 
 class VerifyCustomMCQCandidateRequest(BaseModel):

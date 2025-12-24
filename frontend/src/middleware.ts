@@ -75,7 +75,8 @@ export default withAuth(
         // Custom MCQ API routes - public (candidates aren't logged in via NextAuth, token validated server-side)
         if (pathname.startsWith("/api/v1/custom-mcq/verify-candidate") ||
             pathname.startsWith("/api/v1/custom-mcq/take/") ||
-            pathname.startsWith("/api/v1/custom-mcq/submit")) {
+            pathname.startsWith("/api/v1/custom-mcq/submit") ||
+            pathname.startsWith("/api/custom-mcq/take/")) {
           return true;
         }
         
@@ -99,7 +100,8 @@ export default withAuth(
         // Custom MCQ API routes - public (candidates aren't logged in via NextAuth, token validated server-side)
         if (pathname.startsWith("/api/v1/custom-mcq/verify-candidate") ||
             pathname.startsWith("/api/v1/custom-mcq/take/") ||
-            pathname.startsWith("/api/v1/custom-mcq/submit")) {
+            pathname.startsWith("/api/v1/custom-mcq/submit") ||
+            pathname.startsWith("/api/custom-mcq/take/")) {
           return true;
         }
  

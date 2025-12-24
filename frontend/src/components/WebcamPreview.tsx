@@ -2,9 +2,10 @@
  * WebcamPreview Component
  * 
  * Displays a small webcam preview with status overlay.
+ * The overlay is draggable by the user.
  */
 
-import React, { forwardRef } from 'react';
+import React, { forwardRef, useState, useRef, useEffect } from 'react';
 
 interface WebcamPreviewProps {
   cameraOn: boolean;
@@ -14,6 +15,100 @@ interface WebcamPreviewProps {
 
 const WebcamPreview = forwardRef<HTMLVideoElement, WebcamPreviewProps>(
   ({ cameraOn, faceMeshStatus, facesCount }, ref) => {
+    const [position, setPosition] = useState(() => {
+      // Initialize position from localStorage or use default
+      if (typeof window !== 'undefined') {
+        const savedPosition = localStorage.getItem('webcam-preview-position');
+        if (savedPosition) {
+          try {
+            const parsed = JSON.parse(savedPosition);
+            const maxX = Math.max(0, window.innerWidth - 180);
+            const maxY = Math.max(0, window.innerHeight - 120);
+            return {
+              x: Math.max(0, Math.min(parsed.x || 0, maxX)),
+              y: Math.max(0, Math.min(parsed.y || 0, maxY)),
+            };
+          } catch (e) {
+            // Fall through to default
+          }
+        }
+      }
+      // Default position: bottom right
+      return typeof window !== 'undefined' 
+        ? { x: window.innerWidth - 196, y: window.innerHeight - 136 }
+        : { x: 0, y: 0 };
+    });
+    const [isDragging, setIsDragging] = useState(false);
+    const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+    const containerRef = useRef<HTMLDivElement>(null);
+    const positionRef = useRef(position);
+
+    // Sync positionRef with position state
+    useEffect(() => {
+      positionRef.current = position;
+    }, [position]);
+
+    // Handle window resize to keep overlay in bounds
+    useEffect(() => {
+      const handleResize = () => {
+        setPosition(prev => ({
+          x: Math.min(prev.x, window.innerWidth - 196),
+          y: Math.min(prev.y, window.innerHeight - 136),
+        }));
+      };
+      window.addEventListener('resize', handleResize);
+      return () => window.removeEventListener('resize', handleResize);
+    }, []);
+
+    const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      setIsDragging(true);
+      setDragOffset({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      });
+      e.preventDefault();
+    };
+
+    // Update ref when position changes
+    useEffect(() => {
+      positionRef.current = position;
+    }, [position]);
+
+    useEffect(() => {
+      if (!isDragging) return;
+
+      const handleMouseMove = (e: MouseEvent) => {
+        const newX = e.clientX - dragOffset.x;
+        const newY = e.clientY - dragOffset.y;
+        
+        // Constrain to viewport bounds
+        const maxX = window.innerWidth - 180;
+        const maxY = window.innerHeight - 120;
+        const constrainedX = Math.max(0, Math.min(newX, maxX));
+        const constrainedY = Math.max(0, Math.min(newY, maxY));
+        
+        const newPosition = { x: constrainedX, y: constrainedY };
+        positionRef.current = newPosition;
+        setPosition(newPosition);
+      };
+
+      const handleMouseUp = () => {
+        setIsDragging(false);
+        // Save position to localStorage
+        localStorage.setItem('webcam-preview-position', JSON.stringify(positionRef.current));
+      };
+
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+    }, [isDragging, dragOffset]);
+
     const statusColor = 
       faceMeshStatus === 'loaded' ? '#10b981' : 
       faceMeshStatus === 'loading' ? '#f59e0b' : 
@@ -25,13 +120,23 @@ const WebcamPreview = forwardRef<HTMLVideoElement, WebcamPreviewProps>(
 
     return (
       <>
-        <div className="webcam-preview-container">
+        <div 
+          ref={containerRef}
+          className="webcam-preview-container"
+          style={{
+            left: `${position.x}px`,
+            top: `${position.y}px`,
+            cursor: isDragging ? 'grabbing' : 'grab',
+          }}
+          onMouseDown={handleMouseDown}
+        >
           <video
             ref={ref}
             autoPlay
             playsInline
             muted
             className="webcam-video"
+            style={{ pointerEvents: 'none' }}
           />
           <div className="webcam-status">
             <span className={cameraOn ? 'status-on' : 'status-off'}>
@@ -49,8 +154,6 @@ const WebcamPreview = forwardRef<HTMLVideoElement, WebcamPreviewProps>(
         <style jsx>{`
           .webcam-preview-container {
             position: fixed;
-            bottom: 16px;
-            right: 16px;
             width: 180px;
             height: 120px;
             background-color: #1a1a1a;
@@ -59,6 +162,8 @@ const WebcamPreview = forwardRef<HTMLVideoElement, WebcamPreviewProps>(
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
             z-index: 9998;
             border: 2px solid #333;
+            user-select: none;
+            touch-action: none;
           }
 
           .webcam-video {
@@ -94,8 +199,6 @@ const WebcamPreview = forwardRef<HTMLVideoElement, WebcamPreviewProps>(
 
           @media (max-width: 420px) {
             .webcam-preview-container {
-              right: auto;
-              left: 12px;
               width: 140px;
               height: 100px;
             }

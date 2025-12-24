@@ -381,6 +381,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         status: "active", // Change from draft to active
         currentStation: currentStation,
         proctoringSettings: (assessmentData as any).proctoringSettings,
+        schedule: (assessmentData as any).schedule, // Include schedule with candidateRequirements
       };
 
       // Mark as activated to prevent auto-save from overwriting
@@ -688,6 +689,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
                   status: "draft",
                   currentStation: currentStation,
                   proctoringSettings: (assessmentData as any).proctoringSettings,
+                  schedule: (assessmentData as any).schedule, // Include schedule with candidateRequirements
                 };
 
                 if (assessmentId) {
