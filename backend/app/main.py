@@ -238,7 +238,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
     docs_url=None,    # Disables /docs
-    redoc_url=None    # Disables /redoc
+    redoc_url=None    # Disables /redoc 
 )
  
 # CORS middleware - Secure configuration with specific origins

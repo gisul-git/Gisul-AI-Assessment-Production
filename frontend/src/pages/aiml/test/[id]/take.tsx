@@ -1,8 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useRouter } from 'next/router'
-import dynamic from 'next/dynamic'
+import { useRouter } from 'next/router'import { useSession } from 'next-auth/react'import dynamic from 'next/dynamic'
 import axios from 'axios'
 import { useUniversalProctoring, CandidateLiveService, type ProctoringViolation } from '@/universal-proctoring'
 import WebcamPreview from '../../../../components/WebcamPreview'
@@ -207,7 +206,12 @@ export default function AIMLTestTakePage() {
   // Start proctoring when test is loaded and ready (AI proctoring + tab switch + fullscreen)
   useEffect(() => {
     const localAssessmentIdStr = String(testId || '')
-    const localCandidateIdStr = candidateEmail || userId || ''
+    // Resolve userId with priority: URL param > email > anonymous
+    // Note: session.user.id would be ideal but requires SessionProvider context
+    const localCandidateIdStr = resolveUserIdForProctoring(null, {
+      urlParam: userId as string,
+      email: candidateEmail,
+    })
     const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
     
     if (questions.length > 0 && !isProctoringRunning && !submitted && localCandidateIdStr && thumbVideoRef.current) {
@@ -236,7 +240,11 @@ export default function AIMLTestTakePage() {
   // Start Live Proctoring (separate from AI proctoring)
   useEffect(() => {
     const localAssessmentIdStr = String(testId || '')
-    const localCandidateIdStr = candidateEmail || userId || ''
+    // Resolve userId with priority: URL param > email > anonymous
+    const localCandidateIdStr = resolveUserIdForProctoring(null, {
+      urlParam: userId as string,
+      email: candidateEmail,
+    })
     const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
 
     if (!liveProctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {

@@ -5,6 +5,9 @@ import {
   useRef,
 } from "react";
 import { useRouter } from "next/router";
+
+
+import { useSession } from "next-auth/react";
 import dynamic from "next/dynamic";
 import axios from "axios";
 import { EditorContainer, SubmissionTestcaseResult } from "@/components/dsa/test/EditorContainer";
@@ -22,6 +25,7 @@ import Split from 'react-split';
 import {
   useUniversalProctoring,
   CandidateLiveService,
+  resolveUserIdForProctoring,
   type ProctoringViolation,
 } from "@/universal-proctoring";
 import WebcamPreview from "@/components/WebcamPreview";
@@ -247,28 +251,17 @@ export default function CandidateAssessmentPage() {
   const assessmentIdStr = typeof id === 'string' ? id : '';
   const tokenStr = typeof token === 'string' ? token : '';
   
-  // Try multiple sources for candidateId
-  const getCandidateId = (): string => {
-    if (candidateEmail && candidateEmail.trim() !== '') {
-      return candidateEmail.trim();
-    }
-    if (isClient) {
-      const sessionEmail = sessionStorage.getItem('candidateEmail');
-      if (sessionEmail && sessionEmail.trim() !== '') {
-        return sessionEmail.trim();
-      }
-      const sessionName = sessionStorage.getItem('candidateName');
-      if (sessionName && sessionName.trim() !== '') {
-        return sessionName.trim();
-      }
-    }
-    if (tokenStr) {
-      return `candidate-${tokenStr}`;
-    }
-    return 'anonymous';
-  };
+  // Resolve userId with priority: email > token > anonymous
+  // Note: session.user.id would be ideal but requires SessionProvider context
+  // For token-based public access, this fallback pattern works correctly
+  const fallbackEmail = candidateEmail || 
+    (isClient ? sessionStorage.getItem('candidateEmail') : null) ||
+    (isClient ? sessionStorage.getItem('candidateName') : null);
   
-  const candidateIdStr = getCandidateId();
+  const candidateIdStr = resolveUserIdForProctoring(null, {
+    email: fallbackEmail,
+    token: tokenStr,
+  });
 
   // Get violation message
   const getViolationMessage = (eventType: string): string => {

@@ -18,6 +18,7 @@ import { OutputConsole } from '../../../components/dsa/test/OutputConsole'
 import {
   useUniversalProctoring,
   CandidateLiveService,
+  resolveUserIdForProctoring,
   type ProctoringViolation,
 } from "@/universal-proctoring";
 import WebcamPreview from "@/components/WebcamPreview";
@@ -422,20 +423,13 @@ export default function TestTakePage() {
   const isClient = typeof window !== 'undefined';
   const assessmentIdStr = typeof testId === 'string' ? testId : '';
   
-  // Try multiple sources for candidateId
-  // Priority: userId from URL (for DSA tests) > candidateEmail > anonymous
-  // This ensures unique sessions even if same email is used across multiple tabs
-  const getCandidateId = (): string => {
-    if (userId && userId.trim() !== '') {
-      return userId.trim();
-    }
-    if (candidateEmail && candidateEmail.trim() !== '') {
-      return candidateEmail.trim();
-    }
-    return 'anonymous';
-  };
-  
-  const candidateIdStr = getCandidateId();
+  // Resolve userId with priority: URL param > email > anonymous
+  // Note: session.user.id would be ideal but requires SessionProvider context
+  // For now, URL params and email fallbacks work for all take page scenarios
+  const candidateIdStr = resolveUserIdForProctoring(null, {
+    urlParam: userId as string,
+    email: candidateEmail,
+  });
   
   // Log the candidateId being used for debugging
   useEffect(() => {

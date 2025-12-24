@@ -7,6 +7,8 @@ import { GetServerSideProps } from 'next'
 import { requireAuth } from '../../../../lib/auth'
 import axios from 'axios'
 import { ArrowLeft, AlertTriangle, Clock } from 'lucide-react'
+import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
+import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
 
 interface AnswerLog {
   answer: string
@@ -359,63 +361,10 @@ export default function CandidateAnalyticsPage() {
               No proctoring violations detected
             </div>
           ) : showProctorLogs ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "400px", overflowY: "auto" }}>
-              {proctorLogs.map((log, index) => (
-                <div
-                  key={log._id || index}
-                  style={{
-                    border: "1px solid #fecaca",
-                    borderRadius: "0.5rem",
-                    padding: "1rem",
-                    backgroundColor: "#fef2f2",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "0.5rem" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <AlertTriangle style={{ width: "16px", height: "16px", color: "#dc2626" }} />
-                      <span style={{ fontWeight: 600, color: "#dc2626", fontSize: "0.875rem" }}>
-                        {eventTypeLabels[log.eventType] || log.eventType || 'Unknown Violation'}
-                      </span>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", color: "#64748b" }}>
-                      <Clock style={{ width: "12px", height: "12px" }} />
-                      <span>{formatDate(log.timestamp)}</span>
-                    </div>
-                  </div>
-                  
-                  {log.metadata && Object.keys(log.metadata).length > 0 && (
-                    <div style={{ marginTop: "0.5rem", fontSize: "0.875rem" }}>
-                      <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Details:</div>
-                      <div style={{ backgroundColor: "#f8fafc", borderRadius: "0.375rem", padding: "0.5rem", fontFamily: "monospace", fontSize: "0.75rem" }}>
-                        {Object.entries(log.metadata).map(([key, value]) => (
-                          <div key={key} style={{ marginBottom: "0.25rem" }}>
-                            <span style={{ color: "#64748b" }}>{key}:</span>{' '}
-                            <span style={{ color: "#1e293b" }}>
-                              {typeof value === 'object' ? JSON.stringify(value) : String(value)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {log.snapshotBase64 && (
-                    <div style={{ marginTop: "0.75rem" }}>
-                      <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.5rem" }}>Evidence Snapshot:</div>
-                      <img
-                        src={log.snapshotBase64.startsWith("data:") ? log.snapshotBase64 : `data:image/png;base64,${log.snapshotBase64}`}
-                        alt="Violation snapshot"
-                        style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #e2e8f0", maxHeight: "200px" }}
-                        onError={(e) => {
-                          console.error("Error loading snapshot image:", e);
-                          (e.target as HTMLImageElement).style.display = "none";
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+            <ProctorLogsReview 
+              logs={proctorLogs}
+              candidateName={candidate?.name || candidate?.email}
+            />
           ) : null}
         </div>
 

@@ -21,7 +21,6 @@ import {
 } from "../types";
 import {
   debugLog,
-  createThrottleTracker,
   getTimestamp,
 } from "../utils";
 
@@ -48,10 +47,17 @@ const YAW_THRESHOLD = 15;
 const PITCH_THRESHOLD = 20;
 const LOOKING_DOWN_THRESHOLD = 25;
 
-// Gaze-away timing (milliseconds)
-const GAZE_AWAY_DURATION = 1500;
-const GAZE_DOWN_DURATION = 2500;
-const GAZE_AWAY_COOLDOWN = 3000;
+// Gaze-away timing (milliseconds) - INCIDENT-BASED
+const GAZE_AWAY_TRIGGER_DURATION = 1500;  // 1.5 seconds to trigger
+const GAZE_AWAY_COOLDOWN = 5000;           // 5 seconds cooldown
+
+// No-face timing (milliseconds) - INCIDENT-BASED
+const NO_FACE_TRIGGER_DURATION = 2000;     // 2 seconds to trigger
+const NO_FACE_COOLDOWN = 6000;             // 6 seconds cooldown
+
+// Multiple-face timing (milliseconds) - INCIDENT-BASED
+const MULTIPLE_FACE_TRIGGER_DURATION = 1000; // 1 second to trigger
+const MULTIPLE_FACE_COOLDOWN = 6000;         // 6 seconds cooldown
 
 // ============================================================================
 // Types
@@ -86,8 +92,16 @@ interface Box {
   y2: number;
 }
 
-// Gaze state machine states
-type GazeAwayState = 'idle' | 'detecting' | 'cooldown';
+// Incident state machine states
+type IncidentState = 'idle' | 'detecting' | 'triggered' | 'cooldown';
+
+// Incident tracker for each violation type
+interface IncidentTracker {
+  state: IncidentState;
+  detectionStartTime: number | null;
+  lastTriggerTime: number;
+  snapshotData: string | null;
+}
 
 // ============================================================================
 // Helper Functions - IoU and Centroid calculations
@@ -148,18 +162,39 @@ export class AIProctoringService {
   private isProcessing = false;
   private frameCount = 0;
 
+  // Keyboard activity tracking
+  private keyboardHandler: (() => void) | null = null;
+
   // Face count debouncing refs
   private lastFaceCount = 0;
   private faceCountStability = 0;
   private stableFaceCount = 0;
 
-  // Gaze state machine refs
-  private gazeAwayState: GazeAwayState = 'idle';
-  private gazeAwayStartTime: number | null = null;
-  private lastGazeAwayEventTime = 0;
+  // Keyboard activity tracking (for typing detection)
+  private lastKeyPressTime = 0;
+  private readonly TYPING_WINDOW = 3000; // 3 seconds after last keypress = "typing"
 
-  // Throttle tracker
-  private throttleTracker: ReturnType<typeof createThrottleTracker>;
+  // Incident trackers for each violation type
+  private gazeAwayIncident: IncidentTracker = {
+    state: 'idle',
+    detectionStartTime: null,
+    lastTriggerTime: 0,
+    snapshotData: null,
+  };
+
+  private noFaceIncident: IncidentTracker = {
+    state: 'idle',
+    detectionStartTime: null,
+    lastTriggerTime: 0,
+    snapshotData: null,
+  };
+
+  private multipleFaceIncident: IncidentTracker = {
+    state: 'idle',
+    detectionStartTime: null,
+    lastTriggerTime: 0,
+    snapshotData: null,
+  };
 
   // State
   private state: AIProctoringState = {
@@ -172,7 +207,6 @@ export class AIProctoringService {
 
   constructor(config: Partial<AIProctoringConfig> = {}) {
     this.config = { ...DEFAULT_AI_CONFIG, ...config };
-    this.throttleTracker = createThrottleTracker(this.config.throttleIntervalMs);
   }
 
   // ============================================================================
@@ -265,7 +299,18 @@ export class AIProctoringService {
     this.session = session;
     this.callbacks = callbacks;
     this.videoElement = videoElement;
-    this.canvasElement = canvasElement || null;
+    
+    // Create canvas element if not provided (required for snapshot capture)
+    if (canvasElement) {
+      this.canvasElement = canvasElement;
+    } else {
+      // Create an offscreen canvas for snapshot capture
+      const canvas = document.createElement('canvas');
+      canvas.width = VIDEO_DIMENSIONS.WIDTH;
+      canvas.height = VIDEO_DIMENSIONS.HEIGHT;
+      this.canvasElement = canvas;
+      debugLog("AIProctoringService: Created offscreen canvas for snapshots");
+    }
 
     // Ensure models are loaded
     if (!this.state.isModelLoaded) {
@@ -299,6 +344,9 @@ export class AIProctoringService {
       // Reset detection state
       this.resetDetectionState();
 
+      // Start keyboard listener for typing detection
+      this.startKeyboardListener();
+
       // Start detection loop using requestAnimationFrame
       this.startDetectionLoop();
 
@@ -306,10 +354,6 @@ export class AIProctoringService {
       return true;
     } catch (error) {
       console.error("[AIProctoringService] Failed to start camera:", error);
-      this.recordViolation("CAMERA_ERROR", {
-        error: (error as Error).message,
-        stage: "start",
-      });
       this.addError(`Camera error: ${(error as Error).message}`);
       return false;
     }
@@ -327,6 +371,9 @@ export class AIProctoringService {
       this.animationFrameId = null;
     }
 
+    // Stop keyboard listener
+    this.stopKeyboardListener();
+
     // Stop media stream
     if (this.stream) {
       this.stream.getTracks().forEach((track) => track.stop());
@@ -340,7 +387,6 @@ export class AIProctoringService {
 
     // Reset all state
     this.resetDetectionState();
-    this.throttleTracker.resetAll();
 
     this.updateState({
       isCameraOn: false,
@@ -370,6 +416,38 @@ export class AIProctoringService {
   // ============================================================================
 
   /**
+   * Start keyboard listener to detect typing activity.
+   * Helps ignore brief 'down' gaze when user is typing.
+   */
+  private startKeyboardListener(): void {
+    if (typeof window === 'undefined') return;
+    
+    this.keyboardHandler = () => {
+      this.lastKeyPressTime = Date.now();
+    };
+    
+    window.addEventListener('keydown', this.keyboardHandler);
+  }
+
+  /**
+   * Stop keyboard listener.
+   */
+  private stopKeyboardListener(): void {
+    if (typeof window === 'undefined' || !this.keyboardHandler) return;
+    
+    window.removeEventListener('keydown', this.keyboardHandler);
+    this.keyboardHandler = null;
+  }
+
+  /**
+   * Check if user is likely typing (recent keyboard activity).
+   */
+  private isLikelyTyping(): boolean {
+    const now = Date.now();
+    return (now - this.lastKeyPressTime) < this.TYPING_WINDOW;
+  }
+
+  /**
    * Reset detection state between sessions.
    */
   private resetDetectionState(): void {
@@ -378,9 +456,28 @@ export class AIProctoringService {
     this.lastFaceCount = 0;
     this.faceCountStability = 0;
     this.stableFaceCount = 0;
-    this.gazeAwayState = 'idle';
-    this.gazeAwayStartTime = null;
-    this.lastGazeAwayEventTime = 0;
+
+    // Reset all incident trackers
+    this.gazeAwayIncident = {
+      state: 'idle',
+      detectionStartTime: null,
+      lastTriggerTime: 0,
+      snapshotData: null,
+    };
+
+    this.noFaceIncident = {
+      state: 'idle',
+      detectionStartTime: null,
+      lastTriggerTime: 0,
+      snapshotData: null,
+    };
+
+    this.multipleFaceIncident = {
+      state: 'idle',
+      detectionStartTime: null,
+      lastTriggerTime: 0,
+      snapshotData: null,
+    };
   }
 
   /**
@@ -606,34 +703,19 @@ export class AIProctoringService {
     this.stableFaceCount = newStableFaceCount;
     this.updateState({ facesCount: newStableFaceCount });
 
-    // ========== No Face Detection Violation ==========
-    if (newStableFaceCount === 0) {
-      this.recordViolation("NO_FACE_DETECTED", {
-        rawFaceCount,
-        stabilityFrames: this.faceCountStability,
-      });
-      this.updateState({ gazeDirection: { direction: "away", confidence: 1 } });
-    }
+    // ========== NO FACE INCIDENT STATE MACHINE ==========
+    this.handleNoFaceIncident(newStableFaceCount === 0, rawFaceCount);
 
-    // ========== Multiple Faces Detection Violation ==========
-    if (newStableFaceCount > 1) {
-      const faceBoxes: FaceBox[] = validPredictions.slice(0, newStableFaceCount).map((p: BlazeFacePrediction) => ({
-        x: p.topLeft[0],
-        y: p.topLeft[1],
-        width: p.bottomRight[0] - p.topLeft[0],
-        height: p.bottomRight[1] - p.topLeft[1],
-        confidence: p.probability || 0,
-      }));
+    // ========== MULTIPLE FACES INCIDENT STATE MACHINE ==========
+    this.handleMultipleFaceIncident(
+      newStableFaceCount > 1,
+      newStableFaceCount,
+      validPredictions
+    );
 
-      this.recordViolation("MULTIPLE_FACES_DETECTED", {
-        facesCount: newStableFaceCount,
-        boxes: faceBoxes,
-      });
-    }
+    // ========== GAZE DETECTION USING FACEMESH (HEAD POSE) ==========
+    let isGazeAway = false;
 
-    // ========== Gaze Detection using FaceMesh (Head Pose) ==========
-    let gazeAway = false;
-    
     if (this.faceMesh && newStableFaceCount === 1) {
       try {
         const results = await new Promise<any>((resolve) => {
@@ -645,12 +727,18 @@ export class AIProctoringService {
           const landmarks = results.multiFaceLandmarks[0];
           const { yaw, pitch } = this.computeHeadPose(landmarks);
 
-          const isLookingAway = Math.abs(yaw) > YAW_THRESHOLD || Math.abs(pitch) > PITCH_THRESHOLD;
+          // Special case: Ignore brief 'down' gaze during typing
           const isLookingDown = pitch > LOOKING_DOWN_THRESHOLD;
-          const now = Date.now();
+          const isTyping = this.isLikelyTyping();
+          
+          // Gaze is away if: outside thresholds OR (looking down but NOT typing)
+          isGazeAway = 
+            Math.abs(yaw) > YAW_THRESHOLD || 
+            Math.abs(pitch) > PITCH_THRESHOLD ||
+            (isLookingDown && !isTyping);
 
           // Update gaze direction state
-          if (isLookingAway) {
+          if (Math.abs(yaw) > YAW_THRESHOLD || Math.abs(pitch) > PITCH_THRESHOLD) {
             const direction = Math.abs(yaw) > Math.abs(pitch)
               ? (yaw > 0 ? 'right' : 'left')
               : (pitch > 0 ? 'down' : 'up');
@@ -658,84 +746,270 @@ export class AIProctoringService {
           } else {
             this.updateState({ gazeDirection: { direction: 'center', confidence: 0.9 } });
           }
-
-          // ========== Gaze State Machine ==========
-          if (this.gazeAwayState === 'cooldown') {
-            // Check if cooldown is over
-            if (now - this.lastGazeAwayEventTime > GAZE_AWAY_COOLDOWN) {
-              this.gazeAwayState = 'idle';
-            }
-          }
-
-          if (this.gazeAwayState === 'idle' && isLookingAway) {
-            // Start detecting gaze away
-            this.gazeAwayState = 'detecting';
-            this.gazeAwayStartTime = now;
-          } else if (this.gazeAwayState === 'detecting') {
-            if (!isLookingAway) {
-              // User looked back - reset to idle
-              this.gazeAwayState = 'idle';
-              this.gazeAwayStartTime = null;
-            } else if (this.gazeAwayStartTime) {
-              // Check if duration threshold exceeded
-              const duration = now - this.gazeAwayStartTime;
-              const requiredDuration = isLookingDown ? GAZE_DOWN_DURATION : GAZE_AWAY_DURATION;
-
-              if (duration >= requiredDuration) {
-                gazeAway = true;
-                this.gazeAwayState = 'cooldown';
-                this.lastGazeAwayEventTime = now;
-                this.gazeAwayStartTime = null;
-                debugLog(`[AIProctoringService] GAZE_AWAY triggered after ${duration}ms (yaw: ${yaw.toFixed(1)}°, pitch: ${pitch.toFixed(1)}°)`);
-              }
-            }
-          }
         }
       } catch (faceMeshError) {
         // FaceMesh error - skip gaze detection this frame
-        debugLog('[AIProctoringService] FaceMesh error, skipping gaze detection');
       }
     }
 
-    // ========== Record Gaze Away Violation ==========
-    if (gazeAway) {
-      this.recordViolation("GAZE_AWAY", {
-        direction: this.state.gazeDirection?.direction || 'away',
-        stateMachine: 'cooldown_triggered',
-      });
+    // ========== GAZE AWAY INCIDENT STATE MACHINE ==========
+    this.handleGazeAwayIncident(isGazeAway);
+  }
+
+  // ============================================================================
+  // Private Methods - Incident State Machines
+  // ============================================================================
+
+  /**
+   * Handle NO_FACE incident state machine.
+   * State flow: IDLE → DETECTING → TRIGGERED → COOLDOWN → IDLE
+   */
+  private handleNoFaceIncident(isNoFace: boolean, rawFaceCount: number): void {
+    const now = Date.now();
+    const incident = this.noFaceIncident;
+
+    // State: COOLDOWN
+    if (incident.state === 'cooldown') {
+      // Check if cooldown expired AND condition cleared
+      if (now - incident.lastTriggerTime >= NO_FACE_COOLDOWN && !isNoFace) {
+        incident.state = 'idle';
+        incident.detectionStartTime = null;
+        incident.snapshotData = null;
+      }
+      return; // No emission during cooldown
+    }
+
+    // State: TRIGGERED
+    if (incident.state === 'triggered') {
+      // Wait for condition to clear before returning to cooldown
+      if (!isNoFace) {
+        incident.state = 'cooldown';
+      }
+      return;
+    }
+
+    // State: IDLE
+    if (incident.state === 'idle' && isNoFace) {
+      // Start detecting
+      incident.state = 'detecting';
+      incident.detectionStartTime = now;
+      return;
+    }
+
+    // State: DETECTING
+    if (incident.state === 'detecting') {
+      if (!isNoFace) {
+        // Condition cleared - reset to idle
+        incident.state = 'idle';
+        incident.detectionStartTime = null;
+        return;
+      }
+
+      // Check if trigger duration exceeded
+      if (incident.detectionStartTime && now - incident.detectionStartTime >= NO_FACE_TRIGGER_DURATION) {
+        // TRIGGER VIOLATION
+        incident.state = 'triggered';
+        incident.lastTriggerTime = now;
+        incident.snapshotData = this.captureSnapshot();
+
+        // Emit violation
+        this.emitViolation('NO_FACE_DETECTED', 'medium', {
+          rawFaceCount,
+          stabilityFrames: this.faceCountStability,
+        }, incident.snapshotData);
+      }
     }
   }
 
   /**
-   * Record a violation event.
+   * Handle MULTIPLE_FACE incident state machine.
+   * State flow: IDLE → DETECTING → TRIGGERED → COOLDOWN → IDLE
    */
-  private recordViolation(
-    eventType: ProctoringViolation["eventType"],
-    metadata?: Record<string, unknown>
+  private handleMultipleFaceIncident(
+    isMultipleFace: boolean,
+    faceCount: number,
+    validPredictions: BlazeFacePrediction[]
+  ): void {
+    const now = Date.now();
+    const incident = this.multipleFaceIncident;
+
+    // State: COOLDOWN
+    if (incident.state === 'cooldown') {
+      // Check if cooldown expired AND condition cleared
+      if (now - incident.lastTriggerTime >= MULTIPLE_FACE_COOLDOWN && !isMultipleFace) {
+        incident.state = 'idle';
+        incident.detectionStartTime = null;
+        incident.snapshotData = null;
+      }
+      return; // No emission during cooldown
+    }
+
+    // State: TRIGGERED
+    if (incident.state === 'triggered') {
+      // Wait for condition to clear before returning to cooldown
+      if (!isMultipleFace) {
+        incident.state = 'cooldown';
+      }
+      return;
+    }
+
+    // State: IDLE
+    if (incident.state === 'idle' && isMultipleFace) {
+      // Start detecting
+      incident.state = 'detecting';
+      incident.detectionStartTime = now;
+      return;
+    }
+
+    // State: DETECTING
+    if (incident.state === 'detecting') {
+      if (!isMultipleFace) {
+        // Condition cleared - reset to idle
+        incident.state = 'idle';
+        incident.detectionStartTime = null;
+        return;
+      }
+
+      // Check if trigger duration exceeded
+      if (incident.detectionStartTime && now - incident.detectionStartTime >= MULTIPLE_FACE_TRIGGER_DURATION) {
+        // TRIGGER VIOLATION
+        incident.state = 'triggered';
+        incident.lastTriggerTime = now;
+        incident.snapshotData = this.captureSnapshot();
+
+        // Build face boxes
+        const faceBoxes: FaceBox[] = validPredictions.slice(0, faceCount).map((p: BlazeFacePrediction) => ({
+          x: p.topLeft[0],
+          y: p.topLeft[1],
+          width: p.bottomRight[0] - p.topLeft[0],
+          height: p.bottomRight[1] - p.topLeft[1],
+          confidence: p.probability || 0,
+        }));
+
+        // Emit violation
+        this.emitViolation('MULTIPLE_FACES_DETECTED', 'high', {
+          facesCount: faceCount,
+          boxes: faceBoxes,
+        }, incident.snapshotData);
+      }
+    }
+  }
+
+  /**
+   * Handle GAZE_AWAY incident state machine.
+   * State flow: IDLE → DETECTING → TRIGGERED → COOLDOWN → IDLE
+   */
+  private handleGazeAwayIncident(isGazeAway: boolean): void {
+    const now = Date.now();
+    const incident = this.gazeAwayIncident;
+
+    // State: COOLDOWN
+    if (incident.state === 'cooldown') {
+      // Check if cooldown expired AND condition cleared
+      if (now - incident.lastTriggerTime >= GAZE_AWAY_COOLDOWN && !isGazeAway) {
+        incident.state = 'idle';
+        incident.detectionStartTime = null;
+        incident.snapshotData = null;
+      }
+      return; // No emission during cooldown
+    }
+
+    // State: TRIGGERED
+    if (incident.state === 'triggered') {
+      // Wait for condition to clear before returning to cooldown
+      if (!isGazeAway) {
+        incident.state = 'cooldown';
+      }
+      return;
+    }
+
+    // State: IDLE
+    if (incident.state === 'idle' && isGazeAway) {
+      // Start detecting
+      incident.state = 'detecting';
+      incident.detectionStartTime = now;
+      return;
+    }
+
+    // State: DETECTING
+    if (incident.state === 'detecting') {
+      if (!isGazeAway) {
+        // Condition cleared - reset to idle
+        incident.state = 'idle';
+        incident.detectionStartTime = null;
+        return;
+      }
+
+      // Check if trigger duration exceeded
+      if (incident.detectionStartTime && now - incident.detectionStartTime >= GAZE_AWAY_TRIGGER_DURATION) {
+        // TRIGGER VIOLATION
+        incident.state = 'triggered';
+        incident.lastTriggerTime = now;
+        incident.snapshotData = this.captureSnapshot();
+
+        // Emit violation
+        this.emitViolation('GAZE_AWAY', 'low', {
+          direction: this.state.gazeDirection?.direction || 'away',
+          confidence: this.state.gazeDirection?.confidence || 0,
+        }, incident.snapshotData);
+      }
+    }
+  }
+
+  // ============================================================================
+  // Private Methods - Violation Emission
+  // ============================================================================
+
+  /**
+   * Emit a violation with standardized payload structure.
+   * 
+   * PAYLOAD STRUCTURE (per requirements):
+   * {
+   *   eventType: string,
+   *   severity: 'low' | 'medium' | 'high',
+   *   timestamp: ISO string,
+   *   userId: string,
+   *   assessmentId: string,
+   *   metadata: {
+   *     severity: string,
+   *     details: object,
+   *     evidence?: {       // Only when snapshot captured
+   *       type: 'image',
+   *       format: 'jpeg',
+   *       data: base64      // Captured at TRIGGERED state only
+   *     }
+   *   },
+   *   snapshotBase64: string | null  // Same image for backward compat
+   * }
+   */
+  private emitViolation(
+    eventType: 'GAZE_AWAY' | 'NO_FACE_DETECTED' | 'MULTIPLE_FACES_DETECTED',
+    severity: 'low' | 'medium' | 'high',
+    details: Record<string, unknown>,
+    snapshotBase64: string | null
   ): void {
     if (!this.session || !this.callbacks) {
-      debugLog("Cannot record violation - no session or callbacks");
       return;
     }
-
-    // Check throttle
-    if (!this.throttleTracker.shouldRecord(eventType)) {
-      return;
-    }
-
-    // Capture snapshot if canvas available
-    const snapshotBase64 = this.captureSnapshot();
 
     const violation: ProctoringViolation = {
       eventType,
       timestamp: getTimestamp(),
       assessmentId: this.session.assessmentId,
       userId: this.session.userId,
-      metadata,
+      metadata: {
+        severity,
+        details,
+        ...(snapshotBase64 && {
+          evidence: {
+            type: 'image',
+            format: 'jpeg',
+            data: snapshotBase64,
+          }
+        })
+      },
       snapshotBase64,
     };
-
-    debugLog("Recording violation:", eventType, metadata);
 
     // Notify callback
     this.callbacks.onViolation(violation);
@@ -747,7 +1021,8 @@ export class AIProctoringService {
   }
 
   /**
-   * Capture a snapshot from the video feed.
+   * Capture the current video frame as a snapshot (JPEG).
+   * Returns base64 data URL (without "data:image/jpeg;base64," prefix).
    */
   private captureSnapshot(): string | null {
     if (!this.videoElement || !this.canvasElement) {
@@ -768,9 +1043,10 @@ export class AIProctoringService {
         VIDEO_DIMENSIONS.HEIGHT
       );
 
-      return this.canvasElement.toDataURL("image/jpeg", 0.7);
+      const dataURL = this.canvasElement.toDataURL("image/jpeg", 0.7);
+      // Strip the "data:image/jpeg;base64," prefix for consistent storage
+      return dataURL.replace(/^data:image\/jpeg;base64,/, '');
     } catch (error) {
-      debugLog("Error capturing snapshot:", error);
       return null;
     }
   }

@@ -7,6 +7,8 @@ import aimlApi from '../../../../lib/aiml/api'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Loader2 } from 'lucide-react'
 import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
 import { useSession } from 'next-auth/react'
+import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
+import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
 
 interface AIFeedback {
   overall_score: number
@@ -106,11 +108,12 @@ export default function AnalyticsPage() {
   const [sendingInvitations, setSendingInvitations] = useState(false)
 
   const fetchProctorLogs = async (userKey: string) => {
-    if (!testId || typeof testId !== 'string') return
-    if (!userKey) return
+    if (!testId || typeof testId !== 'string' || !userKey) return
 
     setLoadingProctorLogs(true)
     try {
+      console.log('[Analytics] Fetching proctor logs with userId:', userKey)
+      
       const response = await fetch(
         `/api/proctor/logs?assessmentId=${encodeURIComponent(testId)}&userId=${encodeURIComponent(userKey)}`
       )
@@ -159,11 +162,8 @@ export default function AnalyticsPage() {
     try {
       const response = await aimlApi.get(`/tests/${testId}/candidates/${userId}/analytics`)
       setAnalytics(response.data)
-      // Proctor logs are keyed by the same identifier used by /api/proctor/record.
-      // For AIML we record with candidate email (preferred) and fall back to userId.
-      const email = response.data?.candidate?.email
-      await fetchProctorLogs(email || userId)
-      // Ensure UI is ready to display logs for newly selected candidate
+      // Fetch proctor logs using userId (same identifier used in proctoring session)
+      await fetchProctorLogs(userId)
       setShowProctorLogs(true)
     } catch (error) {
       console.error('Error fetching analytics:', error)
@@ -978,58 +978,10 @@ export default function AnalyticsPage() {
                       No proctoring violations detected
                     </div>
                   ) : showProctorLogs ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "600px", overflowY: "auto" }}>
-                      {proctorLogs.map((log, index) => (
-                        <div
-                          key={log._id || index}
-                          style={{ border: "1px solid #fca5a5", borderRadius: "0.5rem", padding: "1rem", backgroundColor: "#fef2f2" }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "0.5rem" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                              <AlertTriangle style={{ width: "16px", height: "16px", color: "#ef4444", flexShrink: 0 }} />
-                              <span style={{ fontWeight: 600, color: "#991b1b" }}>
-                                {eventTypeLabels[log.eventType] || log.eventType || 'Unknown Violation'}
-                              </span>
-                            </div>
-                            <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", color: "#64748b" }}>
-                              <Clock style={{ width: "12px", height: "12px" }} />
-                              <span>{formatViolationDate(log.timestamp)}</span>
-                            </div>
-                          </div>
-
-                          {log.metadata && Object.keys(log.metadata).length > 0 && (
-                            <div style={{ marginTop: "0.5rem", fontSize: "0.875rem" }}>
-                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>Details:</div>
-                              <div style={{ backgroundColor: "#1e293b", borderRadius: "0.375rem", padding: "0.5rem", fontFamily: "monospace", fontSize: "0.75rem" }}>
-                                {Object.entries(log.metadata).map(([key, value]: any) => (
-                                  <div key={key} style={{ marginBottom: "0.25rem" }}>
-                                    <span style={{ color: "#94a3b8" }}>{key}:</span>{' '}
-                                    <span style={{ color: "#e2e8f0" }}>
-                                      {typeof value === 'object' ? JSON.stringify(value) : String(value)}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {log.snapshotBase64 && (
-                            <div style={{ marginTop: "0.75rem" }}>
-                              <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.5rem" }}>Evidence Snapshot:</div>
-                              <img
-                                src={log.snapshotBase64.startsWith("data:") ? log.snapshotBase64 : `data:image/png;base64,${log.snapshotBase64}`}
-                                alt="Violation snapshot"
-                                style={{ maxWidth: "100%", height: "auto", borderRadius: "0.375rem", border: "1px solid #475569", maxHeight: "200px" }}
-                                onError={(e) => {
-                                  console.error("Error loading snapshot image:", e);
-                                  (e.target as HTMLImageElement).style.display = "none";
-                                }}
-                              />
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
+                    <ProctorLogsReview 
+                      logs={proctorLogs}
+                      candidateName={analytics.user_name}
+                    />
                   ) : null}
                 </div>
 
