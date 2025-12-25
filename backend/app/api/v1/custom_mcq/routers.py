@@ -29,6 +29,12 @@ from .schemas import (
     SaveAnswerLogRequest,
 )
 from .ai_grading import grade_multiple_subjective_answers
+from ..assessments.services.unified_ai_evaluation import (
+    evaluate_pseudocode_answer,
+    evaluate_subjective_answer_enhanced,
+    aggregate_section_evaluation,
+    generate_overall_assessment_summary
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1259,9 +1265,10 @@ async def submit_custom_mcq_assessment(
         mcq_total = 0
         graded_submissions = []
 
-        # Separate MCQ and subjective submissions
+        # Separate MCQ, subjective, and pseudocode submissions
         mcq_submissions = []
         subjective_submissions = []
+        pseudocode_submissions = []
 
         for submission in request.submissions:
             question = questions_dict.get(submission.questionId)
@@ -1279,7 +1286,9 @@ async def submit_custom_mcq_assessment(
             logger.debug(f"Question {submission.questionId}: questionType={question_type_raw}, has_options={has_options}, has_correctAn={has_correct_an}, question_keys={list(question.keys())}")
             
             # If questionType is explicitly set, use it
-            if question_type == "subjective":
+            if question_type in ["pseudocode", "pseudo code", "pseudocode"]:
+                question_type = "pseudocode"
+            elif question_type == "subjective":
                 question_type = "subjective"
             elif question_type == "mcq":
                 question_type = "mcq"
@@ -1298,6 +1307,32 @@ async def submit_custom_mcq_assessment(
                     "question": question,
                     "selectedAnswers": submission.selectedAnswers,
                 })
+            elif question_type == "pseudocode":
+                if submission.textAnswer:
+                    question_marks = question.get("marks", 1)
+                    if isinstance(question_marks, str):
+                        try:
+                            question_marks = int(question_marks)
+                        except (ValueError, TypeError):
+                            question_marks = 1
+                    if question_marks < 1:
+                        question_marks = 1
+                    
+                    logger.info(f"Adding pseudocode submission: questionId={submission.questionId}, marks={question_marks}, answer_length={len(submission.textAnswer)}")
+                    pseudocode_submissions.append({
+                        "questionId": submission.questionId,
+                        "question": question,
+                        "questionText": question.get("questionText") or question.get("question", ""),
+                        "answer": submission.textAnswer,
+                        "max_marks": question_marks,
+                        "section": question.get("section", ""),
+                        "sampleInput": question.get("sampleInput"),
+                        "expectedOutput": question.get("expectedOutput"),
+                        "rubric": question.get("rubric"),
+                        "difficulty": question.get("difficulty", "Medium")
+                    })
+                else:
+                    logger.warning(f"Question {submission.questionId} is pseudocode but has no textAnswer provided")
             elif question_type == "subjective":
                 if submission.textAnswer:
                     # Get marks from question, default to 1 if not found
@@ -1358,7 +1393,7 @@ async def submit_custom_mcq_assessment(
         subjective_total = 0
         grading_status = "completed"
 
-        logger.info(f"Grading: {len(mcq_submissions)} MCQ submissions, {len(subjective_submissions)} subjective submissions")
+        logger.info(f"Grading: {len(mcq_submissions)} MCQ submissions, {len(subjective_submissions)} subjective submissions, {len(pseudocode_submissions)} pseudocode submissions")
         
         if subjective_submissions:
             try:
@@ -1432,14 +1467,87 @@ async def submit_custom_mcq_assessment(
                         "reasoning": "",
                     })
 
-        # Calculate totals - also count unanswered subjective questions in total marks
+        # Grade pseudocode questions using AI
+        pseudocode_score = 0
+        pseudocode_total = 0
+
+        if pseudocode_submissions:
+            try:
+                logger.info(f"Starting AI grading for {len(pseudocode_submissions)} pseudocode questions")
+                for sub in pseudocode_submissions:
+                    try:
+                        evaluation = await evaluate_pseudocode_answer(
+                            question_id=sub["questionId"],
+                            question_text=sub["questionText"],
+                            candidate_answer=sub["answer"],
+                            max_marks=sub["max_marks"],
+                            section=sub.get("section"),
+                            sample_input=sub.get("sampleInput"),
+                            expected_output=sub.get("expectedOutput"),
+                            rubric=sub.get("rubric"),
+                            difficulty=sub.get("difficulty", "Medium")
+                        )
+                        
+                        score = float(evaluation.get("score", 0))
+                        max_marks = sub["max_marks"]
+                        pseudocode_total += max_marks
+                        pseudocode_score += score
+                        
+                        logger.info(f"Pseudocode question {sub['questionId']}: scored {score}/{max_marks}")
+                        
+                        graded_submissions.append({
+                            "questionId": sub["questionId"],
+                            "questionType": "pseudocode",
+                            "textAnswer": sub["answer"],
+                            "marksAwarded": round(score, 2),
+                            "maxMarks": max_marks,
+                            "feedback": evaluation.get("feedback", {}).get("summary", ""),
+                            "detailed_feedback": evaluation.get("feedback", {}),
+                            "reasoning": evaluation.get("answer_log", {}).get("partial_credit_reasoning", ""),
+                            "ai_evaluation": evaluation
+                        })
+                    except Exception as e:
+                        logger.exception(f"Error evaluating pseudocode question {sub['questionId']}: {e}")
+                        max_marks = sub["max_marks"]
+                        pseudocode_total += max_marks
+                        graded_submissions.append({
+                            "questionId": sub["questionId"],
+                            "questionType": "pseudocode",
+                            "textAnswer": sub["answer"],
+                            "marksAwarded": 0,
+                            "maxMarks": max_marks,
+                            "feedback": f"Error during AI evaluation: {str(e)}",
+                            "detailed_feedback": {},
+                            "reasoning": "",
+                            "ai_evaluation": None
+                        })
+            except Exception as e:
+                logger.exception(f"Error during pseudocode AI grading: {e}")
+                for sub in pseudocode_submissions:
+                    max_marks = sub["max_marks"]
+                    pseudocode_total += max_marks
+                    graded_submissions.append({
+                        "questionId": sub["questionId"],
+                        "questionType": "pseudocode",
+                        "textAnswer": sub["answer"],
+                        "marksAwarded": 0,
+                        "maxMarks": max_marks,
+                        "feedback": "Error during AI grading. Please contact administrator.",
+                        "detailed_feedback": {},
+                        "reasoning": "",
+                        "ai_evaluation": None
+                    })
+
+        # Calculate totals - also count unanswered questions in total marks
         # Get all questions to calculate proper totals
         all_mcq_questions = [q for q in questions if q.get("questionType", "").lower() == "mcq" or ("options" in q and "correctAn" in q)]
         all_subjective_questions = [q for q in questions if q.get("questionType", "").lower() == "subjective" and not ("options" in q and "correctAn" in q)]
+        all_pseudocode_questions = [q for q in questions if q.get("questionType", "").lower() in ["pseudocode", "pseudo code"]]
         
         # Calculate actual totals including unanswered questions
         actual_mcq_total = sum(q.get("marks", 1) for q in all_mcq_questions)
         actual_subjective_total = sum(q.get("marks", 1) for q in all_subjective_questions)
+        actual_pseudocode_total = sum(q.get("marks", 1) for q in all_pseudocode_questions)
         
         # Use actual totals if they differ from what we calculated
         if actual_mcq_total > mcq_total:
@@ -1448,15 +1556,18 @@ async def submit_custom_mcq_assessment(
         if actual_subjective_total > subjective_total:
             logger.info(f"Subjective total includes unanswered questions: calculated={subjective_total}, actual={actual_subjective_total}")
             subjective_total = actual_subjective_total
+        if actual_pseudocode_total > pseudocode_total:
+            logger.info(f"Pseudocode total includes unanswered questions: calculated={pseudocode_total}, actual={actual_pseudocode_total}")
+            pseudocode_total = actual_pseudocode_total
         
         # Calculate totals
-        total_score = mcq_score + subjective_score
-        total_marks = mcq_total + subjective_total
+        total_score = mcq_score + subjective_score + pseudocode_score
+        total_marks = mcq_total + subjective_total + pseudocode_total
         percentage = (total_score / total_marks * 100) if total_marks > 0 else 0
         pass_percentage = assessment.get("passPercentage", 50)
         passed = percentage >= pass_percentage
         
-        logger.info(f"Final scores: MCQ={mcq_score}/{mcq_total}, Subjective={subjective_score}/{subjective_total}, Total={total_score}/{total_marks}, Percentage={percentage:.2f}%")
+        logger.info(f"Final scores: MCQ={mcq_score}/{mcq_total}, Subjective={subjective_score}/{subjective_total}, Pseudocode={pseudocode_score}/{pseudocode_total}, Total={total_score}/{total_marks}, Percentage={percentage:.2f}%")
 
         # Get existing submission data to preserve answerLogs
         existing_submission = submissions.get(candidate_key, {})

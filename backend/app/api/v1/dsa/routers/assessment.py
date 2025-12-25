@@ -33,6 +33,7 @@ from ..services.code_wrapper import (
     generate_boilerplate,
 )
 from ..services.ai_feedback import generate_code_feedback
+from ...assessments.services.unified_ai_evaluation import evaluate_sql_answer
 
 logger = logging.getLogger("backend")
 router = APIRouter(prefix="/api/v1/dsa", tags=["dsa"])
@@ -1420,6 +1421,41 @@ async def submit_sql(
         passed = user_result["success"]
         expected_output = None
     
+    # AI Evaluation
+    ai_evaluation = None
+    ai_score = 100 if passed else 0
+    ai_max_marks = question.get("marks", 100)
+    
+    try:
+        ai_evaluation = await evaluate_sql_answer(
+            question_id=request.question_id,
+            question_description=question.get("questionText") or question.get("question", ""),
+            user_query=request.sql_query,
+            reference_query=reference_query,
+            max_marks=ai_max_marks,
+            section=None,
+            schemas=schemas,
+            test_result={
+                "passed": passed,
+                "user_result": user_result,
+                "reference_result": ref_result if reference_query else None,
+                "error": user_result.get("stderr") if not user_result.get("success") else None
+            },
+            order_sensitive=order_sensitive,
+            difficulty=question.get("difficulty", "Medium")
+        )
+        
+        # Use AI score instead of binary
+        ai_score = ai_evaluation.get("score", ai_score)
+        ai_max_marks = ai_evaluation.get("max_marks", ai_max_marks)
+        
+        logger.info(f"SQL AI evaluation completed: score={ai_score}/{ai_max_marks}, passed={passed}")
+        
+    except Exception as e:
+        logger.exception(f"AI evaluation failed for SQL question {request.question_id}: {e}")
+        # Fallback to binary scoring if AI evaluation fails
+        ai_score = 100 if passed else 0
+    
     # Determine status
     if passed:
         status = "accepted"
@@ -1437,8 +1473,9 @@ async def submit_sql(
         "expected_output": expected_output if not passed else None,  # Only show expected on failure
         "time": user_result.get("time"),
         "memory": user_result.get("memory"),
-        "score": 100 if passed else 0,
-        "max_score": 100,
+        "score": ai_score,  # Use AI score instead of binary
+        "max_score": ai_max_marks,  # Use AI max marks
+        "ai_evaluation": ai_evaluation,  # Include full AI evaluation
     }
     
     # Save submission if user_id provided
@@ -1452,7 +1489,9 @@ async def submit_sql(
             "expected_output": expected_output,
             "passed": passed,
             "status": status,
-            "score": 100 if passed else 0,
+            "score": ai_score,  # Use AI score
+            "max_score": ai_max_marks,  # Use AI max marks
+            "ai_evaluation": ai_evaluation,  # Store full AI evaluation
             "started_at": request.started_at,
             "submitted_at": request.submitted_at or datetime.utcnow().isoformat(),
             "time_spent_seconds": request.time_spent_seconds,

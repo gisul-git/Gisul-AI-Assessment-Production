@@ -174,7 +174,7 @@ async def verify_candidate(
                         logger.info(f"[Verify Candidate] Access ALLOWED - start time has passed. Now: {now}, Start: {start_time}")
                 except HTTPException:
                     # Re-raise HTTP exceptions (access denied) - this is critical
-                    raise
+                    raise http_exc
                 except (ValueError, AttributeError, TypeError) as e:
                     logger.error(f"[Verify Candidate] CRITICAL: Failed to parse start time for access validation: {e}, start_time_str: {start_time_str}, assessment_id: {assessment_id}")
                     # For strict mode, if we can't parse the time, BLOCK access (be strict)
@@ -232,8 +232,8 @@ async def verify_candidate(
                         )
                     else:
                         logger.info(f"[Verify Candidate] Access ALLOWED - within flexible window")
-                except HTTPException:
-                    raise
+                except HTTPException as http_exc:
+                    raise http_exc
                 except (ValueError, AttributeError, TypeError) as e:
                     logger.error(f"[Verify Candidate] Failed to parse times for flexible mode: {e}")
                     # Allow access if parsing fails (graceful degradation)
@@ -273,8 +273,9 @@ async def verify_candidate(
             "message": "Access granted"
         })
         
-    except HTTPException:
-        raise
+    except HTTPException as http_exc:
+        # Re-raise HTTPExceptions as-is (they have proper status codes)
+        raise http_exc
     except Exception as e:
         logger.exception(f"Error verifying candidate: {e}")
         raise HTTPException(
