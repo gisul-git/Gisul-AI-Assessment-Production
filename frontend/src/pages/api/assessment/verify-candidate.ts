@@ -28,14 +28,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
     console.error("Error in verify-candidate API route:", error);
-    const statusCode = error?.response?.status || 500;
+    // Extract status code from error response
+    // FastAPI returns status in error.response.status
+    const statusCode = error?.response?.status || 
+                      error?.response?.statusCode || 
+                      (error?.response?.data?.success === false ? 403 : 500);
+    
+    // Extract error message - check multiple possible locations
     const errorMessage =
       error?.response?.data?.detail ||
       error?.response?.data?.message ||
       error?.message ||
       "Failed to verify candidate";
+    
     return res.status(statusCode).json({
+      status: statusCode,
       message: errorMessage,
+      errorMessage: errorMessage,
+      data: {
+        message: errorMessage,
+      },
     });
   }
 }

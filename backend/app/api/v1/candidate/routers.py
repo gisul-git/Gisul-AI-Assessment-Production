@@ -139,7 +139,17 @@ async def verify_candidate(
                         # No timezone info, assume UTC
                         start_time_str_clean = start_time_str_clean + '+00:00'
                     
-                    start_time = datetime.fromisoformat(start_time_str_clean).replace(tzinfo=None)
+                    # Parse with timezone first, then convert to naive UTC
+                    try:
+                        start_time_aware = datetime.fromisoformat(start_time_str_clean)
+                        if start_time_aware.tzinfo is not None:
+                            start_time = start_time_aware.astimezone(timezone.utc).replace(tzinfo=None)
+                        else:
+                            start_time = start_time_aware
+                    except ValueError:
+                        # Fallback: try parsing without timezone
+                        start_time = datetime.fromisoformat(start_time_str.replace('Z', ''))
+                    
                     access_start_time = start_time - timedelta(minutes=access_time_before_start)
                     access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
                     
@@ -152,15 +162,22 @@ async def verify_candidate(
                     if now < access_start_time:
                         # Too early - cannot access yet
                         logger.warning(f"[Verify Candidate] Access DENIED - too early. Now: {now}, Access opens at: {access_start_time_formatted}, Time until access: {time_diff_seconds/60:.2f} minutes")
+                        
+                        # Format message based on access_time_before_start
+                        if access_time_before_start > 0:
+                            detail_msg = f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}."
+                        else:
+                            detail_msg = f"You cannot access this assessment yet. Access opens at {access_start_time_formatted}."
+                        
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
-                            detail=f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}."
+                            detail=detail_msg
                         )
                     else:
                         logger.info(f"[Verify Candidate] Access ALLOWED - within access window. Now: {now}, Access opened at: {access_start_time_formatted}")
-                except HTTPException:
+                except HTTPException as http_exc:
                     # Re-raise HTTP exceptions (access denied) - this is critical
-                    raise
+                    raise http_exc
                 except (ValueError, AttributeError, TypeError) as e:
                     logger.error(f"[Verify Candidate] CRITICAL: Failed to parse start time for access validation: {e}, start_time_str: {start_time_str}, assessment_id: {assessment_id}")
                     # For strict mode, if we can't parse the time, we should be more strict
@@ -180,8 +197,24 @@ async def verify_candidate(
                     if '+' not in end_time_str_clean and '-' not in end_time_str_clean[10:]:
                         end_time_str_clean = end_time_str_clean + '+00:00'
                     
-                    start_time = datetime.fromisoformat(start_time_str_clean).replace(tzinfo=None)
-                    end_time = datetime.fromisoformat(end_time_str_clean).replace(tzinfo=None)
+                    # Parse with timezone first, then convert to naive UTC
+                    try:
+                        start_time_aware = datetime.fromisoformat(start_time_str_clean)
+                        if start_time_aware.tzinfo is not None:
+                            start_time = start_time_aware.astimezone(timezone.utc).replace(tzinfo=None)
+                        else:
+                            start_time = start_time_aware
+                    except ValueError:
+                        start_time = datetime.fromisoformat(start_time_str.replace('Z', ''))
+                    
+                    try:
+                        end_time_aware = datetime.fromisoformat(end_time_str_clean)
+                        if end_time_aware.tzinfo is not None:
+                            end_time = end_time_aware.astimezone(timezone.utc).replace(tzinfo=None)
+                        else:
+                            end_time = end_time_aware
+                    except ValueError:
+                        end_time = datetime.fromisoformat(end_time_str.replace('Z', ''))
                     
                     logger.info(f"[Verify Candidate] FLEXIBLE MODE - Time check - Now: {now}, Start: {start_time}, End: {end_time}")
                     
@@ -201,8 +234,8 @@ async def verify_candidate(
                         )
                     else:
                         logger.info(f"[Verify Candidate] Access ALLOWED - within flexible window")
-                except HTTPException:
-                    raise
+                except HTTPException as http_exc:
+                    raise http_exc
                 except (ValueError, AttributeError, TypeError) as e:
                     logger.error(f"[Verify Candidate] Failed to parse times for flexible mode: {e}")
                     # Allow access if parsing fails (graceful degradation)
@@ -242,8 +275,9 @@ async def verify_candidate(
             "message": "Access granted"
         })
         
-    except HTTPException:
-        raise
+    except HTTPException as http_exc:
+        # Re-raise HTTPExceptions as-is (they have proper status codes)
+        raise http_exc
     except Exception as e:
         logger.exception(f"Error verifying candidate: {e}")
         raise HTTPException(
