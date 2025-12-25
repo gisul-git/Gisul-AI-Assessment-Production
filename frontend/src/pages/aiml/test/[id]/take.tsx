@@ -63,79 +63,8 @@ export default function AIMLTestTakePage() {
     // ========================
     // LIVE PROCTORING: Candidate WS connect (Lazy WebRTC)
     // ========================
-    useEffect(() => {
-      // TODO: Replace with actual live proctoring enable check if needed
-      const liveProctoringEnabled = true; // Set to true if live proctoring is enabled for AIML tests
-      const candidateIdStr = userId || "";
-      const assessmentIdStr = testId || "";
-      if (!liveProctoringEnabled || !candidateIdStr || !assessmentIdStr) return;
-
-      // Guard: Ensure start-session is called only once per candidate per test
-      if (startSessionCalledRef.current) {
-        console.log('[AIML Take] ⏭️ start-session already called, skipping to prevent duplicate sessions');
-        return;
-      }
-
-      // Mark as called immediately to prevent race conditions
-      startSessionCalledRef.current = true;
-
-      let ws: WebSocket | null = null;
-      let sessionId: string | null = null;
-
-      // Register live session (backend sets status to "candidate_initiated")
-      console.log('[AIML Take] 📝 Registering Live Proctoring session...');
-      fetch('/api/v1/proctor/live/start-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assessmentId: assessmentIdStr,
-          candidateId: candidateIdStr,
-        }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.success && data.data?.sessionId) {
-            sessionId = data.data.sessionId;
-            console.log(`[AIML Take] ✅ Session registered: ${sessionId}`);
-
-            // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
-            const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
-            const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, candidateIdStr);
-            console.log('[AIML Take] Candidate WS connecting...', wsUrl);
-            ws = new WebSocket(wsUrl);
-
-            ws.onopen = () => {
-              console.log('[AIML Take] Candidate WS connected');
-            };
-
-            ws.onmessage = (event) => {
-              const message = JSON.parse(event.data);
-              if (message.type === 'ADMIN_CONNECTED') {
-                console.log('[AIML Take] ADMIN_CONNECTED received');
-                // Do NOT start WebRTC here (Lazy WebRTC)
-              }
-            };
-
-            ws.onerror = (error) => {
-              console.error('[AIML Take] WebSocket error:', error);
-            };
-
-            ws.onclose = () => {
-              console.log('[AIML Take] WebSocket closed');
-            };
-          }
-        })
-        .catch((error) => {
-          console.error('[AIML Take] Failed to register Live Proctoring session:', error);
-        });
-
-      // Cleanup WebSocket on unmount
-      return () => {
-        if (ws) {
-          ws.close();
-        }
-      };
-    }, [userId, testId]);
+    // REMOVED: Duplicate useEffect that created WebSocket but didn't start WebRTC
+    // The correct implementation is in the second useEffect below (lines 367-446)
   const [test, setTest] = useState<Test | null>(null)
   const [questions, setQuestions] = useState<Question[]>([])
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
@@ -159,6 +88,8 @@ export default function AIMLTestTakePage() {
   const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null)
   const liveProctoringStartedRef = useRef(false)
   const startSessionCalledRef = useRef(false) // Guard: prevent multiple start-session calls
+  const candidateWsRef = useRef<WebSocket | null>(null) // Store candidate WebSocket to pass to service
+  const candidateSessionIdRef = useRef<string | null>(null) // Store sessionId to pass to service
 
   const getViolationMessage = (eventType: string): string => {
     const messages: Record<string, string> = {
@@ -318,7 +249,7 @@ export default function AIMLTestTakePage() {
   }, [questions.length, isProctoringRunning, submitted, testId, candidateEmail, userId, cameraProctorEnabled, proctoringSettings?.liveProctoringEnabled, startUniversalProctoring])
 
   // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
-  const startLiveProctoring = useCallback(() => {
+  const startLiveProctoring = useCallback((sessionId: string, ws: WebSocket) => {
     if (liveProctoringStartedRef.current) {
       console.log('[AIML Take] Live Proctoring already started')
       return
@@ -351,7 +282,9 @@ export default function AIMLTestTakePage() {
         },
       },
       liveProctorScreenStream,
-      existingWebcamStream
+      existingWebcamStream,
+      sessionId, // Pass existing sessionId
+      ws // Pass existing WebSocket
     ).then((success) => {
       if (success) {
         console.log('[AIML Take] ✅ Live Proctoring WebRTC connected')
@@ -385,9 +318,6 @@ export default function AIMLTestTakePage() {
     // Mark as called immediately to prevent race conditions
     startSessionCalledRef.current = true
 
-    let ws: WebSocket | null = null;
-    let sessionId: string | null = null;
-
     // Register live session (backend sets status to "candidate_initiated")
     console.log('[AIML Take] 📝 Registering Live Proctoring session...')
     
@@ -403,12 +333,14 @@ export default function AIMLTestTakePage() {
       .then((res) => res.json())
       .then((data) => {
         if (data.success && data.data?.sessionId) {
-          sessionId = data.data.sessionId;
+          const sessionId = data.data.sessionId;
+          candidateSessionIdRef.current = sessionId;
           console.log(`[AIML Take] ✅ Session registered: ${sessionId}`);
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
           const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${localCandidateIdStr}`;
-          ws = new WebSocket(wsUrl);
+          const ws = new WebSocket(wsUrl);
+          candidateWsRef.current = ws;
 
           ws.onopen = () => {
             console.log('[AIML Take] ✅ WebSocket connected, waiting for admin...');
@@ -418,7 +350,7 @@ export default function AIMLTestTakePage() {
             const message = JSON.parse(event.data);
             if (message.type === 'ADMIN_CONNECTED') {
               console.log('[AIML Take] 🚀 ADMIN_CONNECTED signal received!');
-              startLiveProctoring();
+              startLiveProctoring(sessionId, ws);
             }
           };
 
@@ -428,6 +360,7 @@ export default function AIMLTestTakePage() {
 
           ws.onclose = () => {
             console.log('[AIML Take] WebSocket closed');
+            candidateWsRef.current = null;
           };
         }
       })
@@ -439,8 +372,9 @@ export default function AIMLTestTakePage() {
 
     // Cleanup WebSocket on unmount
     return () => {
-      if (ws) {
-        ws.close();
+      if (candidateWsRef.current) {
+        candidateWsRef.current.close();
+        candidateWsRef.current = null;
       }
     };
   }, [proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, timeRemaining, submitted, testId, candidateEmail, userId, startLiveProctoring])

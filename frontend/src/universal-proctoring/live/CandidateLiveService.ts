@@ -62,6 +62,7 @@ export class CandidateLiveService {
   // Media streams
   private webcamStream: MediaStream | null = null;
   private screenStream: MediaStream | null = null;
+  private screenSender: RTCRtpSender | null = null; // Reference to screen track sender for replacement
 
   // Session tracking
   private sessionId: string | null = null;
@@ -98,18 +99,22 @@ export class CandidateLiveService {
    * This will:
    * 1. Get webcam stream (or reuse existing)
    * 2. Get screen stream (if available)
-   * 3. Create session on backend
-   * 4. Connect WebSocket
+   * 3. Create session on backend (or use existing)
+   * 4. Connect WebSocket (or use existing)
    * 5. Create peer connection and send offer
    *
    * @param callbacks - Callbacks for state changes and errors
    * @param screenStream - Optional pre-captured screen stream
    * @param existingWebcamStream - Optional existing webcam stream (shared with AI)
+   * @param existingSessionId - Optional existing session ID (to avoid duplicate session creation)
+   * @param existingWebSocket - Optional existing WebSocket (to avoid duplicate WebSocket)
    */
   async start(
     callbacks: CandidateLiveCallbacks,
     screenStream?: MediaStream | null,
-    existingWebcamStream?: MediaStream | null
+    existingWebcamStream?: MediaStream | null,
+    existingSessionId?: string | null,
+    existingWebSocket?: WebSocket | null
   ): Promise<boolean> {
     // Guards
     if (this.isStarting) {
@@ -146,16 +151,28 @@ export class CandidateLiveService {
         this.log("⚠️ Screen stream not available - continuing with webcam only");
       }
 
-      // 3. Create session on backend
-      this.log("Creating session...");
-      const sessionId = await this.createBackendSession();
-      this.sessionId = sessionId;
-      this.log(`✅ Session created: ${sessionId}`);
+      // 3. Create session on backend (or use existing)
+      if (existingSessionId) {
+        this.log(`Using existing session: ${existingSessionId}`);
+        this.sessionId = existingSessionId;
+      } else {
+        this.log("Creating session...");
+        const newSessionId = await this.createBackendSession();
+        this.sessionId = newSessionId;
+        this.log(`✅ Session created: ${newSessionId}`);
+      }
 
-      // 4. Connect WebSocket
-      this.log("Connecting WebSocket...");
-      await this.connectWebSocket();
-      this.log("✅ WebSocket connected");
+      // 4. Connect WebSocket (or use existing)
+      if (existingWebSocket && existingWebSocket.readyState === WebSocket.OPEN) {
+        this.log("Using existing WebSocket");
+        this.ws = existingWebSocket;
+        // Setup message handler on existing WebSocket
+        this.ws.onmessage = this.handleWebSocketMessage.bind(this);
+      } else {
+        this.log("Connecting WebSocket...");
+        await this.connectWebSocket();
+        this.log("✅ WebSocket connected");
+      }
 
       // 5. Setup peer connection and send offer
       this.log("Setting up peer connection...");
@@ -168,7 +185,7 @@ export class CandidateLiveService {
       // Mark as streaming
       this.updateState({
         isStreaming: true,
-        sessionId,
+        sessionId: this.sessionId, // Use this.sessionId instead of local variable
         connectionState: "connecting",
       });
 
@@ -350,26 +367,34 @@ export class CandidateLiveService {
     await this.peerConnection.setRemoteDescription(
       new RTCSessionDescription(answer)
     );
-    this.log("✅ Answer set - connection establishing");
+    this.log(`✅ Answer set - ICE state: ${this.peerConnection.iceConnectionState}, signaling: ${this.peerConnection.signalingState}`);
+    this.log("✅ Connection establishing - ICE candidates will now be exchanged");
   }
 
   /**
    * Handle ICE candidate from admin.
    */
   private async handleIceCandidate(candidateData: unknown): Promise<void> {
-    if (!this.peerConnection || !this.peerConnection.remoteDescription) {
+    if (!this.peerConnection) {
+      this.log("⚠️ No peer connection when ICE candidate received");
       return;
+    }
+    
+    if (!this.peerConnection.remoteDescription) {
+      this.log("⚠️ Remote description not set yet, ICE candidate will be queued");
     }
 
     const candidate = parseIceCandidate(candidateData);
     if (candidate) {
       try {
         await this.peerConnection.addIceCandidate(candidate);
-        this.log("Added admin ICE candidate");
+        this.log(`✅ Added admin ICE candidate - ICE state: ${this.peerConnection.iceConnectionState}`);
       } catch (err) {
         // Ignore duplicate/invalid ICE candidates
-        this.log("ICE candidate error (ignored)", err);
+        this.log(`ICE candidate error (ignored): ${err}`);
       }
+    } else {
+      this.log("⚠️ Failed to parse ICE candidate");
     }
   }
 
@@ -385,30 +410,123 @@ export class CandidateLiveService {
     }
 
     // Add screen tracks (if available)
-    if (this.screenStream) {
-      addStreamTracks(this.peerConnection, this.screenStream, "screen");
+    if (this.screenStream && this.peerConnection) {
+      const screenTracks = this.screenStream.getVideoTracks();
+      screenTracks.forEach((track) => {
+        // Store sender reference for track replacement
+        const sender = this.peerConnection!.addTrack(track, this.screenStream!);
+        this.screenSender = sender;
+        this.log(`Added screen track: ${track.label}`);
+        
+        // Monitor screen track ending - re-acquire if assessment is still active
+        const handleTrackEnded = async () => {
+          // Only re-acquire if streaming is active and not stopping
+          if (this.state.isStreaming && !this.isStopping) {
+            this.log("⚠️ Screen track ended - re-acquiring screen stream");
+            try {
+              const newScreenStream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: false,
+              });
+              
+              const newTrack = newScreenStream.getVideoTracks()[0];
+              if (newTrack && this.peerConnection && this.screenSender) {
+                // Replace the track in the existing sender
+                await this.screenSender.replaceTrack(newTrack);
+                this.log("✅ Screen track replaced in peer connection");
+                
+                // Update stored stream
+                if (this.screenStream) {
+                  this.screenStream.getTracks().forEach(t => {
+                    if (t !== track) t.stop(); // Don't stop the track we're replacing
+                  });
+                }
+                this.screenStream = newScreenStream;
+                
+                // Update global reference
+                if (typeof window !== "undefined") {
+                  (window as any).__screenStream = newScreenStream;
+                }
+                
+                // Monitor the new track for future replacements
+                newTrack.onended = handleTrackEnded;
+              }
+            } catch (err) {
+              this.log(`❌ Failed to re-acquire screen stream: ${err}`);
+            }
+          }
+        };
+        
+        track.onended = handleTrackEnded;
+      });
     }
 
     // Handle ICE candidates
     this.peerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
+      if (event.candidate && this.peerConnection) {
+        const iceState = this.peerConnection.iceConnectionState;
+        this.log(`Generated ICE candidate:`, {
+          candidate: event.candidate.candidate.substring(0, 50) + '...',
+          sdpMid: event.candidate.sdpMid,
+          sdpMLineIndex: event.candidate.sdpMLineIndex,
+          iceState: iceState,
+          signalingState: this.peerConnection.signalingState,
+        });
+        
         sendWebSocketMessage(this.ws, {
           type: "ice",
           ...formatIceCandidate(event.candidate),
         });
-        this.log("Sent ICE candidate");
+        this.log("✅ Sent ICE candidate to admin");
+      } else if (this.peerConnection) {
+        this.log(`ICE candidate gathering complete - final state: ${this.peerConnection.iceConnectionState}`);
       }
     };
 
+    // Handle ICE connection state - CRITICAL for WebRTC
+    this.peerConnection.oniceconnectionstatechange = () => {
+      const iceState = this.peerConnection?.iceConnectionState;
+      const connectionState = this.peerConnection?.connectionState;
+      this.log(`ICE connection state: ${iceState} (connection: ${connectionState})`);
+      
+      switch (iceState) {
+        case "new":
+          this.log("🔄 ICE negotiation starting");
+          break;
+        case "checking":
+          this.log("🔄 ICE checking in progress");
+          break;
+        case "connected":
+        case "completed":
+          this.log(`✅ ICE ${iceState} - streaming should be active!`);
+          this.updateState({ connectionState: "connected" });
+          break;
+        case "failed":
+          this.log("❌ ICE connection failed");
+          this.updateState({ connectionState: "failed" });
+          break;
+        case "disconnected":
+          this.log("⚠️ ICE disconnected");
+          this.updateState({ connectionState: "disconnected" });
+          break;
+        case "closed":
+          this.log("🔒 ICE closed");
+          break;
+      }
+    };
+    
     // Handle connection state changes
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection?.connectionState;
-      this.log(`Connection state: ${state}`);
+      const iceState = this.peerConnection?.iceConnectionState;
+      this.log(`Connection state: ${state} (ICE: ${iceState})`);
 
       switch (state) {
         case "connected":
-          this.updateState({ connectionState: "connected" });
-          this.log("✅ WebRTC connected - streaming to admin!");
+          if (iceState === "connected" || iceState === "completed") {
+            this.updateState({ connectionState: "connected" });
+            this.log("✅ WebRTC fully connected - streaming to admin!");
+          }
           break;
         case "disconnected":
           this.updateState({ connectionState: "disconnected" });
@@ -456,6 +574,8 @@ export class CandidateLiveService {
    * Cleanup all resources.
    */
   private cleanup(): void {
+    // Clear sender reference
+    this.screenSender = null;
     this.log("Cleaning up resources...");
 
     // Stop heartbeat
@@ -488,7 +608,15 @@ export class CandidateLiveService {
     stopStream(this.webcamStream);
     this.webcamStream = null;
 
-    // Don't stop screen stream - we don't own it
+    // Stop screen stream when assessment ends (cleanup)
+    if (this.isStopping && this.screenStream) {
+      stopStream(this.screenStream);
+      this.screenStream = null;
+      // Clear global reference
+      if (typeof window !== "undefined") {
+        (window as any).__screenStream = null;
+      }
+    }
 
     // Reset state
     this.sessionId = null;

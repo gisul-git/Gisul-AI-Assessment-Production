@@ -57,6 +57,8 @@ export default function CustomMCQTakePage() {
   const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
   const liveProctoringStartedRef = useRef(false);
   const startSessionCalledRef = useRef(false); // Guard: prevent multiple start-session calls
+  const candidateWsRef = useRef<WebSocket | null>(null); // Store candidate WebSocket to pass to service
+  const candidateSessionIdRef = useRef<string | null>(null); // Store sessionId to pass to service
 
   const getViolationMessage = (eventType: string): string => {
     const messages: Record<string, string> = {
@@ -171,7 +173,7 @@ export default function CustomMCQTakePage() {
   }, [examStarted, isProctoringRunning, submitting, assessmentId, candidateInfo?.email, cameraProctorEnabled, proctoringEnabled, startUniversalProctoring]);
 
   // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
-  const startLiveProctoring = useCallback(() => {
+  const startLiveProctoring = useCallback((sessionId: string, ws: WebSocket) => {
     if (liveProctoringStartedRef.current) {
       console.log('[Custom MCQ Take] Live Proctoring already started');
       return;
@@ -203,7 +205,9 @@ export default function CustomMCQTakePage() {
         },
       },
       liveProctorScreenStream,
-      existingWebcamStream
+      existingWebcamStream,
+      sessionId, // Pass existing sessionId
+      ws // Pass existing WebSocket
     ).then((success) => {
       if (success) {
         console.log('[Custom MCQ Take] ✅ Live Proctoring WebRTC connected');
@@ -235,9 +239,6 @@ export default function CustomMCQTakePage() {
     // Mark as called immediately to prevent race conditions
     startSessionCalledRef.current = true;
 
-    let ws: WebSocket | null = null;
-    let sessionId: string | null = null;
-
     // Register live session (backend sets status to "candidate_initiated")
     console.log('[Custom MCQ Take] 📝 Registering Live Proctoring session...');
     
@@ -253,12 +254,14 @@ export default function CustomMCQTakePage() {
       .then((res) => res.json())
       .then((data) => {
         if (data.success && data.data?.sessionId) {
-          sessionId = data.data.sessionId;
+          const sessionId = data.data.sessionId;
+          candidateSessionIdRef.current = sessionId;
           console.log(`[Custom MCQ Take] ✅ Session registered: ${sessionId}`);
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
           const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${candidateIdStr}`;
-          ws = new WebSocket(wsUrl);
+          const ws = new WebSocket(wsUrl);
+          candidateWsRef.current = ws;
 
           ws.onopen = () => {
             console.log('[Custom MCQ Take] ✅ WebSocket connected, waiting for admin...');
@@ -268,7 +271,7 @@ export default function CustomMCQTakePage() {
             const message = JSON.parse(event.data);
             if (message.type === 'ADMIN_CONNECTED') {
               console.log('[Custom MCQ Take] 🚀 ADMIN_CONNECTED signal received!');
-              startLiveProctoring();
+              startLiveProctoring(sessionId, ws);
             }
           };
 
@@ -278,6 +281,7 @@ export default function CustomMCQTakePage() {
 
           ws.onclose = () => {
             console.log('[Custom MCQ Take] WebSocket closed');
+            candidateWsRef.current = null;
           };
         }
       })
@@ -289,8 +293,9 @@ export default function CustomMCQTakePage() {
 
     // Cleanup WebSocket on unmount
     return () => {
-      if (ws) {
-        ws.close();
+      if (candidateWsRef.current) {
+        candidateWsRef.current.close();
+        candidateWsRef.current = null;
       }
     };
   }, [proctoringEnabled, liveProctorScreenStream, examStarted, submitting, assessmentId, candidateInfo?.email, startLiveProctoring]);

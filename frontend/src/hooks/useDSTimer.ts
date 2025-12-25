@@ -56,6 +56,7 @@ export function useDSTimer({
   const questionStartTimesRef = useRef<Record<string, Date>>({}) // Store start times for each question (PER_QUESTION mode)
   const questionExpireCalledRef = useRef<Record<string, boolean>>({}) // Track if expire callback was called for each question
   const questionTotalTimeRef = useRef<Record<string, number>>({}) // Store question total times for immediate access
+  const lastRecalculatedQuestionRef = useRef<string | null>(null) // Track last question we recalculated for to prevent infinite loops
 
   // Initialize timer
   useEffect(() => {
@@ -285,27 +286,32 @@ export function useDSTimer({
           remaining
         })
       } else {
-        // Question timer already started - recalculate remaining time when switching back
-        // This ensures accuracy if user switches away and comes back
-        const questionEndTime = questionEndTimesRef.current[currentQuestionId]
-        if (questionEndTime) {
-          const now = new Date()
-          const remaining = Math.max(0, Math.floor((questionEndTime.getTime() - now.getTime()) / 1000))
-          setQuestionTimeRemaining((prev) => ({
-            ...prev,
-            [currentQuestionId]: remaining
-          }))
+        // Question timer already started - only recalculate if question changed
+        // CRITICAL: Only recalculate when question actually changes, not on every render
+        // This prevents infinite render loops
+        if (lastRecalculatedQuestionRef.current !== currentQuestionId) {
+          lastRecalculatedQuestionRef.current = currentQuestionId
           
-          // Check if question already expired when switching back
-          if (remaining === 0 && !questionExpireCalledRef.current[currentQuestionId] && onQuestionExpire) {
-            questionExpireCalledRef.current[currentQuestionId] = true
-            // Clear interval before calling expire
-            if (intervalRef.current) {
-              clearInterval(intervalRef.current)
-              intervalRef.current = null
+          const questionEndTime = questionEndTimesRef.current[currentQuestionId]
+          if (questionEndTime) {
+            const now = new Date()
+            const remaining = Math.max(0, Math.floor((questionEndTime.getTime() - now.getTime()) / 1000))
+            setQuestionTimeRemaining((prev) => ({
+              ...prev,
+              [currentQuestionId]: remaining
+            }))
+            
+            // Check if question already expired when switching back
+            if (remaining === 0 && !questionExpireCalledRef.current[currentQuestionId] && onQuestionExpire) {
+              questionExpireCalledRef.current[currentQuestionId] = true
+              // Clear interval before calling expire
+              if (intervalRef.current) {
+                clearInterval(intervalRef.current)
+                intervalRef.current = null
+              }
+              onQuestionExpire(currentQuestionId)
+              return
             }
-            onQuestionExpire(currentQuestionId)
-            return
           }
         }
       }

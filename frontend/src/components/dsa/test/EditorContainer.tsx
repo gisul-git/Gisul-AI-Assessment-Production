@@ -324,14 +324,23 @@ export function EditorContainer({
   const panelRef = useRef<HTMLDivElement>(null)
   const isResizingRef = useRef(false)
 
-  // Debug: Log test cases
+  // Debug: Log test cases (only when actually changed to prevent infinite loops)
+  const prevTestcasesRef = useRef<string>('')
+  const prevResultsRef = useRef<string>('')
   useEffect(() => {
-    console.log('[EditorContainer] Test cases received:', {
-      visibleTestcasesLength: visibleTestcases.length,
-      visibleTestcases: visibleTestcases,
-      publicResultsLength: publicResults.length,
-      willShowPanel: publicResults.length > 0 || visibleTestcases.length > 0
-    })
+    const testcasesKey = JSON.stringify(visibleTestcases.map(t => ({ id: t.id, input: t.input, expected: t.expected })))
+    const resultsKey = JSON.stringify(publicResults.map(r => ({ passed: r.passed, status: r.status })))
+    
+    // Only log if testcases or results actually changed
+    if (testcasesKey !== prevTestcasesRef.current || resultsKey !== prevResultsRef.current) {
+      prevTestcasesRef.current = testcasesKey
+      prevResultsRef.current = resultsKey
+      console.log('[EditorContainer] Test cases received:', {
+        visibleTestcasesLength: visibleTestcases.length,
+        publicResultsLength: publicResults.length,
+        willShowPanel: publicResults.length > 0 || visibleTestcases.length > 0
+      })
+    }
   }, [visibleTestcases, publicResults])
 
   useEffect(() => {
