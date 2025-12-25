@@ -56,6 +56,7 @@ export default function CustomMCQTakePage() {
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
   const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
   const liveProctoringStartedRef = useRef(false);
+  const startSessionCalledRef = useRef(false); // Guard: prevent multiple start-session calls
 
   const getViolationMessage = (eventType: string): string => {
     const messages: Record<string, string> = {
@@ -169,34 +170,27 @@ export default function CustomMCQTakePage() {
     }
   }, [examStarted, isProctoringRunning, submitting, assessmentId, candidateInfo?.email, cameraProctorEnabled, proctoringEnabled, startUniversalProctoring]);
 
-  // Start Live Proctoring (separate from AI proctoring)
-  useEffect(() => {
+  // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
+  const startLiveProctoring = useCallback(() => {
+    if (liveProctoringStartedRef.current) {
+      console.log('[Custom MCQ Take] Live Proctoring already started');
+      return;
+    }
+
     const assessmentIdStr = String(assessmentId || '');
-    // Resolve userId with priority: email > anonymous
     const candidateIdStr = resolveUserIdForProctoring(null, {
       email: candidateInfo?.email,
     });
 
-    if (!proctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
-      return;
-    }
-
-    // Only start when exam has started and not submitting
-    if (!examStarted || submitting) {
-      return;
-    }
-
-    console.log('[Custom MCQ Take] Starting Live Proctoring service...');
+    console.log('[Custom MCQ Take] 🚀 Admin connected! Starting WebRTC...');
     liveProctoringStartedRef.current = true;
 
-    // Create and start the live proctoring service
     const liveService = new CandidateLiveService({
       assessmentId: assessmentIdStr,
       candidateId: candidateIdStr,
       debugMode: debugMode,
     });
 
-    // Get existing webcam stream from video element (if camera already started by Universal Proctoring)
     const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
 
     liveService.start(
@@ -212,14 +206,94 @@ export default function CustomMCQTakePage() {
       existingWebcamStream
     ).then((success) => {
       if (success) {
-        console.log('[Custom MCQ Take] ✅ Live Proctoring started');
+        console.log('[Custom MCQ Take] ✅ Live Proctoring WebRTC connected');
         liveProctoringServiceRef.current = liveService;
       } else {
         console.error('[Custom MCQ Take] ❌ Failed to start Live Proctoring');
         liveProctoringStartedRef.current = false;
       }
     });
-  }, [proctoringEnabled, liveProctorScreenStream, examStarted, submitting, assessmentId, candidateInfo?.email, debugMode]);
+  }, [assessmentId, candidateInfo?.email, debugMode, liveProctorScreenStream]);
+
+  // ✅ PHASE 2: Lazy WebRTC - Register session and wait for admin signal
+  useEffect(() => {
+    const assessmentIdStr = String(assessmentId || '');
+    const candidateIdStr = resolveUserIdForProctoring(null, {
+      email: candidateInfo?.email,
+    });
+
+    if (!proctoringEnabled || !liveProctorScreenStream || !examStarted || submitting) {
+      return;
+    }
+
+    // Guard: Ensure start-session is called only once per candidate per test
+    if (startSessionCalledRef.current) {
+      console.log('[Custom MCQ Take] ⏭️ start-session already called, skipping to prevent duplicate sessions');
+      return;
+    }
+
+    // Mark as called immediately to prevent race conditions
+    startSessionCalledRef.current = true;
+
+    let ws: WebSocket | null = null;
+    let sessionId: string | null = null;
+
+    // Register live session (backend sets status to "candidate_initiated")
+    console.log('[Custom MCQ Take] 📝 Registering Live Proctoring session...');
+    
+    // Phase 2.2: Register session with backend
+    fetch('/api/v1/proctor/live/start-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assessmentId: assessmentIdStr,
+        candidateId: candidateIdStr,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.data?.sessionId) {
+          sessionId = data.data.sessionId;
+          console.log(`[Custom MCQ Take] ✅ Session registered: ${sessionId}`);
+
+          // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
+          const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${candidateIdStr}`;
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = () => {
+            console.log('[Custom MCQ Take] ✅ WebSocket connected, waiting for admin...');
+          };
+
+          ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            if (message.type === 'ADMIN_CONNECTED') {
+              console.log('[Custom MCQ Take] 🚀 ADMIN_CONNECTED signal received!');
+              startLiveProctoring();
+            }
+          };
+
+          ws.onerror = (error) => {
+            console.error('[Custom MCQ Take] WebSocket error:', error);
+          };
+
+          ws.onclose = () => {
+            console.log('[Custom MCQ Take] WebSocket closed');
+          };
+        }
+      })
+      .catch((error) => {
+        console.error('[Custom MCQ Take] Failed to register Live Proctoring session:', error);
+      });
+    
+    console.log('[Custom MCQ Take] ⏸️ Live Proctoring ready, waiting for admin to connect...');
+
+    // Cleanup WebSocket on unmount
+    return () => {
+      if (ws) {
+        ws.close();
+      }
+    };
+  }, [proctoringEnabled, liveProctorScreenStream, examStarted, submitting, assessmentId, candidateInfo?.email, startLiveProctoring]);
 
   // Stop proctoring when assessment ends
   useEffect(() => {

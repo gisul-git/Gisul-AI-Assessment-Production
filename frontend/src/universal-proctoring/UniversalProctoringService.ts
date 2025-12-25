@@ -198,18 +198,20 @@ export class UniversalProctoringService {
             debugLog("UniversalProctoringService: AI proctoring failed to start");
           }
         } else if (settings.liveProctoringEnabled) {
-          // Live-only mode: Start camera without AI detection
+          // Live-only mode: Reuse camera from pre-check
           debugLog("UniversalProctoringService: Starting camera for Live Proctoring only");
           try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-              video: {
-                width: { ideal: 640 },
-                height: { ideal: 480 },
-                facingMode: "user",
-              },
-            });
-            videoElement.srcObject = stream;
-            await videoElement.play();
+            // ✅ PHASE 1: Reuse camera from pre-check (NEVER request new permission)
+            const existingStream = (typeof window !== 'undefined' && (window as any).__cameraStream) as MediaStream | undefined;
+            
+            if (existingStream?.active) {
+              debugLog("UniversalProctoringService: Reusing camera from window.__cameraStream");
+              videoElement.srcObject = existingStream;
+              await videoElement.play();
+            } else {
+              throw new Error("No camera stream available from pre-check. Camera must be captured in pre-check phase.");
+            }
+            
             debugLog("UniversalProctoringService: Camera started for Live Proctoring");
           } catch (error) {
             console.error("[UniversalProctoring] Failed to start camera for Live Proctoring:", error);

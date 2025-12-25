@@ -241,6 +241,7 @@ export default function CandidateAssessmentPage() {
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
   const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
   const liveProctoringStartedRef = useRef(false);
+  const startSessionCalledRef = useRef(false); // Guard: prevent multiple start-session calls
   const [debugMode, setDebugMode] = useState(false);
 
   // Get client-side values safely
@@ -375,28 +376,23 @@ export default function CandidateAssessmentPage() {
     }
   }, [appState, isProctoringRunning, isClient, aiProctoringEnabled, liveProctoringEnabled, candidateIdStr, assessmentIdStr, startUniversalProctoring]);
 
-  // Start Live Proctoring (separate from AI proctoring)
-  useEffect(() => {
-    if (!liveProctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
+  // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
+  const startLiveProctoring = useCallback(() => {
+    if (liveProctoringStartedRef.current) {
+      console.log('[Assessment Take] Live Proctoring already started');
       return;
     }
 
-    // Only start when assessment is ready
-    if (appState !== 'ready') {
-      return;
-    }
-
-    console.log('[Assessment Take] Starting Live Proctoring service...');
+    console.log('[Assessment Take] 🚀 Admin connected! Starting WebRTC...');
     liveProctoringStartedRef.current = true;
 
-    // Create and start the live proctoring service
     const liveService = new CandidateLiveService({
       assessmentId: assessmentIdStr,
       candidateId: candidateIdStr,
       debugMode: debugMode,
     });
 
-    // Get existing webcam stream from video element (if camera already started by Universal Proctoring)
+    // Get existing webcam stream from video element
     const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
 
     liveService.start(
@@ -412,14 +408,93 @@ export default function CandidateAssessmentPage() {
       existingWebcamStream
     ).then((success) => {
       if (success) {
-        console.log('[Assessment Take] ✅ Live Proctoring started');
+        console.log('[Assessment Take] ✅ Live Proctoring WebRTC connected');
         liveProctoringServiceRef.current = liveService;
       } else {
         console.error('[Assessment Take] ❌ Failed to start Live Proctoring');
         liveProctoringStartedRef.current = false;
       }
     });
-  }, [liveProctoringEnabled, liveProctorScreenStream, appState, assessmentIdStr, candidateIdStr, debugMode]);
+  }, [assessmentIdStr, candidateIdStr, debugMode, liveProctorScreenStream]);
+
+  // ✅ PHASE 2: Lazy WebRTC - Register session and wait for admin signal
+  useEffect(() => {
+    if (!liveProctoringEnabled || !liveProctorScreenStream || appState !== 'ready') {
+      return;
+    }
+
+    // Guard: Ensure start-session is called only once per candidate per test
+    if (startSessionCalledRef.current) {
+      console.log('[Assessment Take] ⏭️ start-session already called, skipping to prevent duplicate sessions');
+      return;
+    }
+
+    // Mark as called immediately to prevent race conditions
+    startSessionCalledRef.current = true;
+
+    let ws: WebSocket | null = null;
+    let sessionId: string | null = null;
+
+    // Register live session (backend sets status to "candidate_initiated")
+    console.log('[Assessment Take] 📝 Registering Live Proctoring session...');
+    
+    // Phase 2.2: Register session with backend
+    fetch('/api/v1/proctor/live/start-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assessmentId: assessmentIdStr,
+        candidateId: candidateIdStr,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.data?.sessionId) {
+          sessionId = data.data.sessionId;
+          console.log(`[Assessment Take] ✅ Session registered: ${sessionId}`);
+
+          // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
+          // Use backend host for WebSocket connection
+          // Import LIVE_PROCTORING_ENDPOINTS if not already imported
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
+          const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, candidateIdStr);
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = () => {
+            console.log('[Assessment Take] ✅ WebSocket connected, waiting for admin...');
+          };
+
+          ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            if (message.type === 'ADMIN_CONNECTED') {
+              console.log('[Assessment Take] 🚀 ADMIN_CONNECTED signal received!');
+              startLiveProctoring();
+            }
+          };
+
+          ws.onerror = (error) => {
+            console.error('[Assessment Take] WebSocket error:', error);
+          };
+
+          ws.onclose = () => {
+            console.log('[Assessment Take] WebSocket closed');
+          };
+        }
+      })
+      .catch((error) => {
+        console.error('[Assessment Take] Failed to register Live Proctoring session:', error);
+      });
+    
+    console.log('[Assessment Take] ⏸️ Live Proctoring ready, waiting for admin to connect...');
+
+    // Cleanup WebSocket on unmount
+    return () => {
+      if (ws) {
+        ws.close();
+      }
+    };
+  }, [liveProctoringEnabled, liveProctorScreenStream, appState, assessmentIdStr, candidateIdStr, startLiveProctoring]);
 
   // Stop proctoring when assessment ends
   useEffect(() => {
