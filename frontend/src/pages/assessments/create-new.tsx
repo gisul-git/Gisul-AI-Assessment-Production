@@ -2561,7 +2561,6 @@ export default function CreateNewAssessmentPage() {
   // Schedule settings (Station 4)
   const [examMode, setExamMode] = useState<"strict" | "flexible">("strict");
   const [duration, setDuration] = useState<string>("");
-  const [accessTimeBeforeStart, setAccessTimeBeforeStart] = useState<string>("15");
   const [visibilityMode, setVisibilityMode] = useState<string>("public");
   const [candidateRequirements, setCandidateRequirements] = useState<{
     requireEmail: boolean;
@@ -3019,7 +3018,6 @@ export default function CreateNewAssessmentPage() {
     endTime,
     examMode,
     duration,
-    accessTimeBeforeStart,
     candidates,
     assessmentUrl,
   ]);
@@ -3178,9 +3176,6 @@ export default function CreateNewAssessmentPage() {
           }
           if (schedule.duration) {
             setDuration(schedule.duration.toString());
-          }
-          if (schedule.accessTimeBeforeStart !== undefined) {
-            setAccessTimeBeforeStart(schedule.accessTimeBeforeStart.toString());
           }
           if (schedule.visibilityMode) {
             setVisibilityMode(schedule.visibilityMode);
@@ -3564,9 +3559,6 @@ export default function CreateNewAssessmentPage() {
           }
           if (schedule.duration) {
             setDuration(schedule.duration.toString());
-          }
-          if (schedule.accessTimeBeforeStart !== undefined) {
-            setAccessTimeBeforeStart(schedule.accessTimeBeforeStart.toString());
           }
           if (schedule.visibilityMode) {
             setVisibilityMode(schedule.visibilityMode);
@@ -7816,12 +7808,9 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         scheduleData.startTime = normalizeDateTime(startTime);
       }
       
-      // Only include endTime and accessTimeBeforeStart based on exam mode
+      // Only include endTime based on exam mode
       if (examMode === "flexible" && endTime) {
         scheduleData.endTime = normalizeDateTime(endTime);
-      }
-      if (examMode === "strict") {
-        scheduleData.accessTimeBeforeStart = parseInt(accessTimeBeforeStart || "15");
       }
       
       // Include section timers if enabled
@@ -10654,22 +10643,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                           />
                         </div>
                       </div>
-                      <div style={{ flex: 1, minWidth: "200px" }}>
-                        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                          Access Time Before Start (minutes)
-                        </label>
-                        <input
-                          type="number"
-                          value={accessTimeBeforeStart}
-                          onChange={(e) => setAccessTimeBeforeStart(e.target.value)}
-                          placeholder="e.g., 15"
-                          min={0}
-                          style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
-                        />
-                        <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                          Candidates can access the assessment this many minutes before the start time to complete pre-checks. Questions will start automatically at the scheduled start time.
-                        </p>
-                      </div>
                       {startTime && duration && (
                         <div style={{ padding: "0.75rem", backgroundColor: "#f0fdf4", borderRadius: "0.5rem", fontSize: "0.875rem", color: "#059669" }}>
                           <strong>Assessment will end at:</strong> {
@@ -10973,7 +10946,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                           startTime: examMode === "strict" ? startTime : startTime,
                           duration: parseInt(duration),
                           examMode,
-                          accessTimeBeforeStart: examMode === "strict" ? parseInt(accessTimeBeforeStart || "15") : undefined,
                                 visibilityMode,
                                 candidateRequirements,
                                 proctoringSettings,

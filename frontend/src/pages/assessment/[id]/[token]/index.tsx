@@ -34,6 +34,14 @@ export default function CandidateEntryPage() {
     setLoading(true);
     setError(null);
 
+    console.log("[Entry] ========== VERIFICATION START ==========");
+    console.log("[Entry] Request payload:", {
+      assessmentId: id,
+      token,
+      email: email.trim(),
+      name: name.trim(),
+    });
+
     try {
       const response = await axios.post("/api/assessment/verify-candidate", {
         assessmentId: id,
@@ -42,13 +50,20 @@ export default function CandidateEntryPage() {
         name: name.trim(),
       });
 
+      console.log("[Entry] ========== VERIFICATION RESPONSE ==========");
+      console.log("[Entry] Response status:", response.status);
+      console.log("[Entry] Response data:", response.data);
+      console.log("[Entry] Response success?", response.data?.success);
+
       if (response.data?.success) {
+        console.log("[Entry] ✅ Verification successful - redirecting to precheck");
         // Store candidate info in sessionStorage
         sessionStorage.setItem("candidateEmail", email.trim());
         sessionStorage.setItem("candidateName", name.trim());
         // Redirect to new precheck flow
         router.push(`/precheck/${id}/${token}`);
       } else {
+        console.log("[Entry] ❌ Verification failed - no success flag");
         setError(response.data?.message || "Invalid credentials");
       }
     } catch (err: any) {
@@ -57,14 +72,18 @@ export default function CandidateEntryPage() {
                           err.response?.data?.message || 
                           err.message || 
                           "Failed to verify. Please check your email and name.";
-      console.error("[Entry] Verification error:", {
-        status: err.response?.status,
-        data: err.response?.data,
-        errorMessage,
-      });
+      
+      console.error("[Entry] ========== VERIFICATION ERROR ==========");
+      console.error("[Entry] Error status:", err.response?.status);
+      console.error("[Entry] Error statusText:", err.response?.statusText);
+      console.error("[Entry] Error data:", err.response?.data);
+      console.error("[Entry] Error message:", errorMessage);
+      console.error("[Entry] Full error object:", err);
+      
       setError(errorMessage);
     } finally {
       setLoading(false);
+      console.log("[Entry] ==========================================");
     }
   };
 

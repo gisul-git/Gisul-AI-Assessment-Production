@@ -31,7 +31,20 @@ from .exceptions.handlers import (
     rate_limit_exceeded_handler,
 )
 from slowapi.errors import RateLimitExceeded
- 
+
+# Configure logging to output to console
+logging.basicConfig(
+    level=logging.INFO,  # Set to INFO to see info, warning, and error logs
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(sys.stdout)  # Output to console
+    ]
+)
+
+# Set uvicorn access logs to INFO level
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
 logger = logging.getLogger("backend")
  
 # Global variables to store the agent process and log file

@@ -418,7 +418,6 @@ export default function IdentityVerificationPage() {
             if (scheduleData.success && scheduleData.data?.schedule?.startTime) {
               startTimeStr = scheduleData.data.schedule.startTime;
               const examMode = scheduleData.data.schedule?.examMode || scheduleData.data?.examMode || "strict";
-              const accessTimeBeforeStart = scheduleData.data?.accessTimeBeforeStart || scheduleData.data.schedule?.accessTimeBeforeStart || 15;
               
               // Normalize timezone
               if (!startTimeStr) {
