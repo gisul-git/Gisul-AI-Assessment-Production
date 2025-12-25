@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -97,98 +98,102 @@ async def verify_candidate(
                     detail="This assessment is currently paused. Please try again later."
                 )
         
-        # Check access time before start (for strict mode)
-        from datetime import datetime, timedelta
+        # Check assessment start time validation (no access time window)
+        from datetime import datetime
         schedule = assessment.get("schedule") or {}
-        # Check examMode in both assessment root and schedule
-        exam_mode = assessment.get("examMode") or schedule.get("examMode") or "strict"  # Default to strict
+        # Check examMode in both assessment root and schedule - be explicit
+        exam_mode = assessment.get("examMode")
+        if exam_mode is None and isinstance(schedule, dict):
+            exam_mode = schedule.get("examMode")
+        if exam_mode is None:
+            exam_mode = "strict"  # Default to strict if not set
+        # Ensure it's a string (handle case where it might be stored differently)
+        exam_mode = str(exam_mode).lower() if exam_mode else "strict"
+        
         start_time_str = schedule.get("startTime") if isinstance(schedule, dict) else None
+        # Also check assessment root for startTime (some assessments might store it there)
+        if not start_time_str:
+            start_time_str = assessment.get("startTime")
         
-        # Get accessTimeBeforeStart - handle 0 as valid value (use 'is not None' check)
-        access_time_before_start = 15  # Default 15 minutes
-        if "accessTimeBeforeStart" in assessment and assessment.get("accessTimeBeforeStart") is not None:
-            try:
-                access_time_before_start = int(assessment.get("accessTimeBeforeStart"))
-            except (ValueError, TypeError):
-                pass
-        elif isinstance(schedule, dict) and "accessTimeBeforeStart" in schedule and schedule.get("accessTimeBeforeStart") is not None:
-            try:
-                access_time_before_start = int(schedule.get("accessTimeBeforeStart"))
-            except (ValueError, TypeError):
-                pass
+        end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
+        if not end_time_str:
+            end_time_str = assessment.get("endTime")
         
-        now = datetime.utcnow()
+        # Use IST (Indian Standard Time) for AI assessments
+        IST = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(IST).replace(tzinfo=None)  # Make naive for comparison
         
         # Log initial state for debugging
-        logger.info(f"[Verify Candidate] Access validation check - examMode: {exam_mode} (from assessment: {assessment.get('examMode')}, from schedule: {schedule.get('examMode')}), startTime: {start_time_str}, accessTimeBeforeStart: {access_time_before_start}, now: {now}")
-        logger.info(f"[Verify Candidate] Full assessment data - assessment_id: {assessment_id}, schedule keys: {list(schedule.keys()) if isinstance(schedule, dict) else 'not a dict'}")
-        logger.info(f"[Verify Candidate] accessTimeBeforeStart values - assessment: {assessment.get('accessTimeBeforeStart')} (type: {type(assessment.get('accessTimeBeforeStart'))}), schedule: {schedule.get('accessTimeBeforeStart') if isinstance(schedule, dict) else 'N/A'} (type: {type(schedule.get('accessTimeBeforeStart')) if isinstance(schedule, dict) else 'N/A'}), final: {access_time_before_start}")
+        logger.info(f"[Verify Candidate] ========== ACCESS VALIDATION START ==========")
+        logger.info(f"[Verify Candidate] Assessment ID: {assessment_id}")
+        logger.info(f"[Verify Candidate] Exam Mode: {exam_mode}")
+        logger.info(f"[Verify Candidate] Start Time String: {start_time_str}")
+        logger.info(f"[Verify Candidate] End Time String: {end_time_str}")
+        logger.info(f"[Verify Candidate] Current Time (IST): {now}")
+        logger.info(f"[Verify Candidate] ===============================================")
         
         # Validate access time based on exam mode
         if exam_mode == "strict":
-            logger.info(f"[Verify Candidate] STRICT MODE DETECTED - Validating access time...")
+            logger.info(f"[Verify Candidate] STRICT MODE - Validating start time...")
             if not start_time_str:
-                logger.warning(f"[Verify Candidate] Strict mode but no startTime found. Assessment: {assessment_id}, schedule: {schedule}")
-                # If strict mode but no start time, allow access (assessment not properly configured)
-                # But log a warning
+                logger.warning(f"[Verify Candidate] Strict mode but no startTime found. Assessment: {assessment_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Assessment schedule is not properly configured. Please contact the administrator."
+                )
             else:
                 try:
                     # Parse start time - handle various formats
+                    # Times are stored in UTC, convert to IST for comparison
                     start_time_str_clean = start_time_str.replace('Z', '+00:00') if 'Z' in start_time_str else start_time_str
                     if '+' not in start_time_str_clean and '-' not in start_time_str_clean[10:]:
                         # No timezone info, assume UTC
                         start_time_str_clean = start_time_str_clean + '+00:00'
                     
-                    # Parse with timezone first, then convert to naive UTC
-                    try:
-                        start_time_aware = datetime.fromisoformat(start_time_str_clean)
-                        if start_time_aware.tzinfo is not None:
-                            start_time = start_time_aware.astimezone(timezone.utc).replace(tzinfo=None)
-                        else:
-                            start_time = start_time_aware
-                    except ValueError:
-                        # Fallback: try parsing without timezone
-                        start_time = datetime.fromisoformat(start_time_str.replace('Z', ''))
+                    # Parse as UTC time
+                    start_time_utc = datetime.fromisoformat(start_time_str_clean)
+                    if start_time_utc.tzinfo is None:
+                        start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
                     
-                    access_start_time = start_time - timedelta(minutes=access_time_before_start)
-                    access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    # Convert UTC to IST for comparison
+                    IST = ZoneInfo("Asia/Kolkata")
+                    start_time = start_time_utc.astimezone(IST).replace(tzinfo=None)
                     
-                    logger.info(f"[Verify Candidate] Time check - Now: {now}, Access Start: {access_start_time}, Start Time: {start_time}, Access Time Before Start: {access_time_before_start}")
+                    logger.info(f"[Verify Candidate] Time check - Now (IST): {now}, Start Time (IST): {start_time}")
                     
-                    # Calculate time difference for logging
-                    time_diff_seconds = (access_start_time - now).total_seconds()
-                    logger.info(f"[Verify Candidate] Time difference: {time_diff_seconds} seconds ({time_diff_seconds/60:.2f} minutes) until access opens")
-                    
-                    if now < access_start_time:
-                        # Too early - cannot access yet
-                        logger.warning(f"[Verify Candidate] Access DENIED - too early. Now: {now}, Access opens at: {access_start_time_formatted}, Time until access: {time_diff_seconds/60:.2f} minutes")
-                        
-                        # Format message based on access_time_before_start
-                        if access_time_before_start > 0:
-                            detail_msg = f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}."
-                        else:
-                            detail_msg = f"You cannot access this assessment yet. Access opens at {access_start_time_formatted}."
-                        
+                    # Block access if current time is before start time
+                    if now < start_time:
+                        start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S IST')
+                        error_message = f"The assessment has not started yet. The assessment will begin at {start_time_formatted}."
+                        logger.warning(f"[Verify Candidate] Access DENIED - before start time. Now: {now}, Start: {start_time_formatted}")
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
-                            detail=detail_msg
+                            detail=error_message
                         )
                     else:
-                        logger.info(f"[Verify Candidate] Access ALLOWED - within access window. Now: {now}, Access opened at: {access_start_time_formatted}")
-                except HTTPException as http_exc:
+                        logger.info(f"[Verify Candidate] Access ALLOWED - start time has passed. Now: {now}, Start: {start_time}")
+                except HTTPException:
                     # Re-raise HTTP exceptions (access denied) - this is critical
                     raise http_exc
                 except (ValueError, AttributeError, TypeError) as e:
                     logger.error(f"[Verify Candidate] CRITICAL: Failed to parse start time for access validation: {e}, start_time_str: {start_time_str}, assessment_id: {assessment_id}")
-                    # For strict mode, if we can't parse the time, we should be more strict
-                    # But to avoid breaking assessments, we'll log and allow (with warning)
-                    logger.warning(f"[Verify Candidate] Allowing access despite time parsing failure (strict mode) - this should be investigated")
+                    # For strict mode, if we can't parse the time, BLOCK access (be strict)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Assessment schedule configuration error. Please contact the administrator. (Error: {str(e)})"
+                    )
         elif exam_mode == "flexible":
             # For flexible mode, check if we're within the window (startTime to endTime)
             end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
+            # Also check assessment root for endTime
+            if not end_time_str:
+                end_time_str = assessment.get("endTime")
+            
             if start_time_str and end_time_str:
                 try:
-                    # Parse start and end times
+                    # Parse start and end times - convert from UTC to IST
+                    IST = ZoneInfo("Asia/Kolkata")
+                    
                     start_time_str_clean = start_time_str.replace('Z', '+00:00') if 'Z' in start_time_str else start_time_str
                     end_time_str_clean = end_time_str.replace('Z', '+00:00') if 'Z' in end_time_str else end_time_str
                     
@@ -197,37 +202,30 @@ async def verify_candidate(
                     if '+' not in end_time_str_clean and '-' not in end_time_str_clean[10:]:
                         end_time_str_clean = end_time_str_clean + '+00:00'
                     
-                    # Parse with timezone first, then convert to naive UTC
-                    try:
-                        start_time_aware = datetime.fromisoformat(start_time_str_clean)
-                        if start_time_aware.tzinfo is not None:
-                            start_time = start_time_aware.astimezone(timezone.utc).replace(tzinfo=None)
-                        else:
-                            start_time = start_time_aware
-                    except ValueError:
-                        start_time = datetime.fromisoformat(start_time_str.replace('Z', ''))
+                    # Parse as UTC times
+                    start_time_utc = datetime.fromisoformat(start_time_str_clean)
+                    end_time_utc = datetime.fromisoformat(end_time_str_clean)
+                    if start_time_utc.tzinfo is None:
+                        start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
+                    if end_time_utc.tzinfo is None:
+                        end_time_utc = end_time_utc.replace(tzinfo=timezone.utc)
                     
-                    try:
-                        end_time_aware = datetime.fromisoformat(end_time_str_clean)
-                        if end_time_aware.tzinfo is not None:
-                            end_time = end_time_aware.astimezone(timezone.utc).replace(tzinfo=None)
-                        else:
-                            end_time = end_time_aware
-                    except ValueError:
-                        end_time = datetime.fromisoformat(end_time_str.replace('Z', ''))
+                    # Convert to IST for comparison
+                    start_time = start_time_utc.astimezone(IST).replace(tzinfo=None)
+                    end_time = end_time_utc.astimezone(IST).replace(tzinfo=None)
                     
-                    logger.info(f"[Verify Candidate] FLEXIBLE MODE - Time check - Now: {now}, Start: {start_time}, End: {end_time}")
+                    logger.info(f"[Verify Candidate] FLEXIBLE MODE - Time check - Now (IST): {now}, Start (IST): {start_time}, End (IST): {end_time}")
                     
                     if now < start_time:
                         # Before window opens
-                        start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                        start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S IST')
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
                             detail=f"The assessment window has not opened yet. The assessment will be available from {start_time_formatted}."
                         )
                     elif now > end_time:
                         # After window closes
-                        end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                        end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S IST')
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
                             detail=f"The assessment window has closed. The assessment was available until {end_time_formatted}."
@@ -240,8 +238,8 @@ async def verify_candidate(
                     logger.error(f"[Verify Candidate] Failed to parse times for flexible mode: {e}")
                     # Allow access if parsing fails (graceful degradation)
         
-        # Check token (basic validation - you may want to enhance this)
-        # For now, we'll just check if the assessment exists and is accessible
+        # IMPORTANT: If we reach here, access time validation has passed (or was not required)
+        # Now check token and access mode
         
         access_mode = assessment.get("accessMode", "private")
         

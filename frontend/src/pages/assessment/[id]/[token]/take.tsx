@@ -1626,12 +1626,15 @@ export default function CandidateAssessmentPage() {
         const enablePerSectionTimers = assessment?.enablePerSectionTimers || false;
         const sectionTimersFromDB = assessment?.sectionTimers || {};
         const startTimeStr = schedule.startTime;
-        const accessTimeBeforeStart = assessment?.accessTimeBeforeStart || schedule?.accessTimeBeforeStart || 15;
         
-        // Check if assessment has started (for strict mode)
+        // Check if assessment has started (for strict mode) - MUST happen BEFORE question transformation
+        // Declare variables outside if block so they're accessible later
+        let isBeforeStartTime = false;
+        let parsedStartTime: Date | null = null;
+        
         if (examMode === "strict" && startTimeStr) {
           try {
-            // Parse start time (handle both ISO string and other formats)
+            // Parse start time (stored in UTC, represents IST time converted to UTC)
             let startTime: Date;
             if (startTimeStr.includes('Z') || startTimeStr.includes('+') || startTimeStr.includes('-', 10)) {
               startTime = new Date(startTimeStr);
@@ -1639,37 +1642,44 @@ export default function CandidateAssessmentPage() {
               startTime = new Date(startTimeStr + 'Z'); // Assume UTC if no timezone
             }
             
+            // Get current time (JavaScript Date is always UTC internally)
             const now = new Date();
-            const accessStartTime = new Date(startTime.getTime() - accessTimeBeforeStart * 60000);
             
-            console.log("[take.tsx] Time check:", {
-              now: now.toISOString(),
-              startTime: startTime.toISOString(),
-              accessStartTime: accessStartTime.toISOString(),
-              accessTimeBeforeStart,
+            // Compare UTC timestamps directly
+            // The stored UTC time represents the IST time converted to UTC
+            // When user sets 12:35 IST, it's stored as 07:05 UTC
+            // When current time is 12:35 IST, it's 07:05 UTC
+            // So comparing UTC timestamps works correctly
+            
+            // For logging, convert to IST for display
+            const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
+            const nowIST = new Date(now.getTime() + istOffset);
+            const startTimeIST = new Date(startTime.getTime() + istOffset);
+            
+            console.log("[take.tsx] Time check (IST comparison):", {
+              nowUTC: now.toISOString(),
+              startTimeUTC: startTime.toISOString(),
+              nowIST: nowIST.toISOString().replace('Z', '+05:30'),
+              startTimeIST: startTimeIST.toISOString().replace('Z', '+05:30'),
               examMode,
-              nowTime: now.getTime(),
-              startTimeTime: startTime.getTime(),
               isBeforeStart: now < startTime,
             });
             
-            if (now < accessStartTime) {
-              // Too early - show error
-              const errorMsg = `You cannot access this assessment yet. Access will be available ${accessTimeBeforeStart} minutes before the start time. Access opens at ${accessStartTime.toLocaleString()}.`;
-              console.log("[take.tsx] Too early to access:", errorMsg);
-              setError(errorMsg);
-              setAppState("ready");
-              return;
-            } else if (now < startTime) {
-              // Within access window but before start time - show waiting page
-              console.log("[take.tsx] Within access window but before start time, showing waiting page. Now:", now.toISOString(), "Start:", startTime.toISOString());
+            if (now < startTime) {
+              // Before start time - show waiting page
+              const startTimeISTFormatted = startTimeIST.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'medium' });
+              console.log("[take.tsx] Before start time, showing waiting page. Now (IST):", nowIST.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }), "Start (IST):", startTimeISTFormatted);
+              isBeforeStartTime = true;
+              parsedStartTime = startTime;
               setWaitingForStart(true);
               setStartTime(startTime);
               setAppState("ready");
-              return; // CRITICAL: Don't load questions if before start time
+              return; // CRITICAL: Don't load questions if before start time - show waiting page instead
             }
             // If we reach here, start time has passed - continue loading questions
             console.log("[take.tsx] Start time has passed, loading questions");
+            // Store parsed time for potential use later
+            parsedStartTime = startTime;
           } catch (timeError) {
             console.error("[take.tsx] Error parsing start time:", timeError);
             // Continue if time parsing fails
@@ -1763,6 +1773,15 @@ export default function CandidateAssessmentPage() {
               questions: r?.questions,
             })),
           })), null, 2));
+          
+          // CRITICAL: If we're before start time and no questions, show waiting page instead of error
+          if (isBeforeStartTime && parsedStartTime) {
+            console.log("[take.tsx] Before start time and no questions - showing waiting page instead of error");
+            setWaitingForStart(true);
+            setStartTime(parsedStartTime);
+            setAppState("ready");
+            return; // Show waiting page, not error
+          }
         } else {
           console.log("[take.tsx] Transformation successful! Questions by section:", {
             mcq: transformed.sections.mcq.map(q => ({ id: q._id, type: q.type })),
