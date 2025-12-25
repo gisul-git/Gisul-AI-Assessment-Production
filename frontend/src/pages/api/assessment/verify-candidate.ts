@@ -57,6 +57,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(statusCode).json({
       detail: errorMessage,
       message: errorMessage,
+      errorMessage: errorMessage,
+      data: {
+        message: errorMessage,
+      },
     });
   }
 }

@@ -5,9 +5,10 @@ import logging
 from typing import Any
 
 from fastapi import Request
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, HTTPException as FastAPIHTTPException
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -64,37 +65,42 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 async def not_found_handler(request: Request, exc: Any) -> JSONResponse:
-    """Handle 404 errors - preserve original message if it has a custom detail."""
-    # If the exception has a custom detail (not the default), preserve it
-    if hasattr(exc, "status_code") and exc.status_code == 404:
-        # Check if there's a custom detail message from the endpoint
-        if hasattr(exc, "detail") and exc.detail and exc.detail != "Not Found":
+    """Handle HTTPExceptions (404 and other status codes) - preserve original message."""
+    # Check if this is an HTTPException (FastAPI or Starlette)
+    if isinstance(exc, (FastAPIHTTPException, StarletteHTTPException)) or (hasattr(exc, "status_code") and hasattr(exc, "detail")):
+        status_code = exc.status_code if hasattr(exc, "status_code") else 404
+        detail = str(exc.detail) if hasattr(exc, "detail") and exc.detail else "Not Found"
+        
+        # For 404 errors, check if it's a custom message
+        if status_code == 404:
+            if detail and detail != "Not Found":
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "success": False,
+                        "message": detail,
+                        "detail": detail,
+                    },
+                )
+            # Default 404 - route not found
             return JSONResponse(
                 status_code=404,
                 content={
                     "success": False,
-                    "message": str(exc.detail),
-                    "detail": str(exc.detail),
+                    "message": f"Route {request.url.path} not found",
                 },
             )
-        # Default 404 - route not found
+        
+        # For all other HTTPExceptions (403, 500, etc.), return the original error message
         return JSONResponse(
-            status_code=404,
+            status_code=status_code,
             content={
                 "success": False,
-                "message": f"Route {request.url.path} not found",
+                "message": detail,
+                "detail": detail,
             },
         )
-    # For non-404 HTTPExceptions, return the original error message
-    if hasattr(exc, "status_code") and hasattr(exc, "detail"):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "success": False,
-                "message": str(exc.detail),
-                "detail": str(exc.detail),
-            },
-        )
+    
     # Fallback for actual 404s (unknown routes)
     return JSONResponse(
         status_code=404,
