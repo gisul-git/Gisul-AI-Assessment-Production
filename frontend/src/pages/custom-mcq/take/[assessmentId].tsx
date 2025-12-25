@@ -56,6 +56,7 @@ export default function CustomMCQTakePage() {
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
   const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
   const liveProctoringStartedRef = useRef(false);
+  const startSessionCalledRef = useRef(false); // Guard: prevent multiple start-session calls
 
   const getViolationMessage = (eventType: string): string => {
     const messages: Record<string, string> = {
@@ -93,13 +94,13 @@ export default function CustomMCQTakePage() {
       timestamp: violation.timestamp,
     });
 
-    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
-    if (violation.eventType === 'FULLSCREEN_EXIT') {
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay (only when AI Proctoring enabled)
+    if (violation.eventType === 'FULLSCREEN_EXIT' && cameraProctorEnabled) {
       console.log('[Custom MCQ Take] FULLSCREEN_EXIT violation - locking screen');
       setFullscreenLocked(true);
       incrementFullscreenExitCount();
     }
-  }, [setFullscreenLocked, incrementFullscreenExitCount]);
+  }, [setFullscreenLocked, incrementFullscreenExitCount, cameraProctorEnabled]);
 
   // Handle fullscreen re-entry - unlock the screen
   const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
@@ -169,32 +170,28 @@ export default function CustomMCQTakePage() {
     }
   }, [examStarted, isProctoringRunning, submitting, assessmentId, candidateInfo?.email, cameraProctorEnabled, proctoringEnabled, startUniversalProctoring]);
 
-  // Start Live Proctoring (separate from AI proctoring)
-  useEffect(() => {
+  // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
+  const startLiveProctoring = useCallback(() => {
+    if (liveProctoringStartedRef.current) {
+      console.log('[Custom MCQ Take] Live Proctoring already started');
+      return;
+    }
+
     const assessmentIdStr = String(assessmentId || '');
-    // Resolve userId with priority: email > anonymous
     const candidateIdStr = resolveUserIdForProctoring(null, {
       email: candidateInfo?.email,
     });
 
-    if (!proctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
-      return;
-    }
-
-    // Only start when exam has started and not submitting
-    if (!examStarted || submitting) {
-      return;
-    }
-
-    console.log('[Custom MCQ Take] Starting Live Proctoring service...');
+    console.log('[Custom MCQ Take] 🚀 Admin connected! Starting WebRTC...');
     liveProctoringStartedRef.current = true;
 
-    // Create and start the live proctoring service
     const liveService = new CandidateLiveService({
       assessmentId: assessmentIdStr,
       candidateId: candidateIdStr,
       debugMode: debugMode,
     });
+
+    const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
 
     liveService.start(
       {
@@ -205,17 +202,98 @@ export default function CustomMCQTakePage() {
           console.error('[Custom MCQ Take] Live Proctoring error:', error);
         },
       },
-      liveProctorScreenStream
+      liveProctorScreenStream,
+      existingWebcamStream
     ).then((success) => {
       if (success) {
-        console.log('[Custom MCQ Take] ✅ Live Proctoring started');
+        console.log('[Custom MCQ Take] ✅ Live Proctoring WebRTC connected');
         liveProctoringServiceRef.current = liveService;
       } else {
         console.error('[Custom MCQ Take] ❌ Failed to start Live Proctoring');
         liveProctoringStartedRef.current = false;
       }
     });
-  }, [proctoringEnabled, liveProctorScreenStream, examStarted, submitting, assessmentId, candidateInfo?.email, debugMode]);
+  }, [assessmentId, candidateInfo?.email, debugMode, liveProctorScreenStream]);
+
+  // ✅ PHASE 2: Lazy WebRTC - Register session and wait for admin signal
+  useEffect(() => {
+    const assessmentIdStr = String(assessmentId || '');
+    const candidateIdStr = resolveUserIdForProctoring(null, {
+      email: candidateInfo?.email,
+    });
+
+    if (!proctoringEnabled || !liveProctorScreenStream || !examStarted || submitting) {
+      return;
+    }
+
+    // Guard: Ensure start-session is called only once per candidate per test
+    if (startSessionCalledRef.current) {
+      console.log('[Custom MCQ Take] ⏭️ start-session already called, skipping to prevent duplicate sessions');
+      return;
+    }
+
+    // Mark as called immediately to prevent race conditions
+    startSessionCalledRef.current = true;
+
+    let ws: WebSocket | null = null;
+    let sessionId: string | null = null;
+
+    // Register live session (backend sets status to "candidate_initiated")
+    console.log('[Custom MCQ Take] 📝 Registering Live Proctoring session...');
+    
+    // Phase 2.2: Register session with backend
+    fetch('/api/v1/proctor/live/start-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assessmentId: assessmentIdStr,
+        candidateId: candidateIdStr,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.data?.sessionId) {
+          sessionId = data.data.sessionId;
+          console.log(`[Custom MCQ Take] ✅ Session registered: ${sessionId}`);
+
+          // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
+          const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${candidateIdStr}`;
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = () => {
+            console.log('[Custom MCQ Take] ✅ WebSocket connected, waiting for admin...');
+          };
+
+          ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            if (message.type === 'ADMIN_CONNECTED') {
+              console.log('[Custom MCQ Take] 🚀 ADMIN_CONNECTED signal received!');
+              startLiveProctoring();
+            }
+          };
+
+          ws.onerror = (error) => {
+            console.error('[Custom MCQ Take] WebSocket error:', error);
+          };
+
+          ws.onclose = () => {
+            console.log('[Custom MCQ Take] WebSocket closed');
+          };
+        }
+      })
+      .catch((error) => {
+        console.error('[Custom MCQ Take] Failed to register Live Proctoring session:', error);
+      });
+    
+    console.log('[Custom MCQ Take] ⏸️ Live Proctoring ready, waiting for admin to connect...');
+
+    // Cleanup WebSocket on unmount
+    return () => {
+      if (ws) {
+        ws.close();
+      }
+    };
+  }, [proctoringEnabled, liveProctorScreenStream, examStarted, submitting, assessmentId, candidateInfo?.email, startLiveProctoring]);
 
   // Stop proctoring when assessment ends
   useEffect(() => {
@@ -753,13 +831,16 @@ export default function CustomMCQTakePage() {
         <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div>Loading assessment...</div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the assessment."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the assessment."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     );
   }
@@ -773,13 +854,16 @@ export default function CustomMCQTakePage() {
             <p>Assessment not found</p>
           </div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the assessment."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the assessment."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     );
   }
@@ -816,13 +900,16 @@ export default function CustomMCQTakePage() {
               </div>
             </div>
           </div>
-          <FullscreenLockOverlay
-            isLocked={isFullscreenLocked}
-            onRequestFullscreen={handleRequestFullscreen}
-            exitCount={fullscreenExitCount}
-            message="You must be in fullscreen mode to continue the assessment."
-            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-          />
+          {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+          {cameraProctorEnabled && (
+            <FullscreenLockOverlay
+              isLocked={isFullscreenLocked}
+              onRequestFullscreen={handleRequestFullscreen}
+              exitCount={fullscreenExitCount}
+              message="You must be in fullscreen mode to continue the assessment."
+              warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+            />
+          )}
         </>
       );
     }
@@ -836,13 +923,16 @@ export default function CustomMCQTakePage() {
             <p style={{ color: "#2D7A52", fontSize: "1.125rem" }}>{error || "You cannot access this assessment at this time."}</p>
           </div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the assessment."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the assessment."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     );
   }
@@ -1415,14 +1505,16 @@ export default function CustomMCQTakePage() {
         </div>
       </div>
       
-      {/* FULLSCREEN LOCK OVERLAY - blocks UI when not in fullscreen */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="Fullscreen mode is required during the assessment."
-        warningText="Please return to fullscreen to continue your exam. Repeated exits are logged and may affect your assessment."
-      />
+      {/* FULLSCREEN LOCK OVERLAY - only when AI Proctoring enabled */}
+      {cameraProctorEnabled && (
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="Fullscreen mode is required during the assessment."
+          warningText="Please return to fullscreen to continue your exam. Repeated exits are logged and may affect your assessment."
+        />
+      )}
     </div>
   );
 }

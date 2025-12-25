@@ -389,8 +389,8 @@ export default function AnalyticsPage() {
   return (
     <div className="container">
       <div className="card">
-        {/* Back Button */}
-        <div style={{ marginBottom: "1.5rem" }}>
+        {/* Back Button & Live Dashboard Link */}
+        <div style={{ marginBottom: "1.5rem", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <button
             type="button"
             className="btn-secondary"
@@ -406,6 +406,24 @@ export default function AnalyticsPage() {
             <ArrowLeft className="h-4 w-4" />
             Back to Dashboard
           </button>
+          
+          {/* Live Proctoring Dashboard Button */}
+          <Link
+            href={`/assessments/${assessmentId}/live-dashboard`}
+            className="btn-primary"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem",
+              padding: "0.5rem 1rem",
+              fontSize: "0.875rem",
+              backgroundColor: "#8b5cf6",
+              textDecoration: "none",
+            }}
+          >
+            <Video className="h-4 w-4" />
+            Live Proctoring Dashboard
+          </Link>
         </div>
 
         <div style={{ marginBottom: "2rem" }}>

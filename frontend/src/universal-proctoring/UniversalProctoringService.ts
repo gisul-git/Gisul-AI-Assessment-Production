@@ -166,51 +166,93 @@ export class UniversalProctoringService {
       liveProctoringEnabled: settings.liveProctoringEnabled,
     });
 
-    // ========== Start AI Proctoring (if enabled) ==========
-    if (settings.aiProctoringEnabled) {
+    // ========== Start Camera (if either AI or Live enabled) ==========
+    // Camera must start when EITHER AI or Live Proctoring is enabled
+    const needsCamera = settings.aiProctoringEnabled || settings.liveProctoringEnabled;
+    
+    if (needsCamera) {
       if (!videoElement) {
         console.error(
-          "[UniversalProctoring] AI proctoring enabled but no video element provided"
+          "[UniversalProctoring] Camera proctoring enabled but no video element provided"
         );
         this.updateState({
-          errors: [...this.state.errors, "No video element for AI proctoring"],
+          errors: [...this.state.errors, "No video element for camera proctoring"],
         });
       } else {
-        const aiConfig = { ...DEFAULT_AI_CONFIG, ...options.aiConfig };
-        this.aiService.updateConfig(aiConfig);
+        // ========== Start AI Proctoring (if enabled) ==========
+        if (settings.aiProctoringEnabled) {
+          const aiConfig = { ...DEFAULT_AI_CONFIG, ...options.aiConfig };
+          this.aiService.updateConfig(aiConfig);
 
-        const aiStarted = await this.aiService.start(
-          session,
-          {
-            onViolation: this.handleViolation.bind(this),
-            onStateChange: this.handleAIStateChange.bind(this),
-          },
-          videoElement,
-          canvasElement
-        );
+          const aiStarted = await this.aiService.start(
+            session,
+            {
+              onViolation: this.handleViolation.bind(this),
+              onStateChange: this.handleAIStateChange.bind(this),
+            },
+            videoElement,
+            canvasElement
+          );
 
-        if (!aiStarted) {
-          debugLog("UniversalProctoringService: AI proctoring failed to start");
+          if (!aiStarted) {
+            debugLog("UniversalProctoringService: AI proctoring failed to start");
+          }
+        } else if (settings.liveProctoringEnabled) {
+          // Live-only mode: Reuse camera from pre-check
+          debugLog("UniversalProctoringService: Starting camera for Live Proctoring only");
+          try {
+            // ✅ PHASE 1: Reuse camera from pre-check (NEVER request new permission)
+            const existingStream = (typeof window !== 'undefined' && (window as any).__cameraStream) as MediaStream | undefined;
+            
+            if (existingStream?.active) {
+              debugLog("UniversalProctoringService: Reusing camera from window.__cameraStream");
+              videoElement.srcObject = existingStream;
+              await videoElement.play();
+            } else {
+              throw new Error("No camera stream available from pre-check. Camera must be captured in pre-check phase.");
+            }
+            
+            debugLog("UniversalProctoringService: Camera started for Live Proctoring");
+          } catch (error) {
+            console.error("[UniversalProctoring] Failed to start camera for Live Proctoring:", error);
+            this.updateState({
+              errors: [...this.state.errors, `Camera error: ${(error as Error).message}`],
+            });
+          }
         }
       }
     }
 
-    // ========== Start Tab Switch Detection (always) ==========
-    const tabConfig = { ...DEFAULT_TAB_CONFIG, ...options.tabConfig };
-    this.tabSwitchService.updateConfig(tabConfig);
-    this.tabSwitchService.start(session, {
-      onViolation: this.handleViolation.bind(this),
-      onStateChange: this.handleTabStateChange.bind(this),
-    });
+    // ========== Start Tab Switch Detection (only when AI enabled) ==========
+    // Tab/focus enforcement should ONLY run when AI Proctoring is enabled
+    // In Live-only mode, candidates need to switch tabs freely without violations
+    if (settings.aiProctoringEnabled) {
+      const tabConfig = { ...DEFAULT_TAB_CONFIG, ...options.tabConfig };
+      this.tabSwitchService.updateConfig(tabConfig);
+      this.tabSwitchService.start(session, {
+        onViolation: this.handleViolation.bind(this),
+        onStateChange: this.handleTabStateChange.bind(this),
+      });
+      debugLog("UniversalProctoringService: Tab switch detection enabled (AI mode)");
+    } else {
+      debugLog("UniversalProctoringService: Tab switch detection disabled (Live-only mode)");
+    }
 
-    // ========== Start Fullscreen Detection (always) ==========
-    const fsConfig = { ...DEFAULT_FULLSCREEN_CONFIG, ...options.fullscreenConfig };
-    this.fullscreenService.updateConfig(fsConfig);
-    this.fullscreenService.start(session, {
-      onViolation: this.handleViolation.bind(this),
-      onStateChange: this.handleFullscreenStateChange.bind(this),
-      onFullscreenExit: this.callbacks.onFullscreenExit,
-    });
+    // ========== Start Fullscreen Detection (only when AI enabled) ==========
+    // Fullscreen enforcement should ONLY run when AI Proctoring is enabled
+    // In Live-only mode, candidates don't need fullscreen and shouldn't see lock overlay
+    if (settings.aiProctoringEnabled) {
+      const fsConfig = { ...DEFAULT_FULLSCREEN_CONFIG, ...options.fullscreenConfig };
+      this.fullscreenService.updateConfig(fsConfig);
+      this.fullscreenService.start(session, {
+        onViolation: this.handleViolation.bind(this),
+        onStateChange: this.handleFullscreenStateChange.bind(this),
+        onFullscreenExit: this.callbacks.onFullscreenExit,
+      });
+      debugLog("UniversalProctoringService: Fullscreen detection enabled (AI mode)");
+    } else {
+      debugLog("UniversalProctoringService: Fullscreen detection disabled (Live-only mode)");
+    }
 
     debugLog("UniversalProctoringService: Started successfully");
     return true;

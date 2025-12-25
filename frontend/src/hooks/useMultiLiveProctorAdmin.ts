@@ -193,7 +193,16 @@ export function useMultiLiveProctorAdmin({
       }));
       log(`✅ Answer sent to ${candidateId}`);
       
-      updateCandidate(sessionId, { status: "connecting" });
+      // Only set "connecting" if status is not already "connected" (prevents race condition with ontrack)
+      setCandidateStreams(prev => {
+        const existing = prev.get(sessionId);
+        if (existing && existing.status !== "connected") {
+          const newMap = new Map(prev);
+          newMap.set(sessionId, { ...existing, status: "connecting" });
+          return newMap;
+        }
+        return prev;
+      });
       
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Connection failed";

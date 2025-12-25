@@ -246,6 +246,11 @@ export class AdminLiveService {
           await this.handleNewSession(message);
           break;
 
+        case "candidate_connected":
+          // Handle real-time notification when candidate WebSocket connects
+          await this.handleNewSession(message.session || message);
+          break;
+
         case "session_ended":
           this.handleSessionEnded(message.sessionId);
           break;

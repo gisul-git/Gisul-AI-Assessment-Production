@@ -401,6 +401,24 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
               </div>
             </span>
           </label>
+
+          {/* Live Proctoring Checkbox */}
+          <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer", marginTop: "1rem" }}>
+            <input
+              type="checkbox"
+              checked={liveProctoringEnabled}
+              onChange={(e) => setLiveProctoringEnabled(e.target.checked)}
+              style={{ marginTop: "0.25rem" }}
+            />
+            <span>
+              <div style={{ fontWeight: 600, color: "#1E5A3B" }}>
+                Enable Live Proctoring (webcam + screen streaming)
+              </div>
+              <div style={{ fontSize: "0.875rem", color: "#2D7A52", marginTop: "0.25rem" }}>
+                Real-time monitoring via admin dashboard. Works independently of AI Proctoring.
+              </div>
+            </span>
+          </label>
         </div>
 
         {/* Candidate Requirements */}

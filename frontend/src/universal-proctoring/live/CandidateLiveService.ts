@@ -96,7 +96,7 @@ export class CandidateLiveService {
    * Start live proctoring session.
    *
    * This will:
-   * 1. Get webcam stream
+   * 1. Get webcam stream (or reuse existing)
    * 2. Get screen stream (if available)
    * 3. Create session on backend
    * 4. Connect WebSocket
@@ -104,10 +104,12 @@ export class CandidateLiveService {
    *
    * @param callbacks - Callbacks for state changes and errors
    * @param screenStream - Optional pre-captured screen stream
+   * @param existingWebcamStream - Optional existing webcam stream (shared with AI)
    */
   async start(
     callbacks: CandidateLiveCallbacks,
-    screenStream?: MediaStream | null
+    screenStream?: MediaStream | null,
+    existingWebcamStream?: MediaStream | null
   ): Promise<boolean> {
     // Guards
     if (this.isStarting) {
@@ -126,10 +128,15 @@ export class CandidateLiveService {
     try {
       this.log("✅ Starting Live Proctoring...");
 
-      // 1. Get webcam stream
-      this.log("Getting webcam...");
-      this.webcamStream = await getWebcamStream();
-      this.log("✅ Webcam obtained");
+      // 1. Get webcam stream (reuse existing if available)
+      if (existingWebcamStream && existingWebcamStream.active) {
+        this.log("✅ Reusing existing webcam stream (shared with AI or Universal Proctoring)");
+        this.webcamStream = existingWebcamStream;
+      } else {
+        this.log("Getting new webcam stream...");
+        this.webcamStream = await getWebcamStream();
+        this.log("✅ Webcam obtained");
+      }
 
       // 2. Get screen stream (optional but expected)
       this.screenStream = getAvailableScreenStream(screenStream);

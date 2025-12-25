@@ -173,6 +173,7 @@ export default function TestTakePage() {
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
   const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
   const liveProctoringStartedRef = useRef(false);
+  const startSessionCalledRef = useRef(false); // Guard: prevent multiple start-session calls
 
   const editorRef = useRef<HTMLDivElement>(null);
   const [debugMode, setDebugMode] = useState(false);
@@ -475,13 +476,13 @@ export default function TestTakePage() {
       timestamp: violation.timestamp,
     });
 
-    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
-    if (violation.eventType === 'FULLSCREEN_EXIT') {
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay (only when AI Proctoring enabled)
+    if (violation.eventType === 'FULLSCREEN_EXIT' && aiProctoringEnabled) {
       console.log('[DSA Take] FULLSCREEN_EXIT violation - locking screen');
       setFullscreenLocked(true);
       incrementFullscreenExitCount();
     }
-  }, [setFullscreenLocked, incrementFullscreenExitCount]);
+  }, [setFullscreenLocked, incrementFullscreenExitCount, aiProctoringEnabled]);
 
   // Handle fullscreen re-entry - unlock the screen
   const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
@@ -552,26 +553,23 @@ export default function TestTakePage() {
     }
   }, [test, questions.length, isProctoringRunning, isClient, aiProctoringEnabled, liveProctoringEnabled, candidateIdStr, assessmentIdStr, startUniversalProctoring]);
 
-  // Start Live Proctoring (separate from AI proctoring)
-  useEffect(() => {
-    if (!liveProctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
+  // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
+  const startLiveProctoring = useCallback(() => {
+    if (liveProctoringStartedRef.current) {
+      console.log('[DSA Take] Live Proctoring already started');
       return;
     }
 
-    // Only start when test is ready
-    if (!test || questions.length === 0) {
-      return;
-    }
-
-    console.log('[DSA Take] Starting Live Proctoring service...');
+    console.log('[DSA Take] 🚀 Admin connected! Starting WebRTC...');
     liveProctoringStartedRef.current = true;
 
-    // Create and start the live proctoring service
     const liveService = new CandidateLiveService({
       assessmentId: assessmentIdStr,
       candidateId: candidateIdStr,
       debugMode: debugMode,
     });
+
+    const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
 
     liveService.start(
       {
@@ -582,17 +580,96 @@ export default function TestTakePage() {
           console.error('[DSA Take] Live Proctoring error:', error);
         },
       },
-      liveProctorScreenStream
+      liveProctorScreenStream,
+      existingWebcamStream
     ).then((success) => {
       if (success) {
-        console.log('[DSA Take] ✅ Live Proctoring started');
+        console.log('[DSA Take] ✅ Live Proctoring WebRTC connected');
         liveProctoringServiceRef.current = liveService;
       } else {
         console.error('[DSA Take] ❌ Failed to start Live Proctoring');
         liveProctoringStartedRef.current = false;
       }
     });
-  }, [liveProctoringEnabled, liveProctorScreenStream, test, questions.length, assessmentIdStr, candidateIdStr, debugMode]);
+  }, [assessmentIdStr, candidateIdStr, debugMode, liveProctorScreenStream]);
+
+  // ✅ PHASE 2: Lazy WebRTC - Register session and wait for admin signal
+  useEffect(() => {
+    if (!liveProctoringEnabled || !liveProctorScreenStream || !test || questions.length === 0) {
+      return;
+    }
+
+    // Guard: Ensure start-session is called only once per candidate per test
+    if (startSessionCalledRef.current) {
+      console.log('[DSA Take] ⏭️ start-session already called, skipping to prevent duplicate sessions');
+      return;
+    }
+
+    // Mark as called immediately to prevent race conditions
+    startSessionCalledRef.current = true;
+
+    let ws: WebSocket | null = null;
+    let sessionId: string | null = null;
+
+    // Register live session (backend sets status to "candidate_initiated")
+    console.log('[DSA Take] 📝 Registering Live Proctoring session...');
+    
+    // Phase 2.2: Register session with backend
+    fetch('/api/v1/proctor/live/start-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assessmentId: assessmentIdStr,
+        candidateId: candidateIdStr,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.data?.sessionId) {
+          sessionId = data.data.sessionId;
+          console.log(`[DSA Take] ✅ Session registered: ${sessionId}`);
+
+          // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
+          // Use backend host for WebSocket connection
+          const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
+          const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, candidateIdStr);
+          console.log('[DSA Take] Candidate WS connecting...', wsUrl);
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = () => {
+            console.log('[DSA Take] Candidate WS connected');
+          };
+
+          ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            if (message.type === 'ADMIN_CONNECTED') {
+              console.log('[DSA Take] ADMIN_CONNECTED received');
+              startLiveProctoring();
+            }
+          };
+
+          ws.onerror = (error) => {
+            console.error('[DSA Take] WebSocket error:', error);
+          };
+
+          ws.onclose = () => {
+            console.log('[DSA Take] WebSocket closed');
+          };
+        }
+      })
+      .catch((error) => {
+        console.error('[DSA Take] Failed to register Live Proctoring session:', error);
+      });
+    
+    console.log('[DSA Take] ⏸️ Live Proctoring ready, waiting for admin to connect...');
+
+    // Cleanup WebSocket on unmount
+    return () => {
+      if (ws) {
+        ws.close();
+      }
+    };
+  }, [liveProctoringEnabled, liveProctorScreenStream, test, questions.length, assessmentIdStr, candidateIdStr, startLiveProctoring]);
 
   // Stop proctoring when assessment ends
   useEffect(() => {
@@ -2002,14 +2079,16 @@ export default function TestTakePage() {
           candidateName={candidateName || undefined}
           isLoading={false}
         />
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {aiProctoringEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -2073,14 +2152,16 @@ export default function TestTakePage() {
             )}
           </div>
         </div>
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {aiProctoringEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -2095,14 +2176,16 @@ export default function TestTakePage() {
             <p className="text-slate-400">Loading questions...</p>
           </div>
         </div>
-        {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={requestFullscreenLock}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {aiProctoringEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={requestFullscreenLock}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -2248,14 +2331,16 @@ export default function TestTakePage() {
           )}
         </div>
       </div>
-      {/* Fullscreen Lock Overlay - MUST be present on ALL returns */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="You must be in fullscreen mode to continue the test."
-        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-      />
+      {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+      {aiProctoringEnabled && (
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the test."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      )}
     </>
     )
   }
@@ -2426,14 +2511,16 @@ export default function TestTakePage() {
         </Split>
       </div>
 
-      {/* Fullscreen Lock Overlay - Blocks ALL interaction when not in fullscreen */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="You must be in fullscreen mode to continue the test. All your progress is saved."
-        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-      />
+      {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+      {aiProctoringEnabled && (
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the test. All your progress is saved."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      )}
     </div>
   )
 }

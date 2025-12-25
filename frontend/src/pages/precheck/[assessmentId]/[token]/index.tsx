@@ -449,6 +449,12 @@ export default function PrecheckPage() {
           if (passed && canvasRef.current && !capturedPhoto) {
             const photo = canvasRef.current.toDataURL("image/jpeg", 0.8);
             setCapturedPhoto(photo);
+            
+            // ✅ PHASE 1: Store camera stream globally (NEVER stop tracks)
+            if (typeof window !== 'undefined' && stream.active) {
+              (window as any).__cameraStream = stream;
+              console.log('[Precheck] ✅ Camera stream stored in window.__cameraStream');
+            }
           }
           
           return;

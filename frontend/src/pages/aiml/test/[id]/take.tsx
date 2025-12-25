@@ -59,6 +59,83 @@ export default function AIMLTestTakePage() {
   
   const [token, setToken] = useState<string | null>(null)
   const [userId, setUserId] = useState<string | null>(null)
+  
+    // ========================
+    // LIVE PROCTORING: Candidate WS connect (Lazy WebRTC)
+    // ========================
+    useEffect(() => {
+      // TODO: Replace with actual live proctoring enable check if needed
+      const liveProctoringEnabled = true; // Set to true if live proctoring is enabled for AIML tests
+      const candidateIdStr = userId || "";
+      const assessmentIdStr = testId || "";
+      if (!liveProctoringEnabled || !candidateIdStr || !assessmentIdStr) return;
+
+      // Guard: Ensure start-session is called only once per candidate per test
+      if (startSessionCalledRef.current) {
+        console.log('[AIML Take] ⏭️ start-session already called, skipping to prevent duplicate sessions');
+        return;
+      }
+
+      // Mark as called immediately to prevent race conditions
+      startSessionCalledRef.current = true;
+
+      let ws: WebSocket | null = null;
+      let sessionId: string | null = null;
+
+      // Register live session (backend sets status to "candidate_initiated")
+      console.log('[AIML Take] 📝 Registering Live Proctoring session...');
+      fetch('/api/v1/proctor/live/start-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assessmentId: assessmentIdStr,
+          candidateId: candidateIdStr,
+        }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success && data.data?.sessionId) {
+            sessionId = data.data.sessionId;
+            console.log(`[AIML Take] ✅ Session registered: ${sessionId}`);
+
+            // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
+            const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
+            const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, candidateIdStr);
+            console.log('[AIML Take] Candidate WS connecting...', wsUrl);
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+              console.log('[AIML Take] Candidate WS connected');
+            };
+
+            ws.onmessage = (event) => {
+              const message = JSON.parse(event.data);
+              if (message.type === 'ADMIN_CONNECTED') {
+                console.log('[AIML Take] ADMIN_CONNECTED received');
+                // Do NOT start WebRTC here (Lazy WebRTC)
+              }
+            };
+
+            ws.onerror = (error) => {
+              console.error('[AIML Take] WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+              console.log('[AIML Take] WebSocket closed');
+            };
+          }
+        })
+        .catch((error) => {
+          console.error('[AIML Take] Failed to register Live Proctoring session:', error);
+        });
+
+      // Cleanup WebSocket on unmount
+      return () => {
+        if (ws) {
+          ws.close();
+        }
+      };
+    }, [userId, testId]);
   const [test, setTest] = useState<Test | null>(null)
   const [questions, setQuestions] = useState<Question[]>([])
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
@@ -81,6 +158,7 @@ export default function AIMLTestTakePage() {
   const thumbVideoRef = useRef<HTMLVideoElement>(null)
   const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null)
   const liveProctoringStartedRef = useRef(false)
+  const startSessionCalledRef = useRef(false) // Guard: prevent multiple start-session calls
 
   const getViolationMessage = (eventType: string): string => {
     const messages: Record<string, string> = {
@@ -121,13 +199,13 @@ export default function AIMLTestTakePage() {
       timestamp: violation.timestamp,
     })
 
-    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
-    if (violation.eventType === 'FULLSCREEN_EXIT') {
+    // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay (only when AI Proctoring enabled)
+    if (violation.eventType === 'FULLSCREEN_EXIT' && cameraProctorEnabled) {
       console.log('[AIML Take] FULLSCREEN_EXIT violation - locking screen');
       setFullscreenLocked(true);
       incrementFullscreenExitCount();
     }
-  }, [setFullscreenLocked, incrementFullscreenExitCount])
+  }, [setFullscreenLocked, incrementFullscreenExitCount, cameraProctorEnabled])
 
   // Handle fullscreen re-entry - unlock the screen
   const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
@@ -239,34 +317,29 @@ export default function AIMLTestTakePage() {
     }
   }, [questions.length, isProctoringRunning, submitted, testId, candidateEmail, userId, cameraProctorEnabled, proctoringSettings?.liveProctoringEnabled, startUniversalProctoring])
 
-  // Start Live Proctoring (separate from AI proctoring)
-  useEffect(() => {
+  // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
+  const startLiveProctoring = useCallback(() => {
+    if (liveProctoringStartedRef.current) {
+      console.log('[AIML Take] Live Proctoring already started')
+      return
+    }
+
     const localAssessmentIdStr = String(testId || '')
-    // Resolve userId with priority: URL param > email > anonymous
     const localCandidateIdStr = resolveUserIdForProctoring(null, {
       urlParam: userId as string,
       email: candidateEmail,
     })
-    const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
 
-    if (!liveProctoringEnabled || !liveProctorScreenStream || liveProctoringStartedRef.current) {
-      return
-    }
-
-    // Only start when test has started and not submitted
-    if (timeRemaining <= 0 || submitted) {
-      return
-    }
-
-    console.log('[AIML Take] Starting Live Proctoring service...')
+    console.log('[AIML Take] 🚀 Admin connected! Starting WebRTC...')
     liveProctoringStartedRef.current = true
 
-    // Create and start the live proctoring service
     const liveService = new CandidateLiveService({
       assessmentId: localAssessmentIdStr,
       candidateId: localCandidateIdStr,
       debugMode: debugMode,
     })
+
+    const existingWebcamStream = thumbVideoRef.current?.srcObject as MediaStream | null
 
     liveService.start(
       {
@@ -277,17 +350,100 @@ export default function AIMLTestTakePage() {
           console.error('[AIML Take] Live Proctoring error:', error)
         },
       },
-      liveProctorScreenStream
+      liveProctorScreenStream,
+      existingWebcamStream
     ).then((success) => {
       if (success) {
-        console.log('[AIML Take] ✅ Live Proctoring started')
+        console.log('[AIML Take] ✅ Live Proctoring WebRTC connected')
         liveProctoringServiceRef.current = liveService
       } else {
         console.error('[AIML Take] ❌ Failed to start Live Proctoring')
         liveProctoringStartedRef.current = false
       }
     })
-  }, [proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, timeRemaining, submitted, testId, candidateEmail, userId, debugMode])
+  }, [testId, userId, candidateEmail, debugMode, liveProctorScreenStream])
+
+  // ✅ PHASE 2: Lazy WebRTC - Register session and wait for admin signal
+  useEffect(() => {
+    const localAssessmentIdStr = String(testId || '')
+    const localCandidateIdStr = resolveUserIdForProctoring(null, {
+      urlParam: userId as string,
+      email: candidateEmail,
+    })
+    const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
+
+    if (!liveProctoringEnabled || !liveProctorScreenStream || timeRemaining <= 0 || submitted) {
+      return
+    }
+
+    // Guard: Ensure start-session is called only once per candidate per test
+    if (startSessionCalledRef.current) {
+      console.log('[AIML Take] ⏭️ start-session already called, skipping to prevent duplicate sessions')
+      return
+    }
+
+    // Mark as called immediately to prevent race conditions
+    startSessionCalledRef.current = true
+
+    let ws: WebSocket | null = null;
+    let sessionId: string | null = null;
+
+    // Register live session (backend sets status to "candidate_initiated")
+    console.log('[AIML Take] 📝 Registering Live Proctoring session...')
+    
+    // Phase 2.2: Register session with backend
+    fetch('/api/v1/proctor/live/start-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assessmentId: localAssessmentIdStr,
+        candidateId: localCandidateIdStr,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.data?.sessionId) {
+          sessionId = data.data.sessionId;
+          console.log(`[AIML Take] ✅ Session registered: ${sessionId}`);
+
+          // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
+          const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${localCandidateIdStr}`;
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = () => {
+            console.log('[AIML Take] ✅ WebSocket connected, waiting for admin...');
+          };
+
+          ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            if (message.type === 'ADMIN_CONNECTED') {
+              console.log('[AIML Take] 🚀 ADMIN_CONNECTED signal received!');
+              startLiveProctoring();
+            }
+          };
+
+          ws.onerror = (error) => {
+            console.error('[AIML Take] WebSocket error:', error);
+          };
+
+          ws.onclose = () => {
+            console.log('[AIML Take] WebSocket closed');
+          };
+        }
+      })
+      .catch((error) => {
+        console.error('[AIML Take] Failed to register Live Proctoring session:', error);
+      });
+    
+    console.log('[AIML Take] ⏸️ Live Proctoring ready, waiting for admin to connect...')
+
+    // Cleanup WebSocket on unmount
+    return () => {
+      if (ws) {
+        ws.close();
+      }
+    };
+  }, [proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, timeRemaining, submitted, testId, candidateEmail, userId, startLiveProctoring])
 
   // Stop proctoring when test is submitted
   useEffect(() => {
@@ -529,13 +685,16 @@ export default function AIMLTestTakePage() {
             <p className="text-gray-600">Loading test...</p>
           </div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -578,13 +737,16 @@ export default function AIMLTestTakePage() {
             <p className="text-sm">Please check the link and try again.</p>
           </div>
         </div>
-        <FullscreenLockOverlay
-          isLocked={isFullscreenLocked}
-          onRequestFullscreen={handleRequestFullscreen}
-          exitCount={fullscreenExitCount}
-          message="You must be in fullscreen mode to continue the test."
-          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-        />
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
       </>
     )
   }
@@ -694,14 +856,16 @@ export default function AIMLTestTakePage() {
         )}
       </main>
 
-      {/* Fullscreen Lock Overlay - Blocks ALL interaction when not in fullscreen */}
-      <FullscreenLockOverlay
-        isLocked={isFullscreenLocked}
-        onRequestFullscreen={handleRequestFullscreen}
-        exitCount={fullscreenExitCount}
-        message="You must be in fullscreen mode to continue the test. All your progress is saved."
-        warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
-      />
+      {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+      {cameraProctorEnabled && (
+        <FullscreenLockOverlay
+          isLocked={isFullscreenLocked}
+          onRequestFullscreen={handleRequestFullscreen}
+          exitCount={fullscreenExitCount}
+          message="You must be in fullscreen mode to continue the test. All your progress is saved."
+          warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+        />
+      )}
     </div>
   )
 }

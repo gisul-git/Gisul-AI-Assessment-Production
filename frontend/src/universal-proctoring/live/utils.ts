@@ -207,13 +207,20 @@ export function addStreamTracks(
  * @returns Promise<MediaStream>
  */
 export async function getWebcamStream(): Promise<MediaStream> {
-  return navigator.mediaDevices.getUserMedia({
-    video: {
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-    },
-    audio: false,
-  });
+  // ✅ PHASE 1: Always reuse pre-check camera
+  const existingStream =
+    typeof window !== 'undefined' ? (window as any).__cameraStream : null;
+
+  if (existingStream?.active && existingStream.getVideoTracks().length > 0) {
+    console.log('[Live Utils] ✅ Reusing camera from pre-check');
+    return existingStream;
+  }
+
+  // ❌ NEVER request permissions again
+  const error =
+    'No camera stream available. Camera must be initialized during pre-check.';
+  console.error('[Live Utils] ❌', error);
+  throw new Error(error);
 }
 
 /**
