@@ -29,6 +29,8 @@ export default function IdentityVerificationPage() {
   const [showStartTimeModal, setShowStartTimeModal] = useState(false);
   const [testStartTime, setTestStartTime] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
+  const [timeUntilStart, setTimeUntilStart] = useState<number>(0);
+  const [error, setError] = useState<string | null>(null);
   
   useEffect(() => {
     // Wait for router to be ready before accessing query params
@@ -299,10 +301,55 @@ export default function IdentityVerificationPage() {
       const flowType = ctx?.flowType || "ai"; // Default to "ai" if not set
       const isDSATest = flowType === "dsa";
       const isAIMLTest = flowType === "aiml";
-      const isAIAssessment = flowType === "ai" || !flowType;
+      const isCustomMCQ = flowType === "custom-mcq";
+      const isAIAssessment = flowType === "ai" || (!flowType && !isCustomMCQ);
       
       let startTimeStr: string | null = null;
       let testHasStarted = false;
+      
+      // For Custom MCQ assessments, check schedule similar to AI assessments
+      if (isCustomMCQ) {
+        // For Custom MCQ assessments, fetch assessment details to check schedule
+        try {
+          const apiBase = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1`;
+          const assessmentResponse = await fetch(`${apiBase}/custom-mcq/take/${id}?token=${encodeURIComponent(token as string)}`);
+          if (assessmentResponse.ok) {
+            const assessmentData = await assessmentResponse.json();
+            if (assessmentData.success && assessmentData.data?.schedule?.startTime) {
+              startTimeStr = assessmentData.data.schedule.startTime;
+              
+              // Normalize timezone
+              if (startTimeStr) {
+                let startTime: Date;
+                if (startTimeStr.endsWith('Z') || startTimeStr.includes('+') || startTimeStr.includes('-', 10)) {
+                  startTime = new Date(startTimeStr);
+                } else {
+                  startTime = new Date(startTimeStr + 'Z');
+                }
+                
+                const now = new Date();
+                
+                if (now < startTime) {
+                  console.log(`[Identity] Custom MCQ assessment not started yet. Current: ${now.toISOString()}, Start: ${startTime.toISOString()}`);
+                  setTestStartTime(startTimeStr);
+                  setShowStartTimeModal(true);
+                  setIsStarting(false);
+                  return;
+                } else {
+                  testHasStarted = true;
+                }
+              } else {
+                testHasStarted = true;
+              }
+            } else {
+              testHasStarted = true;
+            }
+          }
+        } catch (err) {
+          console.error("[Identity] Error fetching Custom MCQ assessment schedule:", err);
+          // Proceed if schedule check fails
+        }
+      }
       
       // For DSA and AIML tests, check start time via test endpoints
       if (isDSATest || isAIMLTest) {
@@ -370,6 +417,8 @@ export default function IdentityVerificationPage() {
             const scheduleData = await scheduleResponse.json();
             if (scheduleData.success && scheduleData.data?.schedule?.startTime) {
               startTimeStr = scheduleData.data.schedule.startTime;
+              const examMode = scheduleData.data.schedule?.examMode || scheduleData.data?.examMode || "strict";
+              const accessTimeBeforeStart = scheduleData.data?.accessTimeBeforeStart || scheduleData.data.schedule?.accessTimeBeforeStart || 15;
               
               // Normalize timezone
               if (!startTimeStr) {
@@ -386,13 +435,38 @@ export default function IdentityVerificationPage() {
               
               const now = new Date();
               
-              if (now < startTime) {
-                console.log(`[Identity] Assessment not started yet. Current: ${now.toISOString()}, Start: ${startTime.toISOString()}`);
-                setTestStartTime(startTimeStr);
-                setShowStartTimeModal(true);
-                setIsStarting(false);
-                return;
+              // For strict mode, check if assessment has started
+              if (examMode === "strict") {
+                if (now < startTime) {
+                  // Assessment hasn't started yet - show waiting modal
+                  console.log(`[Identity] Assessment not started yet. Current: ${now.toISOString()}, Start: ${startTime.toISOString()}, Time diff: ${(startTime.getTime() - now.getTime()) / 1000} seconds`);
+                  setTestStartTime(startTimeStr);
+                  setShowStartTimeModal(true);
+                  setIsStarting(false);
+                  return; // CRITICAL: Don't proceed to navigation
+                } else {
+                  testHasStarted = true;
+                  console.log(`[Identity] Assessment has started. Current: ${now.toISOString()}, Start: ${startTime.toISOString()}`);
+                }
               } else {
+                // Flexible mode - allow to start (but still check window)
+                const endTimeStr = scheduleData.data?.schedule?.endTime || scheduleData.data?.endTime;
+                if (endTimeStr) {
+                  let endTime: Date;
+                  if (endTimeStr.endsWith('Z') || endTimeStr.includes('+') || endTimeStr.includes('-', 10)) {
+                    endTime = new Date(endTimeStr);
+                  } else {
+                    endTime = new Date(endTimeStr + 'Z');
+                  }
+                  
+                  if (now > endTime) {
+                    // Window has closed
+                    console.log(`[Identity] Flexible window has closed. Current: ${now.toISOString()}, End: ${endTime.toISOString()}`);
+                    setError("The assessment window has closed. You cannot start the assessment now.");
+                    setIsStarting(false);
+                    return;
+                  }
+                }
                 testHasStarted = true;
               }
             } else {
@@ -408,7 +482,7 @@ export default function IdentityVerificationPage() {
       // Try to start the test/assessment - backend will also validate start time
       let response: Response | null = null;
       
-      if (isAIAssessment) {
+      if (isAIAssessment || isCustomMCQ) {
         // For AI assessments, attempt to call start-session (optional - may not exist)
         // If it fails, we'll proceed anyway since attempt is created when fetching questions
         try {
@@ -436,7 +510,7 @@ export default function IdentityVerificationPage() {
           console.warn("[Identity] Start-session endpoint not available, proceeding to assessment:", err);
           response = null; // Treat as success - we'll proceed
         }
-      } else {
+      } else if (isDSATest || isAIMLTest) {
         // Use DSA or AIML test start endpoint
         const apiBase = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1`;
         const startEndpoint = isDSATest ? `/dsa/tests/${id}/start?user_id=${userId}` : `/aiml/tests/${id}/start?user_id=${userId}`;
@@ -485,6 +559,9 @@ export default function IdentityVerificationPage() {
           setIsStarting(false); // Reset loading state
           return;
         }
+      } else if (isCustomMCQ) {
+        // Custom MCQ assessments don't have a start endpoint - just proceed to navigation
+        response = null; // No start endpoint call needed
       }
       
       // Test/Assessment can start - proceed with navigation
@@ -507,6 +584,44 @@ export default function IdentityVerificationPage() {
   };
   
   const allStepsPassed = steps.every(step => step.status === "passed");
+  
+  // Countdown timer for start time modal
+  useEffect(() => {
+    if (!showStartTimeModal || !testStartTime) return;
+    
+    const updateTimer = () => {
+      try {
+        let startTime: Date;
+        if (testStartTime.includes('Z') || testStartTime.includes('+') || testStartTime.includes('-', 10)) {
+          startTime = new Date(testStartTime);
+        } else {
+          startTime = new Date(testStartTime + 'Z');
+        }
+        
+        const remaining = Math.max(0, Math.floor((startTime.getTime() - new Date().getTime()) / 1000));
+        setTimeUntilStart(remaining);
+        
+        if (remaining <= 0) {
+          // Start time arrived - reload page to start assessment
+          window.location.reload();
+        }
+      } catch (err) {
+        console.error("[Identity] Error updating timer:", err);
+      }
+    };
+    
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    
+    return () => clearInterval(interval);
+  }, [showStartTimeModal, testStartTime]);
+  
+  // Format time helper
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
   
   // Add spinner animation style
   useEffect(() => {
@@ -841,7 +956,10 @@ export default function IdentityVerificationPage() {
             justifyContent: "center",
             zIndex: 1000,
           }}
-          onClick={() => setShowStartTimeModal(false)}
+            onClick={(e) => {
+              // Prevent closing by clicking outside - user must wait
+              e.stopPropagation();
+            }}
         >
           <div
             style={{
@@ -890,34 +1008,57 @@ export default function IdentityVerificationPage() {
                   marginBottom: "1rem",
                 }}
               >
-                Test Not Started Yet
+                Assessment Will Start Soon
               </h2>
               
               <p
                 style={{
                   fontSize: "1rem",
                   color: "#64748b",
-                  marginBottom: "1.5rem",
+                  marginBottom: "1rem",
                   lineHeight: "1.6",
                 }}
               >
                 {testStartTime
-                  ? `The test will start at ${new Date(testStartTime).toLocaleString(undefined, {
+                  ? `The assessment will start at ${new Date(testStartTime).toLocaleString(undefined, {
                       year: "numeric",
                       month: "long",
                       day: "numeric",
                       hour: "2-digit",
                       minute: "2-digit",
                       hour12: true,
-                    })}. Please wait until the start time.`
-                  : "The test has not started yet. Please wait until the scheduled start time."}
+                    })}.`
+                  : "The assessment has not started yet. Please wait until the scheduled start time."}
               </p>
               
+              {testStartTime && timeUntilStart > 0 && (
+                <>
+                  <div style={{
+                    fontSize: "1.25rem",
+                    color: "#1e293b",
+                    marginBottom: "0.5rem",
+                  }}>
+                    Time remaining:
+                  </div>
+                  <div style={{
+                    fontSize: "2rem",
+                    color: "#3b82f6",
+                    fontWeight: 700,
+                    marginBottom: "1.5rem",
+                  }}>
+                    {formatTime(timeUntilStart)}
+                  </div>
+                </>
+              )}
+              
               <button
-                onClick={() => setShowStartTimeModal(false)}
+                onClick={() => {
+                  // Reload the page to check if start time has arrived
+                  window.location.reload();
+                }}
                 style={{
                   padding: "0.75rem 2rem",
-                  backgroundColor: "#10b981",
+                  backgroundColor: "#6953a3",
                   color: "#ffffff",
                   border: "none",
                   borderRadius: "0.5rem",

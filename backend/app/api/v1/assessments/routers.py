@@ -2023,38 +2023,70 @@ async def update_schedule_and_candidates(
     # such as candidateRequirements and proctoringSettings.
     existing_schedule = assessment.get("schedule") or {}
     schedule = existing_schedule.copy()
-    schedule.update(
-        {
-            "startTime": payload.get("startTime"),
-            "endTime": payload.get("endTime"),
-            "timezone": "Asia/Kolkata",  # IST
-        }
-    )
+    
+    # Update schedule with new timer fields (Custom-MCQ style)
+    schedule_update = {
+        "timezone": "Asia/Kolkata",  # IST
+    }
+    
+    # Add startTime (required for both modes)
+    if payload.get("startTime"):
+        schedule_update["startTime"] = payload.get("startTime")
+    
+    # Add endTime (only for flexible mode)
+    if payload.get("endTime"):
+        schedule_update["endTime"] = payload.get("endTime")
+    
+    # Add examMode (strict or flexible)
+    if payload.get("examMode"):
+        schedule_update["examMode"] = payload.get("examMode")
+        assessment["examMode"] = payload.get("examMode")
+    
+    # Add duration (required, in minutes)
+    if payload.get("duration"):
+        schedule_update["duration"] = payload.get("duration")
+        assessment["duration"] = payload.get("duration")
+    
+    # Add accessTimeBeforeStart (only for strict mode)
+    if payload.get("accessTimeBeforeStart") is not None:
+        # Ensure it's stored as an integer
+        access_time_value = payload.get("accessTimeBeforeStart")
+        try:
+            access_time_value = int(access_time_value)  # Convert to integer
+            schedule_update["accessTimeBeforeStart"] = access_time_value
+            assessment["accessTimeBeforeStart"] = access_time_value
+        except (ValueError, TypeError):
+            # If conversion fails, use default or log error
+            logger.warning(f"Invalid accessTimeBeforeStart value: {payload.get('accessTimeBeforeStart')}, using default 15")
+            schedule_update["accessTimeBeforeStart"] = 15
+            assessment["accessTimeBeforeStart"] = 15
+    
+    schedule.update(schedule_update)
     assessment["schedule"] = schedule
     
-    # Store timer mode information
-    timer_mode = payload.get("timerMode")
-    if timer_mode == "section":
-        assessment["timerMode"] = "section"
-        assessment["sectionTotalTime"] = payload.get("sectionTotalTime")
-        assessment["scheduledWindowTime"] = payload.get("scheduledWindowTime")
-    elif timer_mode == "scheduleOnly":
-        assessment["timerMode"] = "scheduleOnly"
-        assessment["examDuration"] = payload.get("examDuration")
-    # If timerMode is not provided, keep existing or default to scheduleOnly for backward compatibility
-    elif "timerMode" not in assessment:
-        assessment["timerMode"] = "scheduleOnly"
-        try:
-            # Parse ISO format datetime strings
-            start_time_str = payload.get("startTime", "").replace("Z", "+00:00")
-            end_time_str = payload.get("endTime", "").replace("Z", "+00:00")
-            start_dt = datetime.fromisoformat(start_time_str)
-            end_dt = datetime.fromisoformat(end_time_str)
-            scheduled_window = (end_dt - start_dt).total_seconds() / 60
-            assessment["examDuration"] = scheduled_window
-        except (ValueError, AttributeError, TypeError):
-            # If parsing fails, don't set examDuration
-            logger.warning(f"Failed to parse datetime strings for examDuration calculation: startTime={payload.get('startTime')}, endTime={payload.get('endTime')}")
+    # Save per-section timer settings if provided
+    if payload.get("enablePerSectionTimers"):
+        assessment["enablePerSectionTimers"] = True
+        if payload.get("sectionTimers"):
+            assessment["sectionTimers"] = payload.get("sectionTimers")
+    else:
+        # If explicitly disabled, remove the fields
+        if "enablePerSectionTimers" in assessment:
+            del assessment["enablePerSectionTimers"]
+        if "sectionTimers" in assessment:
+            del assessment["sectionTimers"]
+    
+    # Remove old timer mode fields if they exist
+    if "timerMode" in assessment:
+        del assessment["timerMode"]
+    if "sectionTotalTime" in assessment:
+        del assessment["sectionTotalTime"]
+    if "scheduledWindowTime" in assessment:
+        del assessment["scheduledWindowTime"]
+    if "examDuration" in assessment:
+        del assessment["examDuration"]
+    if "questionTypeTimes" in assessment:
+        del assessment["questionTypeTimes"]
 
     # Update candidates - NORMALIZE EMAIL AND NAME
     candidates = payload.get("candidates", [])
@@ -2742,14 +2774,12 @@ async def get_answer_logs(
                     if question and isinstance(question, dict):
                         all_questions.append(question)
 
-        # Get AI evaluation results and submitted answers from candidate responses
+        # Get submitted answers from candidate responses
         candidate_responses = assessment.get("candidateResponses", {})
-        ai_evaluation = {}
         submitted_answers = {}  # {questionIndex: answer}
         if isinstance(candidate_responses, dict):
             candidate_response = candidate_responses.get(candidate_key, {})
             if isinstance(candidate_response, dict):
-                ai_evaluation = candidate_response.get("aiEvaluation", {})
                 # Get submitted answers
                 answers_list = candidate_response.get("answers", [])
                 if isinstance(answers_list, list):
@@ -2788,14 +2818,6 @@ async def get_answer_logs(
                                 "version": int(version),
                             })
                     
-                    # Get AI evaluation for this question
-                    question_ai_eval = ai_evaluation.get(str(question_index)) or ai_evaluation.get(question_index)
-                    ai_score = None
-                    ai_feedback = None
-                    if question_ai_eval and isinstance(question_ai_eval, dict):
-                        ai_score = question_ai_eval.get("score")
-                        ai_feedback = question_ai_eval.get("feedback")
-                    
                     # For MCQ questions, check if answer is correct
                     is_mcq_correct = None
                     if question.get("type") == "MCQ":
@@ -2811,8 +2833,6 @@ async def get_answer_logs(
                         "questionText": str(question.get("questionText", "")),
                         "questionType": str(question.get("type", "")),
                         "logs": serialized_logs,  # Already in order (version 1, 2, 3, etc.)
-                        "aiScore": ai_score,  # AI evaluated score (for last version)
-                        "aiFeedback": ai_feedback,
                         "maxScore": question.get("score", 5),
                         "isMcqCorrect": is_mcq_correct,  # For MCQ: True/False, for others: None
                         "correctAnswer": question.get("correctAnswer") if question.get("type") == "MCQ" else None,
@@ -2863,14 +2883,6 @@ async def get_answer_logs(
                             "version": 1,
                         })
                     
-                    # Get AI evaluation for this question
-                    question_ai_eval = ai_evaluation.get(str(idx)) or ai_evaluation.get(idx)
-                    ai_score = None
-                    ai_feedback = None
-                    if question_ai_eval and isinstance(question_ai_eval, dict):
-                        ai_score = question_ai_eval.get("score")
-                        ai_feedback = question_ai_eval.get("feedback")
-                    
                     # For MCQ questions, check if answer is correct
                     is_mcq_correct = None
                     if is_mcq:
@@ -2885,8 +2897,6 @@ async def get_answer_logs(
                         "questionText": str(question.get("questionText", "")),
                         "questionType": str(question.get("type", "")),
                         "logs": serialized_logs,
-                        "aiScore": ai_score,
-                        "aiFeedback": ai_feedback,
                         "maxScore": question.get("score", 5),
                         "isMcqCorrect": is_mcq_correct,
                         "correctAnswer": question.get("correctAnswer") if is_mcq else None,
@@ -2943,10 +2953,6 @@ async def get_candidate_results(
                         email = email or parts[0]
                         name = name or parts[1].replace("_", " ").title()
                 
-                # Get evaluation results if available
-                evaluation = response.get("evaluation", {})
-                evaluation_results = evaluation.get("evaluation_results", {}) if evaluation else {}
-                
                 # Safely extract all fields with defaults
                 result_item = {
                     "email": email,
@@ -2958,14 +2964,6 @@ async def get_candidate_results(
                     "correctAnswers": response.get("correctAnswers", 0),
                     "submittedAt": response.get("submittedAt") or response.get("answers", {}).get("submittedAt"),
                     "startedAt": response.get("startedAt"),
-                    # AI evaluation data
-                    "aiScore": response.get("aiScore", 0),
-                    "percentageScored": response.get("percentageScored", 0),
-                    "passPercentage": response.get("passPercentage"),
-                    "passed": response.get("passed", False),
-                    # Include evaluation results for detailed view
-                    "evaluation": evaluation if evaluation else None,
-                    "evaluationResults": evaluation_results,
                 }
                 results.append(result_item)
         
@@ -4110,14 +4108,12 @@ async def classify_technical_topic_endpoint(
                     if question and isinstance(question, dict):
                         all_questions.append(question)
 
-        # Get AI evaluation results and submitted answers from candidate responses
+        # Get submitted answers from candidate responses
         candidate_responses = assessment.get("candidateResponses", {})
-        ai_evaluation = {}
         submitted_answers = {}  # {questionIndex: answer}
         if isinstance(candidate_responses, dict):
             candidate_response = candidate_responses.get(candidate_key, {})
             if isinstance(candidate_response, dict):
-                ai_evaluation = candidate_response.get("aiEvaluation", {})
                 # Get submitted answers
                 answers_list = candidate_response.get("answers", [])
                 if isinstance(answers_list, list):
@@ -4156,14 +4152,6 @@ async def classify_technical_topic_endpoint(
                                 "version": int(version),
                             })
                     
-                    # Get AI evaluation for this question
-                    question_ai_eval = ai_evaluation.get(str(question_index)) or ai_evaluation.get(question_index)
-                    ai_score = None
-                    ai_feedback = None
-                    if question_ai_eval and isinstance(question_ai_eval, dict):
-                        ai_score = question_ai_eval.get("score")
-                        ai_feedback = question_ai_eval.get("feedback")
-                    
                     # For MCQ questions, check if answer is correct
                     is_mcq_correct = None
                     if question.get("type") == "MCQ":
@@ -4179,8 +4167,6 @@ async def classify_technical_topic_endpoint(
                         "questionText": str(question.get("questionText", "")),
                         "questionType": str(question.get("type", "")),
                         "logs": serialized_logs,  # Already in order (version 1, 2, 3, etc.)
-                        "aiScore": ai_score,  # AI evaluated score (for last version)
-                        "aiFeedback": ai_feedback,
                         "maxScore": question.get("score", 5),
                         "isMcqCorrect": is_mcq_correct,  # For MCQ: True/False, for others: None
                         "correctAnswer": question.get("correctAnswer") if question.get("type") == "MCQ" else None,
@@ -4231,14 +4217,6 @@ async def classify_technical_topic_endpoint(
                             "version": 1,
                         })
                     
-                    # Get AI evaluation for this question
-                    question_ai_eval = ai_evaluation.get(str(idx)) or ai_evaluation.get(idx)
-                    ai_score = None
-                    ai_feedback = None
-                    if question_ai_eval and isinstance(question_ai_eval, dict):
-                        ai_score = question_ai_eval.get("score")
-                        ai_feedback = question_ai_eval.get("feedback")
-                    
                     # For MCQ questions, check if answer is correct
                     is_mcq_correct = None
                     if is_mcq:
@@ -4253,8 +4231,6 @@ async def classify_technical_topic_endpoint(
                         "questionText": str(question.get("questionText", "")),
                         "questionType": str(question.get("type", "")),
                         "logs": serialized_logs,
-                        "aiScore": ai_score,
-                        "aiFeedback": ai_feedback,
                         "maxScore": question.get("score", 5),
                         "isMcqCorrect": is_mcq_correct,
                         "correctAnswer": question.get("correctAnswer") if is_mcq else None,
@@ -4311,10 +4287,6 @@ async def get_candidate_results(
                         email = email or parts[0]
                         name = name or parts[1].replace("_", " ").title()
                 
-                # Get evaluation results if available
-                evaluation = response.get("evaluation", {})
-                evaluation_results = evaluation.get("evaluation_results", {}) if evaluation else {}
-                
                 # Safely extract all fields with defaults
                 result_item = {
                     "email": email,
@@ -4326,14 +4298,6 @@ async def get_candidate_results(
                     "correctAnswers": response.get("correctAnswers", 0),
                     "submittedAt": response.get("submittedAt") or response.get("answers", {}).get("submittedAt"),
                     "startedAt": response.get("startedAt"),
-                    # AI evaluation data
-                    "aiScore": response.get("aiScore", 0),
-                    "percentageScored": response.get("percentageScored", 0),
-                    "passPercentage": response.get("passPercentage"),
-                    "passed": response.get("passed", False),
-                    # Include evaluation results for detailed view
-                    "evaluation": evaluation if evaluation else None,
-                    "evaluationResults": evaluation_results,
                 }
                 results.append(result_item)
         

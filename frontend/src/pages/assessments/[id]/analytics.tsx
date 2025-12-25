@@ -23,8 +23,6 @@ interface QuestionLog {
   questionText: string
   questionType: string
   logs: AnswerLog[]
-  aiScore?: number
-  aiFeedback?: string
   maxScore?: number
   isMcqCorrect?: boolean
   correctAnswer?: string
@@ -40,7 +38,6 @@ interface Candidate {
   notAttempted?: number
   correctAnswers?: number
   submittedAt?: string | null
-  aiScore?: number
   percentageScored?: number
   passPercentage?: number
   passed?: boolean
@@ -372,7 +369,7 @@ export default function AnalyticsPage() {
   const submittedCount = submittedCandidates.length
   
   const avgScore = submittedCount > 0 
-    ? submittedCandidates.reduce((sum, c) => sum + (c?.aiScore !== undefined ? c.aiScore : (c?.score || 0)), 0) / submittedCount 
+    ? submittedCandidates.reduce((sum, c) => sum + (c?.score || 0), 0) / submittedCount 
     : 0
   const avgPercentage = submittedCount > 0
     ? submittedCandidates.reduce((sum, c) => sum + (c?.percentageScored !== undefined ? c.percentageScored : ((c?.maxScore && c?.maxScore > 0) ? ((c?.score || 0) / (c?.maxScore || 1)) * 100 : 0)), 0) / submittedCount
@@ -380,7 +377,7 @@ export default function AnalyticsPage() {
   const passedCount = submittedCandidates.filter(c => c?.passed === true).length
   const failedCount = submittedCandidates.filter(c => c?.passed === false).length
   const totalMaxScore = submittedCandidates.length > 0 ? (submittedCandidates[0]?.maxScore || 0) : 0
-  const totalScore = submittedCandidates.reduce((sum, c) => sum + (c?.aiScore !== undefined ? c.aiScore : (c?.score || 0)), 0)
+  const totalScore = submittedCandidates.reduce((sum, c) => sum + (c?.score || 0), 0)
   const avgAttempted = submittedCount > 0
     ? submittedCandidates.reduce((sum, c) => sum + (c?.attempted || 0), 0) / submittedCount
     : 0
@@ -691,7 +688,7 @@ export default function AnalyticsPage() {
                       </div>
                       {(candidate.submittedAt || candidate.completedAt) && (
                         <div style={{ fontSize: "0.75rem", color: "#10b981", marginTop: "0.25rem", fontWeight: 600 }}>
-                          Score: {candidate.aiScore !== undefined ? candidate.aiScore : (candidate.score || 0)} / {candidate.maxScore || 0}
+                          Score: {candidate.score || 0} / {candidate.maxScore || 0}
                         </div>
                       )}
                     </button>
@@ -880,7 +877,7 @@ export default function AnalyticsPage() {
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem" }}>{candidate.name}</td>
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem", color: "#64748b" }}>{candidate.email}</td>
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem", fontWeight: 600 }}>
-                                {candidate.aiScore !== undefined ? candidate.aiScore : (candidate.score || 0)} / {candidate.maxScore || 0}
+                                {candidate.score || 0} / {candidate.maxScore || 0}
                               </td>
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem", fontWeight: 600 }}>
                                 {candidate.percentageScored !== undefined 
@@ -1003,7 +1000,7 @@ export default function AnalyticsPage() {
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b" }}>Total Score</div>
                       <div style={{ fontSize: "1.5rem", fontWeight: 700 }}>
-                        {selectedCandidateData.aiScore !== undefined ? selectedCandidateData.aiScore : (selectedCandidateData.score || 0)} / {selectedCandidateData.maxScore || 0}
+                        {selectedCandidateData.score || 0} / {selectedCandidateData.maxScore || 0}
                       </div>
                     </div>
                     <div>
@@ -1248,46 +1245,11 @@ export default function AnalyticsPage() {
                                 {questionLog.isMcqCorrect ? "✓ Correct" : "✗ Incorrect"}
                               </span>
                             </div>
-                            {questionLog.aiScore !== undefined && (
-                              <p style={{
-                                marginTop: "0.5rem",
-                                marginBottom: 0,
-                                fontSize: "0.875rem",
-                                color: questionLog.isMcqCorrect ? "#047857" : "#991b1b",
-                                fontWeight: 600
-                              }}>
-                                Score: {questionLog.aiScore} / {questionLog.maxScore || 5} points
-                              </p>
-                            )}
                           </div>
                         )}
                       </div>
                     )}
                     
-                    {/* AI Score for non-MCQ questions */}
-                    {questionLog.questionType !== "MCQ" && questionLog.aiScore !== undefined && (
-                      <div style={{
-                        marginTop: "0.75rem",
-                        padding: "0.75rem",
-                        backgroundColor: "#f0fdf4",
-                        border: "1px solid #10b981",
-                        borderRadius: "0.5rem"
-                      }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                          <span style={{ fontWeight: 600, color: "#065f46", fontSize: "0.875rem" }}>
-                            AI Evaluated Score:
-                          </span>
-                          <span style={{ fontWeight: 700, color: "#059669", fontSize: "1rem" }}>
-                            {questionLog.aiScore} / {questionLog.maxScore || 5} points
-                          </span>
-                        </div>
-                        {questionLog.aiFeedback && (
-                          <p style={{ marginTop: "0.5rem", marginBottom: 0, fontSize: "0.875rem", color: "#047857" }}>
-                            {questionLog.aiFeedback}
-                          </p>
-                        )}
-                      </div>
-                    )}
 
                     {/* Answer Versions */}
                     <div style={{ marginTop: "1rem", paddingTop: "1rem", borderTop: "1px solid #e2e8f0" }}>

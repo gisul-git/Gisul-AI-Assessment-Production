@@ -52,7 +52,17 @@ export default function CandidateEntryPage() {
         setError(response.data?.message || "Invalid credentials");
       }
     } catch (err: any) {
-      setError(err.response?.data?.message || err.message || "Failed to verify. Please check your email and name.");
+      // Extract error message from different possible response structures
+      const errorMessage = err.response?.data?.detail || 
+                          err.response?.data?.message || 
+                          err.message || 
+                          "Failed to verify. Please check your email and name.";
+      console.error("[Entry] Verification error:", {
+        status: err.response?.status,
+        data: err.response?.data,
+        errorMessage,
+      });
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
