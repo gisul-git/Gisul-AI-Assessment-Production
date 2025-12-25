@@ -2047,19 +2047,11 @@ async def update_schedule_and_candidates(
         schedule_update["duration"] = payload.get("duration")
         assessment["duration"] = payload.get("duration")
     
-    # Add accessTimeBeforeStart (only for strict mode)
-    if payload.get("accessTimeBeforeStart") is not None:
-        # Ensure it's stored as an integer
-        access_time_value = payload.get("accessTimeBeforeStart")
-        try:
-            access_time_value = int(access_time_value)  # Convert to integer
-            schedule_update["accessTimeBeforeStart"] = access_time_value
-            assessment["accessTimeBeforeStart"] = access_time_value
-        except (ValueError, TypeError):
-            # If conversion fails, use default or log error
-            logger.warning(f"Invalid accessTimeBeforeStart value: {payload.get('accessTimeBeforeStart')}, using default 15")
-            schedule_update["accessTimeBeforeStart"] = 15
-            assessment["accessTimeBeforeStart"] = 15
+    # Remove accessTimeBeforeStart if it exists (no longer used)
+    if "accessTimeBeforeStart" in schedule_update:
+        del schedule_update["accessTimeBeforeStart"]
+    if "accessTimeBeforeStart" in assessment:
+        del assessment["accessTimeBeforeStart"]
     
     schedule.update(schedule_update)
     assessment["schedule"] = schedule
