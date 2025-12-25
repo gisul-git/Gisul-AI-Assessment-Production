@@ -172,7 +172,7 @@ async def verify_candidate(
                         )
                     else:
                         logger.info(f"[Verify Candidate] Access ALLOWED - start time has passed. Now: {now}, Start: {start_time}")
-                except HTTPException:
+                except HTTPException as http_exc:
                     # Re-raise HTTP exceptions (access denied) - this is critical
                     raise http_exc
                 except (ValueError, AttributeError, TypeError) as e:
