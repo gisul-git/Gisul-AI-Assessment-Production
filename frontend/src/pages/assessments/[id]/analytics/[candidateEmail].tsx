@@ -21,8 +21,6 @@ interface QuestionLog {
   questionText: string
   questionType: string
   logs: AnswerLog[]
-  aiScore?: number
-  aiFeedback?: string
   maxScore?: number
   isMcqCorrect?: boolean
   correctAnswer?: string
@@ -43,7 +41,6 @@ interface Candidate {
   notAttempted?: number
   correctAnswers?: number
   submittedAt?: string | null
-  aiScore?: number
   percentageScored?: number
   passPercentage?: number
   passed?: boolean
@@ -308,7 +305,7 @@ export default function CandidateAnalyticsPage() {
               <div>
                 <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Score</div>
                 <div style={{ fontSize: "1rem", fontWeight: 600 }}>
-                  {candidate.aiScore !== undefined ? candidate.aiScore : candidate.score} / {candidate.maxScore}
+                  {candidate.score || 0} / {candidate.maxScore || 0}
                 </div>
               </div>
             )}
@@ -450,30 +447,6 @@ export default function CandidateAnalyticsPage() {
                   </div>
                 )}
                 
-                {/* AI Score for non-MCQ questions */}
-                {questionLog.questionType !== "MCQ" && questionLog.aiScore !== undefined && (
-                  <div style={{
-                    marginTop: "0.75rem",
-                    padding: "0.75rem",
-                    backgroundColor: "#f0fdf4",
-                    border: "1px solid #10b981",
-                    borderRadius: "0.5rem"
-                  }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontWeight: 600, color: "#065f46", fontSize: "0.875rem" }}>
-                        AI Evaluated Score:
-                      </span>
-                      <span style={{ fontWeight: 700, color: "#059669", fontSize: "1rem" }}>
-                        {questionLog.aiScore} / {questionLog.maxScore || 5} points
-                      </span>
-                    </div>
-                    {questionLog.aiFeedback && (
-                      <p style={{ marginTop: "0.5rem", marginBottom: 0, fontSize: "0.875rem", color: "#047857" }}>
-                        {questionLog.aiFeedback}
-                      </p>
-                    )}
-                  </div>
-                )}
 
                 {/* Answer Versions */}
                 <div style={{ marginTop: "1rem", paddingTop: "1rem", borderTop: "1px solid #e2e8f0" }}>

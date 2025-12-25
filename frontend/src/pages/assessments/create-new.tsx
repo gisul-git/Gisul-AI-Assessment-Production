@@ -2428,8 +2428,6 @@ export default function CreateNewAssessmentPage() {
     sentBy: "AI Assessment Platform"
   });
   const [showEmailTemplate, setShowEmailTemplate] = useState(false);
-  const [questionTypeTimes, setQuestionTypeTimes] = useState<{ [key: string]: number }>({});
-  const [enablePerSectionTimers, setEnablePerSectionTimers] = useState<boolean>(true); // Default to enabled
   const [hasVisitedConfigureStation, setHasVisitedConfigureStation] = useState(false);
   const [hasVisitedReviewStation, setHasVisitedReviewStation] = useState(false);
   const [isFinalized, setIsFinalized] = useState(false); // Track if assessment is finalized
@@ -2522,22 +2520,6 @@ export default function CreateNewAssessmentPage() {
   const [isTopicValid, setIsTopicValid] = useState<boolean | null>(null);
   const [addingTopic, setAddingTopic] = useState(false); // Loading state for adding topic
 
-  // Review Questions page states
-  const [sectionTimers, setSectionTimers] = useState<{
-    MCQ: number;
-    Subjective: number;
-    PseudoCode: number;
-    Coding: number;
-    SQL: number;
-    AIML: number;
-  }>({
-    MCQ: 0,
-    Subjective: 0,
-    PseudoCode: 0,
-    Coding: 0,
-    SQL: 0,
-    AIML: 0,
-  });
   // Scoring system - per question type (all questions of same type have same score)
   const [scoringRules, setScoringRules] = useState<{
     MCQ: number;
@@ -2554,15 +2536,32 @@ export default function CreateNewAssessmentPage() {
     SQL: 8,
     AIML: 10,
   });
+  // Per-section timer settings
+  const [enablePerSectionTimers, setEnablePerSectionTimers] = useState<boolean>(false);
+  const [sectionTimers, setSectionTimers] = useState<{
+    MCQ: number;
+    Subjective: number;
+    PseudoCode: number;
+    Coding: number;
+    SQL: number;
+    AIML: number;
+  }>({
+    MCQ: 0,
+    Subjective: 0,
+    PseudoCode: 0,
+    Coding: 0,
+    SQL: 0,
+    AIML: 0,
+  });
   const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null);
   const [editingReviewQuestion, setEditingReviewQuestion] = useState<any | null>(null);
   // Regenerate question modal state
   const [regeneratingQuestionId, setRegeneratingQuestionId] = useState<string | null>(null);
   const [regenerateQuestionFeedback, setRegenerateQuestionFeedback] = useState<string>("");
-  const [scheduleTimeMinutes, setScheduleTimeMinutes] = useState<number>(0);
-  const [scheduleTimeWarning, setScheduleTimeWarning] = useState<string | null>(null);
-  
   // Schedule settings (Station 4)
+  const [examMode, setExamMode] = useState<"strict" | "flexible">("strict");
+  const [duration, setDuration] = useState<string>("");
+  const [accessTimeBeforeStart, setAccessTimeBeforeStart] = useState<string>("15");
   const [visibilityMode, setVisibilityMode] = useState<string>("public");
   const [candidateRequirements, setCandidateRequirements] = useState<{
     requireEmail: boolean;
@@ -2717,68 +2716,6 @@ export default function CreateNewAssessmentPage() {
     };
   }, [currentStation, experienceMin, experienceMax, experienceMode]);
 
-  // Auto-calculate section timers from question timers when topicsV2 changes or when entering Station 3
-  useEffect(() => {
-    if (currentStation !== 3) return;
-    
-    // Extract all questions from topicsV2 with their timers
-    const questionsByType: {
-      MCQ: Array<{ timer: number }>;
-      Subjective: Array<{ timer: number }>;
-      PseudoCode: Array<{ timer: number }>;
-      Coding: Array<{ timer: number }>;
-      SQL: Array<{ timer: number }>;
-      AIML: Array<{ timer: number }>;
-    } = {
-      MCQ: [],
-      Subjective: [],
-      PseudoCode: [],
-      Coding: [],
-      SQL: [],
-      AIML: [],
-    };
-    
-    // Aggregate questions from ALL topics including custom topics
-    topicsV2.forEach((topic) => {
-      topic.questionRows.forEach((row) => {
-        // Include questions if they exist and status is "generated" or "completed"
-        const rowStatus = row.status;
-        const isGeneratedOrCompleted = rowStatus === "generated" || rowStatus === "completed";
-        if (row.questions && row.questions.length > 0 && isGeneratedOrCompleted) {
-          const questionType = row.questionType as keyof typeof questionsByType;
-          if (questionsByType[questionType]) {
-            row.questions.forEach((question) => {
-              // Use question timer if available, otherwise calculate default
-              let timer = question.timer;
-              if (!timer || timer < 1) {
-                const baseTime = getBaseTimePerQuestion(row.questionType);
-                const multiplier = getDifficultyMultiplier(row.difficulty);
-                let questionTime = baseTime * multiplier;
-                if (row.questionType === "MCQ" && questionTime > 40) {
-                  questionTime = 40;
-                }
-                timer = Math.max(1, Math.ceil(questionTime / 60));
-              }
-              questionsByType[questionType].push({ timer });
-            });
-          }
-        }
-      });
-    });
-    
-    // Calculate section timers as sum of question timers
-    const newTimers = {
-      MCQ: questionsByType.MCQ.reduce((sum, q) => sum + q.timer, 0),
-      Subjective: questionsByType.Subjective.reduce((sum, q) => sum + q.timer, 0),
-      PseudoCode: questionsByType.PseudoCode.reduce((sum, q) => sum + q.timer, 0),
-      Coding: questionsByType.Coding.reduce((sum, q) => sum + q.timer, 0),
-      SQL: questionsByType.SQL.reduce((sum, q) => sum + q.timer, 0),
-      AIML: questionsByType.AIML.reduce((sum, q) => sum + q.timer, 0),
-    };
-    
-    // Update section timers
-    setSectionTimers(newTimers);
-  }, [currentStation, topicsV2]);
 
   // Auto-calculate initial scores when questions are loaded in Review Questions page
   useEffect(() => {
@@ -2840,7 +2777,84 @@ export default function CreateNewAssessmentPage() {
     });
   }, [currentStation, topicsV2]);
 
-  // Save timer settings, scoring rules, and pass percentage to draft when they change
+  // Auto-calculate section timers from questions when enabled
+  useEffect(() => {
+    if (currentStation !== 3 || !enablePerSectionTimers || !topicsV2 || topicsV2.length === 0) return;
+    
+    // Extract all questions grouped by type
+    const questionsByType: {
+      MCQ: Array<{ difficulty: string }>;
+      Subjective: Array<{ difficulty: string }>;
+      PseudoCode: Array<{ difficulty: string }>;
+      Coding: Array<{ difficulty: string }>;
+      SQL: Array<{ difficulty: string }>;
+      AIML: Array<{ difficulty: string }>;
+    } = {
+      MCQ: [],
+      Subjective: [],
+      PseudoCode: [],
+      Coding: [],
+      SQL: [],
+      AIML: [],
+    };
+    
+    topicsV2.forEach((topic) => {
+      topic.questionRows.forEach((row) => {
+        const rowStatus = row.status;
+        const isGeneratedOrCompleted = rowStatus === "generated" || rowStatus === "completed";
+        if (row.questions && row.questions.length > 0 && isGeneratedOrCompleted) {
+          const questionType = row.questionType as keyof typeof questionsByType;
+          if (questionsByType[questionType]) {
+            row.questions.forEach((question) => {
+              questionsByType[questionType].push({ difficulty: row.difficulty });
+            });
+          }
+        }
+      });
+    });
+    
+    // Calculate section timers as sum of question times (in minutes)
+    const calculateSectionTime = (questions: Array<{ difficulty: string }>, questionType: string): number => {
+      const totalSeconds = questions.reduce((sum, q) => {
+        const baseTime = getBaseTimePerQuestion(questionType);
+        const multiplier = getDifficultyMultiplier(q.difficulty);
+        let questionTime = baseTime * multiplier;
+        if (questionType === "MCQ" && questionTime > 40) {
+          questionTime = 40;
+        }
+        return sum + questionTime;
+      }, 0);
+      return Math.max(1, Math.ceil(totalSeconds / 60)); // Convert to minutes, minimum 1
+    };
+    
+    const newTimers = {
+      MCQ: calculateSectionTime(questionsByType.MCQ, "MCQ"),
+      Subjective: calculateSectionTime(questionsByType.Subjective, "Subjective"),
+      PseudoCode: calculateSectionTime(questionsByType.PseudoCode, "PseudoCode"),
+      Coding: calculateSectionTime(questionsByType.Coding, "Coding"),
+      SQL: calculateSectionTime(questionsByType.SQL, "SQL"),
+      AIML: calculateSectionTime(questionsByType.AIML, "AIML"),
+    };
+    
+    // Only update if timers are 0 (initial state) or if questions changed significantly
+    setSectionTimers(prev => {
+      const hasZeroTimers = Object.values(prev).every(t => t === 0);
+      if (hasZeroTimers) {
+        return newTimers;
+      }
+      // If user has manually edited, only update sections that are still 0
+      return {
+        MCQ: prev.MCQ === 0 ? newTimers.MCQ : prev.MCQ,
+        Subjective: prev.Subjective === 0 ? newTimers.Subjective : prev.Subjective,
+        PseudoCode: prev.PseudoCode === 0 ? newTimers.PseudoCode : prev.PseudoCode,
+        Coding: prev.Coding === 0 ? newTimers.Coding : prev.Coding,
+        SQL: prev.SQL === 0 ? newTimers.SQL : prev.SQL,
+        AIML: prev.AIML === 0 ? newTimers.AIML : prev.AIML,
+      };
+    });
+  }, [currentStation, enablePerSectionTimers, topicsV2]);
+
+  // Save scoring rules, pass percentage, and section timers to draft when they change
   useEffect(() => {
     if (currentStation !== 3 || !assessmentId) return;
     
@@ -2848,17 +2862,17 @@ export default function CreateNewAssessmentPage() {
     const timeoutId = setTimeout(() => {
       axios.put("/api/v1/assessments/update-draft", {
         assessmentId,
-        sectionTimers,
-        enablePerSectionTimers,
         scoringRules,
         passPercentage,
+        enablePerSectionTimers,
+        sectionTimers: enablePerSectionTimers ? sectionTimers : undefined,
       }).catch((err) => {
         console.error("Error saving review settings to draft:", err);
       });
     }, 1000);
     
     return () => clearTimeout(timeoutId);
-  }, [currentStation, assessmentId, sectionTimers, enablePerSectionTimers, scoringRules, passPercentage]);
+  }, [currentStation, assessmentId, scoringRules, passPercentage, enablePerSectionTimers, sectionTimers]);
 
   // Clear all state function for new assessment
   const clearAllState = () => {
@@ -2936,8 +2950,6 @@ export default function CreateNewAssessmentPage() {
         // Add questions if available
         if (questions.length > 0) {
           draftData.questions = questions;
-          draftData.questionTypeTimes = questionTypeTimes;
-          draftData.enablePerSectionTimers = enablePerSectionTimers;
           draftData.passPercentage = passPercentage;
         }
 
@@ -3002,11 +3014,12 @@ export default function CreateNewAssessmentPage() {
     topicsV2,
     topicConfigs,
     questions,
-    questionTypeTimes,
-    enablePerSectionTimers,
     passPercentage,
     startTime,
     endTime,
+    examMode,
+    duration,
+    accessTimeBeforeStart,
     candidates,
     assessmentUrl,
   ]);
@@ -3144,24 +3157,40 @@ export default function CreateNewAssessmentPage() {
         
         // Load Station 4 data (Schedule & Proctoring Settings)
         if (assessment.schedule) {
-          if (assessment.schedule.startTime) {
-            setStartTime(assessment.schedule.startTime);
+          const schedule = assessment.schedule;
+          if (schedule.startTime) {
+            // Convert ISO string to datetime-local format
+            const startDate = new Date(schedule.startTime);
+            const startLocal = new Date(startDate.getTime() - startDate.getTimezoneOffset() * 60000)
+              .toISOString()
+              .slice(0, 16);
+            setStartTime(startLocal);
           }
-          if (assessment.schedule.endTime) {
-            setEndTime(assessment.schedule.endTime);
+          if (schedule.endTime) {
+            const endDate = new Date(schedule.endTime);
+            const endLocal = new Date(endDate.getTime() - endDate.getTimezoneOffset() * 60000)
+              .toISOString()
+              .slice(0, 16);
+            setEndTime(endLocal);
           }
-          if (assessment.schedule.visibilityMode) {
-            setVisibilityMode(assessment.schedule.visibilityMode);
+          if (schedule.examMode) {
+            setExamMode(schedule.examMode);
           }
-          if (assessment.schedule.candidateRequirements) {
-            setCandidateRequirements(assessment.schedule.candidateRequirements);
+          if (schedule.duration) {
+            setDuration(schedule.duration.toString());
+          }
+          if (schedule.accessTimeBeforeStart !== undefined) {
+            setAccessTimeBeforeStart(schedule.accessTimeBeforeStart.toString());
+          }
+          if (schedule.visibilityMode) {
+            setVisibilityMode(schedule.visibilityMode);
+          }
+          if (schedule.candidateRequirements) {
+            setCandidateRequirements(schedule.candidateRequirements);
           }
         }
         
         // Load Station 3 data (Review Questions)
-        if (assessment.sectionTimers) {
-          setSectionTimers(assessment.sectionTimers);
-        }
         if (assessment.scoringRules) {
           setScoringRules(assessment.scoringRules);
         }
@@ -3170,6 +3199,9 @@ export default function CreateNewAssessmentPage() {
         }
         if (assessment.enablePerSectionTimers !== undefined) {
           setEnablePerSectionTimers(assessment.enablePerSectionTimers);
+        }
+        if (assessment.sectionTimers) {
+          setSectionTimers(assessment.sectionTimers);
         }
         
         // Regenerate topic cards for draft (to show Related Technologies & Skills)
@@ -3490,19 +3522,6 @@ export default function CreateNewAssessmentPage() {
           setQuestions(assessmentData.questions);
           setHasVisitedReviewStation(true);
           
-          // Load question type times if available
-          if (assessment.questionTypeTimes) {
-            setQuestionTypeTimes(assessment.questionTypeTimes);
-          }
-          if (assessment.enablePerSectionTimers !== undefined) {
-            setEnablePerSectionTimers(assessment.enablePerSectionTimers);
-          }
-          
-          // Load section timers if available
-          if (assessment.sectionTimers) {
-            setSectionTimers(assessment.sectionTimers);
-          }
-          
           // Load scoring rules if available
           if (assessment.scoringRules) {
             setScoringRules(assessment.scoringRules);
@@ -3511,6 +3530,14 @@ export default function CreateNewAssessmentPage() {
           // Load pass percentage if available
           if (assessment.passPercentage !== undefined) {
             setPassPercentage(assessment.passPercentage);
+          }
+          
+          // Load section timer settings if available
+          if (assessment.enablePerSectionTimers !== undefined) {
+            setEnablePerSectionTimers(assessment.enablePerSectionTimers);
+          }
+          if (assessment.sectionTimers) {
+            setSectionTimers(assessment.sectionTimers);
           }
         }
         
@@ -3531,6 +3558,15 @@ export default function CreateNewAssessmentPage() {
               .toISOString()
               .slice(0, 16);
             setEndTime(endLocal);
+          }
+          if (schedule.examMode) {
+            setExamMode(schedule.examMode);
+          }
+          if (schedule.duration) {
+            setDuration(schedule.duration.toString());
+          }
+          if (schedule.accessTimeBeforeStart !== undefined) {
+            setAccessTimeBeforeStart(schedule.accessTimeBeforeStart.toString());
           }
           if (schedule.visibilityMode) {
             setVisibilityMode(schedule.visibilityMode);
@@ -7674,8 +7710,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       // Add questions if available (from Station 3)
       if (questions.length > 0) {
         draftData.questions = questions;
-        draftData.questionTypeTimes = questionTypeTimes;
-        draftData.enablePerSectionTimers = enablePerSectionTimers;
         draftData.passPercentage = passPercentage;
       }
 
@@ -7771,39 +7805,45 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         return dt;
       };
 
-      // Calculate timer mode information
-      const scheduledWindow = (new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 60); // in minutes
-      let timerModeData: any = {};
+      // Prepare schedule data based on exam mode
+      const scheduleData: any = {
+        examMode,
+        duration: parseInt(duration || "0"),
+      };
       
+      // Add startTime if provided (required for both modes)
+      if (startTime) {
+        scheduleData.startTime = normalizeDateTime(startTime);
+      }
+      
+      // Only include endTime and accessTimeBeforeStart based on exam mode
+      if (examMode === "flexible" && endTime) {
+        scheduleData.endTime = normalizeDateTime(endTime);
+      }
+      if (examMode === "strict") {
+        scheduleData.accessTimeBeforeStart = parseInt(accessTimeBeforeStart || "15");
+      }
+      
+      // Include section timers if enabled
       if (enablePerSectionTimers) {
-        // Use sectionTimers (from Review Questions) instead of questionTypeTimes
-        const totalTimeFromSections = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
-        timerModeData = {
-          timerMode: "section",
-          sectionTotalTime: totalTimeFromSections,
-          scheduledWindowTime: scheduledWindow,
-        };
-      } else {
-        timerModeData = {
-          timerMode: "scheduleOnly",
-          examDuration: scheduledWindow,
-        };
+        scheduleData.enablePerSectionTimers = true;
+        scheduleData.sectionTimers = sectionTimers;
       }
 
       await axios.post("/api/assessments/update-schedule-and-candidates", {
         assessmentId,
-        startTime: normalizeDateTime(startTime),
-        endTime: normalizeDateTime(endTime),
+        ...scheduleData,
         candidates: accessMode === "private" ? candidates : [],
         assessmentUrl: url,
         token,
         accessMode: accessMode,
         invitationTemplate: accessMode === "private" ? invitationTemplate : undefined,
-        ...timerModeData,
       });
     } catch (err: any) {
       console.error("Error saving schedule and candidates:", err);
-      setError("Failed to save schedule and candidates");
+      const errorMessage = err.response?.data?.detail || err.response?.data?.message || err.message || "Failed to save schedule and candidates";
+      setError(errorMessage);
+      throw err; // Re-throw to show error in UI
     }
   };
 
@@ -7846,7 +7886,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         }
       }
 
-      // Then finalize with questionTypeTimes, enablePerSectionTimers flag, and passPercentage
+      // Then finalize with passPercentage
       // Fetch the assessment to get the title and description from Station 1
       let assessmentTitle = "";
       let assessmentDescription = "";
@@ -7864,8 +7904,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         assessmentId,
         title: assessmentTitle.trim() || "Untitled Assessment",
         description: assessmentDescription.trim() || undefined,
-        questionTypeTimes: enablePerSectionTimers ? questionTypeTimes : undefined,
-        enablePerSectionTimers: enablePerSectionTimers,
         passPercentage: passPercentage,
       });
 
@@ -9703,54 +9741,22 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 borderRadius: "0.75rem", 
                 border: "2px solid #e2e8f0" 
               }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={enablePerSectionTimers}
+                    onChange={(e) => setEnablePerSectionTimers(e.target.checked)}
+                    style={{ width: "20px", height: "20px", cursor: "pointer" }}
+                  />
                   <div>
-                    <h3 style={{ margin: 0, marginBottom: "0.5rem", fontSize: "1.125rem", color: "#1a1625", fontWeight: 600 }}>
-                      Timer Settings
-                    </h3>
-                    <p style={{ margin: 0, fontSize: "0.875rem", color: "#64748b" }}>
-                      {enablePerSectionTimers 
-                        ? "Each question type will have its own timer. Sections will lock when their timer expires."
-                        : "Only the overall assessment schedule time will apply. No per-section timers."}
-                    </p>
+                    <div style={{ fontWeight: 600, color: "#1e293b", fontSize: "1rem" }}>
+                      Enable Per-Section Timer
                   </div>
-                  <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                    <button
-                      type="button"
-                      onClick={() => setEnablePerSectionTimers(true)}
-                      style={{
-                        padding: "0.75rem 1.5rem",
-                        border: `2px solid ${enablePerSectionTimers ? "#10b981" : "#e2e8f0"}`,
-                        borderRadius: "0.5rem",
-                        backgroundColor: enablePerSectionTimers ? "#10b981" : "#ffffff",
-                        color: enablePerSectionTimers ? "#ffffff" : "#64748b",
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        fontSize: "0.875rem",
-                        transition: "all 0.2s",
-                      }}
-                    >
-                      Enable Per-Section Timers
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setEnablePerSectionTimers(false)}
-                      style={{
-                        padding: "0.75rem 1.5rem",
-                        border: `2px solid ${!enablePerSectionTimers ? "#3b82f6" : "#e2e8f0"}`,
-                        borderRadius: "0.5rem",
-                        backgroundColor: !enablePerSectionTimers ? "#3b82f6" : "#ffffff",
-                        color: !enablePerSectionTimers ? "#ffffff" : "#64748b",
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        fontSize: "0.875rem",
-                        transition: "all 0.2s",
-                      }}
-                    >
-                      Use Schedule Time Only
-                    </button>
+                    <div style={{ fontSize: "0.875rem", color: "#64748b", marginTop: "0.25rem" }}>
+                      Each section will have its own timer. Sections will be locked when their timer expires.
                   </div>
                 </div>
+                </label>
               </div>
 
               {(() => {
@@ -9843,23 +9849,8 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 }, 0);
                 const totalAiEstimatedMinutes = Math.ceil(totalAiEstimatedTime / 60);
                 
-                // Calculate total time from section timers (for per-section mode)
-                const totalCalculatedTime = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
-                
-                // Calculate schedule time in minutes (if available)
-                const scheduleTimeMinutes = startTime && endTime 
-                  ? Math.round((new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 60))
-                  : 0;
-                
-                // Show warning if schedule time is less than AI estimated (but don't block)
-                const showScheduleTimeWarning = !enablePerSectionTimers && 
-                  scheduleTimeMinutes > 0 && 
-                  scheduleTimeMinutes < totalAiEstimatedMinutes;
-                
                 return (
                   <div style={{ marginBottom: "2rem" }}>
-                    {/* AI Estimated Time Display (for Schedule Time Only mode) */}
-                    {!enablePerSectionTimers && (
                       <div style={{
                         marginBottom: "1.5rem",
                         padding: "1.5rem",
@@ -9878,26 +9869,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                             Based on question types and difficulty levels
                           </p>
                         </div>
-                        
-                        {/* Warning if schedule time is less than AI estimated */}
-                        {showScheduleTimeWarning && (
-                          <div style={{
-                            marginTop: "1rem",
-                            padding: "0.75rem",
-                            backgroundColor: "#fef3c7",
-                            border: "1px solid #fbbf24",
-                            borderRadius: "0.5rem",
-                          }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                              <span style={{ fontSize: "1rem" }}>⚠️</span>
-                              <span style={{ fontSize: "0.875rem", color: "#92400e" }}>
-                                Schedule time is lower than AI estimated time. Candidates may need more time to complete all questions.
-                              </span>
                             </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
                     
                     {/* Question Type Sections */}
                     {(["MCQ", "Subjective", "PseudoCode", "Coding", "SQL", "AIML"] as const).map((questionType) => {
@@ -9905,7 +9877,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                       if (typeQuestions.length === 0) return null;
                       
                       const sectionTimer = sectionTimers[questionType];
-                      const canEditTimer = enablePerSectionTimers;
                       
                       return (
                         <div key={questionType} style={{ marginBottom: "2rem" }}>
@@ -9925,28 +9896,31 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                               </h3>
                               <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.875rem", color: "#64748b" }}>
                                 {typeQuestions.length} question{typeQuestions.length !== 1 ? "s" : ""}
-                                {canEditTimer && ` • Auto-calculated time: ${formatTime(sectionTimer)}`}
+                                {enablePerSectionTimers && sectionTimer > 0 && ` • Timer: ${sectionTimer} minutes`}
                               </p>
                             </div>
-                            {canEditTimer && (
-                              <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                            {enablePerSectionTimers && (
+                              <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
                                 <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#1e293b", fontWeight: 600 }}>
-                                  Time (minutes):
+                                  Timer (min):
                                   <input
                                     type="number"
-                                    min="0"
-                                    value={sectionTimer}
-                                    readOnly
+                                    min="1"
+                                    value={sectionTimer || 0}
+                                    onChange={(e) => {
+                                      const newValue = parseInt(e.target.value) || 0;
+                                      setSectionTimers(prev => ({
+                                        ...prev,
+                                        [questionType]: newValue,
+                                      }));
+                                    }}
                                     style={{
                                       width: "80px",
                                       padding: "0.5rem",
                                       border: "1px solid #e2e8f0",
                                       borderRadius: "0.5rem",
                                       fontSize: "0.875rem",
-                                      backgroundColor: "#f1f5f9",
-                                      cursor: "not-allowed",
                                     }}
-                                    title="Auto-calculated from sum of question timers"
                                   />
                                 </label>
                               </div>
@@ -9963,9 +9937,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                   </th>
                                   <th style={{ padding: "1rem", textAlign: "left", borderBottom: "2px solid #e2e8f0", fontWeight: 600, color: "#1e293b", width: "100px" }}>
                                     Difficulty
-                                  </th>
-                                  <th style={{ padding: "1rem", textAlign: "left", borderBottom: "2px solid #e2e8f0", fontWeight: 600, color: "#1e293b", width: "120px" }}>
-                                    Timer (min)
                                   </th>
                                   <th style={{ padding: "1rem", textAlign: "center", borderBottom: "2px solid #e2e8f0", fontWeight: 600, color: "#1e293b", width: "100px" }}>
                                     Score
@@ -10035,48 +10006,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                                         >
                                           {qData.difficulty}
                                         </span>
-                                      </td>
-                                      <td style={{ padding: "1rem" }}>
-                                        {enablePerSectionTimers ? (
-                                          <input
-                                            type="number"
-                                            min="1"
-                                            value={(() => {
-                                              // Get timer from question object, or calculate default
-                                              const topic = topicsV2.find(t => t.id === qData.topicId);
-                                              const row = topic?.questionRows.find(r => r.rowId === qData.rowId);
-                                              const question = row?.questions?.[qData.questionIndex];
-                                              
-                                              if (question?.timer) {
-                                                return question.timer;
-                                              }
-                                              
-                                              // Calculate default if not present
-                                              const baseTime = getBaseTimePerQuestion(questionType);
-                                              const multiplier = getDifficultyMultiplier(qData.difficulty);
-                                              let questionTime = baseTime * multiplier;
-                                              if (questionType === "MCQ" && questionTime > 40) {
-                                                questionTime = 40;
-                                              }
-                                              return Math.max(1, Math.ceil(questionTime / 60));
-                                            })()}
-                                            onChange={(e) => {
-                                              const newTimer = parseInt(e.target.value) || 1;
-                                              handleUpdateQuestionTimer(qData.topicId, qData.rowId, qData.questionIndex, newTimer);
-                                            }}
-                                            style={{
-                                              width: "100%",
-                                              padding: "0.5rem",
-                                              border: "1px solid #e2e8f0",
-                                              borderRadius: "0.5rem",
-                                              fontSize: "0.875rem",
-                                            }}
-                                          />
-                                        ) : (
-                                          <span style={{ fontSize: "0.875rem", color: "#64748b" }}>
-                                            N/A (Schedule Time Only)
-                                          </span>
-                                        )}
                                       </td>
                                       <td style={{ padding: "1rem", textAlign: "center" }}>
                                         <span style={{ 
@@ -10180,32 +10109,6 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                           {allReviewQuestions.length}
                         </span>
                       </div>
-                      {enablePerSectionTimers && (
-                        <div>
-                          <span style={{ color: "#64748b", fontSize: "0.875rem", marginRight: "0.5rem" }}>Total Time (All Sections):</span>
-                          <span style={{ color: "#1e293b", fontSize: "1.125rem", fontWeight: 700 }}>
-                            {formatTime(totalCalculatedTime)}
-                          </span>
-                        </div>
-                      )}
-                      {!enablePerSectionTimers && (
-                        <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", alignItems: "flex-end" }}>
-                          <div>
-                            <span style={{ color: "#64748b", fontSize: "0.875rem", marginRight: "0.5rem" }}>AI Estimated Total Time:</span>
-                            <span style={{ color: "#3b82f6", fontSize: "1.125rem", fontWeight: 700 }}>
-                              {formatTime(totalAiEstimatedMinutes)}
-                            </span>
-                          </div>
-                          {scheduleTimeMinutes > 0 && (
-                            <div>
-                              <span style={{ color: "#64748b", fontSize: "0.875rem", marginRight: "0.5rem" }}>Schedule Time:</span>
-                              <span style={{ color: "#1e293b", fontSize: "1.125rem", fontWeight: 700 }}>
-                                {formatTime(scheduleTimeMinutes)}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </div>
                   </div>
                 );
@@ -10642,7 +10545,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 Schedule Exam
               </h1>
               <p style={{ color: "#6b6678", marginBottom: "2rem", fontSize: "1rem" }}>
-                Set the start and end time for the assessment (Indian Standard Time - IST)
+                Configure exam timing and duration settings
               </p>
                 </div>
                 <button
@@ -10660,44 +10563,150 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 </button>
               </div>
 
-              <div style={{ marginBottom: "2rem" }}>
+              {/* Exam Mode Selection */}
+              <div style={{ marginBottom: "2rem", padding: "1.5rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}>
+                <h3 style={{ marginBottom: "1rem", color: "#1e293b", fontSize: "1.125rem", fontWeight: 600 }}>Exam Mode</h3>
+                <p style={{ marginBottom: "1rem", color: "#64748b", fontSize: "0.875rem" }}>
+                  Choose how the exam timing works.
+                </p>
+                <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem" }}>
+                  <label
+                    style={{
+                      flex: 1,
+                      padding: "1rem",
+                      border: examMode === "strict" ? "2px solid #10b981" : "1px solid #e2e8f0",
+                      borderRadius: "0.5rem",
+                      cursor: "pointer",
+                      backgroundColor: examMode === "strict" ? "#f0fdf4" : "#ffffff",
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="examMode"
+                      value="strict"
+                      checked={examMode === "strict"}
+                      onChange={(e) => setExamMode(e.target.value as "strict" | "flexible")}
+                      style={{ marginRight: "0.5rem" }}
+                    />
+                    <strong style={{ color: "#1e293b" }}>Strict Window</strong>
+                    <p style={{ margin: "0.5rem 0 0 0", fontSize: "0.875rem", color: "#64748b" }}>
+                      Assessment starts at a fixed time. Candidates can access before start time for pre-checks.
+                    </p>
+                  </label>
+                  <label
+                    style={{
+                      flex: 1,
+                      padding: "1rem",
+                      border: examMode === "flexible" ? "2px solid #10b981" : "1px solid #e2e8f0",
+                      borderRadius: "0.5rem",
+                      cursor: "pointer",
+                      backgroundColor: examMode === "flexible" ? "#f0fdf4" : "#ffffff",
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="examMode"
+                      value="flexible"
+                      checked={examMode === "flexible"}
+                      onChange={(e) => setExamMode(e.target.value as "strict" | "flexible")}
+                      style={{ marginRight: "0.5rem" }}
+                    />
+                    <strong style={{ color: "#1e293b" }}>Flexible Window</strong>
+                    <p style={{ margin: "0.5rem 0 0 0", fontSize: "0.875rem", color: "#64748b" }}>
+                      Candidates can start anytime within the schedule window. Each candidate gets the full duration from when they start.
+                    </p>
+                  </label>
+                </div>
+
+                {/* Schedule Times */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem", marginTop: "1.5rem" }}>
+                  {examMode === "strict" ? (
+                    <>
+                      {/* Strict Mode: Start Time + Duration */}
+                      <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+                        <div style={{ flex: 1, minWidth: "200px" }}>
                 <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                  Start Time (IST) *
+                            Start Time (IST) <span style={{ color: "#ef4444" }}>*</span>
                 </label>
                 <input
                   type="datetime-local"
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
                   required
-                  style={{
-                    width: "100%",
-                    padding: "0.75rem",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "0.5rem",
-                    fontSize: "1rem",
-                  }}
+                            style={{ width: "100%", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
                 />
                 <p style={{ fontSize: "0.875rem", color: "#64748b", marginTop: "0.5rem" }}>
                   Indian Standard Time (IST) - UTC+5:30
                 </p>
               </div>
-
-              <div style={{ marginBottom: "2rem" }}>
+                        <div style={{ flex: 1, minWidth: "200px" }}>
                 <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
-                  End Time (IST) *
+                            Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
+                          </label>
+                          <input
+                            type="number"
+                            value={duration}
+                            onChange={(e) => setDuration(e.target.value)}
+                            placeholder="e.g., 80"
+                            min={1}
+                            required
+                            style={{ width: "100%", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
+                          />
+                        </div>
+                      </div>
+                      <div style={{ flex: 1, minWidth: "200px" }}>
+                        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                          Access Time Before Start (minutes)
+                        </label>
+                        <input
+                          type="number"
+                          value={accessTimeBeforeStart}
+                          onChange={(e) => setAccessTimeBeforeStart(e.target.value)}
+                          placeholder="e.g., 15"
+                          min={0}
+                          style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
+                        />
+                        <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                          Candidates can access the assessment this many minutes before the start time to complete pre-checks. Questions will start automatically at the scheduled start time.
+                        </p>
+                      </div>
+                      {startTime && duration && (
+                        <div style={{ padding: "0.75rem", backgroundColor: "#f0fdf4", borderRadius: "0.5rem", fontSize: "0.875rem", color: "#059669" }}>
+                          <strong>Assessment will end at:</strong> {
+                            new Date(new Date(startTime).getTime() + parseInt(duration || "0") * 60000).toLocaleString()
+                          }
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {/* Flexible Mode: Start Time + End Time + Duration */}
+                      <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+                        <div style={{ flex: 1, minWidth: "200px" }}>
+                          <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                            Schedule Start Time (IST) <span style={{ color: "#ef4444" }}>*</span>
+                          </label>
+                          <input
+                            type="datetime-local"
+                            value={startTime}
+                            onChange={(e) => setStartTime(e.target.value)}
+                            required
+                            style={{ width: "100%", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
+                          />
+                          <p style={{ fontSize: "0.875rem", color: "#64748b", marginTop: "0.5rem" }}>
+                            Indian Standard Time (IST) - UTC+5:30
+                          </p>
+                        </div>
+                        <div style={{ flex: 1, minWidth: "200px" }}>
+                          <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                            Schedule End Time (IST) <span style={{ color: "#ef4444" }}>*</span>
                 </label>
                 <input
                   type="datetime-local"
                   value={endTime}
                   onChange={(e) => setEndTime(e.target.value)}
                   required
-                  style={{
-                    width: "100%",
-                    padding: "0.75rem",
-                    border: `1px solid ${startTime && endTime && new Date(endTime) <= new Date(startTime) ? "#ef4444" : "#e2e8f0"}`,
-                    borderRadius: "0.5rem",
-                    fontSize: "1rem",
-                  }}
+                            style={{ width: "100%", padding: "0.75rem", border: `1px solid ${startTime && endTime && new Date(endTime) <= new Date(startTime) ? "#ef4444" : "#e2e8f0"}`, borderRadius: "0.5rem" }}
                 />
                 <p style={{ fontSize: "0.875rem", color: "#64748b", marginTop: "0.5rem" }}>
                   Indian Standard Time (IST) - UTC+5:30
@@ -10708,152 +10717,62 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                   </p>
                 )}
               </div>
-
-              {/* Error Message for Invalid Time Range */}
-              {startTime && endTime && new Date(endTime) <= new Date(startTime) && (
-                <div style={{ 
-                  marginBottom: "1.5rem",
-                  padding: "1rem",
-                  backgroundColor: "#fef2f2",
-                  border: "2px solid #ef4444",
-                  borderRadius: "0.5rem"
-                }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
-                    <span style={{ fontSize: "1.25rem" }}>⚠️</span>
-                    <strong style={{ color: "#dc2626" }}>
-                      Invalid Time Range
-                    </strong>
                   </div>
-                  <div style={{ fontSize: "0.875rem", color: "#64748b", marginLeft: "1.75rem" }}>
-                    <div style={{ color: "#dc2626", fontWeight: 600 }}>
-                      Please choose an end time that is greater than the start time.
+                      <div style={{ flex: 1, minWidth: "200px" }}>
+                        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
+                          Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
+                        </label>
+                        <input
+                          type="number"
+                          value={duration}
+                          onChange={(e) => setDuration(e.target.value)}
+                          placeholder="e.g., 70"
+                          min={1}
+                          required
+                          style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
+                        />
+                        <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                          Candidates can start the assessment anytime between the schedule start and end times. Once started, they have this duration to complete the assessment.
+                        </p>
                     </div>
-                  </div>
-                </div>
-              )}
+                    </>
+                  )}
+                    </div>
+                      </div>
 
-              {/* Validation Message - Mode 1: Enable Per-Section Timers */}
-              {startTime && endTime && new Date(endTime) > new Date(startTime) && enablePerSectionTimers && (() => {
-                const scheduledWindow = (new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 60); // in minutes
-                // Use sectionTimers (from Review Questions) instead of questionTypeTimes
-                const totalTimeFromSections = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
-                const isValid = totalTimeFromSections <= scheduledWindow;
+              {/* Validation Warning: Section Timers vs Duration */}
+              {enablePerSectionTimers && duration && parseInt(duration) > 0 && (() => {
+                const totalSectionTime = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
+                const examDuration = parseInt(duration);
+                const exceedsDuration = totalSectionTime > examDuration;
                 
+                if (exceedsDuration) {
                 return (
                   <div style={{ 
-                    marginBottom: "1.5rem",
+                      marginTop: "1.5rem",
                     padding: "1rem",
-                    backgroundColor: isValid ? "#f0fdf4" : "#fef2f2",
-                    border: `2px solid ${isValid ? "#10b981" : "#ef4444"}`,
+                      backgroundColor: "#fef2f2",
+                      border: "2px solid #ef4444",
                     borderRadius: "0.5rem"
                   }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
-                      <span style={{ fontSize: "1.25rem" }}>{isValid ? "✓" : "⚠️"}</span>
-                      <strong style={{ color: isValid ? "#059669" : "#dc2626" }}>
-                        {isValid ? "Schedule Duration is Valid" : "Section timers exceed the scheduled exam window"}
+                        <span style={{ fontSize: "1.25rem" }}>⚠️</span>
+                        <strong style={{ color: "#dc2626" }}>
+                          Section Timers Exceed Exam Duration
                       </strong>
                     </div>
                     <div style={{ fontSize: "0.875rem", color: "#64748b", marginLeft: "1.75rem" }}>
-                      <div>Total Section Time: <strong>{totalTimeFromSections} minutes</strong></div>
-                      <div>Scheduled Window: <strong>{Math.round(scheduledWindow)} minutes</strong></div>
-                      <div style={{ marginTop: "0.5rem", fontWeight: 600, color: isValid ? "#059669" : "#dc2626" }}>
-                        Status: {isValid ? "Valid" : "Invalid"}
+                        <div>Total Section Time: <strong>{totalSectionTime} minutes</strong></div>
+                        <div>Exam Duration: <strong>{examDuration} minutes</strong></div>
+                        <div style={{ marginTop: "0.5rem", fontWeight: 600, color: "#dc2626" }}>
+                          ⚠️ Total section timers ({totalSectionTime} minutes) exceed the exam duration ({examDuration} minutes). 
+                          Please increase the exam duration or reduce section timers in Review Questions.
                       </div>
-                      {!isValid && (
-                        <div style={{ color: "#dc2626", marginTop: "0.5rem", fontWeight: 600 }}>
-                          ⚠️ Section timers ({totalTimeFromSections} minutes) exceed the scheduled window ({Math.round(scheduledWindow)} minutes). Please increase the scheduled window or reduce section timers.
-                        </div>
-                      )}
                     </div>
                   </div>
                 );
-              })()}
-              
-              {/* Validation Message - Mode 2: Use Schedule Time Only */}
-              {startTime && endTime && new Date(endTime) > new Date(startTime) && !enablePerSectionTimers && (() => {
-                const scheduledWindow = (new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 60); // in minutes
-                
-                // Calculate AI estimated total time (EXACT same logic as in Review Questions)
-                // Aggregate questions from ALL topics including:
-                // - System-generated topics
-                // - Custom-added topics
-                // - Topics previewed individually
-                // - Topics that participated in preview-all
-                const allReviewQuestions: Array<{
-                  question: any;
-                  questionType: string;
-                  difficulty: string;
-                }> = [];
-                
-                topicsV2.forEach((topic) => {
-                  topic.questionRows.forEach((row) => {
-                    // Include questions if they exist and status is "generated" or "completed"
-                    // "completed" status is used for custom topics generated via row preview
-                    const rowStatus = row.status;
-                    const isGeneratedOrCompleted = rowStatus === "generated" || rowStatus === "completed";
-                    if (row.questions && row.questions.length > 0 && isGeneratedOrCompleted) {
-                      row.questions.forEach((question) => {
-                        allReviewQuestions.push({
-                          question,
-                          questionType: row.questionType,
-                          difficulty: row.difficulty,
-                        });
-                      });
-                    }
-                  });
-                });
-                
-                const totalAiEstimatedTime = allReviewQuestions.reduce((total, q) => {
-                  const baseTime = getBaseTimePerQuestion(q.questionType);
-                  const multiplier = getDifficultyMultiplier(q.difficulty);
-                  let questionTime = baseTime * multiplier;
-                  
-                  // Cap MCQ questions at 40 seconds maximum
-                  if (q.questionType === "MCQ" && questionTime > 40) {
-                    questionTime = 40;
-                  }
-                  
-                  return total + questionTime;
-                }, 0);
-                const totalAiEstimatedMinutes = Math.ceil(totalAiEstimatedTime / 60);
-                
-                // Use AI Estimated Total Time as the exam duration
-                const examDuration = totalAiEstimatedMinutes > 0 ? totalAiEstimatedMinutes : Math.round(scheduledWindow);
-                const isValid = examDuration <= scheduledWindow;
-                
-                return (
-                  <div style={{ 
-                    marginBottom: "1.5rem",
-                    padding: "1rem",
-                    backgroundColor: isValid ? "#f0fdf4" : "#fef2f2",
-                    border: `2px solid ${isValid ? "#10b981" : "#ef4444"}`,
-                    borderRadius: "0.5rem"
-                  }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
-                      <span style={{ fontSize: "1.25rem" }}>{isValid ? "✓" : "⚠️"}</span>
-                      <strong style={{ color: isValid ? "#059669" : "#dc2626" }}>
-                        {isValid ? "Schedule Duration is Valid" : "Exam duration exceeds the scheduled window"}
-                      </strong>
-                    </div>
-                    <div style={{ fontSize: "0.875rem", color: "#64748b", marginLeft: "1.75rem" }}>
-                      <div>AI Estimated Total Time: <strong>{examDuration} minutes</strong></div>
-                      <div>Scheduled Window: <strong>{Math.round(scheduledWindow)} minutes</strong></div>
-                      <div style={{ marginTop: "0.5rem", fontWeight: 600, color: isValid ? "#059669" : "#dc2626" }}>
-                        Status: {isValid ? "Valid" : "Invalid"}
-                      </div>
-                      {isValid && (
-                        <div style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                          Candidates can take the exam during the scheduled window. Each candidate will have {examDuration} minutes to complete the exam.
-                        </div>
-                      )}
-                      {!isValid && (
-                        <div style={{ color: "#dc2626", marginTop: "0.5rem", fontWeight: 600 }}>
-                          ⚠️ AI Estimated Total Time ({examDuration} minutes) exceeds the scheduled window ({Math.round(scheduledWindow)} minutes). Please increase the scheduled window.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
+                }
+                return null;
               })()}
 
               {/* Proctoring Settings */}
@@ -11017,24 +10936,38 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 <button
                   type="button"
                   onClick={async () => {
-                    if (!startTime || !endTime) {
-                      setError("Please set both start and end time");
+                    // Validation based on exam mode
+                    if (examMode === "strict") {
+                      if (!startTime || !duration) {
+                        setError("Please set start time and duration");
+                        return;
+                      }
+                      if (parseInt(duration) < 1) {
+                        setError("Duration must be at least 1 minute");
+                        return;
+                      }
+                    } else {
+                      // Flexible mode
+                      if (!startTime || !endTime || !duration) {
+                        setError("Please set start time, end time, and duration");
                       return;
                     }
                     if (new Date(startTime) >= new Date(endTime)) {
                       setError("End time must be after start time");
                       return;
+                      }
+                      if (parseInt(duration) < 1) {
+                        setError("Duration must be at least 1 minute");
+                        return;
+                      }
                     }
                     
-                    // Validate scheduled window >= total section time (only if per-section timers are enabled)
-                    const scheduledWindow = (new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 60); // in minutes
-                    
+                    // Validate section timers if enabled
                     if (enablePerSectionTimers) {
-                      // Use sectionTimers (from Review Questions) instead of questionTypeTimes
-                      const totalTimeFromSections = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
-                      
-                      if (totalTimeFromSections > scheduledWindow) {
-                        setError(`Section timers (${totalTimeFromSections} minutes) exceed the scheduled exam window (${Math.round(scheduledWindow)} minutes). Please increase the scheduled window or reduce section timers.`);
+                      const totalSectionTime = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
+                      const examDuration = parseInt(duration);
+                      if (totalSectionTime > examDuration) {
+                        setError(`Total section timers (${totalSectionTime} minutes) exceed the exam duration (${examDuration} minutes). Please increase the exam duration or reduce section timers.`);
                         return;
                       }
                     }
@@ -11042,20 +10975,24 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                     // Save schedule to draft
                     try {
                           if (assessmentId) {
-                            await axios.put("/api/assessments/update-draft", {
-                              assessmentId,
-                              schedule: {
-                                startTime,
-                                endTime,
-                                duration: Math.round(
-                                  (new Date(endTime).getTime() - new Date(startTime).getTime()) /
-                                    (1000 * 60)
-                                ),
+                        const scheduleData: any = {
+                          startTime: examMode === "strict" ? startTime : startTime,
+                          duration: parseInt(duration),
+                          examMode,
+                          accessTimeBeforeStart: examMode === "strict" ? parseInt(accessTimeBeforeStart || "15") : undefined,
                                 visibilityMode,
                                 candidateRequirements,
-                                // Store simple AI proctoring toggle inside schedule
                                 proctoringSettings,
-                              },
+                        };
+                        
+                        // Only include endTime for flexible mode
+                        if (examMode === "flexible" && endTime) {
+                          scheduleData.endTime = endTime;
+                        }
+                        
+                        await axios.put("/api/assessments/update-draft", {
+                          assessmentId,
+                          schedule: scheduleData,
                             });
                           }
                     } catch (err: any) {

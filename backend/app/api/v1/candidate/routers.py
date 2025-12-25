@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
@@ -96,6 +96,116 @@ async def verify_candidate(
                     status_code=status.HTTP_423_LOCKED,
                     detail="This assessment is currently paused. Please try again later."
                 )
+        
+        # Check access time before start (for strict mode)
+        from datetime import datetime, timedelta
+        schedule = assessment.get("schedule") or {}
+        # Check examMode in both assessment root and schedule
+        exam_mode = assessment.get("examMode") or schedule.get("examMode") or "strict"  # Default to strict
+        start_time_str = schedule.get("startTime") if isinstance(schedule, dict) else None
+        
+        # Get accessTimeBeforeStart - handle 0 as valid value (use 'is not None' check)
+        access_time_before_start = 15  # Default 15 minutes
+        if "accessTimeBeforeStart" in assessment and assessment.get("accessTimeBeforeStart") is not None:
+            try:
+                access_time_before_start = int(assessment.get("accessTimeBeforeStart"))
+            except (ValueError, TypeError):
+                pass
+        elif isinstance(schedule, dict) and "accessTimeBeforeStart" in schedule and schedule.get("accessTimeBeforeStart") is not None:
+            try:
+                access_time_before_start = int(schedule.get("accessTimeBeforeStart"))
+            except (ValueError, TypeError):
+                pass
+        
+        now = datetime.utcnow()
+        
+        # Log initial state for debugging
+        logger.info(f"[Verify Candidate] Access validation check - examMode: {exam_mode} (from assessment: {assessment.get('examMode')}, from schedule: {schedule.get('examMode')}), startTime: {start_time_str}, accessTimeBeforeStart: {access_time_before_start}, now: {now}")
+        logger.info(f"[Verify Candidate] Full assessment data - assessment_id: {assessment_id}, schedule keys: {list(schedule.keys()) if isinstance(schedule, dict) else 'not a dict'}")
+        logger.info(f"[Verify Candidate] accessTimeBeforeStart values - assessment: {assessment.get('accessTimeBeforeStart')} (type: {type(assessment.get('accessTimeBeforeStart'))}), schedule: {schedule.get('accessTimeBeforeStart') if isinstance(schedule, dict) else 'N/A'} (type: {type(schedule.get('accessTimeBeforeStart')) if isinstance(schedule, dict) else 'N/A'}), final: {access_time_before_start}")
+        
+        # Validate access time based on exam mode
+        if exam_mode == "strict":
+            logger.info(f"[Verify Candidate] STRICT MODE DETECTED - Validating access time...")
+            if not start_time_str:
+                logger.warning(f"[Verify Candidate] Strict mode but no startTime found. Assessment: {assessment_id}, schedule: {schedule}")
+                # If strict mode but no start time, allow access (assessment not properly configured)
+                # But log a warning
+            else:
+                try:
+                    # Parse start time - handle various formats
+                    start_time_str_clean = start_time_str.replace('Z', '+00:00') if 'Z' in start_time_str else start_time_str
+                    if '+' not in start_time_str_clean and '-' not in start_time_str_clean[10:]:
+                        # No timezone info, assume UTC
+                        start_time_str_clean = start_time_str_clean + '+00:00'
+                    
+                    start_time = datetime.fromisoformat(start_time_str_clean).replace(tzinfo=None)
+                    access_start_time = start_time - timedelta(minutes=access_time_before_start)
+                    access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    
+                    logger.info(f"[Verify Candidate] Time check - Now: {now}, Access Start: {access_start_time}, Start Time: {start_time}, Access Time Before Start: {access_time_before_start}")
+                    
+                    # Calculate time difference for logging
+                    time_diff_seconds = (access_start_time - now).total_seconds()
+                    logger.info(f"[Verify Candidate] Time difference: {time_diff_seconds} seconds ({time_diff_seconds/60:.2f} minutes) until access opens")
+                    
+                    if now < access_start_time:
+                        # Too early - cannot access yet
+                        logger.warning(f"[Verify Candidate] Access DENIED - too early. Now: {now}, Access opens at: {access_start_time_formatted}, Time until access: {time_diff_seconds/60:.2f} minutes")
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}."
+                        )
+                    else:
+                        logger.info(f"[Verify Candidate] Access ALLOWED - within access window. Now: {now}, Access opened at: {access_start_time_formatted}")
+                except HTTPException:
+                    # Re-raise HTTP exceptions (access denied) - this is critical
+                    raise
+                except (ValueError, AttributeError, TypeError) as e:
+                    logger.error(f"[Verify Candidate] CRITICAL: Failed to parse start time for access validation: {e}, start_time_str: {start_time_str}, assessment_id: {assessment_id}")
+                    # For strict mode, if we can't parse the time, we should be more strict
+                    # But to avoid breaking assessments, we'll log and allow (with warning)
+                    logger.warning(f"[Verify Candidate] Allowing access despite time parsing failure (strict mode) - this should be investigated")
+        elif exam_mode == "flexible":
+            # For flexible mode, check if we're within the window (startTime to endTime)
+            end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
+            if start_time_str and end_time_str:
+                try:
+                    # Parse start and end times
+                    start_time_str_clean = start_time_str.replace('Z', '+00:00') if 'Z' in start_time_str else start_time_str
+                    end_time_str_clean = end_time_str.replace('Z', '+00:00') if 'Z' in end_time_str else end_time_str
+                    
+                    if '+' not in start_time_str_clean and '-' not in start_time_str_clean[10:]:
+                        start_time_str_clean = start_time_str_clean + '+00:00'
+                    if '+' not in end_time_str_clean and '-' not in end_time_str_clean[10:]:
+                        end_time_str_clean = end_time_str_clean + '+00:00'
+                    
+                    start_time = datetime.fromisoformat(start_time_str_clean).replace(tzinfo=None)
+                    end_time = datetime.fromisoformat(end_time_str_clean).replace(tzinfo=None)
+                    
+                    logger.info(f"[Verify Candidate] FLEXIBLE MODE - Time check - Now: {now}, Start: {start_time}, End: {end_time}")
+                    
+                    if now < start_time:
+                        # Before window opens
+                        start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"The assessment window has not opened yet. The assessment will be available from {start_time_formatted}."
+                        )
+                    elif now > end_time:
+                        # After window closes
+                        end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"The assessment window has closed. The assessment was available until {end_time_formatted}."
+                        )
+                    else:
+                        logger.info(f"[Verify Candidate] Access ALLOWED - within flexible window")
+                except HTTPException:
+                    raise
+                except (ValueError, AttributeError, TypeError) as e:
+                    logger.error(f"[Verify Candidate] Failed to parse times for flexible mode: {e}")
+                    # Allow access if parsing fails (graceful degradation)
         
         # Check token (basic validation - you may want to enhance this)
         # For now, we'll just check if the assessment exists and is accessible
@@ -329,7 +439,6 @@ async def get_assessment_schedule(
 @router.post("/submit-answers")
 async def submit_answers(
     request: SubmitAnswersRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> Dict[str, Any]:
     """
@@ -398,16 +507,6 @@ async def submit_answers(
             {"$set": {"candidateResponses": assessment["candidateResponses"]}}
         )
         
-        # Trigger evaluation asynchronously (don't block response)
-        try:
-            background_tasks.add_task(
-                _evaluate_submission_background,
-                assessment_id, candidate_key, request.answers
-            )
-        except Exception as e:
-            logger.warning(f"Failed to trigger evaluation: {e}")
-            # Don't fail submission if evaluation trigger fails
-        
         return success_response({
             "message": "Answers submitted successfully",
             "submittedAt": datetime.now(timezone.utc).isoformat()
@@ -421,61 +520,6 @@ async def submit_answers(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to submit answers: {str(e)}"
         )
-
-
-async def _evaluate_submission_background(
-    assessment_id: Any,
-    candidate_key: str,
-    answers: list
-):
-    """Background task to evaluate submission."""
-    try:
-        # TODO: Fix import path - evaluation_service module not found
-        # from ...assessments.services.evaluation_service import evaluate_assessment_submission
-        from ....db.mongo import get_database
-        
-        # Temporary placeholder for missing evaluation service
-        async def evaluate_assessment_submission(assessment, candidate_key, answers, db):
-            return {"total_score": 0, "max_total_score": 0, "percentage": 0}
-        
-        db = get_database()
-        
-        # Re-fetch assessment to get latest data
-        assessment = await db.assessments.find_one({"_id": assessment_id})
-        if not assessment:
-            logger.error(f"Assessment {assessment_id} not found for evaluation")
-            return
-        
-        # Evaluate submission
-        evaluation_result = await evaluate_assessment_submission(
-            assessment=assessment,
-            candidate_key=candidate_key,
-            answers=answers,
-            db=db
-        )
-        
-        # Store evaluation results
-        if "candidateResponses" not in assessment:
-            assessment["candidateResponses"] = {}
-        
-        if candidate_key not in assessment["candidateResponses"]:
-            assessment["candidateResponses"][candidate_key] = {}
-        
-        assessment["candidateResponses"][candidate_key]["evaluation"] = evaluation_result
-        
-        # Update scores
-        assessment["candidateResponses"][candidate_key]["score"] = evaluation_result.get("total_score", 0)
-        assessment["candidateResponses"][candidate_key]["maxScore"] = evaluation_result.get("max_total_score", 0)
-        assessment["candidateResponses"][candidate_key]["percentageScored"] = evaluation_result.get("percentage", 0)
-        
-        await db.assessments.update_one(
-            {"_id": assessment_id},
-            {"$set": {"candidateResponses": assessment["candidateResponses"]}}
-        )
-        
-        logger.info(f"Evaluation completed for candidate {candidate_key}. Score: {evaluation_result.get('total_score', 0)}/{evaluation_result.get('max_total_score', 0)}")
-    except Exception as e:
-        logger.exception(f"Error in background evaluation: {e}")
 
 
 class SaveCandidateInfoRequest(BaseModel):

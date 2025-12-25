@@ -5,11 +5,19 @@ import fastApiClient from "../../../lib/fastapi";
 
 interface UpdateScheduleAndCandidatesPayload {
   assessmentId: string;
-  startTime: string;
-  endTime: string;
+  examMode?: "strict" | "flexible";
+  duration?: number;
+  startTime?: string;
+  endTime?: string;
+  accessTimeBeforeStart?: number;
+  enablePerSectionTimers?: boolean;
+  sectionTimers?: Record<string, number>;
   candidates: Array<{ email: string; name: string }>;
   assessmentUrl: string;
   token: string;
+  accessMode?: "private" | "public";
+  invitationTemplate?: any;
+  // Legacy fields (kept for backward compatibility)
   timerMode?: "section" | "scheduleOnly";
   sectionTotalTime?: number;
   scheduledWindowTime?: number;
@@ -29,8 +37,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const payload = req.body as UpdateScheduleAndCandidatesPayload;
 
-  if (!payload.assessmentId || !payload.startTime || !payload.endTime || !payload.candidates || payload.candidates.length === 0) {
-    return res.status(400).json({ message: "Missing required fields" });
+  // Validate required fields
+  if (!payload.assessmentId) {
+    return res.status(400).json({ message: "Assessment ID is required" });
+  }
+
+  // Validate examMode if provided
+  if (payload.examMode && !["strict", "flexible"].includes(payload.examMode)) {
+    return res.status(400).json({ message: "Invalid examMode. Must be 'strict' or 'flexible'" });
+  }
+
+  // Validate duration if provided
+  if (payload.duration !== undefined && (isNaN(payload.duration) || payload.duration <= 0)) {
+    return res.status(400).json({ message: "Duration must be a positive number" });
+  }
+
+  // For flexible mode, endTime is required if startTime is provided
+  if (payload.examMode === "flexible" && payload.startTime && !payload.endTime) {
+    return res.status(400).json({ message: "End time is required for flexible exam mode" });
+  }
+
+  // Candidates array is required (can be empty for public mode)
+  if (!Array.isArray(payload.candidates)) {
+    return res.status(400).json({ message: "Candidates must be an array" });
   }
 
   try {

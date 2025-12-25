@@ -12,6 +12,7 @@ export default function AssessmentInstructionsPage() {
   const [assessmentInfo, setAssessmentInfo] = useState<any>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isNavigating, setIsNavigating] = useState(false);
   
   useEffect(() => {
     const storedEmail = sessionStorage.getItem("candidateEmail");
@@ -64,15 +65,21 @@ export default function AssessmentInstructionsPage() {
     if (id && token) fetchAssessment();
   }, [id, token, router]);
   
-  const handleAcknowledge = useCallback(() => {
-    if (!id) return;
+  const handleAcknowledge = useCallback(async () => {
+    if (!id || isNavigating) return;
     
+    setIsNavigating(true);
     setAcknowledged(true);
     sessionStorage.setItem(`instructionsAcknowledged_${id}`, "true");
     
-    // Route to candidate requirements page
-    router.push(`/assessment/${id}/${token}/candidate-requirements`);
-  }, [id, token, router]);
+    try {
+      // Route to candidate requirements page
+      await router.push(`/assessment/${id}/${token}/candidate-requirements`);
+    } catch (error) {
+      console.error("[Instructions] Navigation error:", error);
+      setIsNavigating(false);
+    }
+  }, [id, token, router, isNavigating]);
   
   if (isLoading) {
     return (
@@ -232,22 +239,23 @@ export default function AssessmentInstructionsPage() {
           {/* Continue Button */}
           <button
             onClick={handleAcknowledge}
-            disabled={!acknowledged}
+            disabled={!acknowledged || isNavigating}
             style={{
               width: "100%",
               padding: "1rem 2rem",
-              backgroundColor: acknowledged ? "#6953a3" : "#e2e8f0",
-              color: acknowledged ? "#ffffff" : "#94a3b8",
+              backgroundColor: (acknowledged && !isNavigating) ? "#6953a3" : "#e2e8f0",
+              color: (acknowledged && !isNavigating) ? "#ffffff" : "#94a3b8",
               border: "none",
               borderRadius: "0.5rem",
               fontSize: "1.125rem",
               fontWeight: 600,
-              cursor: acknowledged ? "pointer" : "not-allowed",
-              boxShadow: acknowledged ? "0 4px 6px -1px rgba(105, 83, 163, 0.3)" : "none",
-              transition: "all 0.2s ease"
+              cursor: (acknowledged && !isNavigating) ? "pointer" : "not-allowed",
+              boxShadow: (acknowledged && !isNavigating) ? "0 4px 6px -1px rgba(105, 83, 163, 0.3)" : "none",
+              transition: "all 0.2s ease",
+              opacity: isNavigating ? 0.7 : 1,
             }}
           >
-            Continue to Assessment →
+            {isNavigating ? "Loading..." : "Continue to Assessment →"}
           </button>
         </div>
       </div>

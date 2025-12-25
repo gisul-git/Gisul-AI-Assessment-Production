@@ -166,9 +166,17 @@ interface AnalyticsLog {
 }
 
 interface ExamSettings {
-  timerMode: "section" | "estimated" | "scheduleOnly";
-  estimatedTotalTime: number; // in minutes
-  sectionTimes?: { [key: string]: number }; // in minutes
+  duration: number; // in minutes
+  examMode?: "strict" | "flexible";
+  enablePerSectionTimers?: boolean;
+  sectionTimers?: {
+    MCQ: number;
+    Subjective: number;
+    PseudoCode: number;
+    Coding: number;
+    SQL: number;
+    AIML: number;
+  };
 }
 
 // ============================================================================
@@ -216,19 +224,24 @@ export default function CandidateAssessmentPage() {
   const [hiddenSummary, setHiddenSummary] = useState<Record<string, { total: number; passed: number } | null>>({});
   const [submissionHistory, setSubmissionHistory] = useState<Record<string, SubmissionHistoryEntry[]>>({});
   const [questionStatus, setQuestionStatus] = useState<Record<string, 'not_attempted' | 'attempted' | 'solved'>>({});
-  const [timerRemaining, setTimerRemaining] = useState<number>(0); // in seconds
+  const [timerRemaining, setTimerRemaining] = useState<number>(0); // in seconds (for overall timer)
+  const [sectionTimers, setSectionTimers] = useState<Record<string, number>>({}); // per-section timers in seconds
+  const [lockedSections, setLockedSections] = useState<Set<string>>(new Set()); // locked section keys
   const [examSettings, setExamSettings] = useState<ExamSettings>({
-    timerMode: "estimated",
-    estimatedTotalTime: 60,
+    duration: 60,
   });
   const [attemptId, setAttemptId] = useState<string>("");
   const [candidateEmail, setCandidateEmail] = useState<string>("");
   const [candidateName, setCandidateName] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [waitingForStart, setWaitingForStart] = useState<boolean>(false);
+  const [startTime, setStartTime] = useState<Date | null>(null);
+  const [timeUntilStart, setTimeUntilStart] = useState<number>(0);
 
   // Refs for debouncing and cleanup
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const sectionTimerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastSavedAnswerRef = useRef<Map<string, string>>(new Map());
 
   // ============================================================================
@@ -475,6 +488,11 @@ export default function CandidateAssessmentPage() {
     };
 
     // Process each topic
+    if (!Array.isArray(topics_v2) || topics_v2.length === 0) {
+      console.warn("[take.tsx] topics_v2 is not a valid array or is empty");
+      return { sections, allQuestions };
+    }
+    
     topics_v2.forEach((topic, topicIndex) => {
       if (!topic || typeof topic !== "object") {
         console.warn(`[take.tsx] Topic ${topicIndex} is not a valid object, skipping`);
@@ -501,14 +519,60 @@ export default function CandidateAssessmentPage() {
         const rowId = row.rowId || row.id || `row-${rowIndex}`;
         const questionType = row.questionType || row.type || "";
         const difficulty = row.difficulty || "Easy";
-        const questions = row.questions || [];
+        const rowStatus = row.status;
+        
+        // Get questions array - check multiple possible locations
+        let questions = Array.isArray(row.questions) ? row.questions : [];
+        
+        // If questions array is empty, check if questions are stored elsewhere
+        if (questions.length === 0) {
+          // Check if questions are in a different format or location
+          if (row.question && typeof row.question === "object") {
+            questions = [row.question];
+          } else if (Array.isArray(row.question)) {
+            questions = row.question;
+          }
+        }
+        
+        // Only process rows with "generated" or "completed" status, or if status is missing (for backward compatibility)
+        const isGeneratedOrCompleted = !rowStatus || rowStatus === "generated" || rowStatus === "completed";
+        
+        if (!isGeneratedOrCompleted) {
+          console.log(`[take.tsx] Row ${rowIndex} (${questionType}) in topic ${topicIndex} has status "${rowStatus}", skipping (not generated/completed)`);
+          return;
+        }
+        
+        if (questions.length === 0) {
+          console.warn(`[take.tsx] Row ${rowIndex} (${questionType}) in topic ${topicIndex} has no questions array or it's empty. Row data:`, {
+            rowId,
+            questionType,
+            difficulty,
+            rowStatus,
+            hasQuestionsProperty: 'questions' in row,
+            hasQuestionProperty: 'question' in row,
+            rowKeys: Object.keys(row),
+          });
+          return;
+        }
 
         console.log(`[take.tsx] Processing row ${rowIndex} (${questionType}):`, {
           rowId,
           questionType,
           difficulty,
           questionsCount: questions.length,
+          questionsArray: questions, // Show actual questions array
+          rowStatus: row.status,
+          rowKeys: Object.keys(row),
+          hasQuestionsProperty: 'questions' in row,
+          questionsIsArray: Array.isArray(questions),
         });
+        
+        // Log first question if exists
+        if (questions.length > 0) {
+          console.log(`[take.tsx] First question in row ${rowIndex}:`, JSON.stringify(questions[0], null, 2));
+        } else {
+          console.warn(`[take.tsx] Row ${rowIndex} has no questions! Row data:`, JSON.stringify(row, null, 2));
+        }
 
         // Process each question in the row
         questions.forEach((question: any, questionIndex: number) => {
@@ -621,54 +685,13 @@ export default function CandidateAssessmentPage() {
   // TIMER LOGIC
   // ============================================================================
 
-  const calculateTimer = useCallback((settings: ExamSettings, sections: Sections): number => {
-    // PRODUCTION-GRADE TIMER LOGIC - PART 8
-    // IF timerMode = "perSection" (or "section"): exam timer = SUM of all section timers
-    // IF timerMode = "scheduleOnly": exam timer = AI Estimated Total Time (NOT schedule window duration)
-    // IF timerMode = "estimated": exam timer = estimatedTotalTime
-    
-    console.log("[take.tsx] calculateTimer called with:", {
-      timerMode: settings.timerMode,
-      estimatedTotalTime: settings.estimatedTotalTime,
-      sectionTimes: settings.sectionTimes,
-      sectionsKeys: Object.keys(sections),
-    });
-    
-    if (settings.timerMode === "section") {
-      // Sum of all section time allocations
-      let total = 0;
-      if (settings.sectionTimes) {
-        Object.keys(sections).forEach((sectionKey) => {
-          // Map section keys to questionTypeTimes keys
-          const timeKey = sectionKey === "mcq" ? "MCQ" : 
-                         sectionKey === "pseudocode" ? "PseudoCode" :
-                         sectionKey === "subjective" ? "Subjective" :
-                         sectionKey === "coding" ? "Coding" : sectionKey;
-          const sectionTime = settings.sectionTimes?.[timeKey] || settings.sectionTimes?.[sectionKey] || 0;
-          total += sectionTime * 60; // Convert minutes to seconds
-        });
-      }
-      console.log("[take.tsx] Timer mode: per-section, total:", total, "seconds");
-      return total > 0 ? total : (settings.estimatedTotalTime || 60) * 60; // Fallback to estimated if section times sum to 0
-    } else if (settings.timerMode === "estimated") {
-      // Use estimatedTotalTime
-      const estimatedMinutes = settings.estimatedTotalTime || 60; // Default to 60 minutes if not set
-      const timerSeconds = estimatedMinutes * 60; // Convert minutes to seconds
-      console.log("[take.tsx] Timer mode: estimated, total:", timerSeconds, "seconds");
-      return timerSeconds;
-    } else if (settings.timerMode === "scheduleOnly") {
-      // CRITICAL: Use AI Estimated Total Time, NOT schedule window duration
-      // Do NOT use (endTime - startTime) automatically
-      const estimatedMinutes = settings.estimatedTotalTime || 60; // Default to 60 minutes if not set
-      const timerSeconds = estimatedMinutes * 60; // Convert minutes to seconds
-      console.log("[take.tsx] Timer mode: scheduleOnly, using estimatedTotalTime:", timerSeconds, "seconds (NOT schedule window)");
-      return timerSeconds;
-    }
-    // Default to estimated
-    const estimatedMinutes = settings.estimatedTotalTime || 60; // Default to 60 minutes if not set
-    const defaultTimer = estimatedMinutes * 60;
-    console.log("[take.tsx] Timer mode: default (estimated), total:", defaultTimer, "seconds");
-    return defaultTimer;
+  const calculateTimer = useCallback((settings: ExamSettings): number => {
+    // Simple duration-based timer (Custom-MCQ style)
+    // Use duration from schedule (in minutes), convert to seconds
+    const durationMinutes = settings.duration || 60; // Default to 60 minutes if not set
+    const timerSeconds = durationMinutes * 60; // Convert minutes to seconds
+    console.log("[take.tsx] Timer calculation: duration =", durationMinutes, "minutes =", timerSeconds, "seconds");
+    return timerSeconds;
   }, []);
 
   // ============================================================================
@@ -1070,6 +1093,12 @@ export default function CandidateAssessmentPage() {
       });
     }
     
+    // Check if section is locked (only for per-section timers)
+    if (examSettings?.enablePerSectionTimers && lockedSections.has(section)) {
+      alert(`This section has been locked because its timer expired. You cannot access questions in this section.`);
+      return;
+    }
+    
     setCurrentSection(section);
     setCurrentQuestionIndex(index);
     const question = sections[section][index];
@@ -1080,7 +1109,7 @@ export default function CandidateAssessmentPage() {
         questionId: getQuestionId(question),
       });
     }
-  }, [sections, logAnalyticsEvent, getQuestionId, getCurrentQuestion, currentSection, answers, codeAnswers, attemptId, timerRemaining]);
+  }, [sections, logAnalyticsEvent, getQuestionId, getCurrentQuestion, currentSection, answers, codeAnswers, attemptId, timerRemaining, lockedSections, examSettings]);
 
   const navigateNext = useCallback(() => {
     if (!currentSection) return;
@@ -1095,13 +1124,20 @@ export default function CandidateAssessmentPage() {
       const currentIndex = sectionOrder.indexOf(currentSection);
       if (currentIndex < sectionOrder.length - 1) {
         const nextSection = sectionOrder[currentIndex + 1];
+        
+        // Check if next section is locked (for per-section timers)
+        if (examSettings.enablePerSectionTimers && lockedSections.has(nextSection)) {
+          alert(`The ${getSectionName(nextSection)} section is locked because its timer expired. You cannot access questions in this section.`);
+          return;
+        }
+        
         if (sections[nextSection].length > 0) {
           navigateToQuestion(nextSection, 0);
           logAnalyticsEvent("SECTION_SWITCH", { from: currentSection, to: nextSection });
         }
       }
     }
-  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent]);
+  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections]);
 
   const navigatePrevious = useCallback(() => {
     if (!currentSection) return;
@@ -1115,6 +1151,13 @@ export default function CandidateAssessmentPage() {
       const currentIndex = sectionOrder.indexOf(currentSection);
       if (currentIndex > 0) {
         const prevSection = sectionOrder[currentIndex - 1];
+        
+        // Check if previous section is locked (for per-section timers)
+        if (examSettings.enablePerSectionTimers && lockedSections.has(prevSection)) {
+          alert(`The ${getSectionName(prevSection)} section is locked because its timer expired. You cannot access questions in this section.`);
+          return;
+        }
+        
         if (sections[prevSection].length > 0) {
           const prevSectionLength = sections[prevSection].length;
           navigateToQuestion(prevSection, prevSectionLength - 1);
@@ -1122,7 +1165,7 @@ export default function CandidateAssessmentPage() {
         }
       }
     }
-  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent]);
+  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections]);
 
   // ============================================================================
   // FINAL SUBMISSION
@@ -1238,8 +1281,8 @@ export default function CandidateAssessmentPage() {
           aiml: sections.aiml.length,
         },
         examSettings: {
-          timerMode: examSettings.timerMode,
-          estimatedTotalTime: examSettings.estimatedTotalTime,
+          duration: examSettings.duration,
+          examMode: examSettings.examMode,
         },
         submissionTime: new Date().toISOString(),
       };
@@ -1410,12 +1453,200 @@ export default function CandidateAssessmentPage() {
 
         const assessment = assessmentResponse.data.data;
         const topics_v2 = assessment?.topics_v2 || [];
+        
+        // Enhanced logging for debugging - EXPAND OBJECTS
+        console.log("[take.tsx] Full assessment data:", JSON.stringify({
+          hasTopicsV2: !!assessment?.topics_v2,
+          topicsV2Type: Array.isArray(assessment?.topics_v2) ? "array" : typeof assessment?.topics_v2,
+          topicsV2Length: Array.isArray(assessment?.topics_v2) ? assessment.topics_v2.length : "N/A",
+          assessmentKeys: assessment ? Object.keys(assessment) : [],
+          assessmentStatus: assessment?.status,
+          allQuestionsGenerated: assessment?.allQuestionsGenerated,
+        }, null, 2));
+        
+        // Check if topics_v2 exists but is empty or has no questions
+        if (Array.isArray(topics_v2) && topics_v2.length > 0) {
+          const detailedAnalysis = topics_v2.map((topic, topicIdx) => {
+            const questionRows = topic?.questionRows || [];
+            const rowsAnalysis = questionRows.map((row: any, rowIdx: number) => {
+              const questions = row?.questions || [];
+              return {
+                rowIndex: rowIdx,
+                rowId: row?.rowId,
+                questionType: row?.questionType,
+                difficulty: row?.difficulty,
+                questionsCount: row?.questionsCount,
+                actualQuestionsArrayLength: questions.length,
+                hasQuestions: questions.length > 0,
+                firstQuestionPreview: questions.length > 0 ? {
+                  id: questions[0]?._id || questions[0]?.id,
+                  hasQuestionText: !!questions[0]?.questionText || !!questions[0]?.question,
+                } : null,
+              };
+            });
+            return {
+              topicIndex: topicIdx,
+              topicId: topic?.id,
+              topicLabel: topic?.label,
+              questionRowsCount: questionRows.length,
+              rowsAnalysis: rowsAnalysis,
+            };
+          });
+          
+          const totalQuestions = topics_v2.reduce((count, topic) => {
+            const questionRows = topic?.questionRows || [];
+            return count + questionRows.reduce((rowCount: number, row: any) => {
+              const questions = row?.questions || [];
+              return rowCount + questions.length;
+            }, 0);
+          }, 0);
+          
+          console.log("[take.tsx] Topics_v2 detailed analysis:", JSON.stringify({
+            topicsCount: topics_v2.length,
+            totalQuestionsInTopics: totalQuestions,
+            topicsWithQuestions: topics_v2.filter(t => {
+              const rows = t?.questionRows || [];
+              return rows.some((r: any) => (r?.questions || []).length > 0);
+            }).length,
+            detailedTopics: detailedAnalysis,
+          }, null, 2));
+          
+          if (totalQuestions === 0) {
+            console.error("[take.tsx] Topics_v2 exists but has no questions. Full structure:", 
+              JSON.stringify(topics_v2.map(t => ({
+                id: t?.id,
+                label: t?.label,
+                questionRowsCount: (t?.questionRows || []).length,
+                questionRows: (t?.questionRows || []).map((r: any) => ({
+                  rowId: r?.rowId,
+                  questionType: r?.questionType,
+                  questionsCount: r?.questionsCount,
+                  actualQuestionsLength: (r?.questions || []).length,
+                  hasQuestionsArray: Array.isArray(r?.questions),
+                  questionsArray: r?.questions, // Show actual questions array
+                })),
+              })), null, 2)
+            );
+          }
+        } else {
+          console.error("[take.tsx] Topics_v2 is missing or empty:", JSON.stringify({
+            topics_v2,
+            topics_v2Type: typeof topics_v2,
+            topics_v2IsArray: Array.isArray(topics_v2),
+            assessmentHasTopics: !!assessment?.topics,
+            assessmentHasTopicsV2: !!assessment?.topics_v2,
+            assessmentKeys: assessment ? Object.keys(assessment) : [],
+          }, null, 2));
+        }
+        
+        // Get duration from schedule (new Custom-MCQ style) or fallback to assessment duration
+        const schedule = assessment?.schedule || {};
+        const duration = schedule.duration || assessment?.duration || 60; // Default to 60 minutes
+        const examMode = schedule.examMode || assessment?.examMode || "strict";
+        const enablePerSectionTimers = assessment?.enablePerSectionTimers || false;
+        const sectionTimersFromDB = assessment?.sectionTimers || {};
+        const startTimeStr = schedule.startTime;
+        const accessTimeBeforeStart = assessment?.accessTimeBeforeStart || schedule?.accessTimeBeforeStart || 15;
+        
+        // Check if assessment has started (for strict mode)
+        if (examMode === "strict" && startTimeStr) {
+          try {
+            // Parse start time (handle both ISO string and other formats)
+            let startTime: Date;
+            if (startTimeStr.includes('Z') || startTimeStr.includes('+') || startTimeStr.includes('-', 10)) {
+              startTime = new Date(startTimeStr);
+            } else {
+              startTime = new Date(startTimeStr + 'Z'); // Assume UTC if no timezone
+            }
+            
+            const now = new Date();
+            const accessStartTime = new Date(startTime.getTime() - accessTimeBeforeStart * 60000);
+            
+            console.log("[take.tsx] Time check:", {
+              now: now.toISOString(),
+              startTime: startTime.toISOString(),
+              accessStartTime: accessStartTime.toISOString(),
+              accessTimeBeforeStart,
+              examMode,
+              nowTime: now.getTime(),
+              startTimeTime: startTime.getTime(),
+              isBeforeStart: now < startTime,
+            });
+            
+            if (now < accessStartTime) {
+              // Too early - show error
+              const errorMsg = `You cannot access this assessment yet. Access will be available ${accessTimeBeforeStart} minutes before the start time. Access opens at ${accessStartTime.toLocaleString()}.`;
+              console.log("[take.tsx] Too early to access:", errorMsg);
+              setError(errorMsg);
+              setAppState("ready");
+              return;
+            } else if (now < startTime) {
+              // Within access window but before start time - show waiting page
+              console.log("[take.tsx] Within access window but before start time, showing waiting page. Now:", now.toISOString(), "Start:", startTime.toISOString());
+              setWaitingForStart(true);
+              setStartTime(startTime);
+              setAppState("ready");
+              return; // CRITICAL: Don't load questions if before start time
+            }
+            // If we reach here, start time has passed - continue loading questions
+            console.log("[take.tsx] Start time has passed, loading questions");
+          } catch (timeError) {
+            console.error("[take.tsx] Error parsing start time:", timeError);
+            // Continue if time parsing fails
+          }
+        }
+        
         const fetchedSettings: ExamSettings = {
-          timerMode: assessment?.timerMode || "estimated",
-          estimatedTotalTime: assessment?.estimatedTotalTime || 60,
-          sectionTimes: assessment?.questionTypeTimes || {},
+          duration: duration,
+          examMode: examMode,
+          enablePerSectionTimers: enablePerSectionTimers,
+          sectionTimers: sectionTimersFromDB,
         };
-        console.log("[take.tsx] Topics_v2 structure:", topics_v2);
+        
+        // Initialize per-section timers if enabled
+        if (enablePerSectionTimers && sectionTimersFromDB) {
+          const sectionTimerMap: Record<string, number> = {};
+          // Map section names to keys
+          const sectionKeyMap: Record<string, string> = {
+            "MCQ": "mcq",
+            "Subjective": "subjective",
+            "PseudoCode": "pseudocode",
+            "Coding": "coding",
+            "SQL": "sql",
+            "AIML": "aiml",
+          };
+          
+          Object.entries(sectionTimersFromDB).forEach(([sectionName, minutes]) => {
+            const sectionKey = sectionKeyMap[sectionName];
+            if (sectionKey && typeof minutes === "number" && minutes > 0) {
+              sectionTimerMap[sectionKey] = minutes * 60; // Convert to seconds
+            }
+          });
+          console.log("[take.tsx] Per-section timers initialized:", {
+            enablePerSectionTimers,
+            sectionTimersFromDB,
+            sectionTimerMap,
+            hasTimers: Object.keys(sectionTimerMap).length > 0,
+          });
+          if (Object.keys(sectionTimerMap).length > 0) {
+            setSectionTimers(sectionTimerMap);
+          } else {
+            console.warn("[take.tsx] Per-section timers enabled but no valid timers found in sectionTimersFromDB");
+          }
+        } else {
+          console.log("[take.tsx] Per-section timers not enabled or missing:", {
+            enablePerSectionTimers,
+            hasSectionTimersFromDB: !!sectionTimersFromDB,
+            sectionTimersFromDB,
+          });
+        }
+        
+        console.log("[take.tsx] Exam settings:", {
+          enablePerSectionTimers,
+          sectionTimersFromDB,
+          fetchedSettings,
+        });
+        console.log("[take.tsx] Topics_v2 structure (raw):", JSON.stringify(topics_v2, null, 2));
 
         // Read proctoring flags from schedule.proctoringSettings (if present)
         const proctoringSettings = assessment?.schedule?.proctoringSettings;
@@ -1426,6 +1657,8 @@ export default function CandidateAssessmentPage() {
         setLiveProctoringEnabled(liveFlagFromSchedule === true);
 
         // Transform topics_v2 into sections
+        console.log("[take.tsx] About to transform topics_v2, input length:", topics_v2.length);
+        console.log("[take.tsx] First topic sample:", JSON.stringify(topics_v2[0], null, 2)); // Log first topic as sample
         const transformed = transformTopicsV2ToSections(topics_v2);
         console.log("[take.tsx] Transformed sections:", {
           mcq: transformed.sections.mcq.length,
@@ -1436,9 +1669,72 @@ export default function CandidateAssessmentPage() {
           aiml: transformed.sections.aiml.length,
           allQuestions: transformed.allQuestions.length,
         });
+        
+        // Debug: Check if transformation actually processed questions
+        if (transformed.allQuestions.length === 0) {
+          console.error("[take.tsx] TRANSFORMATION FAILED - No questions in result but questions exist in input!");
+          console.error("[take.tsx] Input topics_v2 structure:", JSON.stringify(topics_v2.map((t: any) => ({
+            id: t?.id,
+            label: t?.label,
+            questionRows: t?.questionRows?.map((r: any) => ({
+              rowId: r?.rowId,
+              questionType: r?.questionType,
+              questionsCount: r?.questions?.length || 0,
+              questions: r?.questions,
+            })),
+          })), null, 2));
+        } else {
+          console.log("[take.tsx] Transformation successful! Questions by section:", {
+            mcq: transformed.sections.mcq.map(q => ({ id: q._id, type: q.type })),
+            subjective: transformed.sections.subjective.map(q => ({ id: q._id, type: q.type })),
+            coding: transformed.sections.coding.map(q => ({ id: q._id, type: q.type })),
+            aiml: transformed.sections.aiml.map(q => ({ id: q._id, type: q.type })),
+          });
+        }
 
         if (transformed.allQuestions.length === 0) {
-          throw new Error("Assessment has no generated questions. Please contact the administrator.");
+          // Provide more detailed error message
+          const hasTopicsV2 = Array.isArray(topics_v2) && topics_v2.length > 0;
+          const hasTopics = Array.isArray(assessment?.topics) && assessment.topics.length > 0;
+          const assessmentStatus = assessment?.status;
+          const allQuestionsGenerated = assessment?.allQuestionsGenerated;
+          
+          let errorMessage = "Assessment has no generated questions.";
+          
+          if (!hasTopicsV2 && !hasTopics) {
+            errorMessage += " No topics or questions have been configured for this assessment.";
+          } else if (hasTopicsV2) {
+            const topicsWithQuestions = topics_v2.filter(t => {
+              const rows = t?.questionRows || [];
+              return rows.some((r: any) => (r?.questions || []).length > 0);
+            });
+            if (topicsWithQuestions.length === 0) {
+              errorMessage += ` Topics are configured but no questions have been generated yet.`;
+            } else {
+              errorMessage += ` Found ${topicsWithQuestions.length} topic(s) with questions, but they could not be processed.`;
+            }
+          } else if (hasTopics) {
+            errorMessage += " Assessment uses old topics format. Please regenerate questions.";
+          }
+          
+          if (assessmentStatus === "draft") {
+            errorMessage += " The assessment is still in draft mode. Please complete question generation and schedule the assessment.";
+          } else if (!allQuestionsGenerated) {
+            errorMessage += " Question generation may not be complete. Please check the assessment configuration.";
+          }
+          
+          errorMessage += " Please contact the administrator.";
+          
+          console.error("[take.tsx] No questions available:", {
+            hasTopicsV2,
+            hasTopics,
+            assessmentStatus,
+            allQuestionsGenerated,
+            topicsV2Length: Array.isArray(topics_v2) ? topics_v2.length : 0,
+            errorMessage,
+          });
+          
+          throw new Error(errorMessage);
         }
 
         setQuestions(transformed.allQuestions);
@@ -1459,11 +1755,10 @@ export default function CandidateAssessmentPage() {
         }
 
         // Calculate and set timer
-        const calculatedTimer = calculateTimer(fetchedSettings, transformed.sections);
+        const calculatedTimer = calculateTimer(fetchedSettings);
         console.log("[take.tsx] Timer calculation:", {
-          timerMode: fetchedSettings.timerMode,
-          estimatedTotalTime: fetchedSettings.estimatedTotalTime,
-          sectionTimes: fetchedSettings.sectionTimes,
+          duration: fetchedSettings.duration,
+          examMode: fetchedSettings.examMode,
           calculatedTimer,
           sectionsCount: {
             mcq: transformed.sections.mcq.length,
@@ -1493,11 +1788,40 @@ export default function CandidateAssessmentPage() {
     loadAssessment();
   }, [id, token, transformTopicsV2ToSections, calculateTimer]);
 
+  // Countdown timer for waiting page - MUST be before any conditional returns
+  useEffect(() => {
+    if (!waitingForStart || !startTime) return;
+    
+    const updateTimer = () => {
+      const remaining = Math.max(0, Math.floor((startTime.getTime() - new Date().getTime()) / 1000));
+      setTimeUntilStart(remaining);
+      if (remaining <= 0) {
+        setWaitingForStart(false);
+        window.location.reload(); // Reload to start assessment
+      }
+    };
+    
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    
+    return () => clearInterval(interval);
+  }, [waitingForStart, startTime]);
+
   // ============================================================================
   // TIMER COUNTDOWN
   // ============================================================================
 
+  // Overall timer countdown (when per-section timers are disabled)
   useEffect(() => {
+    // Skip if per-section timers are enabled
+    if (examSettings.enablePerSectionTimers) {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+      return;
+    }
+    
     // Only start timer when appState is ready AND timerRemaining is greater than 0
     if (appState !== "ready" || timerRemaining <= 0) {
       // Clear interval if timer is 0 or appState is not ready
@@ -1534,7 +1858,93 @@ export default function CandidateAssessmentPage() {
         timerIntervalRef.current = null;
       }
     };
-  }, [appState, timerRemaining, submitAssessment]);
+  }, [appState, timerRemaining, submitAssessment, examSettings.enablePerSectionTimers]);
+
+  // Per-section timer countdown (when per-section timers are enabled)
+  useEffect(() => {
+    if (!examSettings.enablePerSectionTimers || appState !== "ready" || !currentSection) {
+      return;
+    }
+
+    // Check if section is already locked
+    if (lockedSections.has(currentSection)) {
+      return;
+    }
+
+    const currentSectionTimer = sectionTimers[currentSection];
+    if (!currentSectionTimer || currentSectionTimer <= 0) {
+      return;
+    }
+
+    // Clear any existing interval before starting a new one
+    if (sectionTimerIntervalRef.current) {
+      clearInterval(sectionTimerIntervalRef.current);
+      sectionTimerIntervalRef.current = null;
+    }
+    
+    // Start countdown for current section
+    sectionTimerIntervalRef.current = setInterval(() => {
+      setSectionTimers((prev) => {
+        const currentTimer = prev[currentSection];
+        if (!currentTimer || currentTimer <= 1) {
+          // Clear interval first
+          if (sectionTimerIntervalRef.current) {
+            clearInterval(sectionTimerIntervalRef.current);
+            sectionTimerIntervalRef.current = null;
+          }
+          
+          // Section timer expired - lock this section and handle navigation
+          setLockedSections((currentLocked) => {
+            const newLockedSet = new Set(currentLocked);
+            newLockedSet.add(currentSection);
+            
+            // If current section is locked, try to move to next unlocked section
+            const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
+            const currentIndex = sectionOrder.indexOf(currentSection as keyof Sections);
+            
+            // Find next unlocked section
+            let foundNext = false;
+            for (let i = currentIndex + 1; i < sectionOrder.length; i++) {
+              const nextSection = sectionOrder[i];
+              const isLocked = newLockedSet.has(nextSection);
+              if (sections[nextSection]?.length > 0 && !isLocked) {
+                // Use setTimeout to avoid state update conflicts
+                setTimeout(() => {
+                  setCurrentSection(nextSection);
+                  setCurrentQuestionIndex(0);
+                }, 0);
+                foundNext = true;
+                break;
+              }
+            }
+            
+            // If all sections are locked, auto-submit
+            if (!foundNext) {
+              const allSectionsLocked = sectionOrder.every(section => {
+                const isLocked = newLockedSet.has(section);
+                return isLocked || sections[section]?.length === 0;
+              });
+              if (allSectionsLocked) {
+                setTimeout(() => submitAssessment(), 0);
+              }
+            }
+            
+            return newLockedSet;
+          });
+          
+          return { ...prev, [currentSection]: 0 };
+        }
+        return { ...prev, [currentSection]: currentTimer - 1 };
+      });
+    }, 1000);
+
+    return () => {
+      if (sectionTimerIntervalRef.current) {
+        clearInterval(sectionTimerIntervalRef.current);
+        sectionTimerIntervalRef.current = null;
+      }
+    };
+  }, [appState, currentSection, examSettings.enablePerSectionTimers, sections, submitAssessment, lockedSections, sectionTimers]);
 
   // ============================================================================
   // RENDERING
@@ -1714,7 +2124,7 @@ export default function CandidateAssessmentPage() {
   const isFirstQuestion = currentQuestionIndex === 0 && currentSection === "mcq";
   
   // Check if this is the last question across all sections
-  const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
+  const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
   
   // Find the last non-empty section
   let lastSectionWithQuestions: keyof Sections | null = null;
@@ -1735,6 +2145,65 @@ export default function CandidateAssessmentPage() {
   // ============================================================================
   // RENDERING
   // ============================================================================
+
+  // Show waiting page if assessment hasn't started (strict mode)
+  if (waitingForStart && startTime) {
+    return (
+      <div style={{ 
+        backgroundColor: "#f1dcba", 
+        minHeight: "100vh", 
+        padding: "2rem",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}>
+        <div style={{
+          backgroundColor: "#ffffff",
+          borderRadius: "0.75rem",
+          padding: "3rem",
+          maxWidth: "600px",
+          textAlign: "center",
+          boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
+        }}>
+          <h1 style={{ fontSize: "2rem", color: "#1a1625", marginBottom: "1rem", fontWeight: 700 }}>
+            Assessment Will Start Soon
+          </h1>
+          <p style={{ fontSize: "1.125rem", color: "#64748b", marginBottom: "2rem" }}>
+            The assessment will begin at:
+          </p>
+          <div style={{
+            fontSize: "1.5rem",
+            color: "#6953a3",
+            fontWeight: 700,
+            marginBottom: "2rem",
+            padding: "1rem",
+            backgroundColor: "#f8fafc",
+            borderRadius: "0.5rem",
+          }}>
+            {startTime.toLocaleString()}
+          </div>
+          <div style={{
+            fontSize: "1.25rem",
+            color: "#1e293b",
+            marginBottom: "1rem",
+          }}>
+            Time remaining:
+          </div>
+          <div style={{
+            fontSize: "2rem",
+            color: "#3b82f6",
+            fontWeight: 700,
+            marginBottom: "2rem",
+          }}>
+            {formatTime(timeUntilStart)}
+          </div>
+          <p style={{ fontSize: "0.875rem", color: "#64748b" }}>
+            Please wait. The assessment will start automatically when the time arrives.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ 
@@ -1812,25 +2281,54 @@ export default function CandidateAssessmentPage() {
             height: isFullscreen ? "100%" : "auto",
           }}>
             {/* Timer */}
-                <div style={{
-              marginBottom: "1.5rem",
-                  padding: "1rem",
-              backgroundColor: timerRemaining < 300 ? "#fef2f2" : "#f0f9ff",
-              border: `2px solid ${timerRemaining < 300 ? "#ef4444" : "#3b82f6"}`,
-                  borderRadius: "0.5rem",
-                    textAlign: "center",
-                  }}>
-                    <p style={{ color: "#64748b", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
-                      Assessment ends in:
-                    </p>
-                    <p style={{ 
-                fontSize: "1.5rem",
-                      fontWeight: 700, 
-                color: timerRemaining < 300 ? "#dc2626" : "#1e40af",
-                    }}>
-                {formatTime(timerRemaining)}
-                    </p>
-                  </div>
+            {examSettings?.enablePerSectionTimers && currentSection && sectionTimers[currentSection] !== undefined && sectionTimers[currentSection] >= 0 ? (
+              // Per-section timer display
+              <div style={{
+                marginBottom: "1.5rem",
+                padding: "1rem",
+                backgroundColor: (sectionTimers[currentSection] || 0) < 300 ? "#fef2f2" : "#f0f9ff",
+                border: `2px solid ${(sectionTimers[currentSection] || 0) < 300 ? "#ef4444" : "#3b82f6"}`,
+                borderRadius: "0.5rem",
+                textAlign: "center",
+              }}>
+                <p style={{ color: "#64748b", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
+                  {getSectionName(currentSection)} Section Timer:
+                </p>
+                <p style={{ 
+                  fontSize: "1.5rem",
+                  fontWeight: 700, 
+                  color: (sectionTimers[currentSection] || 0) < 300 ? "#dc2626" : "#1e40af",
+                }}>
+                  {formatTime(sectionTimers[currentSection] || 0)}
+                </p>
+                {lockedSections.has(currentSection) && (
+                  <p style={{ color: "#dc2626", fontSize: "0.875rem", marginTop: "0.5rem", fontWeight: 600 }}>
+                    ⚠️ This section is locked
+                  </p>
+                )}
+              </div>
+            ) : (
+              // Overall timer display
+              <div style={{
+                marginBottom: "1.5rem",
+                padding: "1rem",
+                backgroundColor: timerRemaining < 300 ? "#fef2f2" : "#f0f9ff",
+                border: `2px solid ${timerRemaining < 300 ? "#ef4444" : "#3b82f6"}`,
+                borderRadius: "0.5rem",
+                textAlign: "center",
+              }}>
+                <p style={{ color: "#64748b", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
+                  Assessment ends in:
+                </p>
+                <p style={{ 
+                  fontSize: "1.5rem",
+                  fontWeight: 700, 
+                  color: timerRemaining < 300 ? "#dc2626" : "#1e40af",
+                }}>
+                  {formatTime(timerRemaining)}
+                </p>
+              </div>
+            )}
 
             {/* Question Navigator - Hide for coding, sql and aiml sections (they have their own navigation) */}
             {currentSection !== "coding" && currentSection !== "sql" && currentSection !== "aiml" && (
