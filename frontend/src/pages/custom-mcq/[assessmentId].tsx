@@ -28,7 +28,7 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [expandedAnswerLogsUser, setExpandedAnswerLogsUser] = useState<string | null>(null);
   const [showLiveProctoring, setShowLiveProctoring] = useState(false);
   const [showCandidates, setShowCandidates] = useState(false);
-  const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false);
+  // Removed isLiveProctoringCooldown - no longer needed
 
   useEffect(() => {
     if (assessmentId) {
@@ -37,20 +37,7 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   }, [assessmentId]);
 
   // Handle Live Proctoring cooldown when dashboard closes
-  const prevShowLiveProctoringRef = useRef(showLiveProctoring);
-  useEffect(() => {
-    // Check if dashboard was just closed (changed from true to false)
-    if (prevShowLiveProctoringRef.current === true && showLiveProctoring === false) {
-      // Dashboard was just closed, start 10-second cooldown
-      setIsLiveProctoringCooldown(true);
-      const timer = setTimeout(() => {
-        setIsLiveProctoringCooldown(false);
-      }, 8000); // 8 seconds
-
-      return () => clearTimeout(timer);
-    }
-    prevShowLiveProctoringRef.current = showLiveProctoring;
-  }, [showLiveProctoring]);
+  // Removed 8-second cooldown - no longer needed as reconnection is handled properly
 
   const loadAssessment = async () => {
     try {
@@ -207,33 +194,24 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
             <button
               type="button"
               onClick={() => setShowLiveProctoring(true)}
-              disabled={isLiveProctoringCooldown}
               style={{
                 padding: "0.5rem 1rem",
                 fontSize: "0.875rem",
                 display: "flex",
                 alignItems: "center",
                 gap: "0.5rem",
-                backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
+                backgroundColor: "#3b82f6",
                 color: "#ffffff",
                 border: "none",
                 borderRadius: "0.5rem",
-                cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
+                cursor: "pointer",
                 fontWeight: 600,
-                opacity: isLiveProctoringCooldown ? 0.7 : 1,
               }}
             >
-              {isLiveProctoringCooldown ? (
-                <>
-                  <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                  Please wait...
-                </>
-              ) : (
-                <>
-                  <Eye size={16} />
-                  Open Live Proctoring
-                </>
-              )}
+              <>
+                <Eye size={16} />
+                Open Live Proctoring
+              </>
             </button>
           </div>
           <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b", margin: 0 }}>

@@ -62,13 +62,10 @@ export function useMultiLiveProctorAdmin({
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const isMonitoringRef = useRef(false);
 
-  // Logging
+  // Logging - removed console logs as requested
   const log = useCallback((msg: string, data?: unknown) => {
-    const prefix = `[AdminProctor]`;
-    if (debugMode || msg.includes("✅") || msg.includes("❌") || msg.includes("⚠️")) {
-      console.log(`${prefix} ${msg}`, data !== undefined ? data : "");
-    }
-  }, [debugMode]);
+    // Logging disabled - no console output
+  }, []);
 
   // Update candidate stream state
   const updateCandidate = useCallback((sessionId: string, updates: Partial<CandidateStream>) => {
@@ -121,12 +118,18 @@ export function useMultiLiveProctorAdmin({
     let trackCount = 0;
     
     // Handle incoming tracks - CRITICAL for receiving streams
+    // NOTE: Tracks may be muted until ICE connection is established
     pc.ontrack = (event) => {
       trackCount++;
+      const iceState = pc.iceConnectionState;
+      const trackMuted = event.track.muted;
+      
       log(`✅ Received track #${trackCount} for ${candidateId}:`, {
         kind: event.track.kind,
         id: event.track.id,
         streamId: event.streams[0]?.id,
+        muted: trackMuted,
+        iceConnectionState: iceState,
       });
       
       const stream = event.streams[0];
@@ -136,37 +139,124 @@ export function useMultiLiveProctorAdmin({
       }
       
       // First video track = webcam, second = screen
+      // IMPORTANT: Don't set status to "connected" here - wait for ICE connection
+      // Tracks are muted until ICE connects, so frames won't flow yet
       if (trackCount === 1) {
-        log(`✅ Webcam stream received: ${stream.id}`);
-        updateCandidate(sessionId, { webcamStream: stream, status: "connected" });
+        log(`✅ Webcam stream received: ${stream.id} (muted: ${trackMuted}, ICE: ${iceState})`);
+        updateCandidate(sessionId, { webcamStream: stream });
+        if (iceState === "connected" || iceState === "completed") {
+          log(`✅ ICE already connected - webcam should be ready`);
+          updateCandidate(sessionId, { status: "connected" });
+        }
+        
+        // Monitor track unmute - this is when frames actually start flowing
+        event.track.onunmute = () => {
+          log(`🎬 Webcam track UNMUTED - frames should start flowing now!`);
+        };
+        event.track.onmute = () => {
+          log(`⚠️ Webcam track MUTED - frames stopped`);
+        };
       } else if (trackCount === 2) {
-        log(`✅ Screen stream received: ${stream.id}`);
-        updateCandidate(sessionId, { screenStream: stream, status: "connected" });
+        log(`✅ Screen stream received: ${stream.id} (muted: ${trackMuted}, ICE: ${iceState})`);
+        updateCandidate(sessionId, { screenStream: stream });
+        if (iceState === "connected" || iceState === "completed") {
+          log(`✅ ICE already connected - screen should be ready`);
+          updateCandidate(sessionId, { status: "connected" });
+        }
+        
+        // Monitor track unmute - this is when frames actually start flowing
+        event.track.onunmute = () => {
+          log(`🎬 Screen track UNMUTED - frames should start flowing now!`);
+        };
+        event.track.onmute = () => {
+          log(`⚠️ Screen track MUTED - frames stopped`);
+        };
       }
     };
     
     // Handle ICE candidates - send to candidate
     pc.onicecandidate = (event) => {
-      if (event.candidate && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: "ice",
-          sessionId,
-          candidate: event.candidate.candidate,
+      if (event.candidate) {
+        log(`Generated ICE candidate for ${candidateId}:`, {
+          candidate: event.candidate.candidate.substring(0, 50) + '...',
           sdpMid: event.candidate.sdpMid,
           sdpMLineIndex: event.candidate.sdpMLineIndex,
-        }));
-        log(`Sent ICE candidate to ${candidateId}`);
+          iceState: pc.iceConnectionState,
+        });
+        
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: "ice",
+            sessionId,
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+          }));
+          log(`✅ Sent ICE candidate to ${candidateId}`);
+        } else {
+          log(`⚠️ WebSocket not open, cannot send ICE candidate to ${candidateId}`);
+        }
+      } else {
+        log(`ICE candidate gathering complete for ${candidateId} - final state: ${pc.iceConnectionState}`);
       }
     };
     
-    // Handle connection state
+    // Handle ICE connection state - CRITICAL: Tracks are muted until ICE connects
+    pc.oniceconnectionstatechange = () => {
+      const iceState = pc.iceConnectionState;
+      const connectionState = pc.connectionState;
+      const signalingState = pc.signalingState;
+      
+      log(`ICE connection state for ${candidateId}: ${iceState} (connection: ${connectionState}, signaling: ${signalingState})`);
+      
+      // Log all ICE state transitions for debugging
+      switch (iceState) {
+        case "new":
+          log(`🔄 ICE negotiation starting for ${candidateId}`);
+          break;
+        case "checking":
+          log(`🔄 ICE checking in progress for ${candidateId}`);
+          break;
+        case "connected":
+        case "completed":
+          log(`✅ ICE ${iceState} for ${candidateId} - tracks should unmute and frames should flow!`);
+          // Update status to connected - this is when frames actually start flowing
+          updateCandidate(sessionId, { status: "connected" });
+          
+          // Log track states to verify they're unmuted
+          setCandidateStreams(prev => {
+            const candidate = prev.get(sessionId);
+            if (candidate) {
+              const webcamTracks = candidate.webcamStream?.getTracks() || [];
+              const screenTracks = candidate.screenStream?.getTracks() || [];
+              log(`Track states after ICE ${iceState} - Webcam: ${webcamTracks.map(t => `muted=${t.muted}, enabled=${t.enabled}`).join(', ')}, Screen: ${screenTracks.map(t => `muted=${t.muted}, enabled=${t.enabled}`).join(', ')}`);
+            }
+            return prev;
+          });
+          break;
+        case "failed":
+          log(`❌ ICE failed for ${candidateId} - connection cannot be established`);
+          updateCandidate(sessionId, { status: "failed" });
+          break;
+        case "disconnected":
+          log(`⚠️ ICE disconnected for ${candidateId}`);
+          updateCandidate(sessionId, { status: "disconnected" });
+          break;
+        case "closed":
+          log(`🔒 ICE closed for ${candidateId}`);
+          break;
+      }
+    };
+    
+    // Handle connection state (secondary to ICE state)
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      log(`Connection state for ${candidateId}: ${state}`);
+      log(`Connection state for ${candidateId}: ${state} (ICE: ${pc.iceConnectionState})`);
       
-      if (state === "connected") {
+      // Only update status if ICE is also connected, otherwise ICE state handler takes precedence
+      if (state === "connected" && (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed")) {
         updateCandidate(sessionId, { status: "connected" });
-        log(`✅ Connected to ${candidateId}!`);
+        log(`✅ Fully connected to ${candidateId}!`);
       } else if (state === "disconnected" || state === "failed") {
         updateCandidate(sessionId, { 
           status: state === "failed" ? "failed" : "disconnected" 
@@ -335,20 +425,43 @@ export function useMultiLiveProctorAdmin({
             const { sessionId, candidate } = msg;
             const pc = peerConnectionsRef.current.get(sessionId);
             
-            if (pc && candidate && pc.remoteDescription) {
-              try {
-                const candidateStr = typeof candidate === 'object' ? candidate.candidate : candidate;
-                const ice = new RTCIceCandidate({
-                  candidate: candidateStr,
-                  sdpMid: candidate.sdpMid || "0",
-                  sdpMLineIndex: candidate.sdpMLineIndex || 0,
-                });
-                await pc.addIceCandidate(ice);
-                log(`Added ICE candidate for ${sessionId}`);
-              } catch (err) {
-                // Ignore duplicate/invalid ICE candidates
-                log(`ICE error (ignored): ${err}`);
-              }
+            log(`Received ICE candidate from candidate for ${sessionId}`, {
+              hasPc: !!pc,
+              hasRemoteDesc: !!pc?.remoteDescription,
+              candidate: candidate,
+            });
+            
+            if (!pc) {
+              log(`⚠️ No peer connection for session ${sessionId} when ICE candidate received`);
+              return;
+            }
+            
+            if (!candidate) {
+              log(`⚠️ No candidate data in ICE candidate message`);
+              return;
+            }
+            
+            // ICE candidates can arrive before remoteDescription is set - queue them
+            if (!pc.remoteDescription) {
+              log(`⚠️ Remote description not set yet, ICE candidate will be queued by browser`);
+            }
+            
+            try {
+              const candidateStr = typeof candidate === 'object' ? candidate.candidate : candidate;
+              const sdpMid = typeof candidate === 'object' ? candidate.sdpMid : undefined;
+              const sdpMLineIndex = typeof candidate === 'object' ? candidate.sdpMLineIndex : undefined;
+              
+              const ice = new RTCIceCandidate({
+                candidate: candidateStr,
+                sdpMid: sdpMid || "0",
+                sdpMLineIndex: sdpMLineIndex !== undefined ? sdpMLineIndex : 0,
+              });
+              
+              await pc.addIceCandidate(ice);
+              log(`✅ Added ICE candidate for ${sessionId} - ICE state: ${pc.iceConnectionState}`);
+            } catch (err) {
+              // Log error but don't fail - might be duplicate
+              log(`ICE candidate error for ${sessionId}: ${err}`);
             }
             
           } else if (msg.type === "new_session") {

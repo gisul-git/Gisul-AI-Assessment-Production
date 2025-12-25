@@ -182,21 +182,7 @@ export default function AnalyticsPage() {
     fetchData()
   }, [assessmentId, candidateEmail])
 
-  // Handle Live Proctoring cooldown when dashboard closes
-  const prevShowLiveProctoringRef = useRef(showLiveProctoring)
-  useEffect(() => {
-    // Check if dashboard was just closed (changed from true to false)
-    if (prevShowLiveProctoringRef.current === true && showLiveProctoring === false) {
-      // Dashboard was just closed, start 10-second cooldown
-      setIsLiveProctoringCooldown(true)
-      const timer = setTimeout(() => {
-        setIsLiveProctoringCooldown(false)
-      }, 8000) // 8 seconds
-
-      return () => clearTimeout(timer)
-    }
-    prevShowLiveProctoringRef.current = showLiveProctoring
-  }, [showLiveProctoring])
+  // Removed 8-second cooldown - no longer needed as reconnection is handled properly
 
   const handleCandidateSelect = (email: string, name: string) => {
     setSelectedCandidate(email)

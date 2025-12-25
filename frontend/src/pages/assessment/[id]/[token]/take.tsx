@@ -3,6 +3,7 @@ import {
   useEffect,
   useCallback,
   useRef,
+  useMemo,
 } from "react";
 import { useRouter } from "next/router";
 
@@ -242,6 +243,8 @@ export default function CandidateAssessmentPage() {
   const liveProctoringServiceRef = useRef<CandidateLiveService | null>(null);
   const liveProctoringStartedRef = useRef(false);
   const startSessionCalledRef = useRef(false); // Guard: prevent multiple start-session calls
+  const candidateWsRef = useRef<WebSocket | null>(null); // Store candidate WebSocket to pass to service
+  const candidateSessionIdRef = useRef<string | null>(null); // Store sessionId to pass to service
   const [debugMode, setDebugMode] = useState(false);
 
   // Get client-side values safely
@@ -256,10 +259,13 @@ export default function CandidateAssessmentPage() {
     (isClient ? sessionStorage.getItem('candidateEmail') : null) ||
     (isClient ? sessionStorage.getItem('candidateName') : null);
   
-  const candidateIdStr = resolveUserIdForProctoring(null, {
-    email: fallbackEmail,
-    token: tokenStr,
-  });
+  // CRITICAL: Memoize to prevent infinite render loops - this was being called on every render
+  const candidateIdStr = useMemo(() => {
+    return resolveUserIdForProctoring(null, {
+      email: fallbackEmail,
+      token: tokenStr,
+    });
+  }, [fallbackEmail, tokenStr]);
 
   // Get violation message
   const getViolationMessage = (eventType: string): string => {
@@ -377,7 +383,7 @@ export default function CandidateAssessmentPage() {
   }, [appState, isProctoringRunning, isClient, aiProctoringEnabled, liveProctoringEnabled, candidateIdStr, assessmentIdStr, startUniversalProctoring]);
 
   // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
-  const startLiveProctoring = useCallback(() => {
+  const startLiveProctoring = useCallback((sessionId: string, ws: WebSocket) => {
     if (liveProctoringStartedRef.current) {
       console.log('[Assessment Take] Live Proctoring already started');
       return;
@@ -405,7 +411,9 @@ export default function CandidateAssessmentPage() {
         },
       },
       liveProctorScreenStream,
-      existingWebcamStream
+      existingWebcamStream,
+      sessionId, // Pass existing sessionId
+      ws // Pass existing WebSocket
     ).then((success) => {
       if (success) {
         console.log('[Assessment Take] ✅ Live Proctoring WebRTC connected');
@@ -432,9 +440,6 @@ export default function CandidateAssessmentPage() {
     // Mark as called immediately to prevent race conditions
     startSessionCalledRef.current = true;
 
-    let ws: WebSocket | null = null;
-    let sessionId: string | null = null;
-
     // Register live session (backend sets status to "candidate_initiated")
     console.log('[Assessment Take] 📝 Registering Live Proctoring session...');
     
@@ -450,16 +455,17 @@ export default function CandidateAssessmentPage() {
       .then((res) => res.json())
       .then((data) => {
         if (data.success && data.data?.sessionId) {
-          sessionId = data.data.sessionId;
+          const sessionId = data.data.sessionId;
+          candidateSessionIdRef.current = sessionId;
           console.log(`[Assessment Take] ✅ Session registered: ${sessionId}`);
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
           // Use backend host for WebSocket connection
-          // Import LIVE_PROCTORING_ENDPOINTS if not already imported
           // eslint-disable-next-line @typescript-eslint/no-var-requires
           const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
           const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, candidateIdStr);
-          ws = new WebSocket(wsUrl);
+          const ws = new WebSocket(wsUrl);
+          candidateWsRef.current = ws;
 
           ws.onopen = () => {
             console.log('[Assessment Take] ✅ WebSocket connected, waiting for admin...');
@@ -469,7 +475,7 @@ export default function CandidateAssessmentPage() {
             const message = JSON.parse(event.data);
             if (message.type === 'ADMIN_CONNECTED') {
               console.log('[Assessment Take] 🚀 ADMIN_CONNECTED signal received!');
-              startLiveProctoring();
+              startLiveProctoring(sessionId, ws);
             }
           };
 
@@ -479,6 +485,7 @@ export default function CandidateAssessmentPage() {
 
           ws.onclose = () => {
             console.log('[Assessment Take] WebSocket closed');
+            candidateWsRef.current = null;
           };
         }
       })
@@ -490,8 +497,9 @@ export default function CandidateAssessmentPage() {
 
     // Cleanup WebSocket on unmount
     return () => {
-      if (ws) {
-        ws.close();
+      if (candidateWsRef.current) {
+        candidateWsRef.current.close();
+        candidateWsRef.current = null;
       }
     };
   }, [liveProctoringEnabled, liveProctorScreenStream, appState, assessmentIdStr, candidateIdStr, startLiveProctoring]);
