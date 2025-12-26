@@ -104,7 +104,7 @@ export default function PrecheckPage() {
     
     setIsLoading(false);
   }, [assessmentId, token, router]);
-  
+
   // Step 1: Browser Compatibility Check
   const checkBrowser = useCallback((): boolean => {
     const userAgent = navigator.userAgent;

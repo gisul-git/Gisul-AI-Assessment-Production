@@ -499,7 +499,7 @@ export default function IdentityVerificationPage() {
                   assessmentId={id as string}
                   token={token as string}
                   candidateEmail={email || ""}
-                  skipBackendSave={getGateContext(id as string)?.flowType !== "ai"}
+                  skipBackendSave={false}
                   onCaptureComplete={handleCaptureComplete}
                   onError={handleCaptureError}
                 />

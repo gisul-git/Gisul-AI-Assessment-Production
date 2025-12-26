@@ -3,6 +3,7 @@ import { useRouter } from "next/router";
 import { CameraProctorModal } from "../../../components/proctor";
 import { useCameraProctor } from "../../../hooks/useCameraProctor";
 import dsaApi from "../../../lib/dsa/api";
+import axios from "axios";
 
 export default function TestInstructionsPage() {
   const router = useRouter();

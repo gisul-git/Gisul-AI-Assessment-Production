@@ -42,6 +42,7 @@ export default function IdentityVerification({
   const detectionAnimationFrameRef = useRef<number | null>(null);
   const isDetectionRunningRef = useRef(false);
   const isModelLoadedRef = useRef(false);
+  const isSavingRef = useRef(false); // Guard to prevent duplicate saves
 
   // Optimized camera initialization - fast and seamless
   useEffect(() => {
@@ -115,7 +116,11 @@ export default function IdentityVerification({
     return () => {
       stopDetectionLoop();
       isModelLoadedRef.current = false;
-      cameraStream?.getTracks().forEach((track) => track.stop());
+      // Only cleanup if camera stream still exists (component unmounting)
+      if (cameraStream) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+      }
+      // Cleanup face detection on unmount (safe to call multiple times)
       cleanupFaceDetection();
     };
   }, []);
@@ -219,36 +224,61 @@ export default function IdentityVerification({
       const photoData = canvas.toDataURL("image/jpeg", 0.8);
       setCapturedPhoto(photoData);
 
-      // Stop camera stream
+      // Stop camera stream and cleanup detection immediately
+      stopDetectionLoop();
       if (cameraStream) {
         cameraStream.getTracks().forEach((track) => track.stop());
         setCameraStream(null);
       }
+      // Cleanup face detection model immediately after capture
+      cleanupFaceDetection();
+      isModelLoadedRef.current = false;
 
-      // Save reference image to backend
-      try {
-        if (!skipBackendSave) {
-          await axios.post("/api/v1/candidate/save-reference-face", {
+      // Store in sessionStorage first (for proctoring engine)
+      sessionStorage.setItem(`referenceFace_${assessmentId}`, photoData);
+      sessionStorage.setItem(`capturedPhoto_${assessmentId}`, photoData);
+
+      // Call onCaptureComplete immediately to advance to next step (don't wait for save)
+      onCaptureComplete(photoData);
+      setStatusMessage("Photo captured successfully!");
+
+      // Save reference image to backend asynchronously (non-blocking)
+      // Prevent duplicate saves
+      if (isSavingRef.current) {
+        console.log('[IdentityVerification] Save already in progress, skipping duplicate save');
+        return;
+      }
+
+      // Save to database in background (non-blocking)
+      isSavingRef.current = true;
+      (async () => {
+        try {
+          console.log('[IdentityVerification] Saving reference photo to database:', {
+            assessmentId,
+            candidateEmail,
+            skipBackendSave,
+            photoDataLength: photoData.length,
+            photoDataPrefix: photoData.substring(0, 50)
+          });
+
+          const response = await axios.post("/api/v1/candidate/save-reference-face", {
             assessmentId,
             candidateEmail,
             referenceImage: photoData,
           });
+          console.log('[IdentityVerification] ✅ Reference photo saved to database:', response.data);
+        } catch (saveError: any) {
+          // Don't block the flow if saving fails - photo is still in sessionStorage
+          console.warn('[IdentityVerification] Failed to save to database (non-critical):', {
+            status: saveError?.response?.status,
+            error: saveError?.response?.data?.error || saveError?.response?.data?.detail || saveError?.message,
+            assessmentId,
+            candidateEmail
+          });
+        } finally {
+          isSavingRef.current = false;
         }
-
-        // Store in sessionStorage for proctoring engine
-        sessionStorage.setItem(`referenceFace_${assessmentId}`, photoData);
-        sessionStorage.setItem(`capturedPhoto_${assessmentId}`, photoData);
-
-        setStatusMessage(skipBackendSave ? "Photo captured (saved locally)" : "Photo captured successfully!");
-        onCaptureComplete(photoData);
-      } catch (error) {
-        console.error("Error saving reference image:", error);
-        // Store in sessionStorage anyway for fallback
-        sessionStorage.setItem(`referenceFace_${assessmentId}`, photoData);
-        sessionStorage.setItem(`capturedPhoto_${assessmentId}`, photoData);
-        setStatusMessage("Photo captured (saved locally)");
-        onCaptureComplete(photoData);
-      }
+      })();
     } catch (error) {
       console.error("Error capturing photo:", error);
       setStatusMessage("Failed to capture photo. Please try again.");
