@@ -2443,6 +2443,8 @@ export default function CreateNewAssessmentPage() {
   const isProcessingUrlRef = useRef(false);
   const lastProcessedUrlRef = useRef<string | null>(null);
   const urlTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const categorySaveDebounceRef = useRef<NodeJS.Timeout | null>(null);
+  const topicsV2Ref = useRef<any[]>([]);
   
   // CSV Upload state (kept for backward compatibility but not used in UI)
   const [activeMethod, setActiveMethod] = useState<"role" | "manual" | "csv">("role");
@@ -6070,9 +6072,55 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     const isSpecialCategory = topic?.category && specialCategories.includes(topic.category as any);
     
     if (!topic?.category || (topic.category === "technical" || !isSpecialCategory)) {
-      detectTopicCategory(value).then(detectedCategory => {
+      detectTopicCategory(value).then(async (detectedCategory) => {
         if (specialCategories.includes(detectedCategory as any)) {
           handleUpdateTopicV2(topicId, "category", detectedCategory);
+          
+          // Clear any existing debounce timer for this topic
+          if (categorySaveDebounceRef.current) {
+            clearTimeout(categorySaveDebounceRef.current);
+            categorySaveDebounceRef.current = null;
+          }
+          
+          // Debounced auto-save to backend (2.5 seconds delay)
+          categorySaveDebounceRef.current = setTimeout(async () => {
+            if (!assessmentId) {
+              console.warn("Cannot save category: assessmentId is missing");
+              categorySaveDebounceRef.current = null;
+              return;
+            }
+            
+            try {
+              // Get the latest topicsV2 state from ref (synced via useEffect)
+              const currentTopics = topicsV2Ref.current;
+              const updatedTopics = currentTopics.map(t => {
+                if (t.id === topicId) {
+                  return { ...t, category: detectedCategory };
+                }
+                return t;
+              });
+              
+              console.log(`💾 Saving category "${detectedCategory}" for topic: ${value}`);
+              
+              const saveResponse = await axios.put("/api/assessments/update-draft", {
+                assessmentId: assessmentId,
+                topics_v2: updatedTopics,
+              });
+              
+              if (saveResponse.data?.success) {
+                console.log(`✅ Category "${detectedCategory}" saved successfully for topic: ${value}`);
+              } else {
+                console.warn("Category save response indicates failure:", saveResponse.data);
+                setError(`Failed to save category update. Please try saving the assessment manually.`);
+              }
+              
+              categorySaveDebounceRef.current = null;
+            } catch (err: any) {
+              console.error("❌ Error saving category update:", err);
+              setError(`Failed to save category update: ${err.response?.data?.message || err.message || "Unknown error"}. The category is updated locally but not saved to the database. Please try saving the assessment manually.`);
+              categorySaveDebounceRef.current = null;
+            }
+          }, 2500); // 2.5 seconds debounce
           
           // Fetch suggestions for non-technical categories
           if (value.length >= 2) {
@@ -6090,6 +6138,11 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       setTopicSuggestions([]);
     }
   };
+
+  // Sync topicsV2 state to ref for use in debounced callbacks
+  useEffect(() => {
+    topicsV2Ref.current = topicsV2;
+  }, [topicsV2]);
 
   // REMOVED: Debounced context summary generation useEffect
   // Context is now generated ONLY when user clicks "Add Topic" button
