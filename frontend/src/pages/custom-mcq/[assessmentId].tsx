@@ -8,6 +8,7 @@ import ProctorSummaryCard from "../../components/admin/ProctorSummaryCard";
 import LiveProctoringDashboard from "../../components/proctor/LiveProctoringDashboard";
 import { useSession } from "next-auth/react";
 import { Eye, Loader2 } from "lucide-react";
+import axios from "axios";
 
 interface CustomMCQDetailsPageProps {
   session: any;
@@ -29,6 +30,7 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [expandedRequirementsUser, setExpandedRequirementsUser] = useState<string | null>(null);
   const [showLiveProctoring, setShowLiveProctoring] = useState(false);
   const [showCandidates, setShowCandidates] = useState(false);
+  const [referencePhotos, setReferencePhotos] = useState<Record<string, string | null>>({});
   // Removed isLiveProctoringCooldown - no longer needed
 
   useEffect(() => {
@@ -36,6 +38,22 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
       loadAssessment();
     }
   }, [assessmentId]);
+
+  // Fetch reference photos for all submissions when assessment loads
+  useEffect(() => {
+    if (!assessment) return;
+    const submissions = (assessment as any).submissionsList || [];
+    if (submissions.length > 0) {
+      submissions.forEach((submission: AssessmentSubmission) => {
+        const candidateInfo = submission.candidateInfo || {};
+        const userEmail = String(candidateInfo.email || "").trim();
+        if (userEmail && !referencePhotos[userEmail]) {
+          fetchReferencePhoto(userEmail);
+        }
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assessment]);
 
   // Handle Live Proctoring cooldown when dashboard closes
   // Removed 8-second cooldown - no longer needed as reconnection is handled properly
@@ -86,6 +104,31 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
       console.error("Failed to fetch proctor logs for user:", userEmail, e);
     } finally {
       setLoadingProctorForUser((prev) => ({ ...prev, [userEmail]: false }));
+    }
+  };
+
+  const fetchReferencePhoto = async (candidateEmail: string) => {
+    if (!assessmentId || typeof assessmentId !== "string" || !candidateEmail) {
+      setReferencePhotos((prev) => ({ ...prev, [candidateEmail]: null }));
+      return;
+    }
+
+    try {
+      const response = await axios.get(`/api/v1/candidate/get-reference-photo`, {
+        params: {
+          assessmentId,
+          candidateEmail,
+        },
+      });
+
+      if (response.data?.success && response.data?.data?.referenceImage) {
+        setReferencePhotos((prev) => ({ ...prev, [candidateEmail]: response.data.data.referenceImage }));
+      } else {
+        setReferencePhotos((prev) => ({ ...prev, [candidateEmail]: null }));
+      }
+    } catch (error) {
+      console.warn('[Custom MCQ] Failed to fetch reference photo:', error);
+      setReferencePhotos((prev) => ({ ...prev, [candidateEmail]: null }));
     }
   };
 
@@ -508,7 +551,23 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                           }}
                         >
                           <td style={{ padding: "0.75rem 0.75rem", fontSize: "0.9rem", color: "#1E5A3B" }}>
-                            {candidateInfo.name || "Unknown"}
+                            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                              {referencePhotos[userEmail] && (
+                                <img
+                                  src={referencePhotos[userEmail]!}
+                                  alt="Reference Photo"
+                                  style={{
+                                    width: "40px",
+                                    height: "40px",
+                                    borderRadius: "0.5rem",
+                                    objectFit: "cover",
+                                    border: "2px solid #A8E8BC"
+                                  }}
+                                  onError={() => setReferencePhotos((prev) => ({ ...prev, [userEmail]: null }))}
+                                />
+                              )}
+                              <span>{candidateInfo.name || "Unknown"}</span>
+                            </div>
                           </td>
                           <td style={{ padding: "0.75rem 0.75rem", fontSize: "0.85rem", color: "#2D7A52" }}>
                             {candidateInfo.email || "N/A"}

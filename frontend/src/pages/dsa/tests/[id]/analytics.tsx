@@ -7,6 +7,7 @@ import { GetServerSideProps } from 'next'
 import { requireAuth } from '../../../../lib/auth'
 import Link from 'next/link'
 import dsaApi from '../../../../lib/dsa/api'
+import axios from 'axios'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video, Loader2 } from 'lucide-react'
 import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
 import { useMultiLiveProctorAdmin } from '../../../../hooks/useMultiLiveProctorAdmin'
@@ -131,6 +132,7 @@ export default function AnalyticsPage() {
   const [sendingInvitations, setSendingInvitations] = useState(false)
   const [showLiveProctoring, setShowLiveProctoring] = useState(false)
   const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
+  const [referencePhoto, setReferencePhoto] = useState<string | null>(null)
   
   // Memoize proctorAssessmentId to prevent infinite loops
   const proctorAssessmentId = useMemo(() => (testId as string) || "", [testId])
@@ -288,6 +290,10 @@ export default function AnalyticsPage() {
           setSelectedCandidate(candidateUserId)
           fetchAnalytics(candidateUserId)
           fetchProctorLogs(candidateUserId)
+          // Try to fetch reference photo if candidate email is available
+          if (candidate?.email) {
+            fetchReferencePhoto(candidate.email)
+          }
         }
       } catch (error) {
         console.error('Error fetching data:', error)
@@ -331,6 +337,32 @@ export default function AnalyticsPage() {
     return () => clearInterval(pollInterval)
   }, [selectedCandidate, testId, analytics])
 
+  const fetchReferencePhoto = async (candidateEmail: string) => {
+    if (!testId || typeof testId !== 'string' || !candidateEmail) {
+      setReferencePhoto(null)
+      return
+    }
+
+    try {
+      // For DSA/AIML tests, identity verification uses testId as assessmentId
+      const response = await axios.get(`/api/v1/candidate/get-reference-photo`, {
+        params: {
+          assessmentId: testId,
+          candidateEmail,
+        },
+      })
+
+      if (response.data?.success && response.data?.data?.referenceImage) {
+        setReferencePhoto(response.data.data.referenceImage)
+      } else {
+        setReferencePhoto(null)
+      }
+    } catch (error) {
+      // Silently fail - reference photo might not exist
+      setReferencePhoto(null)
+    }
+  }
+
   const handleCandidateSelect = (userId: string) => {
     const candidate = candidates.find(c => c.user_id === userId)
     console.log('[Analytics] Candidate selected:', {
@@ -343,6 +375,10 @@ export default function AnalyticsPage() {
     fetchAnalytics(userId)
     // Fetch proctor logs using candidate.user_id (MongoDB ObjectId)
     fetchProctorLogs(userId)
+    // Try to fetch reference photo if candidate email is available
+    if (candidate?.email) {
+      fetchReferencePhoto(candidate.email)
+    }
     // Auto-show logs when candidate is selected (same expectation as AI assessment analytics)
     setShowProctorLogs(true)
     // Scroll to top of analytics content when candidate is selected
@@ -1022,15 +1058,39 @@ export default function AnalyticsPage() {
                   <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
                     Candidate Information
                   </h2>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem" }}>
-                    <div>
-                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Name</div>
-                      <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidate.name}</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Email</div>
-                      <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidate.email}</div>
-                    </div>
+                  <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap" }}>
+                    {/* Reference Photo */}
+                    {referencePhoto && (
+                      <div style={{ 
+                        flexShrink: 0,
+                        width: "150px",
+                        height: "150px",
+                        borderRadius: "0.5rem",
+                        overflow: "hidden",
+                        border: "2px solid #e2e8f0",
+                        backgroundColor: "#ffffff"
+                      }}>
+                        <img 
+                          src={referencePhoto} 
+                          alt="Reference Photo" 
+                          style={{ 
+                            width: "100%", 
+                            height: "100%", 
+                            objectFit: "cover" 
+                          }} 
+                        />
+                      </div>
+                    )}
+                    {/* Candidate Details */}
+                    <div style={{ flex: 1, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem", minWidth: "300px" }}>
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Name</div>
+                        <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidate.name}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Email</div>
+                        <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidate.email}</div>
+                      </div>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Score</div>
                       <div style={{ fontSize: "1.5rem", fontWeight: 700 }}>
@@ -1044,6 +1104,7 @@ export default function AnalyticsPage() {
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Submitted</div>
                       <div style={{ fontSize: "1rem" }}>{formatDate(analytics.submission.submitted_at)}</div>
+                    </div>
                     </div>
                   </div>
                 </div>

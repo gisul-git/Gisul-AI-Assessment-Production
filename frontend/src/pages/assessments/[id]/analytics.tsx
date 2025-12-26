@@ -70,6 +70,7 @@ export default function AnalyticsPage() {
   const [emailError, setEmailError] = useState<string | null>(null)
   const [addingCandidate, setAddingCandidate] = useState(false)
   const [assessmentCandidates, setAssessmentCandidates] = useState<Candidate[]>([])
+  const [referencePhoto, setReferencePhoto] = useState<string | null>(null)
   
 
   const fetchAnalytics = async (email: string, name: string) => {
@@ -149,6 +150,7 @@ export default function AnalyticsPage() {
             }))
             setAssessmentCandidates(normalizedCandidates)
           }
+          
         }
         
         // Fetch candidate results
@@ -164,6 +166,7 @@ export default function AnalyticsPage() {
               setSelectedCandidate(candidateEmail)
               fetchAnalytics(candidate.email, candidate.name)
               fetchProctorLogs(candidate.email)
+              fetchReferencePhoto(candidate.email, candidate.name)
             }
           }
         }
@@ -179,12 +182,65 @@ export default function AnalyticsPage() {
     fetchData()
   }, [assessmentId, candidateEmail])
 
+  // Fetch reference photo when candidate is selected
+  useEffect(() => {
+    if (selectedCandidate) {
+      const candidateData = candidates.find(c => c.email === selectedCandidate) || 
+                           assessmentCandidates.find(c => c.email === selectedCandidate)
+      if (candidateData) {
+        fetchReferencePhoto(selectedCandidate, candidateData.name)
+      }
+    }
+  }, [selectedCandidate, candidates, assessmentCandidates])
+
   // Removed 8-second cooldown - no longer needed as reconnection is handled properly
+
+  const fetchReferencePhoto = async (candidateEmail: string, candidateName?: string) => {
+    if (!assessmentId || typeof assessmentId !== 'string' || !candidateEmail) {
+      setReferencePhoto(null)
+      return
+    }
+
+    try {
+      const response = await axios.get(`/api/v1/candidate/get-reference-photo`, {
+        params: {
+          assessmentId,
+          candidateEmail,
+        },
+      })
+
+      if (response.data?.success && response.data?.data?.referenceImage) {
+        setReferencePhoto(response.data.data.referenceImage)
+      } else {
+        setReferencePhoto(null)
+      }
+    } catch (error) {
+      console.warn('[Analytics] Error fetching reference photo:', error)
+      setReferencePhoto(null)
+    }
+  }
 
   const handleCandidateSelect = (email: string, name: string) => {
     setSelectedCandidate(email)
     fetchAnalytics(email, name)
     fetchProctorLogs(email)
+    // Try to fetch reference photo from current assessment data first
+    fetchReferencePhoto(email, name)
+    // Also try to refresh assessment data in background (non-blocking)
+    const refreshAssessment = async () => {
+      try {
+        const assessmentResponse = await axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`)
+        if (assessmentResponse.data?.success && assessmentResponse.data?.data) {
+          setAssessment(assessmentResponse.data.data)
+          // Fetch photo again after refresh
+          setTimeout(() => fetchReferencePhoto(email, name), 100)
+        }
+      } catch (error) {
+        // Silently fail - we already tried with existing data
+        console.warn('[Analytics] Could not refresh assessment data (non-critical):', error)
+      }
+    }
+    refreshAssessment()
     setShowProctorLogs(false)
     // Scroll to top of analytics content when candidate is selected
     setTimeout(() => {
@@ -921,15 +977,39 @@ export default function AnalyticsPage() {
                   <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
                     Candidate Information
                   </h2>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
-                    <div>
-                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Name</div>
-                      <div style={{ fontSize: "1rem", fontWeight: 600 }}>{selectedCandidateData.name}</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Email</div>
-                      <div style={{ fontSize: "1rem", fontWeight: 600 }}>{selectedCandidateData.email}</div>
-                    </div>
+                  <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap" }}>
+                    {/* Reference Photo */}
+                    {referencePhoto && (
+                      <div style={{ 
+                        flexShrink: 0,
+                        width: "150px",
+                        height: "150px",
+                        borderRadius: "0.5rem",
+                        overflow: "hidden",
+                        border: "2px solid #e2e8f0",
+                        backgroundColor: "#ffffff"
+                      }}>
+                        <img 
+                          src={referencePhoto} 
+                          alt="Reference Photo" 
+                          style={{ 
+                            width: "100%", 
+                            height: "100%", 
+                            objectFit: "cover" 
+                          }} 
+                        />
+                      </div>
+                    )}
+                    {/* Candidate Details */}
+                    <div style={{ flex: 1, display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem", minWidth: "300px" }}>
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Name</div>
+                        <div style={{ fontSize: "1rem", fontWeight: 600 }}>{selectedCandidateData.name}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Email</div>
+                        <div style={{ fontSize: "1rem", fontWeight: 600 }}>{selectedCandidateData.email}</div>
+                      </div>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Status</div>
                       <span style={{
@@ -969,6 +1049,7 @@ export default function AnalyticsPage() {
                         <div style={{ fontSize: "1rem" }}>{formatDate(selectedCandidateData.completedAt || null)}</div>
                       </div>
                     )}
+                    </div>
                   </div>
                 </div>
 
