@@ -27,10 +27,12 @@ export default function CandidateRequirementsPage() {
   const [githubUrl, setGithubUrl] = useState<string>("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeFileName, setResumeFileName] = useState<string>("");
+  const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [fetchingAssessment, setFetchingAssessment] = useState(true);
   const [assessmentInfo, setAssessmentInfo] = useState<any>(null);
+  const [customFields, setCustomFields] = useState<Array<{ label: string; required: boolean }>>([]);
   const [candidateRequirements, setCandidateRequirements] = useState<{
     requireEmail: boolean;
     requireName: boolean;
@@ -73,6 +75,91 @@ export default function CandidateRequirementsPage() {
     const ctx = getGateContext(id as string);
     const isAIFlow = !ctx || ctx.flowType === "ai";
     const isCustomMCQFlow = ctx?.flowType === "custom-mcq";
+    const isAIMLFlow = ctx?.flowType === "aiml";
+
+    // For AIML flow, fetch requirements from AIML test
+    if (isAIMLFlow && id && token) {
+      const fetchAIMLTest = async () => {
+        try {
+          setFetchingAssessment(true);
+          setError(null);
+
+          // Fetch AIML test using verify-link endpoint (public, no auth required)
+          const response = await axios.get(
+            `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/aiml/tests/${id}/verify-link`,
+            {
+              params: { token }
+            }
+          );
+
+          const test = response.data;
+          console.log("AIML Test API response:", test);
+          
+          if (!test || typeof test !== "object" || !test.valid) {
+            console.warn("No AIML test found or invalid token, using default requirements");
+            setAssessmentInfo(null);
+            setCandidateRequirements(DEFAULT_REQUIREMENTS);
+            setFetchingAssessment(false);
+            return;
+          }
+
+          setAssessmentInfo(test);
+
+          // Get candidate requirements from schedule
+          const schedule = test?.schedule || {};
+          console.log("Schedule from AIML test:", schedule);
+          
+          const candidateReqs = schedule?.candidateRequirements || {};
+          console.log("Candidate requirements from schedule:", candidateReqs);
+
+          const normalizedRequirements = {
+            requireEmail: false, // Email is always collected in entry page
+            requireName: false, // Name is always collected in entry page
+            requirePhone: candidateReqs?.requirePhone === true,
+            requireResume: false, // Not supported for AIML yet
+            requireLinkedIn: candidateReqs?.requireLinkedIn === true,
+            requireGithub: candidateReqs?.requireGithub === true,
+          };
+
+          // Handle custom fields
+          const customFieldsData = candidateReqs?.customFields || [];
+          console.log("Custom fields from schedule:", customFieldsData);
+          setCustomFields(customFieldsData);
+
+          console.log("Normalized candidate requirements for AIML:", normalizedRequirements);
+          setCandidateRequirements(normalizedRequirements);
+
+          const hasAnyRequirement =
+            normalizedRequirements.requirePhone ||
+            normalizedRequirements.requireLinkedIn ||
+            normalizedRequirements.requireGithub ||
+            (customFieldsData.length > 0);
+
+          // If no requirements are enabled, skip this page
+          if (!hasAnyRequirement && id && token) {
+            console.log("No candidate requirements enabled for AIML, skipping to identity verification");
+            sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
+            router.push(`/assessment/${id}/${token}/identity-verify`);
+          }
+
+          setError(null);
+        } catch (error: any) {
+          console.error("Error fetching AIML test:", {
+            message: error?.message,
+            response: error?.response?.data,
+            status: error?.response?.status,
+          });
+
+          setError("Failed to load test settings. Using default requirements.");
+          setCandidateRequirements(DEFAULT_REQUIREMENTS);
+        } finally {
+          setFetchingAssessment(false);
+        }
+      };
+
+      fetchAIMLTest();
+      return;
+    }
 
     // For custom-mcq flow, fetch requirements from custom MCQ assessment
     if (isCustomMCQFlow && id && token) {
@@ -326,6 +413,15 @@ export default function CandidateRequirementsPage() {
       return;
     }
     
+    // Validate custom fields
+    for (const field of customFields) {
+      if (field.required && !customFieldValues[field.label]?.trim()) {
+        setError(`${field.label} is required`);
+        setLoading(false);
+        return;
+      }
+    }
+    
     // Validate email format if email is required
     if (candidateRequirements.requireEmail) {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -384,6 +480,11 @@ export default function CandidateRequirementsPage() {
       }
       if (githubUrl.trim()) {
         sessionStorage.setItem("candidateGithub", githubUrl.trim());
+      }
+      
+      // Store custom fields
+      if (Object.keys(customFieldValues).length > 0) {
+        sessionStorage.setItem("candidateCustomFields", JSON.stringify(customFieldValues));
       }
      
       // Get final email/name values (from form if required, or from sessionStorage if preserved)
@@ -683,7 +784,40 @@ export default function CandidateRequirementsPage() {
                   />
                 </div>
               )}
-             
+              
+              {/* Custom Fields - Only show if configured */}
+              {customFields.map((field, index) => (
+                <div key={index}>
+                  <label style={{
+                    display: "block",
+                    marginBottom: "0.375rem",
+                    fontWeight: 500,
+                    color: "#374151",
+                    fontSize: "0.875rem"
+                  }}>
+                    {field.label} {field.required && <span style={{ color: "#ef4444" }}>*</span>}
+                  </label>
+                  <input
+                    type="text"
+                    value={customFieldValues[field.label] || ""}
+                    onChange={(e) => setCustomFieldValues({ ...customFieldValues, [field.label]: e.target.value })}
+                    required={field.required}
+                    style={{
+                      width: "100%",
+                      padding: "0.625rem 0.75rem",
+                      border: "1px solid #d1d5db",
+                      borderRadius: "0.375rem",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                      transition: "border-color 0.2s",
+                      boxSizing: "border-box"
+                    }}
+                    onFocus={(e) => e.target.style.borderColor = "#6953a3"}
+                    onBlur={(e) => e.target.style.borderColor = "#d1d5db"}
+                  />
+                </div>
+              ))}
+              
               {/* Resume Upload - Only show if required */}
               {candidateRequirements.requireResume && (
                 <div>

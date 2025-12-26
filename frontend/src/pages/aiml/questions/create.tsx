@@ -124,21 +124,26 @@ export default function AIMLQuestionCreatePage() {
   const previousDifficulty = useRef<string | null>(null)
 
   // Fetch AI-suggested topics when skill or difficulty changes (only for AI generation mode)
+  // Only fetch when user explicitly changes skill/difficulty, NOT on initial mount or mode switch
   useEffect(() => {
-    // Skip on initial mount
+    // Skip on initial mount - don't fetch topics for pre-set values
     if (isInitialMount.current) {
       isInitialMount.current = false
       previousSkill.current = skill
       previousDifficulty.current = aiDifficulty
+      // Don't fetch topics on initial mount, even if skill/difficulty are pre-set
       return
     }
     
     // Only fetch if AI generation mode is active
     if (!isAiGenerated) {
+      // Clear topics if switching away from AI generation
+      setAvailableTopics([])
+      setTopic('')
       return
     }
     
-    // Only fetch if skill or difficulty actually changed
+    // Only fetch if skill or difficulty actually changed (user explicitly changed them)
     if (previousSkill.current === skill && previousDifficulty.current === aiDifficulty) {
       return
     }
@@ -147,7 +152,11 @@ export default function AIMLQuestionCreatePage() {
     previousSkill.current = skill
     previousDifficulty.current = aiDifficulty
     
-    if (!skill) return
+    if (!skill) {
+      setAvailableTopics([])
+      setTopic('')
+      return
+    }
     
     const fetchTopics = async () => {
       setLoadingTopics(true)
@@ -179,40 +188,15 @@ export default function AIMLQuestionCreatePage() {
     fetchTopics()
   }, [skill, aiDifficulty, isAiGenerated])
   
-  // Fetch topics when switching to AI generation mode
+  // Clear topics when switching away from AI generation mode
   useEffect(() => {
-    if (isAiGenerated && skill && !isInitialMount.current) {
-      const fetchTopics = async () => {
-        setLoadingTopics(true)
-        setTopicsError(null)
-        setTopic('')
-        
-        try {
-          const response = await aimlApi.post('/questions/suggest-topics', {
-            skill: skill,
-            difficulty: aiDifficulty
-          })
-          
-          if (response.data && response.data.topics) {
-            setAvailableTopics(response.data.topics)
-    } else {
-            setAvailableTopics(SKILL_TOPICS[skill] || [])
-          }
-        } catch (err: any) {
-          console.error('Error fetching topic suggestions:', err)
-          setTopicsError('Failed to load topic suggestions')
-          setAvailableTopics(SKILL_TOPICS[skill] || [])
-        } finally {
-          setLoadingTopics(false)
-        }
-      }
-      
-      fetchTopics()
-    } else if (!isAiGenerated) {
+    if (!isAiGenerated) {
       // Clear topics when switching away from AI generation
       setAvailableTopics([])
       setTopic('')
     }
+    // Do NOT auto-fetch topics when switching TO AI generation mode
+    // Topics should only be fetched when user explicitly changes skill or difficulty
   }, [isAiGenerated])
 
   // Handle skill change - reset topic when skill changes

@@ -85,18 +85,42 @@ async def create_test(
 
     if exam_mode not in ("strict", "flexible"):
         raise HTTPException(status_code=400, detail="Invalid examMode. Must be 'strict' or 'flexible'.")
-    if not start_dt or not end_dt:
-        raise HTTPException(status_code=400, detail="Start time and end time are required.")
-    if start_dt >= end_dt:
-        raise HTTPException(status_code=400, detail="End time must be after start time.")
-    if exam_mode == "flexible":
+    
+    # For strict mode, calculate endTime from startTime + duration (matching Custom MCQ)
+    calculated_end_time = None
+    if exam_mode == "strict" and start_dt and duration_minutes:
+        calculated_end_time = start_dt + timedelta(minutes=int(duration_minutes))
+    
+    # Use calculated endTime for strict mode, provided endTime for flexible mode (matching Custom MCQ)
+    final_end_time = calculated_end_time if exam_mode == "strict" else end_dt
+    
+    if not start_dt:
+        raise HTTPException(status_code=400, detail="Start time is required.")
+    if exam_mode == "strict":
+        if not duration_minutes or int(duration_minutes) <= 0:
+            raise HTTPException(status_code=400, detail="Duration is required for strict exam mode.")
+        if not final_end_time:
+            raise HTTPException(status_code=400, detail="Failed to calculate end time for strict mode.")
+    elif exam_mode == "flexible":
+        if not final_end_time:
+            raise HTTPException(status_code=400, detail="End time is required for flexible exam mode.")
         if not duration_minutes or int(duration_minutes) <= 0:
             raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
+        if start_dt >= final_end_time:
+            raise HTTPException(status_code=400, detail="End time must be after start time.")
 
+    # Extract candidateRequirements from schedule if provided
+    candidate_requirements = {}
+    if schedule_obj and hasattr(schedule_obj, "candidateRequirements"):
+        candidate_requirements = schedule_obj.candidateRequirements or {}
+    elif schedule_obj and isinstance(schedule_obj, dict):
+        candidate_requirements = schedule_obj.get("candidateRequirements", {})
+    
     schedule_payload = {
         "startTime": start_dt,
-        "endTime": end_dt,
-        "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
+        "endTime": final_end_time,  # Always store endTime (calculated for strict, provided for flexible)
+        "duration": int(duration_minutes) if duration_minutes else None,
+        "candidateRequirements": candidate_requirements,  # Store candidate requirements
     }
 
     test_dict = test.model_dump()
@@ -104,7 +128,7 @@ async def create_test(
     test_dict["schedule"] = schedule_payload
     # Ensure legacy fields are set (backward compatible)
     test_dict["start_time"] = start_dt
-    test_dict["end_time"] = end_dt
+    test_dict["end_time"] = final_end_time  # Use calculated/provided endTime
 
     # -------------------------------
     # Timer configuration (mirrors DSA)
@@ -125,12 +149,8 @@ async def create_test(
             total += mins
         test_dict["duration_minutes"] = total
     else:
-        # GLOBAL timer
-        if exam_mode == "strict":
-            window_minutes = int((end_dt - start_dt).total_seconds() // 60)
-            test_dict["duration_minutes"] = max(window_minutes, 1)
-        else:
-            test_dict["duration_minutes"] = int(duration_minutes)
+        # GLOBAL timer - use duration_minutes directly (already validated above)
+        test_dict["duration_minutes"] = int(duration_minutes) if duration_minutes else 60
     test_dict["created_by"] = user_id
     test_dict["is_active"] = True
     test_dict["is_published"] = False
@@ -276,13 +296,104 @@ async def update_test(
     if str(test.get("created_by")) != user_id:
         raise HTTPException(status_code=403, detail="You don't have permission to update this test")
     
-    # Prepare update fields (only allow specific fields to be updated)
-    allowed_fields = ["invitationTemplate", "title", "description", "duration_minutes", "question_ids"]
+    # Prepare update fields (allow schedule, exam mode, timer mode, proctoring settings, etc.)
     update_fields = {}
     
-    for field in allowed_fields:
+    # Basic fields
+    allowed_basic_fields = ["invitationTemplate", "title", "description", "duration_minutes", "question_ids", 
+                           "examMode", "timer_mode", "proctoringSettings", "question_timings"]
+    for field in allowed_basic_fields:
         if field in update_data:
             update_fields[field] = update_data[field]
+    
+    # Handle schedule updates (matching Custom MCQ structure)
+    if "schedule" in update_data or "startTime" in update_data or "start_time" in update_data:
+        # Extract schedule data from request
+        schedule_data = update_data.get("schedule") or {}
+        start_time_raw = schedule_data.get("startTime") if isinstance(schedule_data, dict) else None
+        end_time_raw = schedule_data.get("endTime") if isinstance(schedule_data, dict) else None
+        duration_raw = schedule_data.get("duration") if isinstance(schedule_data, dict) else None
+        
+        # Also check root level fields (for backward compatibility)
+        if not start_time_raw:
+            start_time_raw = update_data.get("startTime") or update_data.get("start_time")
+        if not end_time_raw:
+            end_time_raw = update_data.get("endTime") or update_data.get("end_time")
+        if not duration_raw:
+            duration_raw = update_data.get("duration") or update_data.get("duration_minutes")
+        
+        # Get exam mode (use existing if not provided)
+        exam_mode = update_data.get("examMode") or test.get("examMode", "strict")
+        
+        # Parse datetime strings
+        def _parse_datetime(val):
+            if val is None:
+                return None
+            if isinstance(val, datetime):
+                return val.replace(tzinfo=None) if val.tzinfo else val
+            if isinstance(val, str):
+                try:
+                    return datetime.fromisoformat(val.replace('Z', '+00:00')).replace(tzinfo=None)
+                except (ValueError, AttributeError):
+                    try:
+                        from dateutil import parser
+                        parsed = parser.parse(val)
+                        return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                    except (ImportError, ValueError):
+                        logger.warning(f"Could not parse datetime: {val}")
+                        return None
+            return None
+        
+        start_dt = _parse_datetime(start_time_raw)
+        end_dt = _parse_datetime(end_time_raw)
+        duration_minutes = int(duration_raw) if duration_raw else None
+        
+        # For strict mode, calculate endTime from startTime + duration (matching Custom MCQ)
+        calculated_end_time = None
+        if exam_mode == "strict" and start_dt and duration_minutes:
+            calculated_end_time = start_dt + timedelta(minutes=duration_minutes)
+        
+        # Use calculated endTime for strict mode, provided endTime for flexible mode
+        final_end_time = calculated_end_time if exam_mode == "strict" else end_dt
+        
+        # Validate
+        if not start_dt:
+            raise HTTPException(status_code=400, detail="Start time is required.")
+        if exam_mode == "strict":
+            if not duration_minutes or duration_minutes <= 0:
+                raise HTTPException(status_code=400, detail="Duration is required for strict exam mode.")
+            if not final_end_time:
+                raise HTTPException(status_code=400, detail="Failed to calculate end time for strict mode.")
+        elif exam_mode == "flexible":
+            if not final_end_time:
+                raise HTTPException(status_code=400, detail="End time is required for flexible exam mode.")
+            if not duration_minutes or duration_minutes <= 0:
+                raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
+            if start_dt >= final_end_time:
+                raise HTTPException(status_code=400, detail="End time must be after start time.")
+        
+        # Extract candidateRequirements from schedule if provided
+        candidate_requirements = {}
+        if isinstance(schedule_data, dict) and "candidateRequirements" in schedule_data:
+            candidate_requirements = schedule_data.get("candidateRequirements", {})
+        
+        # Build schedule payload
+        schedule_payload = {
+            "startTime": start_dt,
+            "endTime": final_end_time,  # Always store endTime (calculated for strict, provided for flexible)
+            "duration": duration_minutes,
+            "candidateRequirements": candidate_requirements,  # Store candidate requirements
+        }
+        
+        # Merge with existing schedule to preserve other fields
+        existing_schedule = test.get("schedule") or {}
+        if isinstance(existing_schedule, dict):
+            schedule_payload = {**existing_schedule, **schedule_payload}
+        
+        update_fields["schedule"] = schedule_payload
+        update_fields["start_time"] = start_dt  # Legacy field
+        update_fields["end_time"] = final_end_time  # Legacy field
+        update_fields["examMode"] = exam_mode
     
     # Validate and normalize question_ids (must belong to current user and be AIML questions)
     if "question_ids" in update_fields:
@@ -377,7 +488,7 @@ async def get_test(
 async def verify_test_link(test_id: str, token: str = Query(...)):
     """
     Verify test link token (shared token for all candidates)
-    Returns test info if token is valid
+    Returns test info if token is valid, including schedule with candidateRequirements
     """
     db = get_database()
     if not ObjectId.is_valid(test_id):
@@ -393,10 +504,15 @@ async def verify_test_link(test_id: str, token: str = Query(...)):
     if not test.get("is_published", False):
         raise HTTPException(status_code=403, detail="Test is not published")
     
+    # Return schedule with candidateRequirements for candidate requirements page
+    schedule = test.get("schedule") or {}
+    
     return {
         "test_id": test_id,
         "test_title": test.get("title", ""),
         "test_description": test.get("description", ""),
+        "duration_minutes": test.get("duration_minutes", 0),
+        "schedule": schedule,  # Include schedule with candidateRequirements
         "valid": True
     }
 
@@ -410,6 +526,7 @@ async def verify_candidate(
     """
     Verify candidate email/name and return user_id
     Used with shared test link
+    NEW: Also checks if candidate already submitted or is currently taking the test
     """
     db = get_database()
     if not ObjectId.is_valid(test_id):
@@ -428,11 +545,121 @@ async def verify_candidate(
     if candidate.get("name", "").lower() != name.strip().lower():
         raise HTTPException(status_code=400, detail="Name does not match the email")
     
+    user_id = candidate["user_id"]
+    candidate_email = email.strip().lower()
+    
+    # NEW: Check if candidate already submitted (prevents retaking)
+    existing_completed = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "candidate_email": candidate_email,
+        "is_completed": True
+    })
+    if existing_completed:
+        raise HTTPException(
+            status_code=400,
+            detail="You have already submitted this test. You cannot take the test again."
+        )
+    
+    # NEW: Check if candidate is currently taking the test (prevents concurrent sessions)
+    existing_in_progress = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "user_id": user_id,
+        "is_completed": False,
+        "started_at": {"$exists": True}
+    })
+    if existing_in_progress:
+        raise HTTPException(
+            status_code=400,
+            detail="You are already taking this test in another tab or browser. Please complete it there first."
+        )
+    
+    # NEW: Check access time windows based on exam mode
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    exam_mode = test.get("examMode", "strict")
+    schedule = test.get("schedule") or {}
+    start_time_raw = schedule.get("startTime") if isinstance(schedule, dict) else None
+    end_time_raw = schedule.get("endTime") if isinstance(schedule, dict) else None
+    duration_minutes = schedule.get("duration") if isinstance(schedule, dict) else test.get("duration_minutes")
+    access_time_before_start = test.get("accessTimeBeforeStart", 15)
+    
+    # Parse datetime (handle both string and datetime objects)
+    def _parse_datetime(val):
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val.replace(tzinfo=None) if val.tzinfo else val
+        if isinstance(val, str):
+            try:
+                return datetime.fromisoformat(val.replace('Z', '+00:00')).replace(tzinfo=None)
+            except (ValueError, AttributeError):
+                try:
+                    from dateutil import parser
+                    parsed = parser.parse(val)
+                    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                except (ImportError, ValueError):
+                    return None
+        return None
+    
+    start_time_dt = _parse_datetime(start_time_raw)
+    end_time_dt = _parse_datetime(end_time_raw)
+    
+    now = datetime.utcnow()
+    
+    # Check start time and return info (don't block if test hasn't started, let frontend show popup)
+    test_has_started = False
+    test_has_ended = False
+    
+    if exam_mode == "strict" and start_time_dt:
+        # Strict mode: Check access time before start (matching Custom MCQ - only checks start time at entry)
+        access_start_time = start_time_dt - timedelta(minutes=access_time_before_start)
+        
+        if now < access_start_time:
+            # Too early - cannot access yet
+            access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+            raise HTTPException(
+                status_code=403,
+                detail=f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}."
+            )
+        
+        # Calculate end time if not provided
+        if not end_time_dt and duration_minutes:
+            end_time_dt = start_time_dt + timedelta(minutes=int(duration_minutes))
+        
+        # Check if test has actually started (after access window opens)
+        test_has_started = now >= start_time_dt
+        
+        # Check if test has ended
+        if end_time_dt:
+            test_has_ended = now >= end_time_dt
+    
+    elif exam_mode == "flexible":
+        if not start_time_dt:
+            raise HTTPException(status_code=400, detail="Assessment schedule is not properly configured")
+        
+        # For flexible mode, check if we're before start time (but don't block - let frontend show popup)
+        if now < start_time_dt:
+            test_has_started = False
+            # Don't raise error - let frontend show popup
+        else:
+            test_has_started = True
+        
+        # Check if test has ended (window has closed - return info but don't block, let frontend show popup)
+        if end_time_dt:
+            test_has_ended = now > end_time_dt
+    
     return {
-        "user_id": candidate["user_id"],
+        "user_id": user_id,
         "name": candidate["name"],
         "email": candidate["email"],
-        "test_id": test_id
+        "test_id": test_id,
+        "test_has_started": test_has_started,
+        "test_has_ended": test_has_ended,
+        "start_time": start_time_dt.isoformat() if start_time_dt else None,
+        "end_time": end_time_dt.isoformat() if end_time_dt else None,
+        "exam_mode": exam_mode,
     }
 
 
@@ -440,6 +667,7 @@ async def verify_candidate(
 async def start_test(test_id: str, user_id: str = Query(..., description="User ID from link token")):
     """
     Start a test (user_id provided via query parameter)
+    Uses atomic operation to prevent race conditions and validates access time windows
     """
     db = get_database()
     if not ObjectId.is_valid(test_id):
@@ -458,8 +686,99 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     if not test.get("is_active", True):
         raise HTTPException(status_code=400, detail="Test is not active")
 
-    # For test-taking platform, allow taking published tests regardless of time window.
-    # The time window is informational, not restrictive (mirrors DSA behavior).
+    # NEW: Validate access time windows based on exam mode (matching Custom MCQ structure)
+    exam_mode = test.get("examMode", "strict")
+    schedule = test.get("schedule") or {}
+    start_time_raw = schedule.get("startTime") if isinstance(schedule, dict) else None
+    end_time_raw = schedule.get("endTime") if isinstance(schedule, dict) else None
+    duration_minutes = schedule.get("duration") if isinstance(schedule, dict) else test.get("duration_minutes")
+    access_time_before_start = test.get("accessTimeBeforeStart", 15)
+    
+    # Parse datetime strings (handle both string and datetime objects)
+    def _parse_datetime(val):
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val.replace(tzinfo=None) if val.tzinfo else val
+        if isinstance(val, str):
+            try:
+                return datetime.fromisoformat(val.replace('Z', '+00:00')).replace(tzinfo=None)
+            except (ValueError, AttributeError):
+                try:
+                    from dateutil import parser
+                    parsed = parser.parse(val)
+                    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                except (ImportError, ValueError):
+                    logger.warning(f"Could not parse datetime: {val}")
+                    return None
+        return None
+    
+    start_time = _parse_datetime(start_time_raw)
+    end_time = _parse_datetime(end_time_raw)
+    
+    now = datetime.utcnow()
+    
+    if exam_mode == "strict":
+        if not start_time or not duration_minutes:
+            raise HTTPException(status_code=400, detail="Assessment schedule is not properly configured")
+        
+        # Use endTime from schedule if available, otherwise calculate (matching Custom MCQ)
+        # Priority: use endTime from schedule if it exists, otherwise calculate from startTime + duration
+        if not end_time:
+            # Fallback: calculate from startTime + duration
+            end_time = start_time + timedelta(minutes=int(duration_minutes))
+        
+        access_start_time = start_time - timedelta(minutes=access_time_before_start)
+        
+        # Log for debugging
+        logger.info(f"[start_test] Strict mode - test_id={test_id}, user_id={user_id}, now={now}, start_time={start_time}, end_time={end_time}, access_start_time={access_start_time}, duration_minutes={duration_minutes}")
+        
+        if now < access_start_time:
+            access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+            raise HTTPException(
+                status_code=403,
+                detail=f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}."
+            )
+        elif now < start_time:
+            # Can access for pre-checks but cannot start yet
+            raise HTTPException(
+                status_code=403,
+                detail="Assessment has not started yet. Please wait for the scheduled start time."
+            )
+        elif now >= end_time:
+            # Exam has ended - but allow if candidate already started (they might be resuming)
+            # Check if candidate has an existing submission
+            existing_submission = await db.test_submissions.find_one({
+                "test_id": test_id,
+                "user_id": user_id
+            })
+            if not existing_submission or not existing_submission.get("started_at"):
+                # No existing submission or not started - assessment window has ended
+                end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                logger.warning(f"[start_test] Assessment ended - test_id={test_id}, user_id={user_id}, now={now}, end_time={end_time_formatted}")
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"The assessment has ended. The assessment window closed at {end_time_formatted}. You cannot start a new attempt."
+                )
+            # If candidate already started, allow them to continue (they're resuming)
+            logger.info(f"[start_test] Candidate resuming - test_id={test_id}, user_id={user_id}, started_at={existing_submission.get('started_at')}")
+    
+    elif exam_mode == "flexible":
+        if not start_time or not end_time or not duration_minutes:
+            raise HTTPException(status_code=400, detail="Assessment schedule is not properly configured")
+        
+        if now < start_time:
+            start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+            raise HTTPException(
+                status_code=403,
+                detail=f"You cannot access this assessment yet. The assessment window will be available from {start_time_formatted}."
+            )
+        elif now > end_time:
+            end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+            raise HTTPException(
+                status_code=403,
+                detail=f"The assessment window has ended. The assessment was available until {end_time_formatted}. You cannot take this assessment."
+            )
 
     # Resolve candidate email (email is unique identity)
     user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
@@ -477,6 +796,7 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     if existing_completed_by_email:
         raise HTTPException(status_code=400, detail="Test already completed for this email. A candidate can attempt the test only once.")
     
+    # NEW: Use atomic operation to check and set started_at (prevents concurrent sessions)
     # Check if user already started
     existing = await db.test_submissions.find_one({
         "test_id": test_id,
@@ -484,11 +804,36 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     })
     
     if existing:
-        return {
-            "test_submission_id": str(existing["_id"]),
-            "started_at": existing["started_at"].isoformat() if isinstance(existing.get("started_at"), datetime) else existing.get("started_at"),
-            "is_completed": existing.get("is_completed", False)
-        }
+        # If already started, return existing submission
+        started_at_existing = existing.get("started_at")
+        if started_at_existing:
+            return {
+                "test_submission_id": str(existing["_id"]),
+                "started_at": started_at_existing.isoformat() if isinstance(started_at_existing, datetime) else str(started_at_existing),
+                "is_completed": existing.get("is_completed", False)
+            }
+        # If submission exists but no started_at, set it atomically
+        result = await db.test_submissions.update_one(
+            {
+                "_id": existing["_id"],
+                "started_at": {"$exists": False}
+            },
+            {
+                "$set": {
+                    "started_at": datetime.utcnow(),
+                    "candidate_email": candidate_email
+                }
+            }
+        )
+        if result.modified_count == 0:
+            # Another process already set started_at (race condition prevented)
+            updated = await db.test_submissions.find_one({"_id": existing["_id"]})
+            if updated and updated.get("started_at"):
+                return {
+                    "test_submission_id": str(existing["_id"]),
+                    "started_at": updated["started_at"].isoformat() if isinstance(updated["started_at"], datetime) else str(updated["started_at"]),
+                    "is_completed": updated.get("is_completed", False)
+                }
 
     # If paused, allow ONLY candidates who were added before the pause time.
     paused_at = test.get("pausedAt")
@@ -503,7 +848,8 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
         if isinstance(paused_at, datetime) and isinstance(created_at, datetime) and created_at > paused_at:
             raise HTTPException(status_code=403, detail="Test is currently paused")
     
-    # Create test submission
+    # NEW: Create test submission atomically (only if no existing submission)
+    # This prevents race conditions where multiple tabs try to start simultaneously
     test_submission = {
         "test_id": test_id,
         "user_id": user_id,
@@ -514,6 +860,7 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
         "is_completed": False,
     }
     
+    # Create test submission (only reached if no existing submission found above)
     result = await db.test_submissions.insert_one(test_submission)
     
     # Materialize datasets for all questions in this test
@@ -536,6 +883,58 @@ async def start_test(test_id: str, user_id: str = Query(..., description="User I
     }
 
 
+@router.get("/{test_id}/public")
+async def get_test_public(
+    test_id: str,
+    user_id: str = Query(..., description="User ID from link token")
+):
+    """
+    Get test details for candidates (public endpoint).
+    Returns test info including duration for timer display.
+    Verifies user has access via test submission.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    # Verify user is authorized for this test.
+    # Allow access if they are a registered candidate (before starting) OR already have a submission.
+    test_submission = await db.test_submissions.find_one({"test_id": test_id, "user_id": user_id})
+    if not test_submission:
+        # Fall back to candidate list check (covers "added candidate but not started yet")
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+        candidate_email = (user_doc or {}).get("email")
+        candidate_email = str(candidate_email).strip().lower() if candidate_email else ""
+        if not candidate_email:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
+        candidate = await db.test_candidates.find_one({"test_id": test_id, "email": candidate_email})
+        if not candidate:
+            raise HTTPException(status_code=403, detail="User not authorized for this test")
+    
+    # Get test data
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # Return test data for candidates (limited fields)
+    test_dict = {
+        "id": str(test["_id"]),
+        "title": test.get("title", ""),
+        "description": test.get("description", ""),
+        "duration_minutes": test.get("duration_minutes", 0),
+        "question_ids": [str(qid) if isinstance(qid, ObjectId) else qid for qid in test.get("question_ids", [])],
+        # Include timer mode and question timings if set
+        "timer_mode": test.get("timer_mode", "GLOBAL"),
+        "question_timings": test.get("question_timings", []),
+        # Include proctoring settings for candidate runtime toggle (backward compatible)
+        "proctoringSettings": test.get("proctoringSettings"),
+    }
+    
+    logger.info(f"[get_test_public] Returning test {test_id} for user {user_id}, duration_minutes={test_dict['duration_minutes']}")
+    
+    return test_dict
+
+
 @router.get("/{test_id}/candidate")
 async def get_test_for_candidate(
     test_id: str,
@@ -544,6 +943,7 @@ async def get_test_for_candidate(
     """
     Get test data for candidate (questions without answers)
     Returns started_at and time_remaining if test has been started
+    Includes accessControl object with server-calculated timer and access status
     """
     db = get_database()
     if not ObjectId.is_valid(test_id):
@@ -570,8 +970,7 @@ async def get_test_for_candidate(
         started_at = test_submission.get("started_at")
         is_completed = test_submission.get("is_completed", False)
         
-        # Calculate remaining time for candidate timer.
-        # We treat start/end window as informational (mirrors start_test behavior); timer is based on test duration.
+        # Calculate remaining time for candidate timer based on actual start time
         started_datetime = None
         if started_at and not is_completed:
             if isinstance(started_at, datetime):
@@ -579,13 +978,15 @@ async def get_test_for_candidate(
             elif isinstance(started_at, str):
                 try:
                     if started_at.endswith('Z'):
-                        started_datetime = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                        started_datetime = datetime.fromisoformat(started_at.replace('Z', '+00:00')).replace(tzinfo=None)
                     else:
-                        started_datetime = datetime.fromisoformat(started_at)
+                        started_datetime = datetime.fromisoformat(started_at).replace(tzinfo=None)
                 except Exception:
                     try:
                         from dateutil import parser  # type: ignore
                         started_datetime = parser.parse(started_at)
+                        if started_datetime.tzinfo:
+                            started_datetime = started_datetime.replace(tzinfo=None)
                     except Exception:
                         started_datetime = None
 
@@ -593,6 +994,107 @@ async def get_test_for_candidate(
             duration_seconds = int(test.get("duration_minutes", 0) or 0) * 60
             elapsed_seconds = (datetime.utcnow() - started_datetime).total_seconds()
             time_remaining_seconds = max(0, int(duration_seconds - elapsed_seconds))
+    
+    # NEW: Access control based on exam mode (strict/flexible)
+    exam_mode = test.get("examMode", "strict")
+    schedule = test.get("schedule") or {}
+    start_time_raw = schedule.get("startTime") if isinstance(schedule, dict) else None
+    end_time_raw = schedule.get("endTime") if isinstance(schedule, dict) else None
+    duration_minutes = schedule.get("duration") if isinstance(schedule, dict) else test.get("duration_minutes")
+    access_time_before_start = test.get("accessTimeBeforeStart", 15)  # Default 15 minutes
+    
+    # Parse datetime (handle both string and datetime objects)
+    def _parse_datetime(val):
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val.replace(tzinfo=None) if val.tzinfo else val
+        if isinstance(val, str):
+            try:
+                return datetime.fromisoformat(val.replace('Z', '+00:00')).replace(tzinfo=None)
+            except (ValueError, AttributeError):
+                try:
+                    from dateutil import parser
+                    parsed = parser.parse(val)
+                    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                except (ImportError, ValueError):
+                    logger.warning(f"Could not parse datetime: {val}")
+                    return None
+        return None
+    
+    start_time = _parse_datetime(start_time_raw)
+    end_time = _parse_datetime(end_time_raw)
+    
+    now = datetime.utcnow()
+    can_access = False
+    can_start = False
+    waiting_for_start = False
+    exam_started = False
+    time_remaining = None
+    error_message = None
+    
+    if exam_mode == "strict":
+        if not start_time or not duration_minutes:
+            error_message = "Assessment schedule is not properly configured"
+            can_access = False
+        else:
+            # Use endTime from schedule (always stored for strict mode, matching Custom MCQ)
+            if not end_time:
+                # Fallback: calculate from startTime + duration (shouldn't happen if schedule is properly set)
+                end_time = start_time + timedelta(minutes=int(duration_minutes))
+            access_start_time = start_time - timedelta(minutes=access_time_before_start)
+            
+            if now < access_start_time:
+                # Too early - cannot access yet
+                access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                error_message = f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}."
+                can_access = False
+            elif access_start_time <= now < start_time:
+                # Within access window but before start time - can access for pre-checks
+                can_access = True
+                can_start = False
+                waiting_for_start = True
+            elif start_time <= now < end_time:
+                # Exam is running
+                can_access = True
+                can_start = True
+                exam_started = True
+                # Use server-calculated time if test already started, otherwise use window-based time
+                if time_remaining_seconds is not None:
+                    time_remaining = time_remaining_seconds
+                else:
+                    time_remaining = max(0, int((end_time - now).total_seconds()))
+            else:
+                # Exam has ended
+                error_message = "The assessment has ended. You cannot take this assessment."
+                can_access = False
+    
+    elif exam_mode == "flexible":
+        if not start_time or not end_time or not duration_minutes:
+            error_message = "Assessment schedule is not properly configured"
+            can_access = False
+        else:
+            
+            if now < start_time:
+                # Before scheduled start time - cannot access yet
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                error_message = f"You cannot access this assessment yet. The assessment window will be available from {start_time_formatted}."
+                can_access = False
+            elif now > end_time:
+                # After scheduled end time - window has closed
+                end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                error_message = f"The assessment window has ended. The assessment was available until {end_time_formatted}. You cannot take this assessment."
+                can_access = False
+            else:
+                # Within window - auto-start assessment immediately after pre-checks
+                can_access = True
+                can_start = True
+                exam_started = True  # Auto-start for flexible mode (no manual start button)
+                # Use server-calculated time if test already started, otherwise use full duration
+                if time_remaining_seconds is not None:
+                    time_remaining = time_remaining_seconds
+                else:
+                    time_remaining = int(duration_minutes) * 60 if duration_minutes else None  # Timer starts with full duration
     
     # Get questions (without hidden testcases for candidate view)
     question_ids = test.get("question_ids", [])
@@ -647,9 +1149,21 @@ async def get_test_for_candidate(
         "questions": questions,
         # Include proctoring settings for candidate runtime toggle (backward compatible)
         "proctoringSettings": test.get("proctoringSettings"),
+        # Timer configuration
+        "timer_mode": test.get("timer_mode", "GLOBAL"),
+        "question_timings": test.get("question_timings", []),
+        # NEW: Access control information
+        "accessControl": {
+            "canAccess": can_access,
+            "canStart": can_start,
+            "waitingForStart": waiting_for_start,
+            "examStarted": exam_started,
+            "timeRemaining": time_remaining,
+            "errorMessage": error_message,
+        },
     }
     
-    # Add timing information if test has been started
+    # Add timing information if test has been started (backward compatibility)
     if started_at:
         result["started_at"] = started_at.isoformat() if isinstance(started_at, datetime) else str(started_at)
         result["is_completed"] = is_completed
@@ -755,7 +1269,8 @@ async def submit_answer(
 async def submit_test(
     test_id: str,
     user_id: str = Body(..., description="User ID from link token"),
-    answers: List[Dict[str, Any]] = Body(default=[], description="Final answers with question_id and source_code")
+    answers: List[Dict[str, Any]] = Body(default=[], description="Final answers with question_id and source_code"),
+    candidateRequirements: Optional[Dict[str, Any]] = Body(default=None, description="Candidate requirements details (phone, linkedIn, github, custom fields, etc.)")
 ):
     """
     Final test submission - evaluates all code with AI and generates scores/feedback.
@@ -817,6 +1332,40 @@ async def submit_test(
     # Check if already completed for this user_id
     if test_submission.get("is_completed"):
         raise HTTPException(status_code=400, detail="Test already submitted. A candidate can attempt the test only once.")
+    
+    # NEW: Validate timer server-side before accepting submission
+    started_at = test_submission.get("started_at")
+    if started_at:
+        started_datetime = None
+        if isinstance(started_at, datetime):
+            started_datetime = started_at
+        elif isinstance(started_at, str):
+            try:
+                if started_at.endswith('Z'):
+                    started_datetime = datetime.fromisoformat(started_at.replace('Z', '+00:00')).replace(tzinfo=None)
+                else:
+                    started_datetime = datetime.fromisoformat(started_at).replace(tzinfo=None)
+            except Exception:
+                try:
+                    from dateutil import parser  # type: ignore
+                    started_datetime = parser.parse(started_at)
+                    if started_datetime.tzinfo:
+                        started_datetime = started_datetime.replace(tzinfo=None)
+                except Exception:
+                    started_datetime = None
+        
+        if started_datetime:
+            duration_minutes = test.get("duration_minutes", 0)
+            duration_seconds = int(duration_minutes) * 60 if duration_minutes else 0
+            elapsed_seconds = (datetime.utcnow() - started_datetime).total_seconds()
+            time_remaining_seconds = duration_seconds - elapsed_seconds
+            
+            # Reject submission if time has expired
+            if time_remaining_seconds <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Time has expired. You cannot submit the test after the time limit."
+                )
     
     # Get existing submissions from database
     existing_submissions = {sub.get("question_id"): sub for sub in test_submission.get("submissions", [])}
@@ -897,18 +1446,22 @@ async def submit_test(
     final_score = round((total_score / max_possible_score) * 100) if max_possible_score > 0 else 0
     
     # Update test submission
+    update_data = {
+        "submissions": list(existing_submissions.values()),
+        "score": final_score,
+        "is_completed": True,
+        "submitted_at": datetime.utcnow(),
+        "evaluations": evaluations,
+        "ai_feedback_status": "completed"
+    }
+    
+    # Store candidate requirements if provided
+    if candidateRequirements:
+        update_data["candidateRequirements"] = candidateRequirements
+    
     await db.test_submissions.update_one(
         {"_id": test_submission["_id"]},
-        {
-            "$set": {
-                "submissions": list(existing_submissions.values()),
-                "score": final_score,
-                "is_completed": True,
-                "submitted_at": datetime.utcnow(),
-                "evaluations": evaluations,
-                "ai_feedback_status": "completed"
-            }
-        }
+        {"$set": update_data}
     )
     
     logger.info(f"AIML test {test_id} submitted by user {user_id}. Score: {final_score}/100")

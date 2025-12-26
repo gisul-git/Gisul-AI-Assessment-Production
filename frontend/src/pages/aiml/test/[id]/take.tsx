@@ -12,6 +12,7 @@ import { ViolationToast, pushViolationToast } from '@/components/ViolationToast'
 // Fullscreen Lock imports
 import { FullscreenLockOverlay } from "@/components/FullscreenLockOverlay";
 import { useFullscreenLock } from "@/hooks/useFullscreenLock";
+import { useAITimer } from "@/hooks/useAITimer";
 
 const AIMLCompetencyNotebook = dynamic(
   () => import('../../../../components/aiml/competency/AIMLCompetencyNotebook'),
@@ -51,6 +52,27 @@ interface Test {
   description: string
   duration_minutes: number
   questions: Question[]
+  examMode?: "strict" | "flexible"
+  schedule?: {
+    startTime?: string
+    endTime?: string
+    duration?: number
+  }
+  start_time?: string
+  timer_mode?: "GLOBAL" | "PER_QUESTION"
+  question_timings?: Array<{
+    question_id: string
+    duration_minutes: number
+  }>
+  accessControl?: {
+    canAccess: boolean
+    canStart: boolean
+    waitingForStart: boolean
+    examStarted: boolean
+    timeRemaining: number | null
+    errorMessage: string | null
+  }
+  started_at?: string
 }
 
 export default function AIMLTestTakePage() {
@@ -141,11 +163,17 @@ export default function AIMLTestTakePage() {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [codeAnswers, setCodeAnswers] = useState<Record<string, string>>({})
   const [outputAnswers, setOutputAnswers] = useState<Record<string, string[]>>({})
-  const [timeRemaining, setTimeRemaining] = useState(0)
+  const [timeRemaining, setTimeRemaining] = useState<number | null>(null)
   const [submitted, setSubmitted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [loading, setLoading] = useState(true)
   const [lastSaved, setLastSaved] = useState<Date | null>(null)
+  // Access control states (matching Custom MCQ structure)
+  const [waitingForStart, setWaitingForStart] = useState(false)
+  const [accessError, setAccessError] = useState<string | null>(null)
+  const [examStarted, setExamStarted] = useState(false)
+  const [startTime, setStartTime] = useState<Date | null>(null)
+  const [startedAt, setStartedAt] = useState<Date | null>(null)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const autoSaveRef = useRef<NodeJS.Timeout | null>(null)
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true)
@@ -153,6 +181,13 @@ export default function AIMLTestTakePage() {
   const [proctoringSettings, setProctoringSettings] = useState<any>({})
   const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null)
   const [debugMode, setDebugMode] = useState(false)
+  // Per-question timer states
+  const [expiredQuestions, setExpiredQuestions] = useState<Set<string>>(new Set())
+  const [showTimerExpiryPopup, setShowTimerExpiryPopup] = useState(false)
+  const [expiredQuestionId, setExpiredQuestionId] = useState<string | null>(null)
+  // Sequential question locking - only first question unlocked initially
+  const [unlockedQuestions, setUnlockedQuestions] = useState<Set<string>>(new Set())
+  const [completedQuestions, setCompletedQuestions] = useState<Set<string>>(new Set()) // Questions that are expired or submitted
 
   // Proctoring refs
   const thumbVideoRef = useRef<HTMLVideoElement>(null)
@@ -372,7 +407,7 @@ export default function AIMLTestTakePage() {
     })
     const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
 
-    if (!liveProctoringEnabled || !liveProctorScreenStream || timeRemaining <= 0 || submitted) {
+    if (!liveProctoringEnabled || !liveProctorScreenStream || (timeRemaining !== null && timeRemaining <= 0) || submitted) {
       return
     }
 
@@ -469,24 +504,78 @@ export default function AIMLTestTakePage() {
     }
   }, [stopUniversalProctoring])
 
-  // Timer
+
+  // NEW: Periodic server sync for timer accuracy (every 30 seconds)
   useEffect(() => {
-    if (timeRemaining <= 0 || submitted) return
+    if (!token || !userId || !testId || submitted || timeRemaining === null || !examStarted) return
 
-    timerRef.current = setInterval(() => {
-      setTimeRemaining(prev => {
-        if (prev <= 1) {
-          handleSubmitTest()
-          return 0
+    const syncInterval = setInterval(async () => {
+      try {
+        const response = await axios.get(
+          `${apiUrl}/api/v1/aiml/tests/${testId}/candidate?user_id=${userId}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        )
+        
+        const testData = response.data
+        const accessControl = testData.accessControl
+        
+        if (accessControl?.timeRemaining !== null && accessControl?.timeRemaining !== undefined) {
+          // Sync with server-calculated time
+          setTimeRemaining(Math.max(0, accessControl.timeRemaining))
+        } else if (testData.time_remaining_seconds !== undefined && testData.time_remaining_seconds >= 0) {
+          // Fallback to backward compatibility field
+          setTimeRemaining(Math.max(0, testData.time_remaining_seconds))
         }
-        return prev - 1
-      })
-    }, 1000)
+      } catch (err) {
+        console.error('Failed to sync timer with server:', err)
+        // Don't update timer on error, keep using client-side countdown
+      }
+    }, 30000) // Sync every 30 seconds
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
+    return () => clearInterval(syncInterval)
+  }, [token, userId, testId, submitted, timeRemaining, examStarted])
+
+  // Auto-transition when exam time arrives (strict mode only - for pre-check to exam start)
+  // Matching Custom MCQ structure exactly
+  useEffect(() => {
+    if (!waitingForStart || !startTime || !test || !token || !userId || test.examMode !== "strict") return
+
+    const checkStartTime = async () => {
+      const now = new Date()
+      if (now >= startTime) {
+        // Start time has arrived - reload test data to get updated accessControl
+        try {
+          const response = await axios.get(
+            `${apiUrl}/api/v1/aiml/tests/${testId}/candidate?user_id=${userId}`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          )
+          
+          const testData = response.data
+          setTest(testData)
+          
+          // Update state based on new accessControl
+          const accessControl = testData.accessControl
+          if (accessControl?.examStarted) {
+            setWaitingForStart(false)
+            setExamStarted(true)
+            setTimeRemaining(accessControl.timeRemaining || null)
+            setStartedAt(new Date())
+            setAccessError(null)
+          }
+        } catch (err: any) {
+          setAccessError(err.message || "Failed to start assessment")
+        }
+      }
     }
-  }, [timeRemaining, submitted])
+
+    // Check immediately
+    checkStartTime()
+
+    // Check every second until exam time arrives
+    const interval = setInterval(checkStartTime, 1000)
+
+    return () => clearInterval(interval)
+  }, [waitingForStart, startTime, test, token, userId, testId])
 
   const fetchTestData = async (urlToken: string, urlUserId: string) => {
     try {
@@ -506,31 +595,60 @@ export default function AIMLTestTakePage() {
       setCameraProctorEnabled(aiEnabled)
       setProctoringSettings(testData?.proctoringSettings || {})
       
-      // Use time_remaining_seconds from backend if available (test already started)
-      // Otherwise, auto-start the test and use full duration
+      // NEW IMPLEMENTATION: Use accessControl from backend (matching Custom MCQ structure)
+      const accessControl = testData.accessControl
+      const schedule = testData.schedule || {}
+      const startTimeStr = schedule.startTime || testData.start_time
+      
       if (testData.is_completed) {
         // Test already completed, set time to 0 and mark as submitted
         setTimeRemaining(0)
         setSubmitted(true)
-      } else if (testData.time_remaining_seconds !== undefined && testData.time_remaining_seconds >= 0) {
-        // Test already started, use remaining time from backend
-        setTimeRemaining(Math.max(0, testData.time_remaining_seconds))
-        // If time has expired, it will be handled by the timer effect
-      } else {
-        // Test hasn't been started yet, auto-start it
-        try {
-          await axios.post(
-            `${apiUrl}/api/v1/aiml/tests/${testId}/start?user_id=${urlUserId}`,
-            {},
-            { headers: { Authorization: `Bearer ${urlToken}` } }
-          )
-          // After starting, use full duration (timer will count down from here)
-          setTimeRemaining(testData.duration_minutes * 60)
-        } catch (startErr) {
-          console.error('Failed to auto-start test:', startErr)
-          // If start fails, still use full duration as fallback
-          setTimeRemaining(testData.duration_minutes * 60)
+        setExamStarted(false)
+        setWaitingForStart(false)
+        setAccessError(null)
+      } else if (accessControl) {
+        if (!accessControl.canAccess) {
+          // Cannot access - show error message
+          setAccessError(accessControl.errorMessage || "You cannot access this assessment at this time.")
+          setWaitingForStart(false)
+          setExamStarted(false)
+          setTimeRemaining(null)
+          return
         }
+        
+        if (accessControl.waitingForStart) {
+          // Can access but waiting for start (strict mode - pre-check phase)
+          if (startTimeStr) {
+            const startTimeDate = new Date(startTimeStr)
+            setWaitingForStart(true)
+            setStartTime(startTimeDate)
+            setExamStarted(false)
+            setTimeRemaining(null)
+            setAccessError(null) // Clear error, show waiting message in UI
+          }
+          return
+        }
+        
+        if (accessControl.examStarted) {
+          // Exam has started (both strict and flexible mode now auto-start)
+          setWaitingForStart(false)
+          setExamStarted(true)
+          setTimeRemaining(accessControl.timeRemaining || null)
+          setStartedAt(new Date())
+          setAccessError(null)
+        } else if (accessControl.canStart) {
+          // Can start - this shouldn't happen now as flexible mode auto-starts
+          // But keep as fallback
+          setWaitingForStart(false)
+          setExamStarted(true)
+          setTimeRemaining(accessControl.timeRemaining || null)
+          setStartedAt(new Date())
+          setAccessError(null)
+        }
+      } else {
+        // Fallback if accessControl not available (shouldn't happen)
+        setAccessError("Assessment access information is not available.")
       }
       
       // Initialize code answers
@@ -539,6 +657,18 @@ export default function AIMLTestTakePage() {
         initialCodes[q.id] = q.starter_code?.python3 || q.starter_code?.python || ''
       })
       setCodeAnswers(initialCodes)
+      
+      // Initialize sequential locking: only first question unlocked
+      if (testData.questions && testData.questions.length > 0 && testData.timer_mode === 'PER_QUESTION') {
+        const firstQuestionId = testData.questions[0].id
+        setUnlockedQuestions(new Set<string>([firstQuestionId]))
+        setCompletedQuestions(new Set<string>())
+        setExpiredQuestions(new Set<string>())
+      } else if (testData.timer_mode !== 'PER_QUESTION' && testData.questions) {
+        // GLOBAL mode: all questions unlocked
+        const allQuestionIds = new Set<string>(testData.questions.map((q: Question) => q.id))
+        setUnlockedQuestions(allQuestionIds)
+      }
     } catch (err: any) {
       console.error(err)
       alert(err.response?.data?.detail || 'Failed to load test')
@@ -582,7 +712,9 @@ export default function AIMLTestTakePage() {
   }, [token, userId, testId, apiUrl])
 
   const handleCodeChange = useCallback((code: string) => {
-    if (currentQuestion) {
+    if (currentQuestion && 
+        !expiredQuestions.has(currentQuestion.id) &&
+        (test?.timer_mode !== 'PER_QUESTION' || unlockedQuestions.has(currentQuestion.id))) {
       setCodeAnswers(prev => ({
         ...prev,
         [currentQuestion.id]: code
@@ -594,7 +726,7 @@ export default function AIMLTestTakePage() {
         autoSaveAnswer(currentQuestion.id, code)
       }, 2000)
     }
-  }, [currentQuestion, autoSaveAnswer])
+  }, [currentQuestion, autoSaveAnswer, expiredQuestions, test?.timer_mode, unlockedQuestions])
 
   const handleSubmitQuestion = async (code: string, outputs: string[]) => {
     if (!currentQuestion || submitting) return
@@ -618,17 +750,33 @@ export default function AIMLTestTakePage() {
         { headers: { Authorization: `Bearer ${token}` } }
       )
       
-      // Auto-save successful - show toast notification
+      // Mark question as completed (manually submitted)
+      setCompletedQuestions(prev => {
+        const newSet = new Set(prev)
+        newSet.add(currentQuestion.id)
+        return newSet
+      })
+      
+      // Lock current question and unlock next question (sequential locking)
+      // BUT do NOT auto-navigate - user stays on current question
+      if (currentQuestionIndex < questions.length - 1) {
+        const nextQuestionId = questions[currentQuestionIndex + 1].id
+        setUnlockedQuestions(prev => {
+          const newSet = new Set(prev)
+          newSet.delete(currentQuestion.id) // Lock current question
+          newSet.add(nextQuestionId) // Unlock next question
+          return newSet
+        })
+      }
+      
+      // Show success notification
       const toast = document.createElement('div')
       toast.className = 'fixed bottom-4 right-4 bg-emerald-600 text-white px-4 py-2 rounded-lg shadow-lg z-50'
-      toast.textContent = '✓ Answer auto-saved'
+      toast.textContent = '✓ Answer submitted. Next question unlocked!'
       document.body.appendChild(toast)
-      setTimeout(() => document.body.removeChild(toast), 2000)
+      setTimeout(() => document.body.removeChild(toast), 3000)
       
-      // Move to next question if requested
-      if (currentQuestionIndex < questions.length - 1) {
-        setCurrentQuestionIndex(prev => prev + 1)
-      }
+      // DO NOT auto-navigate - user can manually click "Next" or question tab when ready
     } catch (err: any) {
       console.error(err)
       alert(err.response?.data?.detail || 'Failed to save answer')
@@ -650,6 +798,26 @@ export default function AIMLTestTakePage() {
 
     setSubmitting(true)
     try {
+      // Get candidate requirements from sessionStorage
+      const candidateRequirements: any = {};
+      const phone = sessionStorage.getItem("candidatePhone");
+      const linkedIn = sessionStorage.getItem("candidateLinkedIn");
+      const github = sessionStorage.getItem("candidateGithub");
+      
+      if (phone) candidateRequirements.phone = phone;
+      if (linkedIn) candidateRequirements.linkedInUrl = linkedIn;
+      if (github) candidateRequirements.githubUrl = github;
+      
+      // Get custom fields from sessionStorage
+      const customFieldsStr = sessionStorage.getItem("candidateCustomFields");
+      if (customFieldsStr) {
+        try {
+          candidateRequirements.customFields = JSON.parse(customFieldsStr);
+        } catch (e) {
+          console.warn("Failed to parse custom fields:", e);
+        }
+      }
+
       const response = await axios.post(
         `${apiUrl}/api/v1/aiml/tests/${testId}/submit`,
         {
@@ -658,7 +826,8 @@ export default function AIMLTestTakePage() {
             question_id: questionId,
             source_code: code,
             outputs: outputAnswers[questionId] || []
-          }))
+          })),
+          candidateRequirements: Object.keys(candidateRequirements).length > 0 ? candidateRequirements : undefined
         },
         { headers: { Authorization: `Bearer ${token}` } }
       )
@@ -676,6 +845,82 @@ export default function AIMLTestTakePage() {
     }
   }
 
+  // Use AITimer hook for per-question or global timer
+  const currentQuestionForTimer = questions[currentQuestionIndex] || null
+  const timer = useAITimer({
+    test: test ? {
+      timer_mode: test.timer_mode || "GLOBAL",
+      duration_minutes: test.duration_minutes,
+      question_timings: test.question_timings,
+      start_time: test.start_time || test.schedule?.startTime,
+    } : null,
+    testSubmission: test?.started_at ? { started_at: test.started_at } : null,
+    questions,
+    currentQuestionId: currentQuestionForTimer?.id || null,
+    onExpire: handleSubmitTest,
+    onQuestionExpire: async (questionId: string) => {
+      console.log('[AIML Timer] Question expired:', questionId)
+      
+      // Mark question as expired and completed
+      setExpiredQuestions(prev => {
+        const newSet = new Set(prev)
+        newSet.add(questionId)
+        return newSet
+      })
+      setCompletedQuestions(prev => {
+        const newSet = new Set(prev)
+        newSet.add(questionId)
+        return newSet
+      })
+      setExpiredQuestionId(questionId)
+      
+      // Auto-save the current question's answer
+      const currentCode = codeAnswers[questionId] || ''
+      const currentOutputs = outputAnswers[questionId] || []
+      try {
+        await autoSaveAnswer(questionId, currentCode)
+        console.log('[AIML Timer] Auto-saved question:', questionId)
+      } catch (err) {
+        console.error('[AIML Timer] Failed to auto-save:', err)
+      }
+      
+      // Lock current question and unlock next question (sequential locking)
+      const currentIndex = questions.findIndex(q => q.id === questionId)
+      if (currentIndex < questions.length - 1) {
+        const nextQuestionId = questions[currentIndex + 1].id
+        setUnlockedQuestions(prev => {
+          const newSet = new Set(prev)
+          newSet.delete(questionId) // Lock current question
+          newSet.add(nextQuestionId) // Unlock next question
+          return newSet
+        })
+      }
+      
+      // Show popup
+      setShowTimerExpiryPopup(true)
+      
+      // After 2.5 seconds, navigate to next question or submit
+      setTimeout(() => {
+        setShowTimerExpiryPopup(false)
+        if (currentIndex < questions.length - 1) {
+          // Move to next question
+          setCurrentQuestionIndex(currentIndex + 1)
+        } else {
+          // Last question - submit test
+          handleSubmitTest()
+        }
+      }, 2500) // 2.5 second delay
+    },
+    enabled: examStarted && !submitted && questions.length > 0,
+  })
+
+  // Update timeRemaining from timer hook (for GLOBAL mode)
+  useEffect(() => {
+    if (test?.timer_mode === 'GLOBAL') {
+      setTimeRemaining(timer.timeRemaining)
+    }
+  }, [timer.timeRemaining, test?.timer_mode])
+
   if (loading) {
     return (
       <>
@@ -683,6 +928,87 @@ export default function AIMLTestTakePage() {
           <div className="text-center">
             <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
             <p className="text-gray-600">Loading test...</p>
+          </div>
+        </div>
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
+      </>
+    )
+  }
+
+  // Show access denied screen
+  if (accessError && !examStarted) {
+    return (
+      <>
+        <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-red-50 via-white to-orange-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-8 text-center">
+            <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-bold text-gray-800 mb-2">Access Denied</h2>
+            <p className="text-gray-600">{accessError}</p>
+          </div>
+        </div>
+        {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
+        {cameraProctorEnabled && (
+          <FullscreenLockOverlay
+            isLocked={isFullscreenLocked}
+            onRequestFullscreen={handleRequestFullscreen}
+            exitCount={fullscreenExitCount}
+            message="You must be in fullscreen mode to continue the test."
+            warningText={fullscreenExitCount > 0 ? "Exiting fullscreen is recorded as a violation." : undefined}
+          />
+        )}
+      </>
+    )
+  }
+
+  // Show waiting for start screen (strict mode pre-check phase)
+  // Matching Custom MCQ structure exactly
+  if (waitingForStart && !examStarted) {
+    const isStrictMode = test?.examMode === "strict"
+    
+    return (
+      <>
+        <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-50 via-white to-teal-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-8 text-center">
+            <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <h1 className="text-2xl font-bold text-gray-800 mb-2">Pre-Check Phase</h1>
+            <p className="text-gray-600 mb-4">
+              You can complete pre-checks now. The assessment will start automatically at the scheduled time.
+            </p>
+            {startTime && (
+              <div className="bg-emerald-50 rounded-lg p-4 mb-4">
+                <p className="text-sm text-emerald-800 font-semibold mb-1">Assessment starts at</p>
+                <p className="text-lg text-emerald-700 font-bold">
+                  {startTime.toLocaleString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
+                    hour12: true,
+                  })}
+                </p>
+              </div>
+            )}
+            <p className="text-sm text-gray-500">
+              The assessment will automatically start when the scheduled time arrives. This page will refresh automatically.
+            </p>
           </div>
         </div>
         {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
@@ -776,85 +1102,192 @@ export default function AIMLTestTakePage() {
               </div>
             )}
             
-            {/* Timer */}
-            <div className={`px-4 py-2 rounded-lg font-mono text-lg font-semibold ${
-              timeRemaining < 300 
-                ? 'bg-red-100 text-red-700' 
-                : timeRemaining < 600 
-                  ? 'bg-amber-100 text-amber-700' 
-                  : 'bg-emerald-100 text-emerald-700'
-            }`}>
-              ⏱️ {Math.floor(timeRemaining / 60)}:{String(timeRemaining % 60).padStart(2, '0')}
-            </div>
+            {/* Timer - Show GLOBAL or PER_QUESTION timer */}
+            {test.timer_mode === 'PER_QUESTION' && currentQuestion && examStarted ? (
+              (() => {
+                const questionTime = timer.questionTimeRemaining[currentQuestion.id] || 0
+                return questionTime > 0 ? (
+                  <div className={`px-4 py-2 rounded-lg font-mono text-lg font-semibold ${
+                    questionTime < 60 
+                      ? 'bg-red-100 text-red-700' 
+                      : questionTime < 180 
+                        ? 'bg-amber-100 text-amber-700' 
+                        : 'bg-emerald-100 text-emerald-700'
+                  }`}>
+                    ⏱️ Q{currentQuestionIndex + 1}: {Math.floor(questionTime / 60)}:{String(questionTime % 60).padStart(2, '0')}
+                  </div>
+                ) : null
+              })()
+            ) : (
+              timeRemaining !== null && !isNaN(timeRemaining) && timeRemaining >= 0 && (
+                <div className={`px-4 py-2 rounded-lg font-mono text-lg font-semibold ${
+                  timeRemaining < 300 
+                    ? 'bg-red-100 text-red-700' 
+                    : timeRemaining < 600 
+                      ? 'bg-amber-100 text-amber-700' 
+                      : 'bg-emerald-100 text-emerald-700'
+                }`}>
+                  ⏱️ {Math.floor(timeRemaining / 60)}:{String(timeRemaining % 60).padStart(2, '0')}
+                </div>
+              )
+            )}
             
-            <button
-              onClick={() => {
-                if (confirm('Are you sure you want to submit the test? This action cannot be undone.')) {
-                  handleSubmitTest()
-                }
-              }}
-              disabled={submitting}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 shadow-md hover:shadow-lg"
-            >
-              {submitting ? 'Submitting...' : 'Submit Test'}
-            </button>
+            {examStarted && (
+              <button
+                onClick={() => {
+                  if (confirm('Are you sure you want to submit the test? This action cannot be undone.')) {
+                    handleSubmitTest()
+                  }
+                }}
+                disabled={submitting}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 shadow-md hover:shadow-lg"
+              >
+                {submitting ? 'Submitting...' : 'Submit Test'}
+              </button>
+            )}
           </div>
         </div>
         
-        {/* Question Navigation */}
-        <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 flex items-center justify-between gap-2">
-          {/* Previous Button */}
-          <button
-            onClick={() => setCurrentQuestionIndex(prev => Math.max(0, prev - 1))}
-            disabled={currentQuestionIndex === 0}
-            className="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            ← Previous
-          </button>
-          
-          {/* Question Tabs */}
-          <div className="flex items-center gap-2 overflow-x-auto flex-1">
-            {questions.map((q, idx) => (
-              <button
-                key={q.id}
-                onClick={() => setCurrentQuestionIndex(idx)}
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  idx === currentQuestionIndex
-                    ? 'bg-emerald-600 text-white'
-                    : codeAnswers[q.id] && codeAnswers[q.id].trim() !== ''
-                      ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                      : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
-                }`}
-              >
-                Q{idx + 1}
-              </button>
-            ))}
+        {/* Question Navigation - Only show when exam started */}
+        {examStarted && (
+          <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 flex items-center justify-between gap-2">
+            {/* Previous Button - Disabled for PER_QUESTION mode (no going back) */}
+            <button
+              onClick={() => {
+                const prevIndex = currentQuestionIndex - 1
+                if (prevIndex >= 0) {
+                  const prevQuestion = questions[prevIndex]
+                  // Only allow navigation if not PER_QUESTION mode and question not expired
+                  if (test.timer_mode !== 'PER_QUESTION' && !expiredQuestions.has(prevQuestion.id)) {
+                    setCurrentQuestionIndex(prevIndex)
+                  }
+                }
+              }}
+              disabled={
+                test.timer_mode === 'PER_QUESTION' || 
+                currentQuestionIndex === 0 || 
+                (currentQuestionIndex > 0 && expiredQuestions.has(questions[currentQuestionIndex - 1]?.id))
+              }
+              className="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              ← Previous
+            </button>
+            
+            {/* Question Tabs */}
+            <div className="flex items-center gap-2 overflow-x-auto flex-1">
+              {questions.map((q, idx) => {
+                const isExpired = expiredQuestions.has(q.id)
+                const isLocked = test.timer_mode === 'PER_QUESTION' && !unlockedQuestions.has(q.id)
+                const isCompleted = completedQuestions.has(q.id)
+                const isCurrent = idx === currentQuestionIndex
+                
+                return (
+                  <button
+                    key={q.id}
+                    onClick={() => {
+                      // Only allow navigation to unlocked questions
+                      if (!isLocked && !isExpired) {
+                        setCurrentQuestionIndex(idx)
+                      }
+                    }}
+                    disabled={isLocked || isExpired}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
+                      isCurrent
+                        ? 'bg-emerald-600 text-white'
+                        : isLocked
+                          ? 'bg-gray-200 text-gray-400 cursor-not-allowed border border-gray-300'
+                          : isExpired
+                            ? 'bg-gray-200 text-gray-400 cursor-not-allowed border border-gray-300'
+                            : isCompleted
+                              ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                              : codeAnswers[q.id] && codeAnswers[q.id].trim() !== ''
+                                ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                                : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+                    }`}
+                    title={
+                      isLocked 
+                        ? 'This question is locked. Complete previous questions first.' 
+                        : isExpired 
+                          ? 'Time expired for this question' 
+                          : ''
+                    }
+                  >
+                    Q{idx + 1}
+                    {isLocked && ' 🔒'}
+                  </button>
+                )
+              })}
+            </div>
+            
+            {/* Next Button - Disabled until current question is completed (for PER_QUESTION mode) */}
+            <button
+              onClick={() => {
+                const nextIndex = currentQuestionIndex + 1
+                if (nextIndex < questions.length) {
+                  const nextQuestion = questions[nextIndex]
+                  // Only allow navigation if question is unlocked
+                  if (test.timer_mode !== 'PER_QUESTION' || unlockedQuestions.has(nextQuestion.id)) {
+                    setCurrentQuestionIndex(nextIndex)
+                  }
+                }
+              }}
+              disabled={
+                currentQuestionIndex === questions.length - 1 ||
+                (test.timer_mode === 'PER_QUESTION' && 
+                 currentQuestion && 
+                 !completedQuestions.has(currentQuestion.id) &&
+                 !expiredQuestions.has(currentQuestion.id))
+              }
+              className="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              title={
+                test.timer_mode === 'PER_QUESTION' && 
+                currentQuestion && 
+                !completedQuestions.has(currentQuestion.id) &&
+                !expiredQuestions.has(currentQuestion.id)
+                  ? 'Complete or wait for timer to expire on current question'
+                  : ''
+              }
+            >
+              Next →
+            </button>
           </div>
-          
-          {/* Next Button */}
-          <button
-            onClick={() => setCurrentQuestionIndex(prev => Math.min(questions.length - 1, prev + 1))}
-            disabled={currentQuestionIndex === questions.length - 1}
-            className="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Next →
-          </button>
-        </div>
+        )}
       </header>
 
       {/* Main Content - Competency Notebook IDE */}
       <main className="flex-1 overflow-hidden">
-        {currentQuestion && (
+        {currentQuestion && examStarted && (
           <AIMLCompetencyNotebook
             key={currentQuestion.id}
             question={currentQuestion}
             sessionId={`test_${testId}_user_${userId}_q_${currentQuestion.id}`}
             onCodeChange={handleCodeChange}
             onSubmit={handleSubmitQuestion}
-            showSubmit={currentQuestionIndex === questions.length - 1}
+            showSubmit={true}
+            readOnly={expiredQuestions.has(currentQuestion.id)}
           />
         )}
       </main>
+
+      {/* Timer Expiry Popup Modal */}
+      {showTimerExpiryPopup && expiredQuestionId && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md mx-4">
+            <div className="text-center">
+              <div className="mb-4">
+                <svg className="mx-auto h-12 w-12 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">Time's up!</h3>
+              <p className="text-gray-600 mb-4">Time's up! Moving to next question...</p>
+              <div className="flex justify-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Fullscreen Lock Overlay - only when AI Proctoring enabled */}
       {cameraProctorEnabled && (

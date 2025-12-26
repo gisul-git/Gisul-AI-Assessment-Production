@@ -6,20 +6,27 @@ import aimlApi from '../../../lib/aiml/api'
 import { Clock, Eye, EyeOff, Users, Mail, Edit, Upload, List } from 'lucide-react'
 import Link from 'next/link'
 
-// Helper function to format dates
+// Helper function to format dates (converts UTC to IST - UTC+5:30)
 const formatDate = (dateString: string, formatStr: string) => {
+  if (!dateString) return ''
+  
+  // Parse the UTC date
   const date = new Date(dateString)
+  
+  // Add 5 hours and 30 minutes (IST offset) to convert from UTC to IST
+  const istDate = new Date(date.getTime() + (5 * 60 + 30) * 60 * 1000)
+  
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  const month = months[date.getMonth()]
-  const day = date.getDate()
-  const year = date.getFullYear()
-  const hours = date.getHours().toString().padStart(2, '0')
-  const minutes = date.getMinutes().toString().padStart(2, '0')
+  const month = months[istDate.getMonth()]
+  const day = istDate.getDate()
+  const year = istDate.getFullYear()
+  const hours = istDate.getHours().toString().padStart(2, '0')
+  const minutes = istDate.getMinutes().toString().padStart(2, '0')
 
   if (formatStr === 'MMM dd, yyyy HH:mm') {
     return `${month} ${day}, ${year} ${hours}:${minutes}`
   }
-  return date.toLocaleDateString()
+  return istDate.toLocaleDateString()
 }
 
 interface Test {
@@ -35,6 +42,7 @@ interface Test {
   question_ids?: string[]
   test_token?: string
   pausedAt?: string | null
+  schedule?: { startTime?: string; endTime?: string; duration?: number } | null
 }
 
 export default function AIMLTestsListPage() {
@@ -194,10 +202,10 @@ export default function AIMLTestsListPage() {
                           {test.duration_minutes} minutes
                         </div>
                         <div>
-                          Start: {formatDate(test.start_time, 'MMM dd, yyyy HH:mm')}
+                          Start: {formatDate(test.schedule?.startTime || test.start_time, 'MMM dd, yyyy HH:mm')}
                         </div>
                         <div>
-                          End: {formatDate(test.end_time, 'MMM dd, yyyy HH:mm')}
+                          End: {formatDate(test.schedule?.endTime || test.end_time, 'MMM dd, yyyy HH:mm')}
                         </div>
                         <span
                           className={`px-2 py-1 rounded text-xs ${

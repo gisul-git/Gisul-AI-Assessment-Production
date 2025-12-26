@@ -35,6 +35,7 @@ export default function AIMLQuestionPreviewPage() {
   const [loadingDataset, setLoadingDataset] = useState(false)
   const [selectedFormat, setSelectedFormat] = useState<string>('csv')
   const [error, setError] = useState<string | null>(null)
+  const [datasetMeta, setDatasetMeta] = useState<{ isBinary?: boolean; mimeType?: string } | null>(null)
 
   useEffect(() => {
     if (id) {
@@ -68,11 +69,19 @@ export default function AIMLQuestionPreviewPage() {
     try {
       setLoadingDataset(true)
       const response = await aimlApi.get(`/questions/${id}/dataset-preview?format=${format}`)
-      setDatasetPreview(response.data.content)
+      // Store the full response to check if it's binary
+      const isBinary = response.data.is_binary || false
+      const content = response.data.content
+      const mimeType = response.data.mime_type || 'text/plain'
+      
+      // Store both content and metadata
+      setDatasetPreview(content)
       setSelectedFormat(format)
+      setDatasetMeta({ isBinary, mimeType })
     } catch (error: any) {
       console.error('Error fetching dataset preview:', error)
       setError(error.response?.data?.detail || 'Failed to fetch dataset preview')
+      setDatasetMeta(null)
     } finally {
       setLoadingDataset(false)
     }
@@ -360,55 +369,110 @@ export default function AIMLQuestionPreviewPage() {
                     overflow: "auto",
                   }}
                 >
-                  {selectedFormat === 'json' ? (
-                    <pre
-                      style={{
-                        margin: 0,
-                        fontFamily: "monospace",
-                        fontSize: "0.875rem",
-                        color: "#374151",
-                        whiteSpace: "pre-wrap",
-                      }}
-                    >
-                      {datasetPreview}
-                    </pre>
-                  ) : selectedFormat === 'csv' ? (
-                    <pre
-                      style={{
-                        margin: 0,
-                        fontFamily: "monospace",
-                        fontSize: "0.875rem",
-                        color: "#374151",
-                        whiteSpace: "pre-wrap",
-                      }}
-                    >
-                      {datasetPreview}
-                    </pre>
-                  ) : selectedFormat === 'pdf' ? (
-                    <div style={{ textAlign: "center", padding: "2rem" }}>
-                      <p style={{ color: "#64748b", marginBottom: "1rem" }}>
-                        PDF format - Click Download to view
-                      </p>
-                      <button
-                        className="btn-primary"
-                        onClick={downloadDataset}
+                  {(() => {
+                    const isBinary = datasetMeta?.isBinary || false
+                    const mimeType = datasetMeta?.mimeType || 'text/plain'
+                    
+                    // Handle binary formats (PDF, Parquet, Avro) - display in original format
+                    if (isBinary) {
+                      if (selectedFormat === 'pdf') {
+                        // Display PDF in iframe - original PDF format
+                        const base64Data = datasetPreview
+                        const pdfDataUri = `data:application/pdf;base64,${base64Data}`
+                        return (
+                          <div style={{ width: "100%", height: "500px" }}>
+                            <iframe
+                              src={pdfDataUri}
+                              style={{
+                                width: "100%",
+                                height: "100%",
+                                border: "1px solid #e5e7eb",
+                                borderRadius: "0.375rem",
+                              }}
+                              title="PDF Preview"
+                            />
+                          </div>
+                        )
+                      } else if (selectedFormat === 'parquet' || selectedFormat === 'avro') {
+                        // For Parquet/Avro, show that it's in original binary format
+                        // These are binary formats that can't be displayed as text
+                        return (
+                          <div style={{ textAlign: "center", padding: "2rem" }}>
+                            <p style={{ color: "#64748b", marginBottom: "0.5rem", fontWeight: 600 }}>
+                              {selectedFormat.toUpperCase()} Format Dataset
+                            </p>
+                            <p style={{ color: "#64748b", marginBottom: "1rem", fontSize: "0.875rem" }}>
+                              This dataset is in its original {selectedFormat.toUpperCase()} binary format. 
+                              The format has not been changed - it's displayed as stored.
+                            </p>
+                            <button
+                              className="btn-primary"
+                              onClick={downloadDataset}
+                              style={{ padding: "0.5rem 1rem", fontSize: "0.875rem" }}
+                            >
+                              📥 Download {selectedFormat.toUpperCase()}
+                            </button>
+                          </div>
+                        )
+                      }
+                    }
+                    
+                    // Handle text-based formats (CSV, JSON) - display in original format
+                    if (selectedFormat === 'json') {
+                      return (
+                        <pre
+                          style={{
+                            margin: 0,
+                            fontFamily: "monospace",
+                            fontSize: "0.875rem",
+                            whiteSpace: "pre-wrap",
+                            backgroundColor: "#1e293b",
+                            color: "#e2e8f0",
+                            padding: "1rem",
+                            borderRadius: "0.375rem",
+                          }}
+                        >
+                          {(() => {
+                            try {
+                              const parsed = JSON.parse(datasetPreview)
+                              return JSON.stringify(parsed, null, 2)
+                            } catch (e) {
+                              return datasetPreview
+                            }
+                          })()}
+                        </pre>
+                      )
+                    } else if (selectedFormat === 'csv') {
+                      return (
+                        <pre
+                          style={{
+                            margin: 0,
+                            fontFamily: "monospace",
+                            fontSize: "0.875rem",
+                            color: "#374151",
+                            whiteSpace: "pre-wrap",
+                          }}
+                        >
+                          {datasetPreview}
+                        </pre>
+                      )
+                    }
+                    
+                    // Fallback - display as-is in original format
+                    return (
+                      <pre
+                        style={{
+                          margin: 0,
+                          fontFamily: "monospace",
+                          fontSize: "0.875rem",
+                          color: "#374151",
+                          whiteSpace: "pre-wrap",
+                        }}
                       >
-                        📥 Download PDF
-                      </button>
-                    </div>
-                  ) : (
-                    <div style={{ textAlign: "center", padding: "2rem" }}>
-                      <p style={{ color: "#64748b", marginBottom: "1rem" }}>
-                        {selectedFormat.toUpperCase()} format - Click Download to view
-                      </p>
-                      <button
-                        className="btn-primary"
-                        onClick={downloadDataset}
-                      >
-                        📥 Download {selectedFormat.toUpperCase()}
-                      </button>
-                    </div>
-                  )}
+                        {datasetPreview}
+                      </pre>
+                    )
+                  })()}
                 </div>
               ) : (
                 <div style={{ padding: "2rem", textAlign: "center", color: "#64748b" }}>
