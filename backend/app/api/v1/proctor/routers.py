@@ -499,16 +499,25 @@ async def start_live_proctoring_session(
         except Exception as e:
             logger.warning(f"[Live Proctoring] Could not fetch candidate info: {e}")
         
-        # CRITICAL FIX: Clean up any existing sessions for this candidate+assessment
-        # This prevents duplicate/old sessions from cluttering the admin dashboard
-        existing_sessions_result = await db.live_proctor_sessions.delete_many({
+        # Check for existing active session for this candidate+assessment
+        existing_session = await db.live_proctor_sessions.find_one({
             "assessmentId": payload.assessmentId,
             "candidateId": payload.candidateId,
-            "status": {"$in": ["candidate_initiated", "offer_sent", "active"]}
+            "status": {"$nin": ["ended", "closed"]}  # Not closed/ended
         })
         
-        if existing_sessions_result.deleted_count > 0:
-            logger.info(f"[Live Proctoring] Cleaned up {existing_sessions_result.deleted_count} old sessions for candidate {payload.candidateId} in assessment {payload.assessmentId}")
+        if existing_session:
+            logger.info(f"[Live Proctoring] Reusing existing live proctoring session for candidate {payload.candidateId} in assessment {payload.assessmentId}")
+            return success_response(
+                "Live Proctoring session started",
+                LiveProctoringSessionResponse(
+                    sessionId=existing_session["sessionId"],
+                    assessmentId=payload.assessmentId,
+                    candidateId=payload.candidateId,
+                    status=existing_session.get("status", "candidate_initiated"),
+                    createdAt=existing_session.get("createdAt", now),
+                ).dict()
+            )
         
         session_doc = {
             "sessionId": session_id,
@@ -703,6 +712,21 @@ async def websocket_candidate(
     logger.info(f"[Live Proctoring] After connect_candidate, is_candidate_connected({session_id}) = {is_registered}")
     logger.info(f"[Live Proctoring] All registered candidate connections: {list(connection_manager.candidate_connections.keys())}")
     
+    # ✅ FIX: Notify all admins watching this assessment that a new candidate connected
+    session_data = {
+        "sessionId": session_id,
+        "candidateId": session.get("candidateId"),
+        "candidateName": session.get("candidateName"),
+        "candidateEmail": session.get("candidateEmail"),
+        "status": session.get("status"),
+        "createdAt": session.get("createdAt"),
+    }
+    await connection_manager.send_to_admins(assessment_id, {
+        "type": "candidate_connected",
+        "session": session_data
+    })
+    logger.info(f"[Live Proctoring] 📢 Notified admins of assessment {assessment_id} about new candidate: {session_id}")
+    
     try:
         while True:
             data = await websocket.receive_text()
@@ -834,6 +858,26 @@ async def websocket_admin(
         if cleanup_result.deleted_count > 0:
             logger.info(f"[Live Proctoring] Cleaned up {cleanup_result.deleted_count} old disconnected sessions")
         
+        # LAZY WEBRTC: Send ADMIN_CONNECTED signal to all ready candidates
+        cursor_ready = db.live_proctor_sessions.find({
+            "assessmentId": assessment_id,
+            "status": "candidate_initiated",  # Only candidates waiting for admin
+            "wsConnected": True
+        })
+        admin_connected_count = 0
+        async for doc in cursor_ready:
+            session_id = doc["sessionId"]
+            if connection_manager.is_candidate_connected(session_id):
+                await connection_manager.send_to_candidate(session_id, {
+                    "type": "ADMIN_CONNECTED",
+                    "message": "Admin has opened the dashboard. You can now start WebRTC."
+                })
+                admin_connected_count += 1
+                logger.info(f"[Live Proctoring] 🚀 Sent ADMIN_CONNECTED signal to candidate session {session_id}")
+        
+        if admin_connected_count > 0:
+            logger.info(f"[Live Proctoring] ✅ Notified {admin_connected_count} ready candidates that admin connected")
+        
         # Query for currently active sessions only (connected WebSocket + active status)
         cursor = db.live_proctor_sessions.find({
             "assessmentId": assessment_id,
@@ -909,26 +953,51 @@ async def websocket_admin(
                 if session:
                     offer = session.get("offer")
                     candidate_id = session.get("candidateId", "unknown")
+                    is_candidate_connected = connection_manager.is_candidate_connected(session_id)
                     
-                    # If no offer or offer is old, request candidate to send new offer
-                    if not offer or not connection_manager.is_candidate_connected(session_id):
-                        # Candidate not connected or no offer - send empty session_data
-                        # Admin will retry, and candidate should send new offer when reconnected
-                        await websocket.send_text(json.dumps({
-                            "type": "session_data",
-                            "sessionId": session_id,
-                            "candidateId": candidate_id,
-                            "offer": None,
-                        }))
-                        logger.info(f"[Live Proctoring] Admin requested session {session_id} but candidate not connected or no offer")
-                    else:
+                    # CRITICAL FIX: Request fresh offer when admin reconnects
+                    # This ensures reconnection works - candidate sends fresh offer for admin's new peer connection
+                    if is_candidate_connected:
+                        # Candidate is connected - request fresh offer for reconnection scenarios
+                        # This doesn't break first-time flow because:
+                        # - First time: candidate already sent offer, we return it immediately
+                        # - Reconnection: candidate sends fresh offer, admin can use it
+                        try:
+                            await connection_manager.send_to_candidate(session_id, {
+                                "type": "request_offer"
+                            })
+                            logger.info(f"[Live Proctoring] Requested fresh offer from candidate {candidate_id} (session {session_id}) for admin reconnection")
+                        except Exception as e:
+                            logger.warning(f"[Live Proctoring] Failed to request offer from candidate {session_id}: {e}")
+                    
+                    # Return existing offer if available (for immediate use)
+                    # If no offer exists, candidate will send one after receiving request_offer
+                    if offer:
                         await websocket.send_text(json.dumps({
                             "type": "session_data",
                             "sessionId": session_id,
                             "candidateId": candidate_id,
                             "offer": offer,
                         }))
-                        logger.info(f"[Live Proctoring] Sent session data for {session_id} to admin")
+                        logger.info(f"[Live Proctoring] Sent session data for {session_id} to admin (existing offer)")
+                    elif is_candidate_connected:
+                        # Candidate connected but no offer yet - return None, candidate will send offer
+                        await websocket.send_text(json.dumps({
+                            "type": "session_data",
+                            "sessionId": session_id,
+                            "candidateId": candidate_id,
+                            "offer": None,
+                        }))
+                        logger.info(f"[Live Proctoring] Candidate {candidate_id} connected but no offer yet - requested fresh offer")
+                    else:
+                        # Candidate not connected - return None
+                        await websocket.send_text(json.dumps({
+                            "type": "session_data",
+                            "sessionId": session_id,
+                            "candidateId": candidate_id,
+                            "offer": None,
+                        }))
+                        logger.info(f"[Live Proctoring] Admin requested session {session_id} but candidate not connected")
                 else:
                     await websocket.send_text(json.dumps({
                         "type": "error",

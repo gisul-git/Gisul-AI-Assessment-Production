@@ -79,15 +79,18 @@ export default function IdentityVerification({
         // Start detection loop immediately (even before model loads)
         startDetectionLoop();
 
-        // Initialize face detection model in background (non-blocking)
-        // Model loads in ~20-40ms, no UI updates needed
+        // Initialize face detection model in background
+        // Show loading state while model loads
+        setStatusMessage("Loading...");
         initializeFaceDetection()
           .then((initialized) => {
             if (initialized) {
               setIsModelLoaded(true);
               isModelLoadedRef.current = true;
+              // Status message will be updated by detection loop once model is ready
             } else {
               console.error("[IdentityVerification] Failed to initialize face detection");
+              setStatusMessage("Failed to initialize face detection. Please refresh the page.");
               if (onError) {
                 onError("Failed to initialize face detection");
               }
@@ -95,6 +98,7 @@ export default function IdentityVerification({
           })
           .catch((error) => {
             console.error("[IdentityVerification] Face detection initialization error:", error);
+            setStatusMessage("Failed to initialize face detection. Please refresh the page.");
             if (onError) {
               onError("Failed to initialize face detection");
             }
@@ -292,24 +296,107 @@ export default function IdentityVerification({
   };
 
   return (
-    <div style={{ marginBottom: "1.5rem" }}>
-      {!capturedPhoto ? (
-        <>
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            style={{
-              width: "100%",
-              maxWidth: "400px",
-              borderRadius: "0.5rem",
-              marginBottom: "1rem",
-              backgroundColor: "#000",
-            }}
-          />
+    <>
+      <style>{`
+        @keyframes pulse {
+          0%, 100% {
+            opacity: 0.4;
+            transform: scale(0.8);
+          }
+          50% {
+            opacity: 1;
+            transform: scale(1);
+          }
+        }
+        @keyframes pulse-delay-1 {
+          0%, 100% {
+            opacity: 0.4;
+            transform: scale(0.8);
+          }
+          33% {
+            opacity: 1;
+            transform: scale(1);
+          }
+        }
+        @keyframes pulse-delay-2 {
+          0%, 100% {
+            opacity: 0.4;
+            transform: scale(0.8);
+          }
+          66% {
+            opacity: 1;
+            transform: scale(1);
+          }
+        }
+      `}</style>
+      <div style={{ marginBottom: "1.5rem" }}>
+        {!capturedPhoto ? (
+          <>
+            <div style={{ position: "relative", width: "100%", maxWidth: "400px", marginBottom: "1rem" }}>
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                style={{
+                  width: "100%",
+                  borderRadius: "0.5rem",
+                  backgroundColor: "#000",
+                }}
+              />
+              {!isModelLoaded && isCameraReady && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "50%",
+                    left: "50%",
+                    transform: "translate(-50%, -50%)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    backgroundColor: "rgba(255, 255, 255, 0.9)",
+                    padding: "0.5rem 1rem",
+                    borderRadius: "0.5rem",
+                    fontSize: "0.875rem",
+                    color: "#64748b",
+                    boxShadow: "0 2px 8px rgba(0, 0, 0, 0.1)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "4px", marginRight: "4px" }}>
+                    <div
+                      style={{
+                        width: "8px",
+                        height: "8px",
+                        backgroundColor: "#6953a3",
+                        borderRadius: "50%",
+                        animation: "pulse 1.4s ease-in-out infinite",
+                      }}
+                    />
+                    <div
+                      style={{
+                        width: "8px",
+                        height: "8px",
+                        backgroundColor: "#6953a3",
+                        borderRadius: "50%",
+                        animation: "pulse-delay-1 1.4s ease-in-out infinite",
+                      }}
+                    />
+                    <div
+                      style={{
+                        width: "8px",
+                        height: "8px",
+                        backgroundColor: "#6953a3",
+                        borderRadius: "50%",
+                        animation: "pulse-delay-2 1.4s ease-in-out infinite",
+                      }}
+                    />
+                  </div>
+                  <span>{statusMessage}</span>
+                </div>
+              )}
+            </div>
           <canvas ref={canvasRef} style={{ display: "none" }} />
-          {statusMessage && (
+          {statusMessage && isModelLoaded && (
             <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "1rem" }}>
               {statusMessage}
             </div>
@@ -350,7 +437,8 @@ export default function IdentityVerification({
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }
 
