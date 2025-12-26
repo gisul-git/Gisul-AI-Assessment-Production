@@ -3004,6 +3004,8 @@ async def get_all_questions(
     serialized_topics = convert_object_ids(assessment.get("topics", []))
     # Convert topics_v2 to serializable format (if exists)
     serialized_topics_v2 = convert_object_ids(assessment.get("topics_v2", []))
+    # Convert candidateResponses to serializable format (handles ObjectIds and datetimes)
+    serialized_candidate_responses = convert_object_ids(assessment.get("candidateResponses", {}))
     
     data = {
         "assessment": {
@@ -3030,6 +3032,7 @@ async def get_all_questions(
             "questionTypeTimes": assessment.get("questionTypeTimes"),
             "enablePerSectionTimers": assessment.get("enablePerSectionTimers"),
             "candidates": assessment.get("candidates"),
+            "candidateResponses": serialized_candidate_responses,
             "assessmentUrl": assessment.get("assessmentUrl"),
             "accessMode": assessment.get("accessMode"),
             "invitationTemplate": assessment.get("invitationTemplate"),
@@ -4355,6 +4358,8 @@ async def get_all_questions(
     serialized_topics = convert_object_ids(assessment.get("topics", []))
     # Convert topics_v2 to serializable format (if exists)
     serialized_topics_v2 = convert_object_ids(assessment.get("topics_v2", []))
+    # Convert candidateResponses to serializable format (handles ObjectIds and datetimes)
+    serialized_candidate_responses = convert_object_ids(assessment.get("candidateResponses", {}))
     
     data = {
         "assessment": {
@@ -4381,6 +4386,7 @@ async def get_all_questions(
             "questionTypeTimes": assessment.get("questionTypeTimes"),
             "enablePerSectionTimers": assessment.get("enablePerSectionTimers"),
             "candidates": assessment.get("candidates"),
+            "candidateResponses": serialized_candidate_responses,
             "assessmentUrl": assessment.get("assessmentUrl"),
             "accessMode": assessment.get("accessMode"),
             "invitationTemplate": assessment.get("invitationTemplate"),

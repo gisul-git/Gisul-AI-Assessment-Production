@@ -506,7 +506,37 @@ async def save_reference_face(
     """
     try:
         assessment_id = to_object_id(request.assessmentId)
+        assessment = None
+        db_to_update = None
+        collection_name = None
+        
+        # Try to find assessment in different collections (all in same database)
+        # 1. Regular assessments (AI flow)
         assessment = await db.assessments.find_one({"_id": assessment_id})
+        if assessment:
+            db_to_update = db
+            collection_name = "assessments"
+        
+        # 2. Custom MCQ assessments
+        if not assessment:
+            assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_id})
+            if assessment:
+                db_to_update = db
+                collection_name = "custom_mcq_assessments"
+        
+        # 3. DSA tests (in same database, tests collection)
+        if not assessment:
+            assessment = await db.tests.find_one({"_id": assessment_id, "test_type": {"$in": ["dsa", None]}})
+            if assessment:
+                db_to_update = db
+                collection_name = "tests"
+        
+        # 4. AIML tests (in same database, tests collection with test_type: "aiml")
+        if not assessment:
+            assessment = await db.tests.find_one({"_id": assessment_id, "test_type": "aiml"})
+            if assessment:
+                db_to_update = db
+                collection_name = "tests"
         
         if not assessment:
             raise HTTPException(
@@ -571,7 +601,9 @@ async def save_reference_face(
             }
         })
         
-        await db.assessments.update_one(
+        # Update the correct collection in the correct database
+        collection = getattr(db_to_update, collection_name)
+        await collection.update_one(
             {"_id": assessment_id},
             {"$set": {"candidateResponses": assessment["candidateResponses"]}}
         )
@@ -589,4 +621,81 @@ async def save_reference_face(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to save reference face: {str(e)}"
+        )
+
+
+@router.get("/get-reference-photo")
+async def get_reference_photo(
+    assessmentId: str = Query(..., description="Assessment ID"),
+    candidateEmail: str = Query(..., description="Candidate email"),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Get reference photo for a candidate.
+    Lightweight endpoint that only returns the reference photo, not the entire assessment.
+    Checks all assessment collections (assessments, custom_mcq_assessments, dsa_tests, aiml_tests).
+    """
+    try:
+        assessment_id = to_object_id(assessmentId)
+        assessment = None
+        
+        # Try to find assessment in different collections (all in same database)
+        # 1. Regular assessments (AI flow)
+        assessment = await db.assessments.find_one({"_id": assessment_id})
+        
+        # 2. Custom MCQ assessments
+        if not assessment:
+            assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_id})
+        
+        # 3. DSA tests (in same database, tests collection)
+        if not assessment:
+            assessment = await db.tests.find_one({"_id": assessment_id, "test_type": {"$in": ["dsa", None]}})
+        
+        # 4. AIML tests (in same database, tests collection with test_type: "aiml")
+        if not assessment:
+            assessment = await db.tests.find_one({"_id": assessment_id, "test_type": "aiml"})
+        
+        if not assessment:
+            return success_response("No reference photo found", {"referenceImage": None})
+        
+        # Get candidateResponses
+        candidate_responses = assessment.get("candidateResponses", {})
+        if not candidate_responses:
+            return success_response("No reference photo found", {"referenceImage": None})
+        
+        # Find the candidate key (email might be in different format)
+        candidate_key_found = None
+        email_lower = candidateEmail.lower().strip()
+        
+        for key in candidate_responses.keys():
+            if email_lower in key.lower():
+                candidate_key_found = key
+                break
+        
+        if not candidate_key_found:
+            return success_response("No reference photo found", {"referenceImage": None})
+        
+        # Get reference image
+        candidate_data = candidate_responses.get(candidate_key_found, {})
+        candidate_verification = candidate_data.get("candidateVerification", {})
+        reference_image = candidate_verification.get("referenceImage")
+        
+        if not reference_image or not isinstance(reference_image, str) or len(reference_image) < 50:
+            return success_response("No reference photo found", {"referenceImage": None})
+        
+        # Ensure it has data URI prefix
+        if not reference_image.startswith("data:image"):
+            reference_image = f"data:image/jpeg;base64,{reference_image}"
+        
+        return success_response("Reference photo fetched successfully", {
+            "referenceImage": reference_image
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error getting reference photo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get reference photo: {str(e)}"
         )
