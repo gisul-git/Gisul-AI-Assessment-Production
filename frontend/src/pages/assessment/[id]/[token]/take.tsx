@@ -1145,19 +1145,50 @@ export default function CandidateAssessmentPage() {
   // ============================================================================
 
   const navigateToQuestion = useCallback(async (section: keyof Sections, index: number) => {
+    console.log("[NavigateToQuestion] ========== START ==========");
+    console.log("[NavigateToQuestion] Target Section:", section);
+    console.log("[NavigateToQuestion] Target Index:", index);
+    console.log("[NavigateToQuestion] Current Section:", currentSection);
+    console.log("[NavigateToQuestion] Current Question Index:", currentQuestionIndex);
+    
     // PART 7: Auto-save current answer before switching questions
     const currentQuestion = getCurrentQuestion();
+    console.log("[NavigateToQuestion] Current Question:", currentQuestion ? "Found" : "Not Found");
+    
     if (currentQuestion && currentSection) {
       const questionId = getQuestionId(currentQuestion);
+      console.log("[NavigateToQuestion] Current Question ID:", questionId);
+      
       const currentAnswer = answers.get(questionId) || codeAnswers.get(questionId) || "";
+      console.log("[NavigateToQuestion] Current Answer from answers Map:", answers.get(questionId) || "NOT FOUND");
+      console.log("[NavigateToQuestion] Current Answer from codeAnswers Map:", codeAnswers.get(questionId) || "NOT FOUND");
+      console.log("[NavigateToQuestion] Final Current Answer:", currentAnswer || "EMPTY");
+      console.log("[NavigateToQuestion] Answer Length:", currentAnswer.length);
+      
       if (currentAnswer) {
+        console.log("[NavigateToQuestion] Answer found, attempting to save...");
         // Force immediate save (clear debounce and save)
         if (saveTimeoutRef.current) {
+          console.log("[NavigateToQuestion] Clearing pending debounced save");
           clearTimeout(saveTimeoutRef.current);
+          saveTimeoutRef.current = null;
         }
         try {
           const lastSaved = lastSavedAnswerRef.current.get(questionId);
+          console.log("[NavigateToQuestion] Last Saved Answer:", lastSaved || "NOT SAVED YET");
+          console.log("[NavigateToQuestion] Answer Changed?", lastSaved !== currentAnswer);
+          
           if (lastSaved !== currentAnswer) {
+            console.log("[NavigateToQuestion] Saving answer immediately...");
+            console.log("[NavigateToQuestion] Save Request:", {
+              attemptId,
+              questionId,
+              answerLength: currentAnswer.length,
+              answerPreview: currentAnswer.substring(0, 100),
+              section: currentSection,
+              timeRemaining: timerRemaining,
+            });
+            
             await axios.post("/api/v1/attempts/save-answer", {
               attemptId,
               questionId,
@@ -1165,73 +1196,230 @@ export default function CandidateAssessmentPage() {
               section: currentSection,
               timeRemaining: timerRemaining,
             });
+            
+            console.log("[NavigateToQuestion] ✓ Answer saved successfully");
             lastSavedAnswerRef.current.set(questionId, currentAnswer);
+          } else {
+            console.log("[NavigateToQuestion] Answer unchanged, skipping save");
           }
         } catch (error) {
-          console.error("[Navigation] Failed to save answer before switching:", error);
+          console.error("[NavigateToQuestion] ✗ ERROR saving answer:", error);
+          console.error("[NavigateToQuestion] Error Details:", {
+            message: (error as any)?.message,
+            response: (error as any)?.response?.data,
+            status: (error as any)?.response?.status,
+          });
         }
+      } else {
+        console.log("[NavigateToQuestion] No answer to save (empty answer)");
       }
       
       // Log question change
-      await logAnalyticsEvent("SECTION_SWITCH", {
-        fromQuestionId: questionId,
-        fromSection: currentSection,
-        toSection: section,
-        toIndex: index,
-      });
+      try {
+        await logAnalyticsEvent("SECTION_SWITCH", {
+          fromQuestionId: questionId,
+          fromSection: currentSection,
+          toSection: section,
+          toIndex: index,
+        });
+        console.log("[NavigateToQuestion] Analytics event logged");
+      } catch (error) {
+        console.warn("[NavigateToQuestion] Failed to log analytics:", error);
+      }
+    } else {
+      console.log("[NavigateToQuestion] No current question or section, skipping save");
     }
     
     // Check if section is locked (only for per-section timers)
     if (examSettings?.enablePerSectionTimers && lockedSections.has(section)) {
+      console.warn("[NavigateToQuestion] Target section is locked:", section);
       alert(`This section has been locked because its timer expired. You cannot access questions in this section.`);
       return;
     }
     
+    console.log("[NavigateToQuestion] Updating state to new question...");
     setCurrentSection(section);
     setCurrentQuestionIndex(index);
+    
     const question = sections[section][index];
+    console.log("[NavigateToQuestion] New Question:", question ? "Found" : "Not Found");
+    
     if (question) {
-      logAnalyticsEvent("QUESTION_VIEW", {
-        section,
-        questionIndex: index,
-        questionId: getQuestionId(question),
-      });
-    }
-  }, [sections, logAnalyticsEvent, getQuestionId, getCurrentQuestion, currentSection, answers, codeAnswers, attemptId, timerRemaining, lockedSections, examSettings]);
-
-  const navigateNext = useCallback(() => {
-    if (!currentSection) return;
-
-    const sectionQuestions = sections[currentSection];
-    if (currentQuestionIndex < sectionQuestions.length - 1) {
-      navigateToQuestion(currentSection, currentQuestionIndex + 1);
-      logAnalyticsEvent("NAVIGATION_NEXT", { section: currentSection, index: currentQuestionIndex });
-      } else {
-      // Move to next section
-      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
-      const currentIndex = sectionOrder.indexOf(currentSection);
-      if (currentIndex < sectionOrder.length - 1) {
-        const nextSection = sectionOrder[currentIndex + 1];
-        
-        // Check if next section is locked (for per-section timers)
-        if (examSettings.enablePerSectionTimers && lockedSections.has(nextSection)) {
-          alert(`The ${getSectionName(nextSection)} section is locked because its timer expired. You cannot access questions in this section.`);
-          return;
-        }
-        
-        if (sections[nextSection].length > 0) {
-          navigateToQuestion(nextSection, 0);
-          logAnalyticsEvent("SECTION_SWITCH", { from: currentSection, to: nextSection });
-        }
+      const newQuestionId = getQuestionId(question);
+      console.log("[NavigateToQuestion] New Question ID:", newQuestionId);
+      try {
+        logAnalyticsEvent("QUESTION_VIEW", {
+          section,
+          questionIndex: index,
+          questionId: newQuestionId,
+        });
+        console.log("[NavigateToQuestion] Question view analytics logged");
+      } catch (error) {
+        console.warn("[NavigateToQuestion] Failed to log question view:", error);
       }
     }
-  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections]);
+    
+    console.log("[NavigateToQuestion] ========== COMPLETE ==========");
+  }, [sections, logAnalyticsEvent, getQuestionId, getCurrentQuestion, currentSection, answers, codeAnswers, attemptId, timerRemaining, lockedSections, examSettings]);
 
-  const navigatePrevious = useCallback(() => {
+  // Helper function to save current answer before navigation
+  const saveCurrentAnswer = useCallback(async (): Promise<boolean> => {
+    console.log("[SaveCurrentAnswer] ========== SAVING CURRENT ANSWER ==========");
+    const currentQuestion = getCurrentQuestion();
+    if (!currentQuestion || !currentSection) {
+      console.log("[SaveCurrentAnswer] No current question or section, nothing to save");
+      return false;
+    }
+
+    const questionId = getQuestionId(currentQuestion);
+    const currentAnswer = answers.get(questionId) || codeAnswers.get(questionId) || "";
+    console.log("[SaveCurrentAnswer] Question ID:", questionId);
+    console.log("[SaveCurrentAnswer] Current Answer:", currentAnswer || "EMPTY");
+    
+    if (!currentAnswer) {
+      console.log("[SaveCurrentAnswer] No answer to save (empty)");
+      return false;
+    }
+
+    // Clear any pending debounced save
+    if (saveTimeoutRef.current) {
+      console.log("[SaveCurrentAnswer] Clearing pending debounced save");
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
+    try {
+      const lastSaved = lastSavedAnswerRef.current.get(questionId);
+      console.log("[SaveCurrentAnswer] Last Saved Answer:", lastSaved || "NOT SAVED YET");
+      
+      if (lastSaved !== currentAnswer) {
+        console.log("[SaveCurrentAnswer] Answer changed, saving immediately...");
+        console.log("[SaveCurrentAnswer] Save Request:", {
+          attemptId,
+          questionId,
+          answerLength: currentAnswer.length,
+          answerPreview: currentAnswer.substring(0, 100),
+          section: currentSection,
+          timeRemaining: timerRemaining,
+        });
+
+        await axios.post("/api/v1/attempts/save-answer", {
+          attemptId,
+          questionId,
+          answer: currentAnswer,
+          section: currentSection,
+          timeRemaining: timerRemaining,
+        });
+
+        console.log("[SaveCurrentAnswer] ✓ Answer saved successfully");
+        lastSavedAnswerRef.current.set(questionId, currentAnswer);
+        return true;
+      } else {
+        console.log("[SaveCurrentAnswer] Answer unchanged, already saved");
+        return true;
+      }
+    } catch (error) {
+      console.error("[SaveCurrentAnswer] ✗ ERROR saving answer:", error);
+      console.error("[SaveCurrentAnswer] Error Details:", {
+        message: (error as any)?.message,
+        response: (error as any)?.response?.data,
+        status: (error as any)?.response?.status,
+      });
+      return false;
+    }
+  }, [getCurrentQuestion, getQuestionId, currentSection, answers, codeAnswers, attemptId, timerRemaining]);
+
+  const navigateNext = useCallback(async () => {
+    console.log("=".repeat(80));
+    console.log("[Save & Next] ========== NAVIGATE NEXT CLICKED ==========");
+    console.log("[Save & Next] Timestamp:", new Date().toISOString());
+    console.log("[Save & Next] Current Section:", currentSection);
+    console.log("[Save & Next] Current Question Index:", currentQuestionIndex);
+    
+    if (!currentSection) {
+      console.error("[Save & Next] ERROR: currentSection is null/undefined");
+      return;
+    }
+
+    // STEP 1: Save current answer FIRST (before any navigation)
+    console.log("[Save & Next] Step 1: Saving current answer...");
+    await saveCurrentAnswer();
+    console.log("[Save & Next] Step 1: Answer save completed");
+
+    // STEP 2: Navigate to next question or section
+    const sectionQuestions = sections[currentSection];
+    console.log("[Save & Next] Step 2: Determining navigation target");
+    console.log("[Save & Next] Section Questions Length:", sectionQuestions.length);
+    console.log("[Save & Next] Is Last Question in Section:", currentQuestionIndex >= sectionQuestions.length - 1);
+    
+    if (currentQuestionIndex < sectionQuestions.length - 1) {
+      console.log("[Save & Next] Moving to next question in same section");
+      console.log("[Save & Next] Next Question Index:", currentQuestionIndex + 1);
+      try {
+        await navigateToQuestion(currentSection, currentQuestionIndex + 1);
+        console.log("[Save & Next] Successfully navigated to next question");
+        logAnalyticsEvent("NAVIGATION_NEXT", { section: currentSection, index: currentQuestionIndex });
+      } catch (error) {
+        console.error("[Save & Next] ERROR navigating to next question:", error);
+      }
+      } else {
+      console.log("[Save & Next] Moving to next section");
+      // Move to next section - skip empty sections
+      const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
+      const currentIndex = sectionOrder.indexOf(currentSection);
+      console.log("[Save & Next] Current Section Index:", currentIndex);
+      console.log("[Save & Next] Section Order:", sectionOrder);
+      
+      // Find the next section with questions
+      let nextSectionWithQuestions: keyof Sections | null = null;
+      let nextSectionIndex = currentIndex + 1;
+      
+      while (nextSectionIndex < sectionOrder.length) {
+        const candidateSection = sectionOrder[nextSectionIndex];
+        console.log("[Save & Next] Checking section:", candidateSection, "Questions:", sections[candidateSection]?.length || 0);
+        
+        // Check if section is locked (for per-section timers)
+        if (examSettings.enablePerSectionTimers && lockedSections.has(candidateSection)) {
+          console.warn("[Save & Next] Section is locked:", candidateSection);
+          nextSectionIndex++;
+          continue;
+        }
+        
+        // Check if section has questions
+        if (sections[candidateSection] && sections[candidateSection].length > 0) {
+          nextSectionWithQuestions = candidateSection;
+          console.log("[Save & Next] Found next section with questions:", nextSectionWithQuestions);
+          break;
+        }
+        
+        nextSectionIndex++;
+      }
+      
+      if (nextSectionWithQuestions) {
+        console.log("[Save & Next] Navigating to next section with questions:", nextSectionWithQuestions);
+        try {
+          await navigateToQuestion(nextSectionWithQuestions, 0);
+          console.log("[Save & Next] Successfully navigated to next section");
+          logAnalyticsEvent("SECTION_SWITCH", { from: currentSection, to: nextSectionWithQuestions });
+        } catch (error) {
+          console.error("[Save & Next] ERROR navigating to next section:", error);
+        }
+      } else {
+        console.log("[Save & Next] No more sections with questions found");
+        console.log("[Save & Next] This appears to be the last question in the assessment");
+        console.log("[Save & Next] Answer was saved successfully");
+        // Optionally show a message or trigger submit button visibility
+        // The submit button should already be visible if isLastQuestion is true
+      }
+    }
+    console.log("[Save & Next] ============================================");
+  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections, saveCurrentAnswer]);
+
+  const navigatePrevious = useCallback(async () => {
     if (!currentSection) return;
 
     if (currentQuestionIndex > 0) {
-      navigateToQuestion(currentSection, currentQuestionIndex - 1);
+      await navigateToQuestion(currentSection, currentQuestionIndex - 1);
       logAnalyticsEvent("NAVIGATION_PREVIOUS", { section: currentSection, index: currentQuestionIndex });
       } else {
       // Move to previous section
@@ -1248,7 +1436,7 @@ export default function CandidateAssessmentPage() {
         
         if (sections[prevSection].length > 0) {
           const prevSectionLength = sections[prevSection].length;
-          navigateToQuestion(prevSection, prevSectionLength - 1);
+          await navigateToQuestion(prevSection, prevSectionLength - 1);
           logAnalyticsEvent("SECTION_SWITCH", { from: currentSection, to: prevSection });
         }
       }
@@ -1261,11 +1449,22 @@ export default function CandidateAssessmentPage() {
 
   const submitAssessment = useCallback(async () => {
     // PART 9: Final Submit Button Logic
+    console.log("=".repeat(80));
+    console.log("[Submit] ========== SUBMIT BUTTON CLICKED ==========");
+    console.log("[Submit] Timestamp:", new Date().toISOString());
+    console.log("[Submit] Assessment ID:", id);
+    console.log("[Submit] Token:", token ? "Present" : "Missing");
+    console.log("[Submit] Candidate Email:", candidateEmail);
+    console.log("[Submit] Candidate Name:", candidateName);
+    console.log("[Submit] Current App State:", appState);
+    
     if (!id || !token || !candidateEmail || !candidateName) {
-      console.error("[Submit] Missing required fields:", { id, token, candidateEmail, candidateName });
+      console.error("[Submit] ❌ Missing required fields:", { id, token, candidateEmail, candidateName });
       setError("Missing required information. Please refresh the page and try again.");
       return;
     }
+    
+    console.log("[Submit] ✓ All required fields present, proceeding with submission...");
 
     // Create attemptId if it doesn't exist (generate a temporary one for analytics)
     let currentAttemptId = attemptId;
@@ -1404,6 +1603,7 @@ export default function CandidateAssessmentPage() {
 
       // Step 5: Mark attempt.status = "completed" and submit
       // Collect all answers for final submission
+      console.log("[Submit] Collecting all answers for submission...");
       const allAnswers: Array<{ questionIndex: number; answer: string; timeSpent: number }> = [];
       let globalIndex = 0;
 
@@ -1417,19 +1617,37 @@ export default function CandidateAssessmentPage() {
               answer,
               timeSpent: 0, // TODO: Track time spent per question
             });
+            console.log(`[Submit] Collected answer for questionIndex ${globalIndex} (${section}): length=${answer.length}`);
+          } else {
+            console.log(`[Submit] Skipping empty answer for questionIndex ${globalIndex} (${section})`);
           }
           globalIndex++;
         });
       });
+      
+      console.log(`[Submit] Total answers collected: ${allAnswers.length} out of ${globalIndex} total questions`);
 
       // Step 5: Submit to backend with comprehensive data
-      console.log("[Submit] Submitting assessment with:", {
-        assessmentId: id,
-        totalAnswers: allAnswers.length,
-        attemptId: currentAttemptId,
+      console.log("[Submit] ========== SUBMITTING ASSESSMENT ==========");
+      console.log("[Submit] Assessment ID:", id);
+      console.log("[Submit] Candidate Email:", candidateEmail);
+      console.log("[Submit] Candidate Name:", candidateName);
+      console.log("[Submit] Total Answers:", allAnswers.length);
+      console.log("[Submit] Attempt ID:", currentAttemptId);
+      console.log("[Submit] Answers Detail:", allAnswers.map((a, idx) => ({
+        index: idx,
+        questionIndex: a.questionIndex,
+        answerLength: a.answer?.length || 0,
+        answerPreview: a.answer?.substring(0, 50) || ""
+      })));
+      console.log("[Submit] Submission Metadata:", {
+        totalQuestions: submissionMetadata.totalQuestions,
+        answeredQuestions: submissionMetadata.answeredQuestions,
+        sections: submissionMetadata.sections
       });
       
       try {
+        console.log("[Submit] Calling backend API: /api/assessment/submit-answers");
         const submitResponse = await axios.post("/api/assessment/submit-answers", {
           assessmentId: id,
           token,
@@ -1441,9 +1659,17 @@ export default function CandidateAssessmentPage() {
           timerRemaining,
           submissionMetadata, // Include all metadata
         });
-        console.log("[Submit] Submission successful:", submitResponse.data);
+        console.log("[Submit] ========== SUBMISSION SUCCESSFUL ==========");
+        console.log("[Submit] Response Status:", submitResponse.status);
+        console.log("[Submit] Response Data:", submitResponse.data);
+        console.log("[Submit] Evaluation Status:", submitResponse.data?.data?.evaluationStatus || "unknown");
       } catch (submitError: any) {
-        console.error("[Submit] Backend submission failed:", submitError);
+        console.error("[Submit] ========== SUBMISSION FAILED ==========");
+        console.error("[Submit] Error Type:", submitError.name);
+        console.error("[Submit] Error Message:", submitError.message);
+        console.error("[Submit] Response Status:", submitError.response?.status);
+        console.error("[Submit] Response Data:", submitError.response?.data);
+        console.error("[Submit] Full Error:", submitError);
         // Log the submission error
         try {
           await axios.post("/api/v1/analytics/log-event", {
@@ -3214,12 +3440,24 @@ export default function CandidateAssessmentPage() {
                           checked={isSelected}
                           onChange={(e) => {
                             const newAnswer = e.target.value;
+                            console.log("[MCQ Selection] ========== OPTION SELECTED ==========");
+                            console.log("[MCQ Selection] Question ID:", questionId);
+                            console.log("[MCQ Selection] Selected Option:", newAnswer);
+                            console.log("[MCQ Selection] Option Index:", idx);
+                            console.log("[MCQ Selection] Current Section:", currentSection);
+                            
                             setAnswers((prev) => {
                               const updated = new Map(prev);
                               updated.set(questionId, newAnswer);
+                              console.log("[MCQ Selection] Updated answers Map");
+                              console.log("[MCQ Selection] All answers in Map:", Array.from(updated.entries()));
                               return updated;
                             });
+                            
+                            console.log("[MCQ Selection] Calling saveAnswer...");
                             saveAnswer(questionId, newAnswer, currentSection);
+                            console.log("[MCQ Selection] saveAnswer called (debounced)");
+                            console.log("[MCQ Selection] =====================================");
                           }}
                           style={{ width: "20px", height: "20px", cursor: "pointer" }}
                         />
@@ -3307,7 +3545,36 @@ export default function CandidateAssessmentPage() {
                   /* Save & Next Button - Show for all questions except last */
                   <button
                     type="button"
-                    onClick={navigateNext}
+                    onClick={(e) => {
+                      console.log("[Button Click] Save & Next button clicked");
+                      console.log("[Button Click] Event:", e);
+                      console.log("[Button Click] App State:", appState);
+                      console.log("[Button Click] Current Section:", currentSection);
+                      console.log("[Button Click] Current Question Index:", currentQuestionIndex);
+                      console.log("[Button Click] Is Disabled?", appState === "submitting");
+                      
+                      if (appState === "submitting") {
+                        console.warn("[Button Click] Button is disabled, ignoring click");
+                        return;
+                      }
+                      
+                      // Get current question info for logging
+                      const currentQuestion = getCurrentQuestion();
+                      if (currentQuestion) {
+                        const questionId = getQuestionId(currentQuestion);
+                        const currentAnswer = answers.get(questionId) || codeAnswers.get(questionId) || "";
+                        console.log("[Button Click] Current Question ID:", questionId);
+                        console.log("[Button Click] Current Answer:", currentAnswer || "EMPTY");
+                        console.log("[Button Click] Answer in answers Map:", answers.get(questionId) || "NOT FOUND");
+                        console.log("[Button Click] Answer in codeAnswers Map:", codeAnswers.get(questionId) || "NOT FOUND");
+                        console.log("[Button Click] All answers Map keys:", Array.from(answers.keys()));
+                        console.log("[Button Click] All codeAnswers Map keys:", Array.from(codeAnswers.keys()));
+                      }
+                      
+                      navigateNext().catch((error) => {
+                        console.error("[Button Click] ERROR in navigateNext:", error);
+                      });
+                    }}
                     disabled={appState === "submitting"}
                     style={{ 
                       padding: "0.75rem 1.5rem",

@@ -677,6 +677,35 @@ export default function AnalyticsPage() {
                           Score: {candidate.score || 0} / {candidate.maxScore || 0}
                         </div>
                       )}
+                      {(candidate.submittedAt || candidate.completedAt) && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            router.push(`/assessments/${assessmentId}/candidate/${encodeURIComponent(candidateEmail)}/results?name=${encodeURIComponent(candidateName)}`);
+                          }}
+                          style={{
+                            marginTop: "0.5rem",
+                            padding: "0.5rem 0.75rem",
+                            fontSize: "0.75rem",
+                            fontWeight: 600,
+                            backgroundColor: "#3b82f6",
+                            color: "#ffffff",
+                            border: "none",
+                            borderRadius: "0.375rem",
+                            cursor: "pointer",
+                            width: "100%",
+                            transition: "all 0.2s",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = "#2563eb";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = "#3b82f6";
+                          }}
+                        >
+                          View Results
+                        </button>
+                      )}
                     </button>
                     )
                   })}
@@ -855,6 +884,7 @@ export default function AnalyticsPage() {
                             <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.875rem", fontWeight: 600, color: "#1e293b" }}>Percentage</th>
                             <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.875rem", fontWeight: 600, color: "#1e293b" }}>Status</th>
                             <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.875rem", fontWeight: 600, color: "#1e293b" }}>Attempted</th>
+                            <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.875rem", fontWeight: 600, color: "#1e293b" }}>Results</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -888,6 +918,36 @@ export default function AnalyticsPage() {
                               </td>
                               <td style={{ padding: "0.75rem", fontSize: "0.875rem" }}>
                                 <span style={{ color: "#10b981", fontWeight: 600 }}>{candidate.attempted}</span> / {totalQuestions}
+                              </td>
+                              <td style={{ padding: "0.75rem", fontSize: "0.875rem" }}>
+                                {(candidate.submittedAt || candidate.completedAt) ? (
+                                  <button
+                                    onClick={() => {
+                                      router.push(`/assessments/${assessmentId}/candidate/${encodeURIComponent(candidate.email)}/results?name=${encodeURIComponent(candidate.name)}`);
+                                    }}
+                                    style={{
+                                      padding: "0.5rem 1rem",
+                                      fontSize: "0.875rem",
+                                      fontWeight: 600,
+                                      backgroundColor: "#3b82f6",
+                                      color: "#ffffff",
+                                      border: "none",
+                                      borderRadius: "0.375rem",
+                                      cursor: "pointer",
+                                      transition: "all 0.2s",
+                                    }}
+                                    onMouseEnter={(e) => {
+                                      e.currentTarget.style.backgroundColor = "#2563eb";
+                                    }}
+                                    onMouseLeave={(e) => {
+                                      e.currentTarget.style.backgroundColor = "#3b82f6";
+                                    }}
+                                  >
+                                    View Results
+                                  </button>
+                                ) : (
+                                  <span style={{ color: "#94a3b8", fontSize: "0.875rem" }}>Not Available</span>
+                                )}
                               </td>
                             </tr>
                           ))}
