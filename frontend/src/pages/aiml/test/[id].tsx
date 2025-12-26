@@ -14,6 +14,10 @@ export default function AIMLTestVerifyPage() {
   const [error, setError] = useState("");
   const [testInfo, setTestInfo] = useState<{ title: string; duration: number } | null>(null);
   const [checkingToken, setCheckingToken] = useState(true);
+  const [showStartTimePopup, setShowStartTimePopup] = useState(false);
+  const [showEndTimePopup, setShowEndTimePopup] = useState(false);
+  const [startTime, setStartTime] = useState<string | null>(null);
+  const [endTime, setEndTime] = useState<string | null>(null);
 
   useEffect(() => {
     if (!testId) return;
@@ -65,6 +69,24 @@ export default function AIMLTestVerifyPage() {
       );
       
       const candidateInfo = verifyResponse.data;
+
+      // Check if test has ended
+      if (candidateInfo.test_has_ended && candidateInfo.end_time) {
+        // Test has ended - show popup
+        setEndTime(candidateInfo.end_time);
+        setShowEndTimePopup(true);
+        setVerifying(false);
+        return;
+      }
+
+      // Check if test has started
+      if (!candidateInfo.test_has_started && candidateInfo.start_time) {
+        // Test hasn't started yet - show popup
+        setStartTime(candidateInfo.start_time);
+        setShowStartTimePopup(true);
+        setVerifying(false);
+        return;
+      }
 
       // Store candidate info for shared gate pages
       sessionStorage.setItem("candidateEmail", email.trim());
@@ -222,6 +244,92 @@ export default function AIMLTestVerifyPage() {
           </div>
         </div>
       </div>
+
+      {/* Start Time Popup Modal */}
+      {showStartTimePopup && startTime && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 text-center">
+            <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <h2 className="text-2xl font-bold text-gray-800 mb-2">Test Not Started</h2>
+            <p className="text-gray-600 mb-4">
+              The test has not started yet. Please wait for the scheduled start time.
+            </p>
+            <div className="bg-amber-50 rounded-lg p-4 mb-6">
+              <p className="text-sm text-amber-800 font-semibold mb-1">Test will start at</p>
+              <p className="text-lg text-amber-700 font-bold">
+                {(() => {
+                  // Convert UTC to IST (UTC+5:30) for display
+                  const utcDate = new Date(startTime);
+                  const istDate = new Date(utcDate.getTime() + (5 * 60 + 30) * 60 * 1000);
+                  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                  const month = months[istDate.getMonth()];
+                  const day = istDate.getDate();
+                  const year = istDate.getFullYear();
+                  const hours = istDate.getHours().toString().padStart(2, '0');
+                  const minutes = istDate.getMinutes().toString().padStart(2, '0');
+                  return `${month} ${day}, ${year} ${hours}:${minutes}`;
+                })()}
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                setShowStartTimePopup(false);
+                setStartTime(null);
+              }}
+              className="w-full py-3 px-4 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white font-semibold rounded-xl transition-all"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* End Time Popup Modal */}
+      {showEndTimePopup && endTime && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 text-center">
+            <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <h2 className="text-2xl font-bold text-gray-800 mb-2">Test Has Ended</h2>
+            <p className="text-gray-600 mb-4">
+              The test window has closed. You cannot take this assessment anymore.
+            </p>
+            <div className="bg-red-50 rounded-lg p-4 mb-6">
+              <p className="text-sm text-red-800 font-semibold mb-1">Test ended at</p>
+              <p className="text-lg text-red-700 font-bold">
+                {(() => {
+                  // Convert UTC to IST (UTC+5:30) for display
+                  const utcDate = new Date(endTime);
+                  const istDate = new Date(utcDate.getTime() + (5 * 60 + 30) * 60 * 1000);
+                  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                  const month = months[istDate.getMonth()];
+                  const day = istDate.getDate();
+                  const year = istDate.getFullYear();
+                  const hours = istDate.getHours().toString().padStart(2, '0');
+                  const minutes = istDate.getMinutes().toString().padStart(2, '0');
+                  return `${month} ${day}, ${year} ${hours}:${minutes}`;
+                })()}
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                setShowEndTimePopup(false);
+                setEndTime(null);
+              }}
+              className="w-full py-3 px-4 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white font-semibold rounded-xl transition-all"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

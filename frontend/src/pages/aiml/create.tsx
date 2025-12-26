@@ -28,6 +28,12 @@ export default function CreateAIMLCompetencyPage() {
   type ExamMode = "strict" | "flexible";
   const [examMode, setExamMode] = useState<ExamMode>("strict");
 
+  // Candidate Requirements
+  const [requirePhone, setRequirePhone] = useState(false);
+  const [requireLinkedIn, setRequireLinkedIn] = useState(false);
+  const [requireGithub, setRequireGithub] = useState(false);
+  const [customFields, setCustomFields] = useState<Array<{ id: string; label: string; required: boolean }>>([]);
+
   const [formData, setFormData] = useState({
     title: "",
     description: "",
@@ -71,19 +77,32 @@ export default function CreateAIMLCompetencyPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Exam window validation
-    if (!formData.start_time || !formData.end_time) {
-      alert("Start time and end time are required.");
-      return;
-    }
-    if (new Date(formData.start_time) >= new Date(formData.end_time)) {
-      alert("End time must be after start time.");
-      return;
-    }
-    if (examMode === "flexible") {
-      const durationForSchedule = timerMode === "PER_QUESTION"
-        ? calculateTotalDuration()
-        : formData.duration_minutes;
+    // Exam window validation (matching Custom MCQ)
+    if (examMode === "strict") {
+      if (!formData.start_time) {
+        alert("Start time is required for strict window mode.");
+        return;
+      }
+      const durationForSchedule = timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes;
+      if (!durationForSchedule || durationForSchedule < 1) {
+        alert("Duration is required for strict window mode.");
+        return;
+      }
+      // endTime is calculated from startTime + duration, not required from user
+    } else if (examMode === "flexible") {
+      if (!formData.start_time) {
+        alert("Schedule start time is required for flexible window mode.");
+        return;
+      }
+      if (!formData.end_time) {
+        alert("Schedule end time is required for flexible window mode.");
+        return;
+      }
+      if (new Date(formData.start_time) >= new Date(formData.end_time)) {
+        alert("End time must be after start time.");
+        return;
+      }
+      const durationForSchedule = timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes;
       if (!durationForSchedule || durationForSchedule < 1) {
         alert("Duration is required for flexible exam mode.");
         return;
@@ -103,15 +122,16 @@ export default function CreateAIMLCompetencyPage() {
 
     try {
       // Create the test
-      const durationForSchedule =
-        examMode === "flexible"
-          ? (timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes)
-          : null;
+      // For strict mode: duration is required (used to calculate endTime on backend)
+      // For flexible mode: duration is required for the timer
+      const durationForSchedule = timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes;
 
+      // Build payload - exclude end_time for strict mode
+      const { end_time, ...formDataWithoutEndTime } = formData;
+      
       const payload: any = {
-        ...formData,
+        ...formDataWithoutEndTime,
         start_time: new Date(formData.start_time).toISOString(),
-        end_time: new Date(formData.end_time).toISOString(),
         proctoringSettings: { 
           aiProctoringEnabled,
           liveProctoringEnabled
@@ -120,15 +140,31 @@ export default function CreateAIMLCompetencyPage() {
         examMode,
         schedule: {
           startTime: new Date(formData.start_time).toISOString(),
-          endTime: new Date(formData.end_time).toISOString(),
+          // For strict mode: don't send endTime, backend will calculate from startTime + duration
+          // For flexible mode: send endTime
+          ...(examMode === "flexible" && { endTime: new Date(formData.end_time).toISOString() }),
           duration: durationForSchedule,
+          // Candidate Requirements
+          candidateRequirements: {
+            requirePhone,
+            requireLinkedIn,
+            requireGithub,
+            customFields: customFields.filter(f => f.label.trim()).map(f => ({ label: f.label.trim(), required: f.required })),
+          },
         },
         startTime: new Date(formData.start_time).toISOString(),
-        endTime: new Date(formData.end_time).toISOString(),
+        // For strict mode: don't send endTime, backend will calculate it
+        ...(examMode === "flexible" && { endTime: new Date(formData.end_time).toISOString() }),
         duration: durationForSchedule,
         // Timer payload (mirrors DSA)
         timer_mode: timerMode,
       };
+
+      // For strict mode: don't send end_time (backend calculates it)
+      // For flexible mode: include end_time
+      if (examMode === "flexible") {
+        payload.end_time = new Date(formData.end_time).toISOString();
+      }
 
       if (timerMode === "PER_QUESTION") {
         payload.question_timings = formData.question_ids.map(qid => ({
@@ -326,34 +362,43 @@ export default function CreateAIMLCompetencyPage() {
                   <strong style={{ color: "#1E5A3B" }}>Flexible Window</strong>
                 </label>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+              <div style={{ display: "grid", gridTemplateColumns: examMode === "strict" ? "1fr" : "1fr 1fr", gap: "1rem" }}>
                 <div>
                   <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>Start Time *</label>
                   <input type="datetime-local" required value={formData.start_time} onChange={(e) => setFormData({ ...formData, start_time: e.target.value })} style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.375rem" }} />
+                  {examMode === "strict" && (
+                    <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                      Test will automatically end after the configured test duration. Candidates can enter 15 minutes before start time for pre-checks.
+                    </p>
+                  )}
                 </div>
-                <div>
-                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>End Time *</label>
-                  <input type="datetime-local" required value={formData.end_time} onChange={(e) => setFormData({ ...formData, end_time: e.target.value })} style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.375rem" }} />
-                </div>
+                {examMode === "flexible" && (
+                  <div>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>End Time *</label>
+                    <input type="datetime-local" required value={formData.end_time} onChange={(e) => setFormData({ ...formData, end_time: e.target.value })} style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.375rem" }} />
+                  </div>
+                )}
               </div>
-              {examMode === "flexible" && (
-                <div style={{ marginTop: "1rem" }}>
-                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>Duration (minutes) *</label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes}
-                    disabled={timerMode === "PER_QUESTION"}
-                    onChange={(e) => {
-                      const numValue = parseInt(e.target.value, 10);
-                      if (!isNaN(numValue) && numValue >= 1) {
-                        setFormData({ ...formData, duration_minutes: numValue });
-                      }
-                    }}
-                    style={{ width: "200px", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.375rem", backgroundColor: timerMode === "PER_QUESTION" ? "#F3F4F6" : "#ffffff" }}
-                  />
-                </div>
-              )}
+              {/* Duration field - required for both modes */}
+              <div style={{ marginTop: "1rem" }}>
+                <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+                  Duration (minutes) * {examMode === "strict" && <span style={{ fontSize: "0.875rem", fontWeight: 400, color: "#64748b" }}>(Used to calculate end time)</span>}
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  required
+                  value={timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes}
+                  disabled={timerMode === "PER_QUESTION"}
+                  onChange={(e) => {
+                    const numValue = parseInt(e.target.value, 10);
+                    if (!isNaN(numValue) && numValue >= 1) {
+                      setFormData({ ...formData, duration_minutes: numValue });
+                    }
+                  }}
+                  style={{ width: "200px", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.375rem", backgroundColor: timerMode === "PER_QUESTION" ? "#F3F4F6" : "#ffffff" }}
+                />
+              </div>
             </div>
 
             {/* Timer Configuration (PER_QUESTION support) */}
@@ -403,6 +448,124 @@ export default function CreateAIMLCompetencyPage() {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* Candidate Requirements */}
+            <div style={{ marginBottom: "1.5rem", padding: "1.25rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
+              <h3 style={{ marginBottom: "0.75rem", color: "#1a1625" }}>Candidate Requirements</h3>
+              <p style={{ marginBottom: "1rem", fontSize: "0.875rem", color: "#2D7A52" }}>
+                Select which information candidates must provide before taking the assessment.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requirePhone}
+                    onChange={(e) => setRequirePhone(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Phone Number</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requireLinkedIn}
+                    onChange={(e) => setRequireLinkedIn(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>LinkedIn URL</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requireGithub}
+                    onChange={(e) => setRequireGithub(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>GitHub URL</span>
+                </label>
+              </div>
+              
+              {/* Custom Text Fields */}
+              <div style={{ marginTop: "1.5rem", paddingTop: "1rem", borderTop: "1px solid #A8E8BC" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+                  <label style={{ fontWeight: 600, color: "#1E5A3B" }}>Custom Text Fields</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newId = `custom_${Date.now()}`;
+                      setCustomFields([...customFields, { id: newId, label: "", required: false }]);
+                    }}
+                    style={{
+                      padding: "0.5rem 1rem",
+                      backgroundColor: "#2D7A52",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "0.375rem",
+                      cursor: "pointer",
+                      fontSize: "0.875rem",
+                      fontWeight: 500,
+                    }}
+                  >
+                    + Add Custom Field
+                  </button>
+                </div>
+                {customFields.map((field, index) => (
+                  <div key={field.id} style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem", alignItems: "center" }}>
+                    <input
+                      type="text"
+                      placeholder="Field label (e.g., Portfolio URL, Experience)"
+                      value={field.label}
+                      onChange={(e) => {
+                        const updated = [...customFields];
+                        updated[index].label = e.target.value;
+                        setCustomFields(updated);
+                      }}
+                      style={{
+                        flex: 1,
+                        padding: "0.5rem 0.75rem",
+                        border: "1px solid #A8E8BC",
+                        borderRadius: "0.375rem",
+                        fontSize: "0.875rem",
+                      }}
+                    />
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.875rem" }}>
+                      <input
+                        type="checkbox"
+                        checked={field.required}
+                        onChange={(e) => {
+                          const updated = [...customFields];
+                          updated[index].required = e.target.checked;
+                          setCustomFields(updated);
+                        }}
+                      />
+                      <span>Required</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomFields(customFields.filter((_, i) => i !== index));
+                      }}
+                      style={{
+                        padding: "0.5rem",
+                        backgroundColor: "#ef4444",
+                        color: "white",
+                        border: "none",
+                        borderRadius: "0.375rem",
+                        cursor: "pointer",
+                        fontSize: "0.875rem",
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                {customFields.length === 0 && (
+                  <p style={{ fontSize: "0.875rem", color: "#64748b", fontStyle: "italic" }}>
+                    No custom fields added. Click "Add Custom Field" to add one.
+                  </p>
+                )}
+              </div>
             </div>
 
             <div style={{ marginBottom: "1.5rem" }}>
