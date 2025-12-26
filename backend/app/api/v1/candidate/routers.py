@@ -476,18 +476,30 @@ async def submit_answers(
     """
     Submit final answers for an assessment.
     """
+    logger.info("=" * 80)
+    logger.info("SUBMIT_ANSWERS: Starting submission process")
+    logger.info(f"Assessment ID: {request.assessmentId}")
+    logger.info(f"Candidate Email: {request.email}")
+    logger.info(f"Candidate Name: {request.name}")
+    logger.info(f"Total Answers: {len(request.answers)}")
+    logger.info(f"Attempt ID: {getattr(request, 'attemptId', 'N/A')}")
+    
     try:
         assessment_id = to_object_id(request.assessmentId)
         assessment = await db.assessments.find_one({"_id": assessment_id})
         
         if not assessment:
+            logger.error(f"Assessment not found: {request.assessmentId}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Assessment not found"
             )
         
+        logger.info(f"Assessment found: {assessment.get('title', 'N/A')}")
+        
         # Store candidate responses
         candidate_key = f"{request.email.lower()}_{request.name.strip().lower()}"
+        logger.info(f"Candidate Key: '{candidate_key}'")
         
         if "candidateResponses" not in assessment:
             assessment["candidateResponses"] = {}
@@ -534,15 +546,389 @@ async def submit_answers(
             }
         })
         
+        # Save initial submission
         await db.assessments.update_one(
             {"_id": assessment_id},
             {"$set": {"candidateResponses": assessment["candidateResponses"]}}
         )
         
-        return success_response({
-            "message": "Answers submitted successfully",
-            "submittedAt": datetime.now(timezone.utc).isoformat()
-        })
+        # Trigger AI evaluation in background (non-blocking)
+        logger.info("=" * 80)
+        logger.info("AI EVALUATION: Starting evaluation process")
+        evaluations = {}  # Initialize outside try block for return statement
+        evaluation_errors = []  # Initialize outside try block
+        section_summaries = []  # Initialize outside try block
+        
+        try:
+            logger.info("Importing evaluation functions...")
+            # Import evaluation functions
+            from ..assessments.services.unified_ai_evaluation import (
+                evaluate_question_by_type,
+                aggregate_section_evaluation,
+                generate_overall_assessment_summary
+            )
+            logger.info("Evaluation functions imported successfully")
+            
+            # Get all questions from assessment and build ordered list
+            questions_map = {}
+            questions_ordered = []  # Flat ordered list for index mapping
+            topics_v2 = assessment.get("topics_v2", [])
+            
+            def extract_question_id(q: Dict[str, Any], topic_id: str, row_id: str, q_index: int) -> str:
+                """Extract or generate question ID from question object."""
+                # Try _id first (could be ObjectId or string)
+                q_id = q.get("_id")
+                if q_id:
+                    # Handle ObjectId from bson
+                    if hasattr(q_id, '__str__'):
+                        q_id = str(q_id)
+                    else:
+                        q_id = str(q_id)
+                    # Skip if it's "None" string
+                    if q_id and q_id.lower() != "none":
+                        return q_id
+                
+                # Try id field
+                q_id = q.get("id")
+                if q_id:
+                    q_id = str(q_id)
+                    if q_id and q_id.lower() != "none":
+                        return q_id
+                
+                # Generate stable ID based on position
+                # Format: topicId-rowId-questionIndex
+                return f"{topic_id}-{row_id}-{q_index}"
+            
+            question_index_global = 0
+            for topic in topics_v2:
+                topic_id = str(topic.get("id", ""))
+                question_rows = topic.get("questionRows", [])
+                for row in question_rows:
+                    row_id = str(row.get("rowId", ""))
+                    row_questions = row.get("questions", [])
+                    for q_idx, q in enumerate(row_questions):
+                        q_id = extract_question_id(q, topic_id, row_id, q_idx)
+                        question_obj = {
+                            **q,
+                            "topicId": topic_id,
+                            "topicLabel": topic.get("label"),
+                            "rowId": row_id,
+                            "questionType": row.get("questionType"),
+                            "difficulty": row.get("difficulty"),
+                        }
+                        questions_map[q_id] = question_obj
+                        questions_ordered.append((q_id, question_obj, question_index_global))
+                        question_index_global += 1
+            
+            # Fallback to old topics structure
+            if not questions_map:
+                old_topics = assessment.get("topics", [])
+                for topic_idx, topic in enumerate(old_topics):
+                    topic_questions = topic.get("questions", [])
+                    for q_idx, q in enumerate(topic_questions):
+                        q_id = extract_question_id(q, str(topic_idx), "row0", q_idx)
+                        questions_map[q_id] = q
+                        questions_ordered.append((q_id, q, question_index_global))
+                        question_index_global += 1
+            
+            logger.info("=" * 80)
+            logger.info(f"QUESTIONS MAP: Built questions map")
+            logger.info(f"  Total questions in map: {len(questions_map)}")
+            logger.info(f"  Total questions ordered: {len(questions_ordered)}")
+            if len(questions_map) == 0:
+                logger.error("=" * 80)
+                logger.error("ERROR: No questions found in assessment! Cannot perform evaluation.")
+                logger.error(f"  Topics_v2 structure: {topics_v2}")
+                raise ValueError("No questions found in assessment structure")
+            
+            # Log sample question IDs for debugging
+            sample_qids = [qid for qid, _, _ in questions_ordered[:5]]
+            logger.info(f"  Sample question IDs (first 5): {sample_qids}")
+            logger.info(f"  Full question order (first 10):")
+            for idx, (qid, q_obj, global_idx) in enumerate(questions_ordered[:10]):
+                logger.info(f"    [{global_idx}] ID={qid}, Type={q_obj.get('questionType', 'N/A')}, Section={q_obj.get('topicLabel', 'N/A')}")
+            
+            # Also try to extract question IDs from answersSnapshot if available
+            candidate_response_data = assessment["candidateResponses"].get(candidate_key, {})
+            answers_snapshot = candidate_response_data.get("answers", {}).get("metadata", {}).get("answersSnapshot", {})
+            
+            logger.info("=" * 80)
+            logger.info(f"PROCESSING ANSWERS: Starting to process {len(request.answers)} submitted answers")
+            logger.info(f"  Answer structure sample (first answer):")
+            if request.answers:
+                first_answer = request.answers[0]
+                logger.info(f"    Keys: {list(first_answer.keys())}")
+                logger.info(f"    questionIndex: {first_answer.get('questionIndex')}")
+                logger.info(f"    questionId: {first_answer.get('questionId', 'NOT PROVIDED')}")
+                logger.info(f"    answer length: {len(str(first_answer.get('answer', '')))}")
+            
+            # Evaluate each submitted answer (evaluations and evaluation_errors already initialized)
+            
+            for answer_idx, answer_data in enumerate(request.answers):
+                logger.info("-" * 80)
+                logger.info(f"PROCESSING ANSWER {answer_idx + 1}/{len(request.answers)}")
+                logger.info(f"  Answer data keys: {list(answer_data.keys())}")
+                logger.info(f"  questionIndex: {answer_data.get('questionIndex')}")
+                logger.info(f"  questionId: {answer_data.get('questionId', 'NOT PROVIDED')}")
+                # Try to get questionId from answer_data first
+                question_id = str(answer_data.get("questionId", "")) if answer_data.get("questionId") else ""
+                
+                # If not found, try to map from questionIndex
+                if not question_id or question_id.lower() == "none":
+                    question_index = answer_data.get("questionIndex")
+                    if question_index is not None and isinstance(question_index, int):
+                        # Find question by matching global index
+                        for q_id, q_obj, global_idx in questions_ordered:
+                            if global_idx == question_index:
+                                question_id = q_id
+                                logger.info(f"Mapped questionIndex {question_index} to questionId {question_id}")
+                                break
+                    
+                    # If still not found, try to find from answersSnapshot keys by matching answer text
+                    if not question_id or question_id.lower() == "none":
+                        answer_text = answer_data.get("answer", "") or answer_data.get("textAnswer", "")
+                        if answer_text and answers_snapshot:
+                            # Find the key that matches this answer
+                            for snapshot_key, snapshot_answer in answers_snapshot.items():
+                                if snapshot_answer and answer_text:
+                                    # Compare answer content
+                                    if isinstance(snapshot_answer, str) and isinstance(answer_text, str):
+                                        if snapshot_answer.strip() == answer_text.strip():
+                                            # Try to extract question ID from the snapshot key
+                                            # The key format appears to be: topicId-rowId-questionIndex-counter
+                                            parts = snapshot_key.split("-")
+                                            if len(parts) >= 3:
+                                                topic_id_part = parts[0]
+                                                row_id_part = parts[1]
+                                                q_idx_part = parts[2]
+                                                # Find question matching this topic, row, and index
+                                                for q_id, q_obj, global_idx in questions_ordered:
+                                                    if (str(q_obj.get("topicId", "")) == topic_id_part and 
+                                                        str(q_obj.get("rowId", "")) == row_id_part):
+                                                        question_id = q_id
+                                                        logger.info(f"Matched question from snapshot key {snapshot_key}: {question_id}")
+                                                        break
+                                                if question_id:
+                                                    break
+                                    elif isinstance(snapshot_answer, dict) and isinstance(answer_text, dict):
+                                        # For complex answers, try to match by structure
+                                        if snapshot_answer == answer_text:
+                                            # Extract from key
+                                            parts = snapshot_key.split("-")
+                                            if len(parts) >= 3:
+                                                topic_id_part = parts[0]
+                                                row_id_part = parts[1]
+                                                for q_id, q_obj, global_idx in questions_ordered:
+                                                    if (str(q_obj.get("topicId", "")) == topic_id_part and 
+                                                        str(q_obj.get("rowId", "")) == row_id_part):
+                                                        question_id = q_id
+                                                        logger.info(f"Matched question from snapshot key (dict): {question_id}")
+                                                        break
+                                                if question_id:
+                                                    break
+                
+                if not question_id or question_id.lower() == "none" or question_id not in questions_map:
+                    logger.error("=" * 80)
+                    logger.error(f"QUESTION NOT FOUND - Answer {answer_idx + 1}")
+                    logger.error(f"  questionId: {question_id}")
+                    logger.error(f"  questionIndex: {answer_data.get('questionIndex')}")
+                    logger.error(f"  totalQuestions in map: {len(questions_map)}")
+                    logger.error(f"  totalQuestions ordered: {len(questions_ordered)}")
+                    logger.error(f"  answerKeys: {list(answer_data.keys())}")
+                    logger.error(f"  answerLength: {len(str(answer_data.get('answer', '')))}")
+                    logger.error(f"  Available question IDs (first 10): {[qid for qid, _, _ in questions_ordered[:10]]}")
+                    logger.error(f"  Question ID in map? {question_id in questions_map if question_id else 'N/A'}")
+                    evaluation_errors.append({
+                        "answer_index": answer_idx,
+                        "question_id": question_id,
+                        "question_index": answer_data.get('questionIndex'),
+                        "error": "Question not found in questions_map"
+                    })
+                    continue
+                
+                question = questions_map[question_id]
+                question_type = question.get("questionType") or question.get("question_type", "").upper()
+                max_marks = float(question.get("marks", question.get("maxMarks", 1)))
+                section = question.get("topicLabel") or question.get("section", "")
+                
+                logger.info(f"  ✓ Question found in map")
+                logger.info(f"  Question ID: {question_id}")
+                logger.info(f"  Question Type: {question_type}")
+                logger.info(f"  Section: {section}")
+                logger.info(f"  Max Marks: {max_marks}")
+                logger.info(f"  Starting evaluation...")
+                
+                try:
+                    # Prepare evaluation parameters based on question type
+                    eval_kwargs = {}
+                    
+                    if question_type == "MCQ":
+                        # For MCQ, check correctness first
+                        selected_answers = answer_data.get("selectedAnswers", [])
+                        correct_answers = question.get("correctAn", "").split(",") if question.get("correctAn") else []
+                        correct_answers = [a.strip() for a in correct_answers]
+                        
+                        # Check if correct (handle single/multiple choice)
+                        answer_type = question.get("answerType", "single")
+                        if answer_type == "single":
+                            is_correct = len(selected_answers) == 1 and selected_answers[0] in correct_answers
+                        elif answer_type == "multiple_all":
+                            is_correct = set(selected_answers) == set(correct_answers)
+                        else:  # multiple_any
+                            is_correct = any(ans in correct_answers for ans in selected_answers)
+                        
+                        score = max_marks if is_correct else 0.0
+                        eval_kwargs["is_correct"] = is_correct
+                        eval_kwargs["score"] = score
+                    
+                    elif question_type == "CODING":
+                        # For coding, get test results if available
+                        test_results = answer_data.get("testResults")
+                        if test_results:
+                            eval_kwargs["test_results"] = test_results
+                            eval_kwargs["passed_count"] = sum(1 for t in test_results if t.get("passed", False))
+                            eval_kwargs["total_count"] = len(test_results)
+                    
+                    elif question_type == "SQL":
+                        # For SQL, get test result if available
+                        test_result = answer_data.get("testResult")
+                        if test_result:
+                            eval_kwargs["test_result"] = test_result
+                    
+                    elif question_type == "AIML":
+                        # For AIML, get code outputs if available
+                        code_outputs = answer_data.get("outputs") or answer_data.get("codeOutputs")
+                        if code_outputs:
+                            eval_kwargs["code_outputs"] = code_outputs
+                    
+                    # Prepare candidate answer format
+                    candidate_answer = {
+                        "textAnswer": answer_data.get("textAnswer") or answer_data.get("answer", ""),
+                        "selectedAnswers": answer_data.get("selectedAnswers", []),
+                        "source_code": answer_data.get("source_code") or answer_data.get("code", ""),
+                        "sql_query": answer_data.get("sql_query") or answer_data.get("query", ""),
+                        "code": answer_data.get("source_code") or answer_data.get("code", ""),
+                        "answer": answer_data.get("textAnswer") or answer_data.get("answer", ""),
+                    }
+                    
+                    # Evaluate the answer
+                    evaluation = await evaluate_question_by_type(
+                        question_id=question_id,
+                        question_type=question_type,
+                        question_data=question,
+                        candidate_answer=candidate_answer,
+                        max_marks=max_marks,
+                        section=section,
+                        **eval_kwargs
+                    )
+                    
+                    evaluations[question_id] = evaluation
+                    logger.info(f"  ✓ Evaluation completed successfully")
+                    logger.info(f"  Score: {evaluation.get('score', 0)}/{max_marks}")
+                    logger.info(f"  Percentage: {evaluation.get('percentage', 0)}%")
+                    
+                except Exception as eval_error:
+                    logger.error("=" * 80)
+                    logger.error(f"ERROR evaluating question {question_id}:")
+                    logger.error(f"  Question Type: {question_type}")
+                    logger.error(f"  Error Type: {type(eval_error).__name__}")
+                    logger.error(f"  Error Message: {str(eval_error)}")
+                    logger.exception("Full traceback:")
+                    evaluation_errors.append({
+                        "question_id": question_id,
+                        "error": str(eval_error)
+                    })
+                    # Continue with other evaluations
+            
+            # Store evaluations
+            logger.info("=" * 80)
+            logger.info(f"STORING EVALUATIONS: Storing {len(evaluations)} evaluations")
+            logger.info(f"  Evaluation errors: {len(evaluation_errors)}")
+            logger.info(f"  Evaluations keys: {list(evaluations.keys())}")
+            
+            if "evaluations" not in assessment["candidateResponses"][candidate_key]:
+                assessment["candidateResponses"][candidate_key]["evaluations"] = {}
+            assessment["candidateResponses"][candidate_key]["evaluations"].update(evaluations)
+            
+            if evaluation_errors:
+                logger.warning(f"  Storing {len(evaluation_errors)} evaluation errors")
+                if "evaluationErrors" not in assessment["candidateResponses"][candidate_key]:
+                    assessment["candidateResponses"][candidate_key]["evaluationErrors"] = []
+                assessment["candidateResponses"][candidate_key]["evaluationErrors"].extend(evaluation_errors)
+            
+            # Generate section summaries
+            section_evaluations = {}
+            for question_id, evaluation in evaluations.items():
+                section_name = evaluation.get("section", "General")
+                if section_name not in section_evaluations:
+                    section_evaluations[section_name] = []
+                section_evaluations[section_name].append(evaluation)
+            
+            # Build section summaries (section_summaries already initialized outside)
+            section_summaries.clear()  # Clear and rebuild
+            for section_name, section_evals in section_evaluations.items():
+                try:
+                    section_summary = await aggregate_section_evaluation(section_name, section_evals)
+                    section_summaries.append(section_summary)
+                except Exception as e:
+                    logger.exception(f"Error aggregating section {section_name}: {e}")
+            
+            # Generate overall summary
+            try:
+                overall_summary = await generate_overall_assessment_summary(
+                    section_summaries=section_summaries,
+                    question_evaluations=list(evaluations.values()),
+                    job_role=assessment.get("jobRole")
+                )
+                assessment["candidateResponses"][candidate_key]["overallSummary"] = overall_summary
+            except Exception as e:
+                logger.exception(f"Error generating overall summary: {e}")
+            
+            # Store section summaries
+            assessment["candidateResponses"][candidate_key]["sectionSummaries"] = section_summaries
+            
+            # Update database with evaluations
+            await db.assessments.update_one(
+                {"_id": assessment_id},
+                {"$set": {"candidateResponses": assessment["candidateResponses"]}}
+            )
+            
+            logger.info("=" * 80)
+            logger.info(f"AI EVALUATION COMPLETED")
+            logger.info(f"  Candidate: {candidate_key}")
+            logger.info(f"  Total Evaluations: {len(evaluations)}")
+            logger.info(f"  Section Summaries: {len(section_summaries)}")
+            logger.info(f"  Evaluation Errors: {len(evaluation_errors)}")
+            logger.info("=" * 80)
+            
+        except Exception as eval_error:
+            # Log error but don't fail submission
+            logger.error("=" * 80)
+            logger.error("CRITICAL ERROR during AI evaluation (non-blocking):")
+            logger.error(f"  Error Type: {type(eval_error).__name__}")
+            logger.error(f"  Error Message: {str(eval_error)}")
+            logger.exception("Full traceback:")
+            logger.error("=" * 80)
+            # Store error flag
+            if "evaluationStatus" not in assessment["candidateResponses"][candidate_key]:
+                assessment["candidateResponses"][candidate_key]["evaluationStatus"] = "error"
+                assessment["candidateResponses"][candidate_key]["evaluationError"] = str(eval_error)
+        
+        logger.info("=" * 80)
+        logger.info("SUBMIT_ANSWERS: Submission completed successfully")
+        logger.info(f"  Evaluation Status: {'completed' if evaluations else 'pending'}")
+        logger.info(f"  Total Evaluations: {len(evaluations)}")
+        logger.info("=" * 80)
+        
+        return success_response(
+            "Answers submitted successfully",
+            {
+                "submittedAt": datetime.now(timezone.utc).isoformat(),
+                "evaluationStatus": "completed" if evaluations else "pending",
+                "evaluationsCount": len(evaluations),
+                "evaluationErrorsCount": len(evaluation_errors)
+            }
+        )
         
     except HTTPException:
         raise

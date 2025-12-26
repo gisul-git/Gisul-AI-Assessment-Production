@@ -2970,6 +2970,274 @@ async def get_candidate_results(
         ) from exc
 
 
+
+
+@router.get("/{assessment_id}/candidate/{candidate_email}/detailed-results")
+async def get_candidate_detailed_results(
+    assessment_id: str,
+    candidate_email: str,
+    candidate_name: str = Query(..., description="Candidate name"),
+    current_user: Dict[str, Any] = Depends(require_editor),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Get detailed evaluation results for a specific candidate."""
+    try:
+        assessment = await _get_assessment(db, assessment_id)
+        _check_assessment_access(assessment, current_user)
+        
+        # Find candidate response
+        candidate_key = f"{candidate_email.strip().lower()}_{candidate_name.strip().lower()}"
+        candidate_responses = assessment.get("candidateResponses", {})
+        candidate_response = candidate_responses.get(candidate_key)
+        
+        if not candidate_response:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Candidate results not found"
+            )
+        
+        # Extract evaluation data
+        evaluations = candidate_response.get("evaluations", {})
+        section_summaries = candidate_response.get("sectionSummaries", [])
+        overall_summary = candidate_response.get("overallSummary", {})
+        
+        # Calculate overall scores from evaluations if not in summary
+        if not overall_summary and evaluations:
+            total_score = sum(eval.get("score", 0) for eval in evaluations.values())
+            total_max = sum(eval.get("max_marks", 0) for eval in evaluations.values())
+            overall_percentage = (total_score / total_max * 100) if total_max > 0 else 0.0
+            
+            overall_summary = {
+                "overall_score": round(total_score, 2),
+                "overall_max_marks": round(total_max, 2),
+                "overall_percentage": round(overall_percentage, 2),
+                "grade": "A+" if overall_percentage >= 90 else "A" if overall_percentage >= 85 else "B+" if overall_percentage >= 80 else "B" if overall_percentage >= 75 else "C+" if overall_percentage >= 70 else "C" if overall_percentage >= 65 else "D" if overall_percentage >= 60 else "F"
+            }
+        
+        # Extract key strengths and areas of improvement from overall summary
+        key_strengths = overall_summary.get("overall_strengths", [])
+        areas_of_improvement = overall_summary.get("overall_weaknesses", [])
+        
+        # If not in summary, extract from evaluations
+        if not key_strengths or not areas_of_improvement:
+            all_strengths = []
+            all_weaknesses = []
+            
+            for eval_data in evaluations.values():
+                feedback = eval_data.get("feedback", {})
+                if isinstance(feedback, dict):
+                    all_strengths.extend(feedback.get("strengths", []))
+                    all_weaknesses.extend(feedback.get("weaknesses", []))
+                
+                # Also get from areas_of_improvement
+                for area in eval_data.get("areas_of_improvement", []):
+                    skill = area.get("skill", "")
+                    gap = area.get("gap_analysis", "")
+                    if skill and gap:
+                        all_weaknesses.append(f"{skill}: {gap}")
+            
+            if not key_strengths:
+                key_strengths = list(set(all_strengths))[:10]
+            if not areas_of_improvement:
+                areas_of_improvement = list(set(all_weaknesses))[:10]
+        
+        # Get all questions from assessment to show attempted/not attempted
+        all_questions = []
+        questions_map = {}  # question_id -> question
+        question_index_map = {}  # question_index -> question_id
+        
+        def extract_question_id(q: Dict[str, Any], topic_id: str, row_id: str, q_idx: int) -> str:
+            """Extract or generate question ID from question object."""
+            q_id = q.get("_id")
+            if q_id:
+                if hasattr(q_id, '__str__'):
+                    q_id = str(q_id)
+                else:
+                    q_id = str(q_id)
+                if q_id and q_id.lower() != "none":
+                    return q_id
+            
+            q_id = q.get("id")
+            if q_id:
+                q_id = str(q_id)
+                if q_id and q_id.lower() != "none":
+                    return q_id
+            
+            return f"{topic_id}-{row_id}-{q_idx}"
+        
+        global_question_index = 0
+        topics_v2 = assessment.get("topics_v2", [])
+        for topic in topics_v2:
+            topic_id = str(topic.get("id", ""))
+            question_rows = topic.get("questionRows", [])
+            for row in question_rows:
+                row_id = str(row.get("rowId", ""))
+                row_questions = row.get("questions", [])
+                question_type = row.get("questionType", "")
+                for q_idx, q in enumerate(row_questions):
+                    q_id = extract_question_id(q, topic_id, row_id, q_idx)
+                    question_obj = {
+                        **q,
+                        "_id": q_id,
+                        "questionId": q_id,
+                        "topicId": topic_id,
+                        "topicLabel": topic.get("label"),
+                        "rowId": row_id,
+                        "questionType": question_type,
+                        "difficulty": row.get("difficulty"),
+                        "globalIndex": global_question_index,
+                    }
+                    all_questions.append(question_obj)
+                    questions_map[q_id] = question_obj
+                    question_index_map[global_question_index] = q_id
+                    global_question_index += 1
+        
+        # Get submitted answers
+        submitted_answers_data = candidate_response.get("answers", {}).get("submitted", [])
+        submitted_answers_map = {}  # questionIndex -> answer data
+        submitted_answers_by_id = {}  # questionId -> answer data (fallback)
+        
+        for answer_data in submitted_answers_data:
+            question_index = answer_data.get("questionIndex")
+            question_id = answer_data.get("questionId")
+            
+            if question_index is not None:
+                submitted_answers_map[question_index] = answer_data
+            
+            if question_id:
+                submitted_answers_by_id[question_id] = answer_data
+        
+        # Build question results with evaluation and answer data
+        question_results = []
+        for q_idx, question in enumerate(all_questions):
+            q_id = question.get("questionId") or question.get("_id")
+            evaluation = evaluations.get(q_id) if q_id else None
+            
+            # Try to get answer by index first, then by questionId
+            submitted_answer = submitted_answers_map.get(q_idx)
+            if not submitted_answer and q_id:
+                submitted_answer = submitted_answers_by_id.get(q_id)
+            
+            # Determine attempt status
+            is_attempted = False
+            candidate_answer_text = ""
+            candidate_code = ""
+            candidate_query = ""
+            test_results = None
+            test_result = None
+            
+            if submitted_answer:
+                is_attempted = True
+                # Extract answer text (for subjective, pseudocode)
+                candidate_answer_text = (
+                    submitted_answer.get("textAnswer") or 
+                    submitted_answer.get("answer", "") or 
+                    ""
+                )
+                # Extract code (for coding, AIML)
+                candidate_code = (
+                    submitted_answer.get("source_code") or 
+                    submitted_answer.get("code", "") or 
+                    ""
+                )
+                # Extract SQL query
+                candidate_query = (
+                    submitted_answer.get("sql_query") or 
+                    submitted_answer.get("query", "") or 
+                    ""
+                )
+                # Extract test results
+                test_results = submitted_answer.get("testResults")
+                test_result = submitted_answer.get("testResult")
+                
+                # If answer is just a string, use it as text answer
+                if not candidate_answer_text and not candidate_code and not candidate_query:
+                    answer_value = submitted_answer.get("answer", "")
+                    if isinstance(answer_value, str) and answer_value.strip():
+                        candidate_answer_text = answer_value
+            
+            # Get score from evaluation
+            score = evaluation.get("score", 0) if evaluation else 0
+            max_marks = evaluation.get("max_marks", question.get("marks", 1)) if evaluation else question.get("marks", 1)
+            percentage = evaluation.get("percentage", 0) if evaluation else 0
+            
+            question_result = {
+                "questionId": q_id,
+                "questionIndex": q_idx,
+                "questionType": question.get("questionType", ""),
+                "questionText": question.get("questionText") or question.get("question", ""),
+                "section": question.get("topicLabel", ""),
+                "difficulty": question.get("difficulty", "Medium"),
+                "isAttempted": is_attempted,
+                "score": round(score, 2),
+                "maxMarks": max_marks,
+                "percentage": round(percentage, 2),
+                "candidateAnswer": {
+                    "textAnswer": candidate_answer_text,
+                    "code": candidate_code,
+                    "sqlQuery": candidate_query,
+                    "selectedAnswers": submitted_answer.get("selectedAnswers", []) if submitted_answer else []
+                },
+                "evaluation": serialize_document(evaluation) if evaluation else None,
+                "testResults": test_results,
+                "testResult": serialize_document(test_result) if test_result else None,
+            }
+            question_results.append(question_result)
+        
+        # Calculate pass/fail based on passPercentage
+        pass_percentage = assessment.get("passPercentage", 50)
+        overall_percentage = overall_summary.get("overall_percentage", 0) if overall_summary else 0
+        is_passed = overall_percentage >= pass_percentage
+        
+        # Serialize datetime objects to strings
+        completed_at = candidate_response.get("completedAt")
+        if completed_at and isinstance(completed_at, datetime):
+            completed_at = completed_at.isoformat()
+        elif completed_at is None:
+            completed_at = None
+        
+        submitted_at = candidate_response.get("answers", {}).get("submittedAt")
+        if submitted_at and isinstance(submitted_at, datetime):
+            submitted_at = submitted_at.isoformat()
+        elif submitted_at is None:
+            submitted_at = None
+        
+        # Serialize the response data to handle any datetime objects
+        response_data = {
+            "candidate": {
+                "email": candidate_response.get("email", candidate_email),
+                "name": candidate_response.get("name", candidate_name)
+            },
+            "overallSummary": serialize_document(overall_summary) if overall_summary else {},
+            "keyStrengths": key_strengths,
+            "areasOfImprovement": areas_of_improvement,
+            "sectionSummaries": [serialize_document(s) for s in section_summaries] if section_summaries else [],
+            "evaluations": {k: serialize_document(v) for k, v in evaluations.items()} if evaluations else {},
+            "questionResults": question_results,  # New: per-question breakdown
+            "passFail": {
+                "isPassed": is_passed,
+                "overallPercentage": round(overall_percentage, 2),
+                "passPercentage": pass_percentage,
+                "status": "PASSED" if is_passed else "FAILED"
+            },
+            "submissionInfo": {
+                "submittedAt": submitted_at,
+                "completedAt": completed_at,
+                "status": candidate_response.get("status", "completed")
+            }
+        }
+        
+        return success_response("Detailed results fetched successfully", response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error getting detailed results for candidate {candidate_email}: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get detailed results: {str(exc)}"
+        ) from exc
+
 @router.get("/{assessment_id}/questions", response_model=None)
 async def get_all_questions(
     assessment_id: str,

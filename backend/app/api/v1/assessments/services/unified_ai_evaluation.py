@@ -1155,6 +1155,301 @@ def _create_error_evaluation(
 
 
 # ============================================================================
+# MCQ SKILL-BASED EVALUATION
+# ============================================================================
+
+async def evaluate_mcq_skill_analysis(
+    question_id: str,
+    question_data: Dict[str, Any],
+    candidate_answer: Dict[str, Any],
+    max_marks: float,
+    section: Optional[str] = None,
+    is_correct: bool = False,
+    score: float = 0.0
+) -> Dict[str, Any]:
+    """
+    Evaluate MCQ with skill-based analysis.
+    
+    Analyzes performance by skill/topic to identify strengths and weaknesses.
+    
+    Args:
+        question_id: Unique question identifier
+        question_data: MCQ question data with metadata
+        candidate_answer: Candidate's selected answer(s)
+        max_marks: Maximum marks for this question
+        section: Optional section name
+        is_correct: Whether the answer is correct (from automatic evaluation)
+        score: Score awarded (0 or max_marks typically)
+    
+    Returns:
+        Evaluation result with skill-based analysis
+    """
+    # Extract skill/topic information from question
+    skill = question_data.get("skill") or question_data.get("topic") or question_data.get("topicLabel") or question_data.get("category")
+    topic_id = question_data.get("topicId")
+    difficulty = question_data.get("difficulty", "Medium")
+    
+    # If no explicit skill, try to infer from question text or other metadata
+    if not skill:
+        # Try to extract from question text or other fields
+        question_text = question_data.get("question") or question_data.get("questionText", "")
+        # Simple keyword-based skill detection (can be enhanced)
+        question_lower = question_text.lower()
+        if any(kw in question_lower for kw in ["python", "java", "javascript", "c++", "c#"]):
+            skill = "Programming Language"
+        elif any(kw in question_lower for kw in ["array", "list", "tree", "graph", "hash"]):
+            skill = "Data Structures"
+        elif any(kw in question_lower for kw in ["algorithm", "sort", "search", "complexity"]):
+            skill = "Algorithms"
+        elif any(kw in question_lower for kw in ["sql", "database", "query"]):
+            skill = "Database"
+        else:
+            skill = "General Knowledge"
+    
+    # Calculate percentage
+    percentage = (score / max_marks * 100) if max_marks > 0 else 0.0
+    
+    # Determine if this is a strength or weakness
+    is_strength = percentage >= 70
+    is_weakness = percentage < 50
+    
+    # Generate feedback based on correctness
+    if is_correct:
+        strengths = [f"Correctly answered {skill} question"]
+        weaknesses = []
+        summary = f"Correctly answered the {skill} question. Good understanding demonstrated."
+    else:
+        strengths = []
+        weaknesses = [f"Missed {skill} question - review concepts"]
+        summary = f"Incorrect answer for {skill} question. Review the topic and practice more."
+    
+    # Create areas of improvement if it's a weakness
+    areas_of_improvement = []
+    if is_weakness:
+        areas_of_improvement.append({
+            "skill": skill,
+            "current_level": "Beginner" if percentage < 30 else "Intermediate",
+            "gap_analysis": f"Struggling with {skill} concepts. Need to strengthen fundamentals.",
+            "priority": "High" if percentage < 30 else "Medium",
+            "improvement_suggestions": [
+                {
+                    "suggestion": f"Review {skill} fundamentals and core concepts",
+                    "resources": [f"Study materials on {skill}", f"Practice {skill} problems"],
+                    "practice_exercises": [f"Solve {skill} practice questions"],
+                    "estimated_time": "1-2 weeks"
+                }
+            ]
+        })
+    
+    # Create criteria scores
+    criteria_scores = {
+        "accuracy": {
+            "score": score,
+            "weight": 100.0,
+            "feedback": "Correct" if is_correct else "Incorrect"
+        }
+    }
+    
+    return {
+        "question_id": question_id,
+        "section": section or "",
+        "question_type": "MCQ",
+        "score": score,
+        "max_marks": max_marks,
+        "percentage": round(percentage, 2),
+        "criteria_scores": criteria_scores,
+        "feedback": {
+            "summary": summary,
+            "strengths": strengths,
+            "weaknesses": weaknesses,
+            "detailed_analysis": f"This MCQ question tested knowledge of {skill}. " + 
+                               ("The answer was correct, demonstrating good understanding." if is_correct 
+                                else "The answer was incorrect. Review the topic and related concepts."),
+            "suggestions": [f"Practice more {skill} questions"] if not is_correct else []
+        },
+        "answer_log": {
+            "submitted_answer": str(candidate_answer.get("selectedAnswers") or candidate_answer.get("answer", "")),
+            "expected_answer": str(question_data.get("correctAn") or question_data.get("correctAnswer", "")),
+            "key_points_covered": [skill] if is_correct else [],
+            "key_points_missed": [skill] if not is_correct else [],
+            "incorrect_points": [],
+            "partial_credit_reasoning": ""
+        },
+        "areas_of_improvement": areas_of_improvement,
+        "benchmarking": {
+            "compared_to_peers": "Above Average" if is_correct else "Below Average",
+            "percentile": 75.0 if is_correct else 25.0,
+            "industry_standard": "Meets expectations" if is_correct else "Below expectations"
+        },
+        "insights": {
+            "skill_tested": skill,
+            "difficulty_level": difficulty
+        },
+        "flags": {
+            "plagiarism_risk": "Low",
+            "ai_generated_risk": "Low",
+            "incomplete_answer": False,
+            "requires_human_review": False,
+            "confidence_level": 1.0  # MCQ is deterministic
+        }
+    }
+
+
+# ============================================================================
+# AIML EVALUATION WRAPPER
+# ============================================================================
+
+async def evaluate_aiml_answer(
+    question_id: str,
+    question_data: Dict[str, Any],
+    candidate_answer: Dict[str, Any],
+    max_marks: float,
+    section: Optional[str] = None,
+    code_outputs: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Evaluate AIML answer by wrapping existing AIML evaluation service.
+    
+    Args:
+        question_id: Unique question identifier
+        question_data: AIML question data
+        candidate_answer: Candidate's code submission
+        max_marks: Maximum marks for this question
+        section: Optional section name
+        code_outputs: Optional code execution outputs
+    
+    Returns:
+        Unified evaluation result structure
+    """
+    try:
+        # Import AIML evaluation service
+        from ....aiml.services.ai_feedback import evaluate_aiml_submission
+        
+        # Prepare submission format expected by AIML service
+        source_code = candidate_answer.get("source_code") or candidate_answer.get("code", "")
+        
+        # If outputs not provided, use empty list (evaluation will handle it)
+        outputs = code_outputs or candidate_answer.get("outputs", [])
+        
+        submission = {
+            "source_code": source_code,
+            "outputs": outputs
+        }
+        
+        # Call existing AIML evaluation
+        aiml_result = evaluate_aiml_submission(submission, question_data)
+        
+        # Convert AIML result to unified format
+        overall_score = aiml_result.get("overall_score", 0)
+        # Convert 0-100 score to actual marks
+        actual_score = (overall_score / 100.0) * max_marks if max_marks > 0 else 0.0
+        percentage = overall_score
+        
+        # Extract feedback
+        feedback_text = aiml_result.get("feedback_summary", "") or aiml_result.get("feedback", "")
+        one_liner = aiml_result.get("one_liner", "")
+        
+        # Extract skill from question
+        skill = (question_data.get("assessment_metadata", {}).get("skill") or 
+                question_data.get("library") or 
+                question_data.get("skill") or
+                "AIML/Data Science")
+        
+        # Determine areas of improvement
+        areas_of_improvement = []
+        if overall_score < 70:
+            priority = "High" if overall_score < 50 else "Medium"
+            areas_of_improvement.append({
+                "skill": skill,
+                "current_level": "Beginner" if overall_score < 50 else "Intermediate",
+                "gap_analysis": f"Code quality and implementation need improvement. Score: {overall_score}%",
+                "priority": priority,
+                "improvement_suggestions": [
+                    {
+                        "suggestion": "Review AIML best practices and library usage",
+                        "resources": ["AIML documentation", "Data science tutorials"],
+                        "practice_exercises": ["Practice AIML coding problems"],
+                        "estimated_time": "2-4 weeks"
+                    }
+                ]
+            })
+        
+        # Create unified structure
+        result = {
+            "question_id": question_id,
+            "section": section or "",
+            "question_type": "AIML",
+            "score": round(actual_score, 2),
+            "max_marks": max_marks,
+            "percentage": round(percentage, 2),
+            "criteria_scores": {
+                "code_correctness": {
+                    "score": actual_score * 0.4,
+                    "weight": 40.0,
+                    "feedback": aiml_result.get("code_correctness_feedback", "")
+                },
+                "task_completion": {
+                    "score": actual_score * 0.3,
+                    "weight": 30.0,
+                    "feedback": aiml_result.get("task_completion_feedback", "")
+                },
+                "code_quality": {
+                    "score": actual_score * 0.2,
+                    "weight": 20.0,
+                    "feedback": aiml_result.get("code_quality_feedback", "")
+                },
+                "best_practices": {
+                    "score": actual_score * 0.1,
+                    "weight": 10.0,
+                    "feedback": aiml_result.get("best_practices_feedback", "")
+                }
+            },
+            "feedback": {
+                "summary": feedback_text or one_liner or f"AIML code evaluation completed. Score: {overall_score}%",
+                "strengths": aiml_result.get("strengths", []) if isinstance(aiml_result.get("strengths"), list) else [],
+                "weaknesses": aiml_result.get("weaknesses", []) if isinstance(aiml_result.get("weaknesses"), list) else [],
+                "detailed_analysis": feedback_text or one_liner,
+                "suggestions": aiml_result.get("suggestions", []) if isinstance(aiml_result.get("suggestions"), list) else []
+            },
+            "answer_log": {
+                "submitted_answer": source_code[:500] + "..." if len(source_code) > 500 else source_code,
+                "expected_answer": "",
+                "key_points_covered": aiml_result.get("tasks_completed", []) if isinstance(aiml_result.get("tasks_completed"), list) else [],
+                "key_points_missed": aiml_result.get("tasks_missed", []) if isinstance(aiml_result.get("tasks_missed"), list) else [],
+                "incorrect_points": [],
+                "partial_credit_reasoning": ""
+            },
+            "areas_of_improvement": areas_of_improvement,
+            "benchmarking": {
+                "compared_to_peers": "Excellent" if overall_score >= 85 else "Above Average" if overall_score >= 70 else "Average" if overall_score >= 50 else "Below Average",
+                "percentile": overall_score,
+                "industry_standard": "Meets expectations" if overall_score >= 70 else "Below expectations"
+            },
+            "insights": {
+                "approach_quality": aiml_result.get("approach_quality", ""),
+                "library_usage": aiml_result.get("library_usage", ""),
+                "output_quality": aiml_result.get("output_quality", "")
+            },
+            "flags": {
+                "plagiarism_risk": "Low",
+                "ai_generated_risk": "Low",
+                "incomplete_answer": overall_score < 50,
+                "requires_human_review": overall_score < 50 or aiml_result.get("needs_review", False),
+                "confidence_level": 0.8
+            }
+        }
+        
+        # Normalize the result
+        result = _normalize_evaluation_result(result, max_marks)
+        
+        return result
+        
+    except Exception as e:
+        logger.exception(f"Error evaluating AIML answer: {e}")
+        return _create_error_evaluation(question_id, "AIML", max_marks, section, str(e))
+
+
+# ============================================================================
 # SECTION-LEVEL AND OVERALL AGGREGATION
 # ============================================================================
 
@@ -1399,19 +1694,55 @@ async def generate_overall_assessment_summary(
             "sub_skills": skills
         })
     
-    # Extract overall strengths and weaknesses
+    # Extract overall strengths and weaknesses from all question types
     all_strengths = []
     all_weaknesses = []
+    skill_strengths = {}  # Track strengths by skill
+    skill_weaknesses = {}  # Track weaknesses by skill
     
     for q in question_evaluations:
         feedback = q.get("feedback", {})
         if isinstance(feedback, dict):
-            all_strengths.extend(feedback.get("strengths", []))
-            all_weaknesses.extend(feedback.get("weaknesses", []))
+            strengths = feedback.get("strengths", [])
+            weaknesses = feedback.get("weaknesses", [])
+            all_strengths.extend(strengths)
+            all_weaknesses.extend(weaknesses)
+            
+            # Track skill-based strengths/weaknesses
+            skill = q.get("insights", {}).get("skill_tested") or q.get("question_type", "")
+            if skill:
+                if strengths:
+                    if skill not in skill_strengths:
+                        skill_strengths[skill] = []
+                    skill_strengths[skill].extend(strengths)
+                if weaknesses:
+                    if skill not in skill_weaknesses:
+                        skill_weaknesses[skill] = []
+                    skill_weaknesses[skill].extend(weaknesses)
+        
+        # Also extract from areas_of_improvement
+        areas = q.get("areas_of_improvement", [])
+        for area in areas:
+            skill = area.get("skill", "")
+            if skill and area.get("priority") == "High":
+                if skill not in skill_weaknesses:
+                    skill_weaknesses[skill] = []
+                gap = area.get("gap_analysis", "")
+                if gap:
+                    skill_weaknesses[skill].append(gap)
     
     # Get unique strengths/weaknesses
-    overall_strengths = list(set(all_strengths))[:5]  # Top 5
-    overall_weaknesses = list(set(all_weaknesses))[:5]  # Top 5
+    overall_strengths = list(set(all_strengths))[:10]  # Top 10
+    overall_weaknesses = list(set(all_weaknesses))[:10]  # Top 10
+    
+    # Add skill-based insights
+    for skill, strengths_list in skill_strengths.items():
+        if len(strengths_list) >= 2:  # If multiple strengths in this skill
+            overall_strengths.append(f"Strong performance in {skill}")
+    
+    for skill, weaknesses_list in skill_weaknesses.items():
+        if len(weaknesses_list) >= 2:  # If multiple weaknesses in this skill
+            overall_weaknesses.append(f"Needs improvement in {skill}")
     
     # Generate improvement plan
     improvement_plan = _generate_improvement_plan(question_evaluations, overall_percentage)
@@ -1615,19 +1946,31 @@ async def evaluate_question_by_type(
     Returns:
         Comprehensive evaluation result
     """
+    logger.info(f"[EVALUATE_QUESTION] Starting evaluation for question_id={question_id}, type={question_type}")
+    logger.info(f"[EVALUATE_QUESTION] Max marks: {max_marks}, Section: {section}")
+    logger.info(f"[EVALUATE_QUESTION] Candidate answer keys: {list(candidate_answer.keys())}")
+    logger.info(f"[EVALUATE_QUESTION] Additional kwargs: {list(kwargs.keys())}")
+    
     question_type_upper = question_type.upper()
     
     if question_type_upper == "MCQ":
-        # MCQ doesn't need AI evaluation (automatic)
-        return {
-            "question_id": question_id,
-            "section": section or "",
-            "question_type": "MCQ",
-            "score": 0.0,  # Will be set by caller based on correctness
-            "max_marks": max_marks,
-            "percentage": 0.0,
-            "note": "MCQ evaluation is automatic, not AI-based"
-        }
+        # MCQ skill-based evaluation
+        # Get correctness and score from kwargs (set by caller after automatic evaluation)
+        is_correct = kwargs.get("is_correct", False)
+        score = kwargs.get("score", max_marks if is_correct else 0.0)
+        
+        logger.info(f"[EVALUATE_QUESTION] MCQ - is_correct={is_correct}, score={score}")
+        result = await evaluate_mcq_skill_analysis(
+            question_id=question_id,
+            question_data=question_data,
+            candidate_answer=candidate_answer,
+            max_marks=max_marks,
+            section=section,
+            is_correct=is_correct,
+            score=score
+        )
+        logger.info(f"[EVALUATE_QUESTION] MCQ evaluation completed: score={result.get('score', 0)}/{max_marks}")
+        return result
     
     elif question_type_upper == "SUBJECTIVE":
         return await evaluate_subjective_answer_enhanced(
@@ -1684,20 +2027,18 @@ async def evaluate_question_by_type(
         )
     
     elif question_type_upper == "AIML":
-        # AIML uses existing evaluation - can be enhanced later
-        # For now, return a placeholder that indicates AIML evaluation exists elsewhere
-        return {
-            "question_id": question_id,
-            "section": section or "",
-            "question_type": "AIML",
-            "score": 0.0,
-            "max_marks": max_marks,
-            "percentage": 0.0,
-            "note": "AIML evaluation handled by existing service. See aiml/services/ai_feedback.py"
-        }
+        return await evaluate_aiml_answer(
+            question_id=question_id,
+            question_data=question_data,
+            candidate_answer=candidate_answer,
+            max_marks=max_marks,
+            section=section,
+            code_outputs=kwargs.get("code_outputs")
+        )
     
     else:
-        logger.warning(f"Unknown question type: {question_type}")
+        logger.error(f"[EVALUATE_QUESTION] Unknown question type: {question_type}")
+        logger.error(f"[EVALUATE_QUESTION] Question ID: {question_id}, Section: {section}")
         return _create_error_evaluation(
             question_id=question_id,
             question_type=question_type,

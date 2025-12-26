@@ -11662,11 +11662,63 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                     setLoading(true);
                     try {
                       if (assessmentId) {
+                        // Normalize datetime strings to ISO format with seconds and timezone
+                        // Same normalization as in handleGenerateUrl
+                        const normalizeDateTime = (dt: string): string => {
+                          if (!dt) return dt;
+                          
+                          // If format is YYYY-MM-DDTHH:MM (missing seconds), add :00
+                          if (dt.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)) {
+                            // Parse as IST (UTC+5:30) and convert to UTC ISO string
+                            // datetime-local input is in local timezone, but we treat it as IST
+                            // Create a date object assuming IST timezone
+                            const dtWithSeconds = dt + ":00";
+                            // Create date assuming IST (UTC+5:30)
+                            const istDate = new Date(dtWithSeconds + "+05:30");
+                            
+                            if (!isNaN(istDate.getTime())) {
+                              // Convert to ISO string (UTC)
+                              return istDate.toISOString();
+                            } else {
+                              // Fallback: just add seconds and Z
+                              return dt + ":00Z";
+                            }
+                          }
+                          
+                          // If already has seconds but no timezone, add Z
+                          if (dt.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/)) {
+                            return dt + "Z";
+                          }
+                          
+                          return dt;
+                        };
+
+                        // Prepare schedule data with normalized times
+                        const scheduleData: any = {
+                          examMode,
+                          duration: parseInt(duration || "0"),
+                        };
+                        
+                        // Add startTime if provided (normalized to UTC)
+                        if (startTime) {
+                          scheduleData.startTime = normalizeDateTime(startTime);
+                        }
+                        
+                        // Only include endTime based on exam mode (normalized to UTC)
+                        if (examMode === "flexible" && endTime) {
+                          scheduleData.endTime = normalizeDateTime(endTime);
+                        }
+                        
+                        // Include section timers if enabled
+                        if (enablePerSectionTimers) {
+                          scheduleData.enablePerSectionTimers = true;
+                          scheduleData.sectionTimers = sectionTimers;
+                        }
+
                         // Save final state and mark as complete
                         await axios.post("/api/assessments/update-schedule-and-candidates", {
                           assessmentId,
-                          startTime: startTime,
-                          endTime: endTime,
+                          ...scheduleData,
                           candidates: accessMode === "private" ? candidates : [],
                           assessmentUrl: assessmentUrl,
                           token: assessmentUrl.split("/").pop() || "",
