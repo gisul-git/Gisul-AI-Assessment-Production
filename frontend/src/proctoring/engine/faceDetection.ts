@@ -39,6 +39,7 @@ let isModelLoaded = false;
 
 /**
  * Initialize BlazeFace detector (fast face detection model)
+ * Now uses Global Model Service to reuse pre-loaded models
  */
 export async function initializeFaceDetection(): Promise<boolean> {
   try {
@@ -46,7 +47,32 @@ export async function initializeFaceDetection(): Promise<boolean> {
       return true;
     }
 
-    // Initialize TensorFlow.js
+    // Try to get model from Global Model Service first (may be pre-loaded)
+    try {
+      const { modelService } = await import("@/universal-proctoring/services/ModelService");
+      const cachedModel = modelService.getBlazeFace();
+      if (cachedModel) {
+        console.log("[FaceDetection] ✅ Reusing BlazeFace model from ModelService");
+        faceDetector = cachedModel;
+        isModelLoaded = true;
+        return true;
+      }
+      
+      // If not cached, load it (will be cached by ModelService)
+      console.log("[FaceDetection] BlazeFace not cached, loading via ModelService...");
+      const model = await modelService.loadBlazeFace();
+      if (model) {
+        faceDetector = model;
+        isModelLoaded = true;
+        console.log("[FaceDetection] ✅ BlazeFace model loaded via ModelService");
+        return true;
+      }
+    } catch (modelServiceError) {
+      console.warn("[FaceDetection] ModelService not available, falling back to direct load:", modelServiceError);
+    }
+
+    // Fallback: Direct load if ModelService fails
+    console.log("[FaceDetection] Falling back to direct BlazeFace load...");
     await tf.ready();
     
     // Prefer WebGL backend for better performance
@@ -60,11 +86,10 @@ export async function initializeFaceDetection(): Promise<boolean> {
     }
 
     // Load BlazeFace model (fast and accurate)
-    // Using default model which is optimized for speed
     faceDetector = await blazeface.load();
 
     isModelLoaded = true;
-    console.log("[FaceDetection] BlazeFace model loaded successfully");
+    console.log("[FaceDetection] BlazeFace model loaded successfully (direct load)");
     return true;
   } catch (error) {
     console.error("[FaceDetection] Failed to initialize:", error);

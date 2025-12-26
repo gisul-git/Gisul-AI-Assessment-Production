@@ -49,15 +49,15 @@ const LOOKING_DOWN_THRESHOLD = 25;
 
 // Gaze-away timing (milliseconds) - INCIDENT-BASED
 const GAZE_AWAY_TRIGGER_DURATION = 1500;  // 1.5 seconds to trigger
-const GAZE_AWAY_COOLDOWN = 5000;           // 5 seconds cooldown
+const GAZE_AWAY_COOLDOWN = 3000;           // 5 seconds cooldown
 
 // No-face timing (milliseconds) - INCIDENT-BASED
-const NO_FACE_TRIGGER_DURATION = 2000;     // 2 seconds to trigger
-const NO_FACE_COOLDOWN = 6000;             // 6 seconds cooldown
+const NO_FACE_TRIGGER_DURATION = 1000;     // 2 seconds to trigger
+const NO_FACE_COOLDOWN = 4000;             // 6 seconds cooldown
 
 // Multiple-face timing (milliseconds) - INCIDENT-BASED
 const MULTIPLE_FACE_TRIGGER_DURATION = 1000; // 1 second to trigger
-const MULTIPLE_FACE_COOLDOWN = 6000;         // 6 seconds cooldown
+const MULTIPLE_FACE_COOLDOWN = 3000;         // 6 seconds cooldown
 
 // ============================================================================
 // Types
@@ -215,52 +215,49 @@ export class AIProctoringService {
 
   /**
    * Initialize the AI proctoring service.
-   * Loads BlazeFace + MediaPipe FaceMesh models.
+   * Reuses models from Global Model Service (loaded during identity verification).
+   * If models not pre-loaded, loads them via ModelService (will be cached).
    */
   async initialize(): Promise<boolean> {
     debugLog("AIProctoringService: Initializing...");
 
     try {
-      // Load BlazeFace for face detection
-      const blazeface = await import("@tensorflow-models/blazeface");
-      await import("@tensorflow/tfjs");
+      // CRITICAL: Use Global Model Service to reuse pre-loaded models
+      // Models should already be loaded during identity verification phase
+      const { modelService } = await import("./ModelService");
       
-      debugLog("[AIProctoringService] Loading BlazeFace model...");
-      this.blazefaceModel = await blazeface.load();
-      debugLog("[AIProctoringService] BlazeFace model loaded successfully");
-
-      // Try to load MediaPipe FaceMesh for gaze detection
-      try {
-        // Set up locateFile before importing
-        if (typeof window !== 'undefined') {
-          (window as any).createMediapipeSolutionsPackedAssets = {
-            locateFile: (file: string) => `/mediapipe/face_mesh/${file}`
-          };
-          (window as any).Module = (window as any).Module || {};
-          (window as any).Module.locateFile = (file: string) => `/mediapipe/face_mesh/${file}`;
-        }
-
-        const FaceMeshModule = await import('@mediapipe/face_mesh');
-        const faceMesh = new FaceMeshModule.FaceMesh({
-          locateFile: (file: string) => {
-            const url = `/mediapipe/face_mesh/${file}`;
-            debugLog(`[AIProctoringService] Loading asset: ${url}`);
-            return url;
-          }
-        });
-
-        faceMesh.setOptions({
-          maxNumFaces: 1,
-          refineLandmarks: false,
-          minDetectionConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
-
-        await faceMesh.initialize();
+      // Try to get cached models first (fast - no loading)
+      let blazefaceModel = modelService.getBlazeFace();
+      let faceMesh = modelService.getFaceMesh();
+      
+      if (blazefaceModel && faceMesh) {
+        // Both models already loaded - reuse immediately
+        debugLog("[AIProctoringService] ✅ Reusing pre-loaded models from ModelService");
+        this.blazefaceModel = blazefaceModel;
         this.faceMesh = faceMesh;
-        debugLog("[AIProctoringService] FaceMesh model loaded successfully");
-      } catch (faceMeshError) {
-        console.warn('[AIProctoringService] FaceMesh failed to load, gaze detection disabled:', faceMeshError);
+        this.updateState({ isModelLoaded: true });
+        debugLog("AIProctoringService: Models ready (reused from ModelService)");
+        return true;
+      }
+      
+      // If models not pre-loaded, load them via ModelService (will be cached for future use)
+      debugLog("[AIProctoringService] Models not pre-loaded, loading via ModelService...");
+      const models = await modelService.loadAllModels();
+      
+      if (models.blazeface) {
+        this.blazefaceModel = models.blazeface;
+        debugLog("[AIProctoringService] ✅ BlazeFace model loaded via ModelService");
+      } else {
+        console.error("[AIProctoringService] Failed to load BlazeFace");
+        this.addError("Failed to load BlazeFace model");
+        return false;
+      }
+      
+      if (models.faceMesh) {
+        this.faceMesh = models.faceMesh;
+        debugLog("[AIProctoringService] ✅ FaceMesh model loaded via ModelService");
+      } else {
+        console.warn('[AIProctoringService] FaceMesh failed to load, gaze detection disabled');
         // Continue without FaceMesh - BlazeFace is still available for face counting
       }
 
@@ -312,14 +309,10 @@ export class AIProctoringService {
       debugLog("AIProctoringService: Created offscreen canvas for snapshots");
     }
 
-    // Ensure models are loaded
-    if (!this.state.isModelLoaded) {
-      const loaded = await this.initialize();
-      if (!loaded) {
-        return false;
-      }
-    }
-
+    // CRITICAL FIX: Get camera stream FIRST, then load models
+    // This ensures camera is ready immediately when "Start Assessment" is clicked
+    // Models may already be loaded from identity verification phase
+    
     // Use existing stream from precheck if provided, otherwise get new one
     try {
       if (existingStream && existingStream.active) {
@@ -340,6 +333,62 @@ export class AIProctoringService {
       await this.videoElement.play();
 
       this.updateState({ isCameraOn: true });
+      
+      // CRITICAL FIX: Check ModelService FIRST before checking state
+      // Models may already be loaded from precheck/identity verification phase
+      // This ensures instant model availability if pre-loaded
+      if (!this.state.isModelLoaded) {
+        try {
+          const { modelService } = await import("./ModelService");
+          
+          // Check if models are already loaded in ModelService (fast check, no loading)
+          let cachedBlazeface = modelService.getBlazeFace();
+          let cachedFaceMesh = modelService.getFaceMesh();
+          
+          // If models are still loading, wait a bit (max 500ms) for them to finish
+          // This handles race conditions where precheck started loading but hasn't finished
+          if (!cachedBlazeface || !cachedFaceMesh) {
+            if (modelService.areModelsLoading()) {
+              debugLog("AIProctoringService: Models are loading in background, waiting briefly...");
+              // Wait up to 500ms for models to finish loading
+              const maxWait = 500;
+              const startTime = Date.now();
+              while ((!cachedBlazeface || !cachedFaceMesh) && (Date.now() - startTime) < maxWait) {
+                await new Promise(resolve => setTimeout(resolve, 50)); // Check every 50ms
+                cachedBlazeface = modelService.getBlazeFace();
+                cachedFaceMesh = modelService.getFaceMesh();
+              }
+            }
+          }
+          
+          if (cachedBlazeface && cachedFaceMesh) {
+            // Models already loaded! Assign immediately (no delay)
+            debugLog("AIProctoringService: ✅ Models already loaded in ModelService - assigning instantly");
+            this.blazefaceModel = cachedBlazeface;
+            this.faceMesh = cachedFaceMesh;
+            this.updateState({ isModelLoaded: true });
+            debugLog("AIProctoringService: Models ready instantly (pre-loaded from precheck/identity verification)");
+          } else {
+            // Models not pre-loaded - need to load them (may take 2-3 seconds)
+            debugLog("AIProctoringService: Models not pre-loaded, loading via ModelService...");
+            const loaded = await this.initialize();
+            if (!loaded) {
+              debugLog("AIProctoringService: Model loading failed, but camera is ready");
+              // Continue anyway - camera is ready, models can load in background
+            }
+          }
+        } catch (error) {
+          console.error("[AIProctoringService] Error checking ModelService:", error);
+          // Fallback to initialize() if ModelService check fails
+          debugLog("AIProctoringService: ModelService check failed, falling back to initialize()");
+          const loaded = await this.initialize();
+          if (!loaded) {
+            debugLog("AIProctoringService: Model loading failed, but camera is ready");
+          }
+        }
+      } else {
+        debugLog("AIProctoringService: ✅ Models already loaded (state indicates ready)");
+      }
 
       // Reset detection state
       this.resetDetectionState();
