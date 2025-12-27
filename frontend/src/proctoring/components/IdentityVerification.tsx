@@ -6,6 +6,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { initializeFaceDetection, detectFaces, cleanupFaceDetection, type FaceDetectionState } from "../engine/faceDetection";
+import { modelService } from "@/universal-proctoring/services/ModelService";
 import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
 
 export interface IdentityVerificationProps {
@@ -79,30 +80,71 @@ export default function IdentityVerification({
         // Start detection loop immediately (even before model loads)
         startDetectionLoop();
 
-        // Initialize face detection model in background
-        // Show loading state while model loads
-        setStatusMessage("Loading...");
-        initializeFaceDetection()
-          .then((initialized) => {
-            if (initialized) {
-              setIsModelLoaded(true);
-              isModelLoadedRef.current = true;
-              // Status message will be updated by detection loop once model is ready
-            } else {
-              console.error("[IdentityVerification] Failed to initialize face detection");
+        // CRITICAL: Check if models are already pre-loaded from Precheck page
+        // Models should already be loaded during precheck phase - no need to load again
+        if (modelService.areAllModelsLoaded()) {
+          console.log("[IdentityVerification] ✅ Models already pre-loaded from Precheck - using cached models");
+          // Models already loaded - just initialize face detection
+          initializeFaceDetection()
+            .then((initialized) => {
+              if (initialized) {
+                setIsModelLoaded(true);
+                isModelLoadedRef.current = true;
+                console.log("[IdentityVerification] ✅ All models ready - assessment can start immediately");
+                // Status message will be updated by detection loop once model is ready
+              } else {
+                console.error("[IdentityVerification] Failed to initialize face detection");
+                setStatusMessage("Failed to initialize face detection. Please refresh the page.");
+                if (onError) {
+                  onError("Failed to initialize face detection");
+                }
+              }
+            })
+            .catch((error) => {
+              console.error("[IdentityVerification] Face detection initialization error:", error);
               setStatusMessage("Failed to initialize face detection. Please refresh the page.");
               if (onError) {
                 onError("Failed to initialize face detection");
               }
-            }
-          })
-          .catch((error) => {
-            console.error("[IdentityVerification] Face detection initialization error:", error);
-            setStatusMessage("Failed to initialize face detection. Please refresh the page.");
-            if (onError) {
-              onError("Failed to initialize face detection");
-            }
-          });
+            });
+        } else {
+          // Models not pre-loaded (edge case - should not happen if precheck ran)
+          // Load them now as fallback
+          setStatusMessage("Loading models...");
+          console.log("[IdentityVerification] Models not pre-loaded, loading now (fallback)...");
+          
+          modelService.loadAllModels()
+            .then(({ blazeface, faceMesh }) => {
+              console.log("[IdentityVerification] Models loaded:", {
+                blazeface: !!blazeface,
+                faceMesh: !!faceMesh
+              });
+              
+              // Initialize face detection (uses BlazeFace from ModelService)
+              return initializeFaceDetection();
+            })
+            .then((initialized) => {
+              if (initialized) {
+                setIsModelLoaded(true);
+                isModelLoadedRef.current = true;
+                console.log("[IdentityVerification] ✅ All models ready - assessment can start immediately");
+                // Status message will be updated by detection loop once model is ready
+              } else {
+                console.error("[IdentityVerification] Failed to initialize face detection");
+                setStatusMessage("Failed to initialize face detection. Please refresh the page.");
+                if (onError) {
+                  onError("Failed to initialize face detection");
+                }
+              }
+            })
+            .catch((error) => {
+              console.error("[IdentityVerification] Model loading error:", error);
+              setStatusMessage("Failed to initialize face detection. Please refresh the page.");
+              if (onError) {
+                onError("Failed to initialize face detection");
+              }
+            });
+        }
       } catch (error: any) {
         if (error?.name === "AbortError") {
           return;

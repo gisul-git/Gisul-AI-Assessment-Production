@@ -5,6 +5,7 @@ import { requireAuth } from "../../lib/auth";
 import { customMCQApi } from "../../lib/custom-mcq/api";
 import { CustomMCQAssessment, AssessmentSubmission } from "../../types/custom-mcq";
 import ProctorSummaryCard from "../../components/admin/ProctorSummaryCard";
+import ProctorLogsReview from "../../components/admin/ProctorLogsReview";
 import LiveProctoringDashboard from "../../components/proctor/LiveProctoringDashboard";
 import { useSession } from "next-auth/react";
 import { Eye, Loader2 } from "lucide-react";
@@ -76,19 +77,30 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
 
     setLoadingProctorForUser((prev) => ({ ...prev, [userEmail]: true }));
     try {
+      // CRITICAL FIX: Use the same userId format as when recording violations
+      // Violations are stored with "email:userEmail" format (from resolveUserIdForProctoring)
+      // So we must query with the same format to find the logs
+      const userIdForQuery = `email:${userEmail.trim()}`;
+      console.log('[Custom MCQ Analytics] Fetching proctor logs with userId:', userIdForQuery, 'for email:', userEmail);
+
       // Logs (includes eventTypeLabels)
       const logsResp = await fetch(
-        `/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(userEmail)}`
+        `/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(userIdForQuery)}`
       );
       const logsJson = await logsResp.json();
       if (logsJson?.success && logsJson?.data) {
         setProctorLogsByUser((prev) => ({ ...prev, [userEmail]: logsJson.data.logs || [] }));
         setProctorLabelsByUser((prev) => ({ ...prev, [userEmail]: logsJson.data.eventTypeLabels || {} }));
+        console.log('[Custom MCQ Analytics] Fetched', logsJson.data.logs?.length || 0, 'proctor logs for', userEmail);
+      } else {
+        console.warn('[Custom MCQ Analytics] No logs found or API error:', logsJson);
+        setProctorLogsByUser((prev) => ({ ...prev, [userEmail]: [] }));
+        setProctorLabelsByUser((prev) => ({ ...prev, [userEmail]: {} }));
       }
 
       // Summary (for counts)
       const summaryResp = await fetch(
-        `/api/proctor/summary?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(userEmail)}`
+        `/api/proctor/summary?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(userIdForQuery)}`
       );
       const summaryJson = await summaryResp.json();
       if (summaryJson?.success && summaryJson?.data) {
@@ -99,9 +111,27 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
             totalViolations: summaryJson.data.totalViolations || 0,
           },
         }));
+      } else {
+        setProctorSummaryByUser((prev) => ({
+          ...prev,
+          [userEmail]: {
+            summary: {},
+            totalViolations: 0,
+          },
+        }));
       }
     } catch (e) {
       console.error("Failed to fetch proctor logs for user:", userEmail, e);
+      // Set empty state on error
+      setProctorLogsByUser((prev) => ({ ...prev, [userEmail]: [] }));
+      setProctorLabelsByUser((prev) => ({ ...prev, [userEmail]: {} }));
+      setProctorSummaryByUser((prev) => ({
+        ...prev,
+        [userEmail]: {
+          summary: {},
+          totalViolations: 0,
+        },
+      }));
     } finally {
       setLoadingProctorForUser((prev) => ({ ...prev, [userEmail]: false }));
     }
@@ -883,238 +913,39 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                                 {isProctorExpanded && (
                                   <div
                                     style={{
-                                      padding: "0.75rem",
-                                      backgroundColor: "#Fef2f2",
+                                      padding: "1rem",
+                                      backgroundColor: "#ffffff",
                                       borderRadius: "0.5rem",
-                                      border: "1px solid #fecaca",
+                                      border: "1px solid #e2e8f0",
                                     }}
                                   >
-                                    <div
-                                      style={{
-                                        marginBottom: "0.5rem",
-                                        color: "#1E5A3B",
-                                        fontWeight: 600,
-                                        fontSize: "0.9rem",
-                                      }}
-                                    >
-                                      Proctoring Logs
-                                    </div>
-
                                     {isLoadingProctor ? (
                                       <div
                                         style={{
-                                          padding: "0.5rem",
-                                          color: "#4A9A6A",
-                                          fontSize: "0.85rem",
+                                          textAlign: "center",
+                                          padding: "2rem",
+                                          color: "#64748b",
                                         }}
                                       >
                                         Loading proctoring logs...
                                       </div>
+                                    ) : proctorLogs.length === 0 ? (
+                                      <div
+                                        style={{
+                                          textAlign: "center",
+                                          padding: "2rem",
+                                          color: "#64748b",
+                                          backgroundColor: "#f8fafc",
+                                          borderRadius: "0.5rem",
+                                        }}
+                                      >
+                                        No proctoring violations detected
+                                      </div>
                                     ) : (
-                                      <>
-                                        {proctorSummary && (
-                                          <ProctorSummaryCard
-                                            summary={proctorSummary.summary}
-                                            totalViolations={proctorSummary.totalViolations}
-                                            eventTypeLabels={proctorLabels}
-                                          />
-                                        )}
-
-                                        {proctorLogs.length === 0 ? (
-                                          <div
-                                            style={{
-                                              padding: "0.75rem",
-                                              color: "#4A9A6A",
-                                              backgroundColor: "#E8FAF0",
-                                              borderRadius: "0.5rem",
-                                              border: "1px solid #A8E8BC",
-                                              marginTop: "0.5rem",
-                                              fontSize: "0.85rem",
-                                            }}
-                                          >
-                                            No proctoring violations found for this candidate.
-                                          </div>
-                                        ) : (
-                                          <div
-                                            style={{
-                                              display: "flex",
-                                              flexDirection: "column",
-                                              gap: "0.75rem",
-                                              maxHeight: "420px",
-                                              overflowY: "auto",
-                                              marginTop: "0.5rem",
-                                            }}
-                                          >
-                                            {proctorLogs.map(
-                                              (log: any, index2: number) => (
-                                                <div
-                                                  key={log._id || index2}
-                                                  style={{
-                                                    border: "1px solid #fecaca",
-                                                    borderRadius: "0.5rem",
-                                                    padding: "0.75rem",
-                                                    backgroundColor: "#fef2f2",
-                                                  }}
-                                                >
-                                                  <div
-                                                    style={{
-                                                      display: "flex",
-                                                      justifyContent: "space-between",
-                                                      gap: "1rem",
-                                                      flexWrap: "wrap",
-                                                    }}
-                                                  >
-                                                    <div
-                                                      style={{
-                                                        fontWeight: 700,
-                                                        color: "#dc2626",
-                                                      }}
-                                                    >
-                                                      {proctorLabels[log.eventType] ||
-                                                        log.eventType ||
-                                                        "Violation"}
-                                                    </div>
-                                                    <div
-                                                      style={{
-                                                        fontSize: "0.8rem",
-                                                        color: "#64748b",
-                                                      }}
-                                                    >
-                                                      {log.timestamp
-                                                        ? new Date(
-                                                            log.timestamp
-                                                          ).toLocaleString()
-                                                        : ""}
-                                                    </div>
-                                                  </div>
-
-                                                  {log.metadata &&
-                                                    Object.keys(
-                                                      log.metadata
-                                                    ).length > 0 && (
-                                                      <div
-                                                        style={{
-                                                          marginTop: "0.5rem",
-                                                          fontSize: "0.8rem",
-                                                        }}
-                                                      >
-                                                        <div
-                                                          style={{
-                                                            fontSize: "0.75rem",
-                                                            color: "#64748b",
-                                                            marginBottom:
-                                                              "0.25rem",
-                                                          }}
-                                                        >
-                                                          Details:
-                                                        </div>
-                                                        <div
-                                                          style={{
-                                                            backgroundColor:
-                                                              "#f8fafc",
-                                                            borderRadius:
-                                                              "0.375rem",
-                                                            padding: "0.5rem",
-                                                            fontFamily:
-                                                              "monospace",
-                                                            fontSize: "0.75rem",
-                                                          }}
-                                                        >
-                                                          {Object.entries(
-                                                            log.metadata
-                                                          ).map(
-                                                            ([
-                                                              key,
-                                                              value,
-                                                            ]) => (
-                                                              <div
-                                                                key={key}
-                                                                style={{
-                                                                  marginBottom:
-                                                                    "0.25rem",
-                                                                }}
-                                                              >
-                                                                <span
-                                                                  style={{
-                                                                    color:
-                                                                      "#64748b",
-                                                                  }}
-                                                                >
-                                                                  {key}:
-                                                                </span>{" "}
-                                                                <span
-                                                                  style={{
-                                                                    color:
-                                                                      "#1e293b",
-                                                                  }}
-                                                                >
-                                                                  {typeof value ===
-                                                                  "object"
-                                                                    ? JSON.stringify(
-                                                                        value
-                                                                      )
-                                                                    : String(
-                                                                        value
-                                                                      )}
-                                                                </span>
-                                                              </div>
-                                                            )
-                                                          )}
-                                                        </div>
-                                                      </div>
-                                                    )}
-
-                                                  {log.snapshotBase64 && (
-                                                    <div
-                                                      style={{
-                                                        marginTop: "0.75rem",
-                                                      }}
-                                                    >
-                                                      <div
-                                                        style={{
-                                                          fontSize: "0.75rem",
-                                                          color: "#64748b",
-                                                          marginBottom:
-                                                            "0.5rem",
-                                                        }}
-                                                      >
-                                                        Evidence Snapshot:
-                                                      </div>
-                                                      <img
-                                                        src={
-                                                          String(
-                                                            log.snapshotBase64
-                                                          ).startsWith("data:")
-                                                            ? log.snapshotBase64
-                                                            : `data:image/png;base64,${log.snapshotBase64}`
-                                                        }
-                                                        alt="Violation snapshot"
-                                                        style={{
-                                                          maxWidth: "100%",
-                                                          height: "auto",
-                                                          borderRadius:
-                                                            "0.375rem",
-                                                          border:
-                                                            "1px solid #e2e8f0",
-                                                          maxHeight: "220px",
-                                                        }}
-                                                        onError={(e) => {
-                                                          console.error(
-                                                            "Error loading snapshot image:",
-                                                            e
-                                                          );
-                                                          (e.target as HTMLImageElement).style.display =
-                                                            "none";
-                                                        }}
-                                                      />
-                                                    </div>
-                                                  )}
-                                                </div>
-                                              )
-                                            )}
-                                          </div>
-                                        )}
-                                      </>
+                                      <ProctorLogsReview
+                                        logs={proctorLogs}
+                                        candidateName={candidateInfo?.name || candidateInfo?.email}
+                                      />
                                     )}
                                   </div>
                                 )}

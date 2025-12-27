@@ -259,19 +259,70 @@ export default function CustomMCQTakePage() {
           console.log(`[Custom MCQ Take] ✅ Session registered: ${sessionId}`);
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
-          const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${candidateIdStr}`;
+          // CRITICAL FIX: Use backend URL instead of frontend URL
+          const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
+          const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, candidateIdStr);
+          console.log('[Custom MCQ Take] Candidate WS connecting to backend...', wsUrl);
           const ws = new WebSocket(wsUrl);
           candidateWsRef.current = ws;
 
           ws.onopen = () => {
             console.log('[Custom MCQ Take] ✅ WebSocket connected, waiting for admin...');
+            
+            // CRITICAL FIX: Wait for camera stream to be available before starting WebRTC
+            // The camera is initialized by useUniversalProctoring, so we need to wait for it
+            let retryCount = 0;
+            const maxRetries = 20; // 10 seconds max wait (20 * 500ms)
+            
+            const checkCameraAndStart = () => {
+              const webcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
+              if (webcamStream && webcamStream.active) {
+                console.log('[Custom MCQ Take] ✅ Camera stream available - ready for admin connection');
+                // Don't start yet - wait for ADMIN_CONNECTED signal
+              } else if (retryCount < maxRetries) {
+                retryCount++;
+                console.log(`[Custom MCQ Take] ⏳ Waiting for camera stream... (attempt ${retryCount}/${maxRetries})`);
+                setTimeout(checkCameraAndStart, 500);
+              } else {
+                console.warn('[Custom MCQ Take] ⚠️ Camera stream not available after 10 seconds - will start when admin connects');
+              }
+            };
+            
+            // Start checking immediately
+            checkCameraAndStart();
           };
 
           ws.onmessage = (event) => {
             const message = JSON.parse(event.data);
             if (message.type === 'ADMIN_CONNECTED') {
               console.log('[Custom MCQ Take] 🚀 ADMIN_CONNECTED signal received!');
-              startLiveProctoring(sessionId, ws);
+              
+              // CRITICAL FIX: Wait for camera stream before starting WebRTC
+              const webcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
+              if (webcamStream && webcamStream.active) {
+                console.log('[Custom MCQ Take] ✅ Camera stream ready - starting WebRTC...');
+                startLiveProctoring(sessionId, ws);
+              } else {
+                // Retry with exponential backoff
+                let retryCount = 0;
+                const maxRetries = 10;
+                const checkAndStart = () => {
+                  const stream = thumbVideoRef.current?.srcObject as MediaStream | null;
+                  if (stream && stream.active) {
+                    console.log('[Custom MCQ Take] ✅ Camera stream now available - starting WebRTC...');
+                    startLiveProctoring(sessionId, ws);
+                  } else if (retryCount < maxRetries) {
+                    retryCount++;
+                    console.log(`[Custom MCQ Take] ⏳ Waiting for camera stream before starting WebRTC... (attempt ${retryCount}/${maxRetries})`);
+                    setTimeout(checkAndStart, 500);
+                  } else {
+                    console.error('[Custom MCQ Take] ❌ Camera stream not available after retries - starting WebRTC anyway (may fail)');
+                    // Start anyway - the service will handle the error
+                    startLiveProctoring(sessionId, ws);
+                  }
+                };
+                checkAndStart();
+              }
             }
           };
 

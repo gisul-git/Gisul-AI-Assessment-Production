@@ -6,6 +6,7 @@ import { KNOWN_EXTENSIONS } from "@/lib/extensionDatabase";
 import { EXTENSION_DETECTION_CONFIG, formatMessage } from "@/config/precheckConfig";
 import USBDeviceCheck from "@/components/precheck/USBDeviceCheck";
 import { getGateContext } from "@/lib/gateContext";
+import { modelService } from "@/universal-proctoring/services/ModelService";
 
 interface PrecheckStep {
   id: string;
@@ -104,6 +105,40 @@ export default function PrecheckPage() {
     
     setIsLoading(false);
   }, [assessmentId, token, router]);
+
+  // CRITICAL: Pre-load AI models in background during precheck
+  // This ensures models are ready by identity verification phase (no delay)
+  // Models will be cached in ModelService singleton and reused throughout the flow
+  useEffect(() => {
+    // Only load if candidate info is available (after first useEffect runs)
+    const storedEmail = sessionStorage.getItem("candidateEmail");
+    const storedName = sessionStorage.getItem("candidateName");
+    
+    if (!storedEmail || !storedName) {
+      return; // Wait for candidate info
+    }
+
+    // Check if models are already loaded
+    if (modelService.areAllModelsLoaded()) {
+      console.log("[Precheck] ✅ AI models already loaded - ready for identity verification");
+      return;
+    }
+
+    // Load models in background (non-blocking)
+    console.log("[Precheck] 🚀 Pre-loading AI models in background (BlazeFace + FaceMesh)...");
+    modelService.loadAllModels()
+      .then(({ blazeface, faceMesh }) => {
+        if (blazeface && faceMesh) {
+          console.log("[Precheck] ✅ AI models pre-loaded successfully - ready for identity verification and assessment");
+        } else {
+          console.warn("[Precheck] ⚠️ Some models failed to pre-load, will load on-demand");
+        }
+      })
+      .catch((error) => {
+        console.error("[Precheck] Error pre-loading models:", error);
+        // Non-critical - models will load on-demand if needed
+      });
+  }, []);
 
   // Step 1: Browser Compatibility Check
   const checkBrowser = useCallback((): boolean => {
