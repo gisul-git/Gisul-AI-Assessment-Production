@@ -1262,6 +1262,13 @@ export default function CustomMCQTakePage() {
                 }
               </span>
               <span style={{ color: "#4A9A6A", marginLeft: "1rem" }}>[{currentQuestion.section}]</span>
+              <span style={{ 
+                color: "#4A9A6A", 
+                marginLeft: "1rem",
+                fontWeight: 500
+              }}>
+                {currentQuestion.marks || 1} marks
+              </span>
               {mcqSubmitted && isMCQ && (
                 <span style={{ 
                   marginLeft: "1rem",
