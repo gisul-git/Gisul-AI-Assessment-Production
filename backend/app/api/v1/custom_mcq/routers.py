@@ -1204,6 +1204,17 @@ async def get_custom_mcq_assessment_for_taking(
                 exam_started = True  # Auto-start for flexible mode (no manual start button)
                 time_remaining = duration * 60 if duration else None  # Timer starts with full duration
         
+        # Normalize schedule structure before serialization
+        # Ensure candidateRequirements is always a dict, never None
+        if "schedule" in assessment:
+            schedule_data = assessment.get("schedule") or {}
+            if not isinstance(schedule_data, dict):
+                schedule_data = {}
+            # Ensure candidateRequirements exists and is a dict
+            if "candidateRequirements" not in schedule_data or schedule_data.get("candidateRequirements") is None:
+                schedule_data["candidateRequirements"] = {}
+            assessment["schedule"] = schedule_data
+        
         # Prepare candidate-facing assessment data
         assessment_serialized = serialize_document(assessment)
         if not assessment_serialized:
@@ -1212,6 +1223,15 @@ async def get_custom_mcq_assessment_for_taking(
         # Remove internal fields not needed for candidate
         assessment_serialized.pop("submissions", None)
         assessment_serialized.pop("assessmentToken", None)
+        
+        # Ensure schedule.candidateRequirements is properly set after serialization too
+        if "schedule" in assessment_serialized:
+            schedule_serialized = assessment_serialized.get("schedule") or {}
+            if not isinstance(schedule_serialized, dict):
+                schedule_serialized = {}
+            if "candidateRequirements" not in schedule_serialized or schedule_serialized.get("candidateRequirements") is None:
+                schedule_serialized["candidateRequirements"] = {}
+            assessment_serialized["schedule"] = schedule_serialized
         
         # Add access control information
         assessment_serialized["accessControl"] = {
@@ -1348,10 +1368,13 @@ async def submit_custom_mcq_assessment(
                     logger.info(f"Adding subjective submission: questionId={submission.questionId}, marks={question_marks}, answer_length={len(submission.textAnswer)}")
                     subjective_submissions.append({
                         "questionId": submission.questionId,
-                        "question": question.get("question", ""),
+                        "question": question.get("question", "") or question.get("questionText", ""),
                         "answer": submission.textAnswer,
                         "max_marks": question_marks,
                         "section": question.get("section", ""),
+                        "rubric": question.get("rubric"),  # Include rubric if available
+                        "answer_key": question.get("answerKey") or question.get("answer_key"),  # Include answer key if available
+                        "difficulty": question.get("difficulty", "Medium"),  # Include difficulty if available
                     })
                 else:
                     logger.warning(f"Question {submission.questionId} is subjective but has no textAnswer provided")
@@ -1440,15 +1463,35 @@ async def submit_custom_mcq_assessment(
                     
                     logger.info(f"Question {question_id}: scored {score}/{max_marks}")
 
-                    graded_submissions.append({
+                    # Handle enhanced evaluation response structure
+                    feedback_text = result.get("feedback", "")
+                    if isinstance(feedback_text, dict):
+                        feedback_text = feedback_text.get("summary", "")
+                    
+                    graded_submission = {
                         "questionId": question_id,
                         "questionType": "subjective",
                         "textAnswer": submission_item.get("answer", ""),
                         "marksAwarded": round(score, 2),
                         "maxMarks": max_marks,
-                        "feedback": result.get("feedback", ""),
+                        "feedback": feedback_text,
                         "reasoning": result.get("reasoning", ""),
-                    })
+                    }
+                    
+                    # Add enhanced evaluation fields if available
+                    if "criteria_scores" in result:
+                        graded_submission["criteriaScores"] = result["criteria_scores"]
+                    if "completeness_check" in result:
+                        graded_submission["completenessCheck"] = result["completeness_check"]
+                    if "detailed_feedback" in result:
+                        graded_submission["detailedFeedback"] = result["detailed_feedback"]
+                    if "flags" in result:
+                        graded_submission["evaluationFlags"] = result["flags"]
+                        # Log if human review is needed
+                        if result["flags"].get("requires_human_review", False):
+                            logger.warning(f"Question {question_id} flagged for human review")
+                    
+                    graded_submissions.append(graded_submission)
                 grading_status = "completed"
             except Exception as e:
                 logger.exception(f"Error during AI grading: {e}")
