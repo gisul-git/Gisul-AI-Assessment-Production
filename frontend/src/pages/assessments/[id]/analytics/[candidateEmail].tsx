@@ -144,15 +144,67 @@ export default function CandidateAnalyticsPage() {
         // Fetch proctor logs
         setLoadingProctorLogs(true)
         try {
-          const response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(candidateEmail)}`)
-          const data = await response.json()
+          // Try multiple userId formats to match how proctoring logs might be stored
+          // Format 1: email:userEmail (Priority 3 in resolveUserIdForProctoring)
+          const emailUserId = `email:${candidateEmail.trim()}`;
+          console.log('[Analytics] Fetching proctor logs with userId (email format):', emailUserId)
           
-          if (data.success && data.data) {
-            setProctorLogs(data.data.logs || [])
+          let response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(emailUserId)}`)
+          let data = await response.json()
+          
+          // If no logs found with email format, try querying all logs for the assessment
+          // and filter by candidate email (handles public:token format)
+          if (!data.success || !data.data || !data.data.logs || data.data.logs.length === 0) {
+            console.log('[Analytics] No logs found with email format, trying all logs for assessment...')
+            
+            // Query all logs for the assessment (userId: "*")
+            response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=*`)
+            data = await response.json()
+            
+            if (data.success && data.data && data.data.logs) {
+              // Filter logs by candidate email - check metadata.candidateEmail (primary) or userId format (fallback)
+              const emailLower = candidateEmail.trim().toLowerCase();
+              const filteredLogs = data.data.logs.filter((log: any) => {
+                // Primary: Check if metadata contains candidate email (works for all userId formats)
+                if (log.metadata && log.metadata.candidateEmail) {
+                  const logEmail = String(log.metadata.candidateEmail).trim().toLowerCase();
+                  if (logEmail === emailLower) {
+                    return true;
+                  }
+                }
+                // Fallback: Check if userId contains email (for email: format)
+                if (log.userId && log.userId.startsWith('email:')) {
+                  const userIdEmail = log.userId.replace('email:', '').trim().toLowerCase();
+                  if (userIdEmail === emailLower) {
+                    return true;
+                  }
+                }
+                return false;
+              });
+              
+              if (filteredLogs.length > 0) {
+                console.log(`[Analytics] Found ${filteredLogs.length} logs after filtering by email (from metadata or userId)`)
+                setProctorLogs(filteredLogs)
+                setEventTypeLabels(data.data.eventTypeLabels || {})
+              } else {
+                // No logs matched - candidate might not have any violations yet
+                console.log('[Analytics] No logs found for this candidate')
+                setProctorLogs([])
+                setEventTypeLabels(data.data.eventTypeLabels || {})
+              }
+            } else {
+              setProctorLogs([])
+              setEventTypeLabels({})
+            }
+          } else {
+            // Found logs with email format
+            setProctorLogs(data.data.logs)
             setEventTypeLabels(data.data.eventTypeLabels || {})
           }
         } catch (error) {
           console.error('Error fetching proctor logs:', error)
+          setProctorLogs([])
+          setEventTypeLabels({})
         } finally {
           setLoadingProctorLogs(false)
         }

@@ -24,12 +24,28 @@ interface CandidateData {
   status: 'connecting' | 'connected' | 'failed' | 'disconnected'
 }
 
-export default function LiveProctoringDashboard() {
+interface LiveProctoringDashboardProps {
+  isOpen?: boolean
+  onClose?: () => void
+  assessmentId?: string
+  adminId?: string
+}
+
+export default function LiveProctoringDashboard({ 
+  isOpen = true, 
+  onClose,
+  assessmentId: propAssessmentId,
+  adminId: propAdminId 
+}: LiveProctoringDashboardProps = {}) {
   // Assessment candidates list (for mapping candidateId to name/email)
   const [assessmentCandidates, setAssessmentCandidates] = useState<any[]>([]);
   const router = useRouter()
   const { data: session } = useSession()
-  const { id: assessmentId } = router.query
+  const { id: routerAssessmentId } = router.query
+  
+  // Use prop assessmentId if provided, otherwise use router query
+  const assessmentId = propAssessmentId || (typeof routerAssessmentId === 'string' ? routerAssessmentId : undefined)
+  const adminId = propAdminId || session?.user?.email || session?.user?.id || 'admin'
 
   // Service instance
   const serviceRef = useRef<AdminLiveService | null>(null)
@@ -43,70 +59,6 @@ export default function LiveProctoringDashboard() {
 
   // Refs for video elements
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
-
-  // Fetch assessment candidates and initialize service
-  useEffect(() => {
-    if (!assessmentId || typeof assessmentId !== 'string' || !session?.user?.email) {
-      return;
-    }
-
-    // Fetch assessment candidates for mapping
-    axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`)
-      .then((res) => {
-        const candidates = res.data?.data?.assessment?.candidates || [];
-        setAssessmentCandidates(candidates);
-      })
-      .catch((err) => {
-        setAssessmentCandidates([]);
-      });
-
-    console.log('[Live Dashboard] Initializing AdminLiveService...')
-
-    const service = new AdminLiveService({
-      assessmentId,
-      adminId: session.user.email,
-      debugMode: true,
-    })
-
-    serviceRef.current = service
-
-    // Start monitoring
-    service.startMonitoring({
-      onStateChange: (state: Partial<AdminLiveState>) => {
-        console.log('[Live Dashboard] State changed:', state)
-
-        if (state.isMonitoring !== undefined) {
-          setIsMonitoring(state.isMonitoring)
-        }
-
-        if (state.isLoading !== undefined) {
-          setIsLoading(state.isLoading)
-        }
-
-        if (state.candidateStreams) {
-          updateCandidates(state.candidateStreams)
-        }
-      },
-      onCandidateConnected: (sessionId: string, candidateId: string) => {
-        console.log(`[Live Dashboard] ✅ Candidate connected: ${sessionId}`)
-      },
-      onCandidateDisconnected: (sessionId: string) => {
-        console.log(`[Live Dashboard] ⚠️ Candidate disconnected: ${sessionId}`)
-      },
-      onError: (error: string) => {
-        console.error(`[Live Dashboard] ❌ Error: ${error}`)
-        setError(error)
-      },
-    })
-
-    // Cleanup on unmount
-    return () => {
-      console.log('[Live Dashboard] Cleanup: stopping monitoring')
-      if (serviceRef.current) {
-        serviceRef.current.stopMonitoring()
-      }
-    }
-  }, [assessmentId, session?.user?.email])
 
   // Update candidates list from stream map
   const updateCandidates = useCallback((streamMap: Map<string, CandidateStreamInfo>) => {
@@ -142,10 +94,11 @@ export default function LiveProctoringDashboard() {
     // Deduplicate: pick best session per candidateId
     const dedupedCandidates: CandidateData[] = [];
     Object.entries(sessionsByCandidate).forEach(([candidateId, sessions]) => {
-      console.log(`[Live Dashboard] Deduplicating sessions for candidateId ${candidateId}`, {
-        sessionCount: sessions.length,
-        sessionIds: sessions.map(s => s.sessionId)
-      });
+      if (sessions.length === 0) return;
+      if (sessions.length === 1) {
+        dedupedCandidates.push(sessions[0]);
+        return;
+      }
 
       // Priority selection:
       // 1) Session that has active WebRTC tracks (webcam/screen)
@@ -214,7 +167,97 @@ export default function LiveProctoringDashboard() {
         }
       }
     });
-  }, [assessmentCandidates]);
+  }, [assessmentCandidates])
+
+  // Fetch assessment candidates and initialize service
+  useEffect(() => {
+    if (!assessmentId || typeof assessmentId !== 'string' || !adminId) {
+      return;
+    }
+
+    // Fetch assessment candidates for mapping
+    axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`)
+      .then((res) => {
+        const candidates = res.data?.data?.assessment?.candidates || [];
+        setAssessmentCandidates(candidates);
+      })
+      .catch((err) => {
+        setAssessmentCandidates([]);
+      });
+
+    console.log('[Live Dashboard] Initializing AdminLiveService...')
+
+    const service = new AdminLiveService({
+      assessmentId,
+      adminId: adminId,
+      debugMode: true,
+    })
+
+    serviceRef.current = service
+
+    // Cleanup on unmount
+    return () => {
+      console.log('[Live Dashboard] Cleanup: stopping monitoring')
+      if (serviceRef.current) {
+        serviceRef.current.stopMonitoring()
+      }
+    }
+  }, [assessmentId, adminId])
+
+  // Start/stop monitoring based on isOpen prop
+  useEffect(() => {
+    if (!serviceRef.current || !assessmentId || typeof assessmentId !== 'string') {
+      return;
+    }
+
+    const service = serviceRef.current;
+
+    if (isOpen) {
+      // Start monitoring when modal is opened
+      console.log('[Live Dashboard] Modal opened - starting monitoring...')
+      service.startMonitoring({
+        onStateChange: (state: Partial<AdminLiveState>) => {
+          console.log('[Live Dashboard] State changed:', state)
+
+          if (state.isMonitoring !== undefined) {
+            setIsMonitoring(state.isMonitoring)
+          }
+
+          if (state.isLoading !== undefined) {
+            setIsLoading(state.isLoading)
+          }
+
+          if (state.candidateStreams) {
+            updateCandidates(state.candidateStreams)
+          }
+        },
+        onCandidateConnected: (sessionId: string, candidateId: string) => {
+          console.log(`[Live Dashboard] ✅ Candidate connected: ${sessionId}`)
+        },
+        onCandidateDisconnected: (sessionId: string) => {
+          console.log(`[Live Dashboard] ⚠️ Candidate disconnected: ${sessionId}`)
+        },
+        onError: (error: string) => {
+          console.error(`[Live Dashboard] ❌ Error: ${error}`)
+          setError(error)
+        },
+      })
+    } else {
+      // Stop monitoring when modal is closed
+      console.log('[Live Dashboard] Modal closed - stopping monitoring...')
+      service.stopMonitoring()
+      setIsMonitoring(false)
+      setCandidates([])
+    }
+
+    // Cleanup: stop monitoring when component unmounts or isOpen becomes false
+    return () => {
+      if (!isOpen && serviceRef.current) {
+        console.log('[Live Dashboard] Cleanup: stopping monitoring')
+        serviceRef.current.stopMonitoring()
+      }
+    }
+  }, [isOpen, assessmentId, updateCandidates]) // Re-run when isOpen or assessmentId changes
 
   // Refresh specific candidate connection
   const refreshCandidate = useCallback((sessionId: string) => {
@@ -336,12 +379,22 @@ export default function LiveProctoringDashboard() {
       <div className="bg-white border-b border-gray-200 p-4">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <Link
-              href={`/assessments/${assessmentId}/analytics`}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-            >
-              <ArrowLeft className="w-5 h-5" />
-            </Link>
+            {onClose ? (
+              <button
+                onClick={onClose}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                title="Close"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+            ) : (
+              <Link
+                href={`/assessments/${assessmentId}/analytics`}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </Link>
+            )}
             <div>
               <h1 className="text-xl font-semibold text-gray-900">Live Proctoring Dashboard</h1>
               <p className="text-sm text-gray-600">Assessment: {assessmentId}</p>
