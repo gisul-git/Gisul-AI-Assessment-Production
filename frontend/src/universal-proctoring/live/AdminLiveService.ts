@@ -382,12 +382,14 @@ export class AdminLiveService {
       (existingPc.connectionState === "connected" ||
         existingPc.connectionState === "connecting")
     ) {
-      this.log(`Already connected to ${sessionId}, skipping`);
+      this.log(`Already connected to ${sessionId}, skipping (fresh offer will be ignored)`);
       return;
     }
 
-    // Close existing if in bad state
+    // Close existing if in bad state (disconnected/failed/closed)
+    // This allows reconnection with fresh offer
     if (existingPc) {
+      this.log(`Closing existing connection in state: ${existingPc.connectionState}`);
       this.closePeerConnection(sessionId);
     }
 

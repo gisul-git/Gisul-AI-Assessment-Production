@@ -2579,6 +2579,7 @@ export default function CreateNewAssessmentPage() {
   // Simple AI proctoring toggle (controls camera-based proctoring on candidate side)
   const [proctoringSettings, setProctoringSettings] = useState({
     aiProctoringEnabled: false, // default OFF until explicitly enabled
+    faceMismatchEnabled: false, // default OFF until explicitly enabled
     liveProctoringEnabled: false, // default OFF until explicitly enabled
   });
 
@@ -10837,9 +10838,11 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                     type="checkbox"
                     checked={proctoringSettings.aiProctoringEnabled}
                     onChange={(e) => {
+                      const checked = e.target.checked;
                       setProctoringSettings((prev) => ({
                         ...prev,
-                        aiProctoringEnabled: e.target.checked,
+                        aiProctoringEnabled: checked,
+                        faceMismatchEnabled: checked ? prev.faceMismatchEnabled : false, // Disable face mismatch if AI Proctoring is disabled
                       }));
                     }}
                     style={{ 
@@ -10853,6 +10856,41 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                     away)
                   </span>
                 </label>
+
+                {/* Face Mismatch Detection Sub-checkbox (only visible when AI Proctoring is enabled) */}
+                {proctoringSettings.aiProctoringEnabled && (
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                      cursor: "pointer",
+                      fontSize: "0.875rem",
+                      color: "#1e293b",
+                      marginTop: "0.5rem",
+                      marginLeft: "2rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={proctoringSettings.faceMismatchEnabled}
+                      onChange={(e) => {
+                        setProctoringSettings((prev) => ({
+                          ...prev,
+                          faceMismatchEnabled: e.target.checked,
+                        }));
+                      }}
+                      style={{ 
+                        width: "18px", 
+                        height: "18px", 
+                        cursor: "pointer",
+                      }}
+                    />
+                    <span>
+                      Enable Face Mismatch Detection (detects if candidate's face changes during assessment)
+                    </span>
+                  </label>
+                )}
 
                 {/* Live Proctoring Checkbox */}
                 <label

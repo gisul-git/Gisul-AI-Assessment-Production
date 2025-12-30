@@ -63,13 +63,14 @@ type TabType =
   | "GAZE_AWAY"
   | "NO_FACE"
   | "MULTIPLE_FACE"
+  | "FACE_MISMATCH"
   | "SYSTEM_EVENTS";
 
 const TAB_CONFIG: Record<TabType, { label: string; icon: string; eventTypes: string[] }> = {
   VISUAL_EVIDENCE: {
     label: "📸 Visual Evidence",
     icon: "📸",
-    eventTypes: ["GAZE_AWAY", "NO_FACE_DETECTED", "MULTIPLE_FACES_DETECTED"],
+    eventTypes: ["GAZE_AWAY", "NO_FACE_DETECTED", "MULTIPLE_FACES_DETECTED", "FACE_MISMATCH"],
   },
   FULLSCREEN_EXIT: {
     label: "⛔ Fullscreen Violations",
@@ -100,6 +101,11 @@ const TAB_CONFIG: Record<TabType, { label: string; icon: string; eventTypes: str
     label: "❗ Multiple Faces",
     icon: "❗",
     eventTypes: ["MULTIPLE_FACES_DETECTED"],
+  },
+  FACE_MISMATCH: {
+    label: "🔒 Face Mismatch",
+    icon: "🔒",
+    eventTypes: ["FACE_MISMATCH"],
   },
   SYSTEM_EVENTS: {
     label: "ℹ System Events",
@@ -148,6 +154,7 @@ export const ProctorLogsReview: React.FC<ProctorLogsReviewProps> = ({ logs, cand
       GAZE_AWAY: 0,
       NO_FACE: 0,
       MULTIPLE_FACE: 0,
+      FACE_MISMATCH: 0,
       SYSTEM_EVENTS: 0,
     };
 

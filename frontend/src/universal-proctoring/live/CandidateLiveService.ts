@@ -174,10 +174,14 @@ export class CandidateLiveService {
         this.log("✅ WebSocket connected");
       }
 
-      // 5. Setup peer connection and send offer
+      // 5. Setup peer connection (offer will be sent when ADMIN_CONNECTED is received)
       this.log("Setting up peer connection...");
       await this.setupPeerConnection();
       this.log("✅ Peer connection ready");
+
+      // Note: Offer is NOT sent here automatically
+      // It will be sent when ADMIN_CONNECTED signal is received (handled in handleWebSocketMessage)
+      // This prevents duplicate offers and ensures proper signaling state
 
       // 6. Start heartbeat
       this.startHeartbeat();
@@ -321,6 +325,29 @@ export class CandidateLiveService {
       this.log(`WS message: ${msg.type}`);
 
       switch (msg.type) {
+        case "ADMIN_CONNECTED":
+          // Admin connected - send offer if not already sent
+          // This handles ADMIN_CONNECTED arriving after the service has replaced the WebSocket handler
+          this.log("✅ Admin connected - ensuring offer is sent");
+          if (!this.peerConnection) {
+            // No peer connection - setup and send offer
+            this.log("Setting up peer connection and sending offer...");
+            await this.setupPeerConnection();
+            await this.sendOffer();
+          } else if (this.peerConnection.signalingState === "have-local-offer") {
+            // Offer already sent, just log
+            this.log("Offer already sent, waiting for answer");
+          } else if (this.peerConnection.signalingState === "stable") {
+            // In stable state - send offer (normal case)
+            this.log("Peer connection ready - sending offer...");
+            await this.sendOffer();
+          } else {
+            // Other signaling state - log for debugging
+            this.log(`Peer connection in unexpected state: ${this.peerConnection.signalingState} - attempting to send offer`);
+            await this.sendOffer();
+          }
+          break;
+
         case "answer":
           await this.handleAnswer(msg.answer);
           break;
@@ -335,7 +362,35 @@ export class CandidateLiveService {
 
         case "request_offer":
           // Admin requesting new offer (reconnection)
-          this.log("Admin requested new offer");
+          this.log("Admin requested new offer - checking peer connection state...");
+          
+          // Check if peer connection needs to be recreated for reconnection
+          // This ensures clean state when admin reconnects
+          const needsRecreation = !this.peerConnection || 
+            this.peerConnection.connectionState === "disconnected" ||
+            this.peerConnection.connectionState === "failed" ||
+            this.peerConnection.connectionState === "closed" ||
+            this.peerConnection.signalingState === "have-local-offer"; // Waiting for old answer from previous admin
+          
+          if (needsRecreation) {
+            this.log(`Peer connection in bad state (connectionState: ${this.peerConnection?.connectionState}, signalingState: ${this.peerConnection?.signalingState}) - recreating for reconnection`);
+            // Close old peer connection (streams stay active - we maintain single stream)
+            if (this.peerConnection) {
+              try {
+                this.peerConnection.close();
+                this.log("Closed old peer connection");
+              } catch (e) {
+                this.log("Error closing old peer connection:", e);
+              }
+            }
+            // Recreate peer connection with same streams (maintains single stream: webcam + screen)
+            await this.setupPeerConnection();
+            this.log("✅ Peer connection recreated - ready for fresh offer");
+          } else {
+            this.log(`Peer connection in good state (connectionState: ${this.peerConnection.connectionState}, signalingState: ${this.peerConnection.signalingState}) - using existing`);
+          }
+          
+          // Send fresh offer (from new or existing peer connection)
           await this.sendOffer();
           break;
 
@@ -356,18 +411,36 @@ export class CandidateLiveService {
       return;
     }
 
-    if (this.peerConnection.signalingState !== "have-local-offer") {
+    // Handle answer - only accept if in have-local-offer state (normal case)
+    // If in stable state, it means offer wasn't sent yet - send offer first, then answer will be handled on next message
+    if (this.peerConnection.signalingState === "have-local-offer") {
+      // Normal case - proceed with answer
+      this.log("Setting remote description (answer)...");
+      await this.peerConnection.setRemoteDescription(
+        new RTCSessionDescription(answer)
+      );
+      this.log(`✅ Answer set - ICE state: ${this.peerConnection.iceConnectionState}, signaling: ${this.peerConnection.signalingState}`);
+    } else if (this.peerConnection.signalingState === "stable") {
+      // Edge case: Answer arrived but we're in stable state (offer not sent yet)
+      // This can happen if answer arrives before ADMIN_CONNECTED triggers offer sending
+      // Send offer first, then the answer will be queued or we'll get a new one
+      this.log(`⚠️ Answer received in stable state - offer not sent yet. Sending offer first...`);
+      await this.sendOffer();
+      // Try to set answer after sending offer (might work if timing is right)
+      try {
+        await this.peerConnection.setRemoteDescription(
+          new RTCSessionDescription(answer)
+        );
+        this.log(`✅ Answer set after sending offer`);
+      } catch (e) {
+        this.log(`⚠️ Could not set answer immediately - will be handled when answer arrives again`);
+      }
+    } else {
       this.log(
         `⚠️ Ignoring answer - wrong signaling state: ${this.peerConnection.signalingState}`
       );
       return;
     }
-
-    this.log("Setting remote description (answer)...");
-    await this.peerConnection.setRemoteDescription(
-      new RTCSessionDescription(answer)
-    );
-    this.log(`✅ Answer set - ICE state: ${this.peerConnection.iceConnectionState}, signaling: ${this.peerConnection.signalingState}`);
     this.log("✅ Connection establishing - ICE candidates will now be exchanged");
   }
 

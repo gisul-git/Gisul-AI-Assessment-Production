@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/router";
 import IdentityVerification from "@/proctoring/components/IdentityVerification";
 import { getGateContext } from "@/lib/gateContext";
+import axios from "axios";
 
 interface VerificationStep {
   id: string;
@@ -31,6 +32,70 @@ export default function IdentityVerificationPage() {
   const [isStarting, setIsStarting] = useState(false);
   const [timeUntilStart, setTimeUntilStart] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
+  const [aiProctoringEnabled, setAiProctoringEnabled] = useState<boolean>(false);
+  const [faceMismatchEnabled, setFaceMismatchEnabled] = useState<boolean>(false);
+  
+  // Fetch assessment data to get proctoring settings
+  useEffect(() => {
+    if (!router.isReady || !id || !token) return;
+
+    const fetchProctoringSettings = async () => {
+      try {
+        const response = await axios.get(
+          `/api/assessment/get-assessment-full?assessmentId=${id}&token=${token}`
+        );
+        
+        const assessment = response.data?.data || response.data?.assessment || response.data;
+        const proctoringSettings = assessment?.schedule?.proctoringSettings || assessment?.proctoringSettings;
+        const aiEnabled = proctoringSettings?.aiProctoringEnabled === true;
+        const faceMismatch = proctoringSettings?.faceMismatchEnabled === true;
+        
+        setAiProctoringEnabled(aiEnabled);
+        setFaceMismatchEnabled(faceMismatch);
+        console.log('[Identity Verification Page] ✅ Proctoring settings loaded:', {
+          aiProctoringEnabled: aiEnabled,
+          faceMismatchEnabled: faceMismatch,
+          hasProctoringSettings: !!proctoringSettings,
+          proctoringSettings,
+        });
+      } catch (error: any) {
+        console.error('[Identity Verification Page] ❌ Error fetching proctoring settings:', error);
+        console.error('[Identity Verification Page] Error details:', {
+          status: error?.response?.status,
+          message: error?.message,
+          url: error?.config?.url,
+        });
+        
+        // FIX: Try alternative API endpoint or check sessionStorage for assessment data
+        // If assessment was loaded in precheck, it might be in sessionStorage
+        try {
+          const storedAssessment = sessionStorage.getItem(`assessment_${id}`);
+          if (storedAssessment) {
+            const assessment = JSON.parse(storedAssessment);
+            const proctoringSettings = assessment?.schedule?.proctoringSettings || assessment?.proctoringSettings;
+            const aiEnabled = proctoringSettings?.aiProctoringEnabled === true;
+            const faceMismatch = proctoringSettings?.faceMismatchEnabled === true;
+            setAiProctoringEnabled(aiEnabled);
+            setFaceMismatchEnabled(faceMismatch);
+            console.log('[Identity Verification Page] ✅ Loaded proctoring settings from sessionStorage:', {
+              aiProctoringEnabled: aiEnabled,
+              faceMismatchEnabled: faceMismatch,
+            });
+            return;
+          }
+        } catch (e) {
+          console.warn('[Identity Verification Page] Could not load from sessionStorage:', e);
+        }
+        
+        // Default to false if fetch fails (safer default - no face verification without explicit enable)
+        console.warn('[Identity Verification Page] ⚠️ Defaulting to AI Proctoring disabled (API failed)');
+        setAiProctoringEnabled(false);
+        setFaceMismatchEnabled(false);
+      }
+    };
+
+    fetchProctoringSettings();
+  }, [router.isReady, id, token]);
   
   useEffect(() => {
     // Wait for router to be ready before accessing query params
@@ -697,6 +762,8 @@ export default function IdentityVerificationPage() {
                   token={token as string}
                   candidateEmail={email || ""}
                   skipBackendSave={false}
+                  aiProctoringEnabled={aiProctoringEnabled}
+                  faceMismatchEnabled={faceMismatchEnabled}
                   onCaptureComplete={handleCaptureComplete}
                   onError={handleCaptureError}
                 />

@@ -30,6 +30,9 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(
     (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled ?? false
   );
+  const [faceMismatchEnabled, setFaceMismatchEnabled] = useState(
+    (assessmentData as any)?.proctoringSettings?.faceMismatchEnabled ?? false
+  );
   const [showResultToCandidate, setShowResultToCandidate] = useState(
     (assessmentData as any)?.showResultToCandidate ?? true
   );
@@ -66,6 +69,7 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
       proctoringSettings: {
         aiProctoringEnabled,
+        faceMismatchEnabled: aiProctoringEnabled ? faceMismatchEnabled : false, // Only enabled if AI Proctoring is enabled
         liveProctoringEnabled,
       } as CustomMCQAssessment["proctoringSettings"],
       showResultToCandidate,
@@ -88,6 +92,7 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     accessTimeBeforeStart,
     passPercentage,
     aiProctoringEnabled,
+    faceMismatchEnabled,
     liveProctoringEnabled,
     showResultToCandidate,
     requireName,
@@ -389,7 +394,13 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
             <input
               type="checkbox"
               checked={aiProctoringEnabled}
-              onChange={(e) => setAiProctoringEnabled(e.target.checked)}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setAiProctoringEnabled(checked);
+                if (!checked) {
+                  setFaceMismatchEnabled(false); // Disable face mismatch if AI Proctoring is disabled
+                }
+              }}
               style={{ marginTop: "0.25rem" }}
             />
             <span>
@@ -401,6 +412,26 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
               </div>
             </span>
           </label>
+
+          {/* Face Mismatch Detection Sub-checkbox (only visible when AI Proctoring is enabled) */}
+          {aiProctoringEnabled && (
+            <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer", marginTop: "0.75rem", marginLeft: "2rem" }}>
+              <input
+                type="checkbox"
+                checked={faceMismatchEnabled}
+                onChange={(e) => setFaceMismatchEnabled(e.target.checked)}
+                style={{ marginTop: "0.25rem" }}
+              />
+              <span>
+                <div style={{ fontWeight: 600, color: "#1E5A3B" }}>
+                  Enable Face Mismatch Detection
+                </div>
+                <div style={{ fontSize: "0.875rem", color: "#2D7A52", marginTop: "0.25rem" }}>
+                  Detects if the candidate's face changes during the assessment (requires reference photo during identity verification).
+                </div>
+              </span>
+            </label>
+          )}
 
           {/* Live Proctoring Checkbox */}
           <label style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer", marginTop: "1rem" }}>

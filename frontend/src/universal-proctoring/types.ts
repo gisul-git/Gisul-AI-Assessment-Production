@@ -8,6 +8,7 @@
  */
 export interface ProctoringSettings {
   aiProctoringEnabled: boolean;
+  faceMismatchEnabled?: boolean; // Sub-option: Only visible when aiProctoringEnabled is true
   liveProctoringEnabled: boolean;
 }
 
@@ -19,6 +20,7 @@ export type ProctoringEventType =
   | "NO_FACE_DETECTED"
   | "MULTIPLE_FACES_DETECTED"
   | "GAZE_AWAY"
+  | "FACE_MISMATCH"
   // Tab Switch Events
   | "TAB_SWITCH"
   | "FOCUS_LOST"
