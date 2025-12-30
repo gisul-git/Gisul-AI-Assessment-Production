@@ -945,7 +945,7 @@ export default function IdentityVerification({
 
       // AI Proctoring enabled: Extract and validate face embedding for face verification
       let embeddingExtracted = false;
-      let embedding: Float32Array | null = null;
+      let embedding: Float32Array | number[] | null = null;
       let qualityValidation: { isValid: boolean; errors: string[]; warnings: string[] } = { isValid: false, errors: [], warnings: [] };
       
       try {
@@ -1050,10 +1050,11 @@ export default function IdentityVerification({
                 faceSizeRatio = faceArea / imageArea;
                 
                 const landmarks = face.landmarks;
-                if (landmarks && landmarks.length >= 2) {
+                // Type guard: check if landmarks is an array (not Tensor2D)
+                if (landmarks && Array.isArray(landmarks) && landmarks.length >= 2) {
                   const rightEye = landmarks[0];
                   const leftEye = landmarks[1];
-                  if (rightEye && leftEye && rightEye.length >= 2 && leftEye.length >= 2) {
+                  if (rightEye && leftEye && Array.isArray(rightEye) && Array.isArray(leftEye) && rightEye.length >= 2 && leftEye.length >= 2) {
                     const eyeDx = leftEye[0] - rightEye[0];
                     const eyeDy = leftEye[1] - rightEye[1];
                     faceAngle = Math.abs(Math.atan2(eyeDy, eyeDx) * (180 / Math.PI));

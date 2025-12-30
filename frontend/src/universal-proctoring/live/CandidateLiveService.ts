@@ -387,7 +387,13 @@ export class CandidateLiveService {
             await this.setupPeerConnection();
             this.log("✅ Peer connection recreated - ready for fresh offer");
           } else {
-            this.log(`Peer connection in good state (connectionState: ${this.peerConnection.connectionState}, signalingState: ${this.peerConnection.signalingState}) - using existing`);
+            // In else branch, peerConnection exists (needsRecreation was false)
+            if (this.peerConnection) {
+              this.log(`Peer connection in good state (connectionState: ${this.peerConnection.connectionState}, signalingState: ${this.peerConnection.signalingState}) - using existing`);
+            } else {
+              this.log("Peer connection is null - recreating");
+              await this.setupPeerConnection();
+            }
           }
           
           // Send fresh offer (from new or existing peer connection)
