@@ -23,6 +23,7 @@ import {
   debugLog,
   getTimestamp,
 } from "../utils";
+import { FaceVerificationService, type FaceEmbedding } from "./FaceVerificationService";
 
 // ============================================================================
 // Constants - Preserved from useFaceMesh.ts
@@ -48,16 +49,28 @@ const PITCH_THRESHOLD = 20;
 const LOOKING_DOWN_THRESHOLD = 25;
 
 // Gaze-away timing (milliseconds) - INCIDENT-BASED
-const GAZE_AWAY_TRIGGER_DURATION = 1500;  // 1.5 seconds to trigger
-const GAZE_AWAY_COOLDOWN = 3000;           // 5 seconds cooldown
+const GAZE_AWAY_TRIGGER_DURATION = 1000;  // 1.5 seconds to trigger
+const GAZE_AWAY_COOLDOWN = 2000;           // 5 seconds cooldown
 
 // No-face timing (milliseconds) - INCIDENT-BASED
 const NO_FACE_TRIGGER_DURATION = 1000;     // 2 seconds to trigger
-const NO_FACE_COOLDOWN = 4000;             // 6 seconds cooldown
+const NO_FACE_COOLDOWN = 2000;             // 6 seconds cooldown
 
 // Multiple-face timing (milliseconds) - INCIDENT-BASED
 const MULTIPLE_FACE_TRIGGER_DURATION = 1000; // 1 second to trigger
-const MULTIPLE_FACE_COOLDOWN = 3000;         // 6 seconds cooldown
+const MULTIPLE_FACE_COOLDOWN = 2000;         // 6 seconds cooldown
+
+// Face verification timing (milliseconds) - INCIDENT-BASED
+const FACE_VERIFICATION_CHECK_INTERVAL = 3000; // Check every 3 seconds (faster detection)
+const FACE_VERIFICATION_TRIGGER_DURATION = 0; // 0 seconds - trigger immediately when mismatch detected
+const FACE_VERIFICATION_COOLDOWN = 20000; // 20 seconds cooldown (increased for stability)
+const FACE_VERIFICATION_SIMILARITY_THRESHOLD = 0.88; // Minimum similarity (0-1) - Balanced threshold
+const FACE_VERIFICATION_CONSECUTIVE_REQUIRED = 3; // Require 3 consecutive mismatches before triggering (reduced false positives)
+const FACE_VERIFICATION_HIGH_SIMILARITY_THRESHOLD = 0.95; // If similarity > 0.95, likely same person (very high confidence)
+const FACE_VERIFICATION_MIN_CONFIDENCE = 0.8; // Minimum confidence (0-1) to trigger violation
+const FACE_VERIFICATION_BASELINE_DURATION = 60000; // 60 seconds to establish baseline
+const FACE_VERIFICATION_BASELINE_MIN_SAMPLES = 5; // Minimum samples needed for baseline
+const FACE_VERIFICATION_OUTLIER_STD_DEVIATIONS = 2.0; // Number of standard deviations for outlier detection
 
 // ============================================================================
 // Types
@@ -101,6 +114,8 @@ interface IncidentTracker {
   detectionStartTime: number | null;
   lastTriggerTime: number;
   snapshotData: string | null;
+  consecutiveMismatches?: number; // Track consecutive mismatch detections for debouncing
+  lastSimilarity?: number; // Track last similarity score
 }
 
 // ============================================================================
@@ -151,6 +166,21 @@ export class AIProctoringService {
   // Model refs
   private blazefaceModel: any = null;
   private faceMesh: any = null;
+  private faceVerificationService: FaceVerificationService | null = null;
+
+  // Face verification temporal consistency (average over multiple frames)
+  private similarityHistory: number[] = []; // Store last N similarity scores
+  private readonly SIMILARITY_HISTORY_SIZE = 7; // Average over last 7 checks (~35 seconds) - improved stability
+  
+  // Statistical baseline tracking for adaptive threshold
+  private baselineSimilarities: number[] = []; // Store similarity scores during baseline period
+  private baselineMean: number | null = null; // Mean similarity during baseline
+  private baselineStdDev: number | null = null; // Standard deviation during baseline
+  private baselineEstablished: boolean = false; // Whether baseline is established
+  private baselineStartTime: number = 0; // When baseline tracking started
+  
+  // Confidence tracking
+  private lastVerificationConfidence: number = 0; // Confidence of last verification check
 
   // Media refs
   private stream: MediaStream | null = null;
@@ -196,6 +226,19 @@ export class AIProctoringService {
     snapshotData: null,
   };
 
+  private faceMismatchIncident: IncidentTracker = {
+    state: 'idle',
+    detectionStartTime: null,
+    lastTriggerTime: 0,
+    snapshotData: null,
+    consecutiveMismatches: 0,
+    lastSimilarity: 1.0,
+  };
+
+  // Face verification refs
+  private referenceEmbedding: FaceEmbedding | null = null;
+  private lastVerificationCheck = 0;
+
   // State
   private state: AIProctoringState = {
     isCameraOn: false,
@@ -229,12 +272,34 @@ export class AIProctoringService {
       // Try to get cached models first (fast - no loading)
       let blazefaceModel = modelService.getBlazeFace();
       let faceMesh = modelService.getFaceMesh();
+      let faceRecognitionModel = modelService.getFaceRecognition();
       
       if (blazefaceModel && faceMesh) {
         // Both models already loaded - reuse immediately
         debugLog("[AIProctoringService] ✅ Reusing pre-loaded models from ModelService");
         this.blazefaceModel = blazefaceModel;
         this.faceMesh = faceMesh;
+        
+        // CRITICAL FIX: Initialize Face Verification Service even when models are cached
+        if (faceRecognitionModel) {
+          console.log("[AIProctoringService] 🚀 Initializing Face Verification Service (cached model)...");
+          this.faceVerificationService = new FaceVerificationService({
+            similarityThreshold: FACE_VERIFICATION_SIMILARITY_THRESHOLD,
+            checkInterval: FACE_VERIFICATION_CHECK_INTERVAL,
+            violationDuration: FACE_VERIFICATION_TRIGGER_DURATION,
+          });
+          const initialized = await this.faceVerificationService.initialize(faceRecognitionModel);
+          if (initialized) {
+            console.log("[AIProctoringService] ✅ Face Verification Service initialized successfully (cached)");
+            debugLog("[AIProctoringService] ✅ Face Verification Service initialized (cached)");
+          } else {
+            console.error("[AIProctoringService] ❌ Face Verification Service initialization failed (cached)");
+            this.faceVerificationService = null;
+          }
+        } else {
+          console.warn('[AIProctoringService] ⚠️ Face Recognition model not available (cached), face verification disabled');
+        }
+        
         this.updateState({ isModelLoaded: true });
         debugLog("AIProctoringService: Models ready (reused from ModelService)");
         return true;
@@ -259,6 +324,26 @@ export class AIProctoringService {
       } else {
         console.warn('[AIProctoringService] FaceMesh failed to load, gaze detection disabled');
         // Continue without FaceMesh - BlazeFace is still available for face counting
+      }
+
+      // Initialize Face Verification Service if face recognition model is available
+      if (models.faceRecognition) {
+        console.log("[AIProctoringService] 🚀 Initializing Face Verification Service...");
+        this.faceVerificationService = new FaceVerificationService({
+          similarityThreshold: FACE_VERIFICATION_SIMILARITY_THRESHOLD,
+          checkInterval: FACE_VERIFICATION_CHECK_INTERVAL,
+          violationDuration: FACE_VERIFICATION_TRIGGER_DURATION,
+        });
+        const initialized = await this.faceVerificationService.initialize(models.faceRecognition);
+        if (initialized) {
+          console.log("[AIProctoringService] ✅ Face Verification Service initialized successfully");
+          debugLog("[AIProctoringService] ✅ Face Verification Service initialized");
+        } else {
+          console.error("[AIProctoringService] ❌ Face Verification Service initialization failed");
+          this.faceVerificationService = null;
+        }
+      } else {
+        console.warn('[AIProctoringService] ⚠️ Face Recognition model not available, face verification disabled');
       }
 
       this.updateState({ isModelLoaded: true });
@@ -344,6 +429,7 @@ export class AIProctoringService {
           // Check if models are already loaded in ModelService (fast check, no loading)
           let cachedBlazeface = modelService.getBlazeFace();
           let cachedFaceMesh = modelService.getFaceMesh();
+          let cachedFaceRecognition = modelService.getFaceRecognition();
           
           // If models are still loading, wait a bit (max 500ms) for them to finish
           // This handles race conditions where precheck started loading but hasn't finished
@@ -357,6 +443,7 @@ export class AIProctoringService {
                 await new Promise(resolve => setTimeout(resolve, 50)); // Check every 50ms
                 cachedBlazeface = modelService.getBlazeFace();
                 cachedFaceMesh = modelService.getFaceMesh();
+                cachedFaceRecognition = modelService.getFaceRecognition(); // Also check face recognition
               }
             }
           }
@@ -366,6 +453,27 @@ export class AIProctoringService {
             debugLog("AIProctoringService: ✅ Models already loaded in ModelService - assigning instantly");
             this.blazefaceModel = cachedBlazeface;
             this.faceMesh = cachedFaceMesh;
+            
+            // CRITICAL FIX: Initialize Face Verification Service even when models are cached in start()
+            if (cachedFaceRecognition && !this.faceVerificationService) {
+              console.log("[AIProctoringService] 🚀 Initializing Face Verification Service (cached model in start())...");
+              this.faceVerificationService = new FaceVerificationService({
+                similarityThreshold: FACE_VERIFICATION_SIMILARITY_THRESHOLD,
+                checkInterval: FACE_VERIFICATION_CHECK_INTERVAL,
+                violationDuration: FACE_VERIFICATION_TRIGGER_DURATION,
+              });
+              const initialized = await this.faceVerificationService.initialize(cachedFaceRecognition);
+              if (initialized) {
+                console.log("[AIProctoringService] ✅ Face Verification Service initialized successfully (cached in start())");
+                debugLog("[AIProctoringService] ✅ Face Verification Service initialized (cached in start())");
+              } else {
+                console.error("[AIProctoringService] ❌ Face Verification Service initialization failed (cached in start())");
+                this.faceVerificationService = null;
+              }
+            } else if (!cachedFaceRecognition) {
+              console.warn('[AIProctoringService] ⚠️ Face Recognition model not available (cached in start()), face verification disabled');
+            }
+            
             this.updateState({ isModelLoaded: true });
             debugLog("AIProctoringService: Models ready instantly (pre-loaded from precheck/identity verification)");
           } else {
@@ -389,6 +497,9 @@ export class AIProctoringService {
       } else {
         debugLog("AIProctoringService: ✅ Models already loaded (state indicates ready)");
       }
+
+      // Load reference embedding from sessionStorage (for face verification)
+      this.loadReferenceEmbedding();
 
       // Reset detection state
       this.resetDetectionState();
@@ -505,6 +616,7 @@ export class AIProctoringService {
     this.lastFaceCount = 0;
     this.faceCountStability = 0;
     this.stableFaceCount = 0;
+    this.lastVerificationCheck = Date.now(); // Initialize to current time to prevent excessive logging
 
     // Reset all incident trackers
     this.gazeAwayIncident = {
@@ -803,6 +915,43 @@ export class AIProctoringService {
 
     // ========== GAZE AWAY INCIDENT STATE MACHINE ==========
     this.handleGazeAwayIncident(isGazeAway);
+
+    // ========== FACE VERIFICATION (periodic check every 5 seconds) ==========
+    const now = Date.now();
+    const timeSinceLastCheck = now - this.lastVerificationCheck;
+    const shouldCheck = (now - this.lastVerificationCheck) >= FACE_VERIFICATION_CHECK_INTERVAL;
+    
+    // Debug logging for check conditions (only when actually checking or every 60 frames if no embedding)
+    if (shouldCheck && this.referenceEmbedding) {
+      // Log when we're actually about to check
+      console.log("[AIProctoringService] 🔍 Face Verification check conditions:", {
+        serviceReady: this.faceVerificationService?.isReady() || false,
+        hasReferenceEmbedding: !!this.referenceEmbedding,
+        faceCount: newStableFaceCount,
+        timeSinceLastCheck: `${(timeSinceLastCheck / 1000).toFixed(1)}s`,
+        shouldCheck,
+        checkInterval: `${FACE_VERIFICATION_CHECK_INTERVAL / 1000}s`,
+      });
+    } else if (!this.referenceEmbedding && this.frameCount % 300 === 0) {
+      // Log every ~25 seconds (300 frames at 12 FPS) if no embedding exists (to reduce spam)
+      console.log("[AIProctoringService] ⚠️ Face verification disabled: no reference embedding found in sessionStorage");
+    }
+    
+    if (this.faceVerificationService?.isReady() && 
+        this.referenceEmbedding && 
+        newStableFaceCount === 1 && // Only check if exactly one face detected
+        shouldCheck) {
+      console.log("[AIProctoringService] ✅ All conditions met - running face verification check...");
+      this.lastVerificationCheck = now;
+      this.checkFaceVerification();
+    } else if (shouldCheck) {
+      // Log why check is being skipped
+      const reasons = [];
+      if (!this.faceVerificationService?.isReady()) reasons.push("service not ready");
+      if (!this.referenceEmbedding) reasons.push("no reference embedding");
+      if (newStableFaceCount !== 1) reasons.push(`face count is ${newStableFaceCount} (need 1)`);
+      console.log("[AIProctoringService] ⏭️ Skipping face verification check:", reasons.join(", "));
+    }
   }
 
   // ============================================================================
@@ -1006,6 +1155,464 @@ export class AIProctoringService {
   }
 
   // ============================================================================
+  // Private Methods - Face Verification
+  // ============================================================================
+
+  /**
+   * Load reference embedding from sessionStorage
+   */
+  private loadReferenceEmbedding(): void {
+    try {
+      console.log("[AIProctoringService] 🔍 Loading reference embedding from sessionStorage...");
+      const stored = sessionStorage.getItem('faceVerificationReferenceEmbedding');
+      if (stored) {
+        const embeddingArray = JSON.parse(stored);
+        
+        // CRITICAL FIX: Convert plain array to Float32Array for consistency
+        // face-api.js returns Float32Array, so we should maintain that type
+        if (Array.isArray(embeddingArray)) {
+          this.referenceEmbedding = new Float32Array(embeddingArray);
+          console.log("[AIProctoringService] ✅ Reference embedding loaded and converted to Float32Array:", {
+            dimensions: this.referenceEmbedding.length,
+            type: 'Float32Array',
+            sampleValues: Array.from(this.referenceEmbedding.slice(0, 5)),
+          });
+        } else if (embeddingArray instanceof Float32Array) {
+          // Already Float32Array (shouldn't happen from JSON.parse, but handle it)
+          this.referenceEmbedding = embeddingArray;
+          console.log("[AIProctoringService] ✅ Reference embedding loaded (already Float32Array):", {
+            dimensions: this.referenceEmbedding.length,
+            type: 'Float32Array',
+            sampleValues: Array.from(this.referenceEmbedding.slice(0, 5)),
+          });
+        } else {
+          console.error("[AIProctoringService] ❌ Invalid embedding format in sessionStorage:", typeof embeddingArray);
+          this.referenceEmbedding = null;
+          return;
+        }
+        
+        // Load reference photo quality metrics if available (for confidence scoring)
+        const qualityMetricsStr = sessionStorage.getItem('faceVerificationReferenceQuality');
+        if (qualityMetricsStr) {
+          try {
+            const qualityMetrics = JSON.parse(qualityMetricsStr);
+            console.log("[AIProctoringService] ✅ Reference photo quality metrics loaded:", qualityMetrics);
+            // Store in a property for later use in confidence calculation
+            (this as any).referenceQualityMetrics = qualityMetrics;
+          } catch (e) {
+            console.warn("[AIProctoringService] ⚠️ Could not parse reference quality metrics:", e);
+          }
+        }
+        
+        // Initialize baseline tracking
+        this.baselineStartTime = Date.now();
+        this.baselineSimilarities = [];
+        this.baselineEstablished = false;
+        console.log("[AIProctoringService] 📊 Baseline tracking initialized (will establish over next 60 seconds)");
+        
+        debugLog("[AIProctoringService] ✅ Reference embedding loaded from sessionStorage");
+      } else {
+        console.warn("[AIProctoringService] ⚠️ No reference embedding found in sessionStorage - face verification disabled");
+        console.warn("[AIProctoringService] 💡 Reference embedding should be stored during identity verification phase");
+        console.warn("[AIProctoringService] 💡 Make sure identity verification completed successfully");
+        debugLog("[AIProctoringService] ⚠️ No reference embedding found in sessionStorage - face verification disabled");
+      }
+    } catch (error) {
+      console.error("[AIProctoringService] ❌ Error loading reference embedding:", error);
+      console.error("[AIProctoringService] Error details:", {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+      this.referenceEmbedding = null;
+    }
+  }
+
+  /**
+   * Check face verification by comparing current frame with reference
+   * Enhanced with quality filtering, confidence scoring, baseline tracking, and outlier detection
+   */
+  private async checkFaceVerification(): Promise<void> {
+    if (!this.faceVerificationService?.isReady() || !this.referenceEmbedding || !this.videoElement) {
+      console.warn("[AIProctoringService] ⚠️ Cannot run face verification check - missing prerequisites:", {
+        serviceReady: this.faceVerificationService?.isReady() || false,
+        hasReferenceEmbedding: !!this.referenceEmbedding,
+        hasVideoElement: !!this.videoElement,
+      });
+      return;
+    }
+
+    try {
+      console.log("[AIProctoringService] 🔍 Running face verification check...");
+      
+      // QUALITY-BASED FILTERING: Check current frame quality before processing
+      const frameQuality = await this.assessFrameQuality();
+      if (!frameQuality.isGood) {
+        console.log("[AIProctoringService] ⏭️ Frame quality too low - skipping verification:", frameQuality.reason);
+        return;
+      }
+      
+      // Extract embedding from current video frame
+      const currentEmbedding = await this.faceVerificationService.extractEmbedding(this.videoElement);
+      
+      if (!currentEmbedding) {
+        // No face detected in current frame - skip check
+        console.log("[AIProctoringService] ⏭️ No face detected in current frame - skipping verification");
+        return;
+      }
+
+      console.log("[AIProctoringService] ✅ Current frame embedding extracted");
+
+      // Quality check: Validate current embedding has sufficient variance
+      const currentEmbeddingArray = Array.isArray(currentEmbedding) ? currentEmbedding : Array.from(currentEmbedding);
+      const currentMean = currentEmbeddingArray.reduce((sum, val) => sum + val, 0) / currentEmbeddingArray.length;
+      const currentVariance = currentEmbeddingArray.reduce((sum, val) => sum + Math.pow(val - currentMean, 2), 0) / currentEmbeddingArray.length;
+      const currentStdDev = Math.sqrt(currentVariance);
+      
+      if (currentStdDev < 0.01) {
+        console.warn("[AIProctoringService] ⚠️ Current frame embedding has low variance - skipping comparison (face may be obscured)");
+        return;
+      }
+
+      // Quality check: Validate reference embedding has sufficient variance
+      const referenceEmbeddingArray = Array.isArray(this.referenceEmbedding) ? this.referenceEmbedding : Array.from(this.referenceEmbedding);
+      const referenceMean = referenceEmbeddingArray.reduce((sum, val) => sum + val, 0) / referenceEmbeddingArray.length;
+      const referenceVariance = referenceEmbeddingArray.reduce((sum, val) => sum + Math.pow(val - referenceMean, 2), 0) / referenceEmbeddingArray.length;
+      const referenceStdDev = Math.sqrt(referenceVariance);
+      
+      if (referenceStdDev < 0.01) {
+        console.error("[AIProctoringService] ❌ Reference embedding has low variance - invalid reference photo");
+        return;
+      }
+
+      // Compare with reference
+      const result = this.faceVerificationService.compareFaces(this.referenceEmbedding, currentEmbedding);
+      
+      // TEMPORAL CONSISTENCY: Add current similarity to history and average (weighted)
+      this.similarityHistory.push(result.similarity);
+      if (this.similarityHistory.length > this.SIMILARITY_HISTORY_SIZE) {
+        this.similarityHistory.shift(); // Keep only last N scores
+      }
+      
+      // Calculate weighted averaged similarity (recent frames weighted higher)
+      const weights = this.similarityHistory.map((_, idx) => {
+        const position = idx / this.similarityHistory.length; // 0 to 1
+        return 0.5 + 0.5 * position; // Weight from 0.5 to 1.0 (recent = higher weight)
+      });
+      const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+      const averagedSimilarity = this.similarityHistory.reduce((sum, val, idx) => sum + val * weights[idx], 0) / totalWeight;
+      
+      // STATISTICAL BASELINE TRACKING: Collect samples during first 60 seconds
+      const now = Date.now();
+      const timeSinceStart = now - this.baselineStartTime;
+      
+      if (timeSinceStart < FACE_VERIFICATION_BASELINE_DURATION && !this.baselineEstablished) {
+        this.baselineSimilarities.push(averagedSimilarity);
+        console.log("[AIProctoringService] 📊 Baseline tracking:", {
+          samples: this.baselineSimilarities.length,
+          timeRemaining: `${((FACE_VERIFICATION_BASELINE_DURATION - timeSinceStart) / 1000).toFixed(0)}s`,
+          currentSimilarity: averagedSimilarity.toFixed(3),
+        });
+        
+        // Establish baseline if we have enough samples
+        if (this.baselineSimilarities.length >= FACE_VERIFICATION_BASELINE_MIN_SAMPLES) {
+          const baselineMean = this.baselineSimilarities.reduce((sum, val) => sum + val, 0) / this.baselineSimilarities.length;
+          const baselineVariance = this.baselineSimilarities.reduce((sum, val) => sum + Math.pow(val - baselineMean, 2), 0) / this.baselineSimilarities.length;
+          this.baselineMean = baselineMean;
+          this.baselineStdDev = Math.sqrt(baselineVariance);
+          this.baselineEstablished = true;
+          console.log("[AIProctoringService] ✅ Baseline established:", {
+            mean: baselineMean.toFixed(3),
+            stdDev: this.baselineStdDev.toFixed(3),
+            samples: this.baselineSimilarities.length,
+          });
+        }
+      }
+      
+      // CONFIDENCE SCORING: Calculate confidence based on multiple factors
+      const confidence = this.calculateVerificationConfidence(
+        frameQuality,
+        currentStdDev,
+        referenceStdDev,
+        (this as any).referenceQualityMetrics
+      );
+      this.lastVerificationConfidence = confidence;
+      
+      // BASELINE-BASED OUTLIER DETECTION: Use baseline if established, otherwise use fixed threshold
+      let isMismatch = false;
+      let thresholdUsed = FACE_VERIFICATION_SIMILARITY_THRESHOLD;
+      
+      if (this.baselineEstablished && this.baselineMean !== null && this.baselineStdDev !== null) {
+        // Use outlier detection: similarity < (mean - 2 * stdDev)
+        const outlierThreshold = this.baselineMean - (FACE_VERIFICATION_OUTLIER_STD_DEVIATIONS * this.baselineStdDev);
+        thresholdUsed = Math.max(outlierThreshold, FACE_VERIFICATION_SIMILARITY_THRESHOLD * 0.8); // Don't go too low
+        isMismatch = averagedSimilarity < outlierThreshold && averagedSimilarity < FACE_VERIFICATION_SIMILARITY_THRESHOLD;
+        
+        console.log("[AIProctoringService] 📊 Using baseline-based detection:", {
+          baselineMean: this.baselineMean.toFixed(3),
+          baselineStdDev: this.baselineStdDev.toFixed(3),
+          outlierThreshold: outlierThreshold.toFixed(3),
+          currentSimilarity: averagedSimilarity.toFixed(3),
+          isOutlier: averagedSimilarity < outlierThreshold,
+        });
+      } else {
+        // Use fixed threshold with dynamic adjustment
+        const isHighSimilarity = averagedSimilarity >= FACE_VERIFICATION_HIGH_SIMILARITY_THRESHOLD;
+        const isLowSimilarity = averagedSimilarity < FACE_VERIFICATION_SIMILARITY_THRESHOLD;
+        
+        // Dynamic threshold adjustment based on embedding quality
+        const qualityFactor = Math.min(1.0, (currentStdDev + referenceStdDev) / 0.02); // Normalize to 0-1
+        const adjustedThreshold = FACE_VERIFICATION_SIMILARITY_THRESHOLD * (0.9 + 0.1 * qualityFactor); // Adjust by ±10%
+        thresholdUsed = adjustedThreshold;
+        
+        isMismatch = isLowSimilarity && !isHighSimilarity && averagedSimilarity < adjustedThreshold;
+      }
+      
+      // CONFIDENCE FILTER: Only trigger if confidence is high enough
+      if (isMismatch && confidence < FACE_VERIFICATION_MIN_CONFIDENCE) {
+        console.log("[AIProctoringService] ⏭️ Mismatch detected but confidence too low - skipping violation:", {
+          similarity: averagedSimilarity.toFixed(3),
+          confidence: confidence.toFixed(3),
+          minConfidence: FACE_VERIFICATION_MIN_CONFIDENCE,
+        });
+        isMismatch = false; // Don't trigger violation if confidence is low
+      }
+      
+      console.log("[AIProctoringService] 📊 Face verification result (enhanced):", {
+        currentSimilarity: result.similarity.toFixed(3),
+        averagedSimilarity: averagedSimilarity.toFixed(3),
+        historySize: this.similarityHistory.length,
+        threshold: thresholdUsed.toFixed(3),
+        confidence: confidence.toFixed(3),
+        baselineEstablished: this.baselineEstablished,
+        baselineMean: this.baselineMean?.toFixed(3) || "N/A",
+        baselineStdDev: this.baselineStdDev?.toFixed(3) || "N/A",
+        isMatch: result.isMatch,
+        isMismatch,
+        qualityFactor: frameQuality.score.toFixed(2),
+        currentEmbeddingVariance: currentStdDev.toFixed(4),
+        referenceEmbeddingVariance: referenceStdDev.toFixed(4),
+        verdict: isMismatch ? "❌ MISMATCH" : "✅ MATCH",
+      });
+      
+      // Handle mismatch incident with improved logic (use averaged similarity)
+      this.handleFaceMismatchIncident(isMismatch, averagedSimilarity);
+    } catch (error) {
+      console.error("[AIProctoringService] ❌ Face verification error:", error);
+    }
+  }
+  
+  /**
+   * Assess current frame quality (face size, clarity, angle, lighting)
+   * Returns quality score and reason if quality is poor
+   */
+  private async assessFrameQuality(): Promise<{ isGood: boolean; score: number; reason?: string }> {
+    if (!this.videoElement || !this.blazefaceModel) {
+      return { isGood: false, score: 0, reason: "Missing video element or model" };
+    }
+    
+    try {
+      const predictions = await this.blazefaceModel.estimateFaces(this.videoElement as any, false);
+      if (!predictions || predictions.length === 0) {
+        return { isGood: false, score: 0, reason: "No face detected" };
+      }
+      
+      const face = predictions[0];
+      const start = face.topLeft as [number, number];
+      const end = face.bottomRight as [number, number];
+      const width = end[0] - start[0];
+      const height = end[1] - start[1];
+      const faceArea = width * height;
+      const videoArea = this.videoElement.videoWidth * this.videoElement.videoHeight;
+      const faceSizeRatio = faceArea / videoArea;
+      
+      // Check face size (should be at least 5% of frame)
+      if (faceSizeRatio < 0.05) {
+        return { isGood: false, score: 0, reason: `Face too small (${(faceSizeRatio * 100).toFixed(1)}% - need >5%)` };
+      }
+      
+      // Check face angle
+      let faceAngle = 0;
+      const landmarks = face.landmarks;
+      if (landmarks && landmarks.length >= 2) {
+        const rightEye = landmarks[0];
+        const leftEye = landmarks[1];
+        if (rightEye && leftEye && rightEye.length >= 2 && leftEye.length >= 2) {
+          const eyeDx = leftEye[0] - rightEye[0];
+          const eyeDy = leftEye[1] - rightEye[1];
+          faceAngle = Math.abs(Math.atan2(eyeDy, eyeDx) * (180 / Math.PI));
+          if (faceAngle > 30) {
+            return { isGood: false, score: 0, reason: `Face angle too extreme (${faceAngle.toFixed(0)}° - need <30°)` };
+          }
+        }
+      }
+      
+      // Check detection confidence
+      const prob = typeof face.probability === 'number' ? face.probability : 
+                   Array.isArray(face.probability) ? face.probability[0] : 0.9;
+      if (prob < 0.7) {
+        return { isGood: false, score: 0, reason: `Detection confidence too low (${(prob * 100).toFixed(0)}% - need >70%)` };
+      }
+      
+      // Calculate quality score (0-1)
+      const sizeScore = Math.min(1, faceSizeRatio / 0.15); // Optimal size is 15% of frame
+      const angleScore = landmarks && landmarks.length >= 2 ? 1 - (faceAngle / 30) : 0.5;
+      const confidenceScore = prob;
+      const qualityScore = (sizeScore * 0.4) + (angleScore * 0.3) + (confidenceScore * 0.3);
+      
+      return { isGood: qualityScore >= 0.6, score: qualityScore };
+    } catch (error) {
+      console.error("[AIProctoringService] Error assessing frame quality:", error);
+      return { isGood: false, score: 0, reason: "Error assessing quality" };
+    }
+  }
+  
+  /**
+   * Calculate verification confidence based on multiple factors
+   */
+  private calculateVerificationConfidence(
+    frameQuality: { isGood: boolean; score: number },
+    currentStdDev: number,
+    referenceStdDev: number,
+    referenceQualityMetrics?: any
+  ): number {
+    let confidence = 1.0;
+    
+    // Factor 1: Current frame quality (40% weight)
+    confidence *= (0.6 + 0.4 * frameQuality.score);
+    
+    // Factor 2: Embedding variance (30% weight)
+    const varianceScore = Math.min(1, (currentStdDev + referenceStdDev) / 0.02);
+    confidence *= (0.7 + 0.3 * varianceScore);
+    
+    // Factor 3: Reference photo quality (if available) (30% weight)
+    if (referenceQualityMetrics) {
+      const refQualityScore = referenceQualityMetrics.overallScore || 0.8;
+      confidence *= (0.7 + 0.3 * refQualityScore);
+    }
+    
+    return Math.min(1, confidence);
+  }
+
+  /**
+   * Handle FACE_MISMATCH incident state machine with debouncing.
+   * State flow: IDLE → DETECTING → TRIGGERED → COOLDOWN → IDLE
+   * Requires consecutive mismatches to reduce false positives
+   */
+  private handleFaceMismatchIncident(isMismatch: boolean, similarity: number): void {
+    const now = Date.now();
+    const incident = this.faceMismatchIncident;
+    const previousState = incident.state;
+
+    // State: COOLDOWN
+    if (incident.state === 'cooldown') {
+      const cooldownElapsed = now - incident.lastTriggerTime;
+      if (cooldownElapsed >= FACE_VERIFICATION_COOLDOWN && !isMismatch) {
+        incident.state = 'idle';
+        incident.detectionStartTime = null;
+        incident.snapshotData = null;
+        incident.consecutiveMismatches = 0;
+        incident.lastSimilarity = 1.0;
+        // Reset similarity history on cooldown expiry
+        this.similarityHistory = [];
+        console.log("[AIProctoringService] ✅ Face mismatch cooldown expired, reset to idle");
+      } else {
+        console.log("[AIProctoringService] ⏸️ Face mismatch in cooldown:", {
+          cooldownElapsed: `${(cooldownElapsed / 1000).toFixed(1)}s`,
+          cooldownDuration: `${FACE_VERIFICATION_COOLDOWN / 1000}s`,
+          isMismatch,
+        });
+      }
+      return;
+    }
+
+    // State: IDLE
+    if (incident.state === 'idle' && isMismatch) {
+      // Start detecting - require consecutive mismatches
+      incident.state = 'detecting';
+      incident.detectionStartTime = now;
+      incident.consecutiveMismatches = 1;
+      incident.lastSimilarity = similarity;
+      console.log("[AIProctoringService] ⚠️ Face mismatch detected - starting tracking (1st detection):", {
+        similarity: similarity.toFixed(3),
+        threshold: FACE_VERIFICATION_SIMILARITY_THRESHOLD,
+        required: FACE_VERIFICATION_CONSECUTIVE_REQUIRED,
+      });
+      return;
+    }
+
+    // State: DETECTING
+    if (incident.state === 'detecting') {
+      if (!isMismatch) {
+        // Condition cleared - reset to idle
+        const detectionDuration = incident.detectionStartTime ? now - incident.detectionStartTime : 0;
+        incident.state = 'idle';
+        incident.detectionStartTime = null;
+        incident.consecutiveMismatches = 0;
+        incident.lastSimilarity = similarity;
+        // Reset similarity history when condition clears
+        this.similarityHistory = [];
+        console.log("[AIProctoringService] ✅ Face mismatch cleared - similarity returned to normal:", {
+          similarity: similarity.toFixed(3),
+          detectionDuration: `${(detectionDuration / 1000).toFixed(1)}s`,
+        });
+        return;
+      }
+
+      // Mismatch continues - increment counter
+      incident.consecutiveMismatches = (incident.consecutiveMismatches || 0) + 1;
+      incident.lastSimilarity = similarity;
+
+      // Check if we have enough consecutive mismatches
+      if (incident.consecutiveMismatches >= FACE_VERIFICATION_CONSECUTIVE_REQUIRED) {
+        // TRIGGER VIOLATION
+        incident.state = 'triggered';
+        incident.lastTriggerTime = now;
+        incident.snapshotData = this.captureSnapshot();
+
+        console.log("[AIProctoringService] 🚨 FACE_MISMATCH VIOLATION TRIGGERED!", {
+          similarity: similarity.toFixed(3),
+          threshold: FACE_VERIFICATION_SIMILARITY_THRESHOLD,
+          consecutiveMismatches: incident.consecutiveMismatches,
+          hasSnapshot: !!incident.snapshotData,
+        });
+
+        // Emit violation
+        this.emitViolation('FACE_MISMATCH', 'high', {
+          similarityScore: similarity,
+          threshold: FACE_VERIFICATION_SIMILARITY_THRESHOLD,
+          consecutiveDetections: incident.consecutiveMismatches,
+          duration: 0,
+        }, incident.snapshotData);
+
+        // Move to cooldown immediately
+        incident.state = 'cooldown';
+        incident.detectionStartTime = null;
+        incident.consecutiveMismatches = 0;
+        console.log("[AIProctoringService] ⏸️ Face mismatch violation emitted, entering cooldown");
+        return;
+      } else {
+        // Still detecting - waiting for more consecutive mismatches
+        console.log("[AIProctoringService] ⏳ Face mismatch still detected:", {
+          similarity: similarity.toFixed(3),
+          consecutiveMismatches: incident.consecutiveMismatches,
+          required: FACE_VERIFICATION_CONSECUTIVE_REQUIRED,
+        });
+      }
+    }
+    
+    // Log state transitions
+    if (previousState !== incident.state) {
+      console.log("[AIProctoringService] 🔄 Face mismatch state transition:", {
+        from: previousState,
+        to: incident.state,
+        isMismatch,
+        similarity: similarity.toFixed(3),
+        consecutiveMismatches: incident.consecutiveMismatches || 0,
+      });
+    }
+  }
+
+  // ============================================================================
   // Private Methods - Violation Emission
   // ============================================================================
 
@@ -1032,7 +1639,7 @@ export class AIProctoringService {
    * }
    */
   private emitViolation(
-    eventType: 'GAZE_AWAY' | 'NO_FACE_DETECTED' | 'MULTIPLE_FACES_DETECTED',
+    eventType: 'GAZE_AWAY' | 'NO_FACE_DETECTED' | 'MULTIPLE_FACES_DETECTED' | 'FACE_MISMATCH',
     severity: 'low' | 'medium' | 'high',
     details: Record<string, unknown>,
     snapshotBase64: string | null

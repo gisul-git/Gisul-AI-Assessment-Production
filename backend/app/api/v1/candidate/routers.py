@@ -343,27 +343,71 @@ async def get_assessment_full(
 ) -> Dict[str, Any]:
     """
     Get full assessment details including topics_v2, timer settings, and proctoring config.
+    Checks all assessment collections (assessments, custom_mcq_assessments, dsa_tests, aiml_tests).
     """
     try:
         assessment_id = to_object_id(assessmentId)
+        assessment = None
+        collection_name = None
+        
+        # 1. AI Assessments (assessments collection)
         assessment = await db.assessments.find_one({"_id": assessment_id})
+        if assessment:
+            collection_name = "assessments"
+        
+        # 2. Custom MCQ assessments
+        if not assessment:
+            assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_id})
+            if assessment:
+                collection_name = "custom_mcq_assessments"
+        
+        # 3. DSA tests (in same database, tests collection)
+        if not assessment:
+            assessment = await db.tests.find_one({"_id": assessment_id, "test_type": {"$in": ["dsa", None]}})
+            if assessment:
+                collection_name = "tests (dsa)"
+        
+        # 4. AIML tests
+        if not assessment:
+            assessment = await db.tests.find_one({"_id": assessment_id, "test_type": "aiml"})
+            if assessment:
+                collection_name = "tests (aiml)"
 
         if not assessment:
+            logger.warning(f"Assessment not found in any collection: {assessmentId}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Assessment not found"
             )
         
+        logger.info(f"Found assessment {assessmentId} in collection: {collection_name}")
+        
         # Serialize and return assessment
-        assessment_serialized = serialize_document(assessment)
+        try:
+            assessment_serialized = serialize_document(assessment)
+        except Exception as serialize_error:
+            logger.error(f"Error serializing assessment {assessmentId}: {serialize_error}")
+            logger.error(f"Assessment keys: {list(assessment.keys()) if assessment else 'None'}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to serialize assessment: {str(serialize_error)}"
+            )
         
         # Return the assessment directly in data (not nested in assessment key)
         return success_response("Assessment fetched successfully", assessment_serialized)
         
     except HTTPException:
         raise
+    except ValueError as ve:
+        # Invalid ObjectId format
+        logger.error(f"Invalid assessment ID format: {assessmentId}, error: {ve}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid assessment ID format: {str(ve)}"
+        )
     except Exception as e:
         logger.exception(f"Error getting assessment full: {e}")
+        logger.error(f"Assessment ID: {assessmentId}, Error type: {type(e).__name__}, Error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get assessment: {str(e)}"

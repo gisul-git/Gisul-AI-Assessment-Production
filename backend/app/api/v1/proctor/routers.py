@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Set
 from collections import defaultdict
 
@@ -848,7 +848,6 @@ async def websocket_admin(
         logger.info(f"[Live Proctoring] Admin connecting for assessment {assessment_id}, querying active sessions...")
         
         # IMPROVEMENT: Clean up old disconnected sessions (older than 1 hour)
-        from datetime import timedelta
         one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         cleanup_result = await db.live_proctor_sessions.delete_many({
             "assessmentId": assessment_id,
@@ -858,10 +857,12 @@ async def websocket_admin(
         if cleanup_result.deleted_count > 0:
             logger.info(f"[Live Proctoring] Cleaned up {cleanup_result.deleted_count} old disconnected sessions")
         
-        # LAZY WEBRTC: Send ADMIN_CONNECTED signal to all ready candidates
+        # LAZY WEBRTC: Send ADMIN_CONNECTED signal to all connected candidates waiting for admin
+        # FIX: Include all statuses (candidate_initiated, offer_sent, active) - not just candidate_initiated
+        # This ensures candidates get the signal even if they already sent an offer
         cursor_ready = db.live_proctor_sessions.find({
             "assessmentId": assessment_id,
-            "status": "candidate_initiated",  # Only candidates waiting for admin
+            "status": {"$in": ["candidate_initiated", "offer_sent", "active"]},  # All active statuses
             "wsConnected": True
         })
         admin_connected_count = 0
@@ -873,7 +874,7 @@ async def websocket_admin(
                     "message": "Admin has opened the dashboard. You can now start WebRTC."
                 })
                 admin_connected_count += 1
-                logger.info(f"[Live Proctoring] 🚀 Sent ADMIN_CONNECTED signal to candidate session {session_id}")
+                logger.info(f"[Live Proctoring] 🚀 Sent ADMIN_CONNECTED signal to candidate session {session_id} (status: {doc.get('status', 'unknown')})")
         
         if admin_connected_count > 0:
             logger.info(f"[Live Proctoring] ✅ Notified {admin_connected_count} ready candidates that admin connected")
@@ -954,24 +955,39 @@ async def websocket_admin(
                     offer = session.get("offer")
                     candidate_id = session.get("candidateId", "unknown")
                     is_candidate_connected = connection_manager.is_candidate_connected(session_id)
+                    updated_at_str = session.get("updatedAt")
                     
-                    # CRITICAL FIX: Request fresh offer when admin reconnects
-                    # This ensures reconnection works - candidate sends fresh offer for admin's new peer connection
-                    if is_candidate_connected:
-                        # Candidate is connected - request fresh offer for reconnection scenarios
-                        # This doesn't break first-time flow because:
-                        # - First time: candidate already sent offer, we return it immediately
-                        # - Reconnection: candidate sends fresh offer, admin can use it
+                    # FIX: Request fresh offer for reconnection scenarios
+                    # - If no offer exists: Request fresh offer
+                    # - If offer exists but is old (>30 seconds): Request fresh offer (reconnection scenario)
+                    # - If offer is fresh (<30 seconds): Use existing offer (first connection)
+                    should_request_fresh = False
+                    if not offer and is_candidate_connected:
+                        # No offer exists - request fresh
+                        should_request_fresh = True
+                    elif offer and is_candidate_connected and updated_at_str:
+                        # Check if offer is stale (older than 30 seconds) - indicates reconnection
+                        try:
+                            updated_at = datetime.fromisoformat(updated_at_str.replace('Z', '+00:00'))
+                            age_seconds = (datetime.now(timezone.utc) - updated_at).total_seconds()
+                            if age_seconds > 30:  # Offer is older than 30 seconds - likely stale for reconnection
+                                should_request_fresh = True
+                                logger.info(f"[Live Proctoring] Offer for {session_id} is {age_seconds:.1f}s old - requesting fresh offer for reconnection")
+                        except Exception as e:
+                            logger.warning(f"[Live Proctoring] Error checking offer age: {e}, requesting fresh offer as fallback")
+                            should_request_fresh = True
+                    
+                    if should_request_fresh:
                         try:
                             await connection_manager.send_to_candidate(session_id, {
                                 "type": "request_offer"
                             })
-                            logger.info(f"[Live Proctoring] Requested fresh offer from candidate {candidate_id} (session {session_id}) for admin reconnection")
+                            logger.info(f"[Live Proctoring] Requested fresh offer from candidate {candidate_id} (session {session_id})")
                         except Exception as e:
                             logger.warning(f"[Live Proctoring] Failed to request offer from candidate {session_id}: {e}")
                     
                     # Return existing offer if available (for immediate use)
-                    # If no offer exists, candidate will send one after receiving request_offer
+                    # Fresh offer will arrive later if requested
                     if offer:
                         await websocket.send_text(json.dumps({
                             "type": "session_data",

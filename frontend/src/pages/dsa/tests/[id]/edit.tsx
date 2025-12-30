@@ -35,6 +35,7 @@ interface DSATest {
   question_time_limits?: Record<string, number> | null; // Legacy field
   proctoringSettings?: {
     aiProctoringEnabled?: boolean;
+    faceMismatchEnabled?: boolean;
     liveProctoringEnabled?: boolean;
   } | null;
 }
@@ -56,6 +57,7 @@ export default function EditDSACompetencyPage() {
   // Proctoring settings
   const [proctoringSettings, setProctoringSettings] = useState({
     aiProctoringEnabled: false,
+    faceMismatchEnabled: false,
     liveProctoringEnabled: false,
   });
 
@@ -192,6 +194,7 @@ export default function EditDSACompetencyPage() {
     const proctoring = test.proctoringSettings || {};
     setProctoringSettings({
       aiProctoringEnabled: proctoring.aiProctoringEnabled === true,
+      faceMismatchEnabled: proctoring.faceMismatchEnabled === true,
       liveProctoringEnabled: proctoring.liveProctoringEnabled === true,
     });
   };
@@ -314,6 +317,7 @@ export default function EditDSACompetencyPage() {
       // Include proctoring settings in payload
       payload.proctoringSettings = {
         aiProctoringEnabled: proctoringSettings.aiProctoringEnabled,
+        faceMismatchEnabled: proctoringSettings.aiProctoringEnabled ? proctoringSettings.faceMismatchEnabled : false, // Only enabled if AI Proctoring is enabled
         liveProctoringEnabled: proctoringSettings.liveProctoringEnabled,
       };
 
@@ -659,6 +663,7 @@ export default function EditDSACompetencyPage() {
                   setProctoringSettings((prev) => ({
                     ...prev,
                     aiProctoringEnabled: checked,
+                    faceMismatchEnabled: checked ? prev.faceMismatchEnabled : false, // Disable face mismatch if AI Proctoring is disabled
                     // If Live Proctoring is enabled, AI Proctoring should also be enabled
                     liveProctoringEnabled: prev.liveProctoringEnabled && checked ? prev.liveProctoringEnabled : (prev.liveProctoringEnabled && !checked ? false : prev.liveProctoringEnabled),
                   }));
@@ -674,6 +679,41 @@ export default function EditDSACompetencyPage() {
                 away)
               </span>
             </label>
+
+            {/* Face Mismatch Detection Sub-checkbox (only visible when AI Proctoring is enabled) */}
+            {proctoringSettings.aiProctoringEnabled && (
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  cursor: "pointer",
+                  fontSize: "0.875rem",
+                  color: "#1e293b",
+                  marginTop: "0.5rem",
+                  marginLeft: "2rem",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={proctoringSettings.faceMismatchEnabled}
+                  onChange={(e) => {
+                    setProctoringSettings((prev) => ({
+                      ...prev,
+                      faceMismatchEnabled: e.target.checked,
+                    }));
+                  }}
+                  style={{ 
+                    width: "18px", 
+                    height: "18px", 
+                    cursor: "pointer",
+                  }}
+                />
+                <span>
+                  Enable Face Mismatch Detection (detects if candidate's face changes during assessment)
+                </span>
+              </label>
+            )}
 
             {/* Live Proctoring Checkbox */}
             <label

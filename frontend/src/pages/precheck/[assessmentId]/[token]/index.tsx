@@ -110,12 +110,9 @@ export default function PrecheckPage() {
   // This ensures models are ready by identity verification phase (no delay)
   // Models will be cached in ModelService singleton and reused throughout the flow
   useEffect(() => {
-    // Only load if candidate info is available (after first useEffect runs)
-    const storedEmail = sessionStorage.getItem("candidateEmail");
-    const storedName = sessionStorage.getItem("candidateName");
-    
-    if (!storedEmail || !storedName) {
-      return; // Wait for candidate info
+    // Only load if candidate info is available
+    if (!email || !name) {
+      return; // Wait for candidate info to be set from first useEffect
     }
 
     // Check if models are already loaded
@@ -125,11 +122,16 @@ export default function PrecheckPage() {
     }
 
     // Load models in background (non-blocking)
-    console.log("[Precheck] 🚀 Pre-loading AI models in background (BlazeFace + FaceMesh)...");
+    console.log("[Precheck] 🚀 Pre-loading AI models in background (BlazeFace + FaceMesh + Face Recognition)...");
     modelService.loadAllModels()
-      .then(({ blazeface, faceMesh }) => {
+      .then(({ blazeface, faceMesh, faceRecognition }) => {
         if (blazeface && faceMesh) {
           console.log("[Precheck] ✅ AI models pre-loaded successfully - ready for identity verification and assessment");
+          if (faceRecognition) {
+            console.log("[Precheck] ✅ Face Recognition model also loaded - ready for identity verification");
+          } else {
+            console.warn("[Precheck] ⚠️ Face Recognition model not loaded (optional)");
+          }
         } else {
           console.warn("[Precheck] ⚠️ Some models failed to pre-load, will load on-demand");
         }
@@ -138,7 +140,7 @@ export default function PrecheckPage() {
         console.error("[Precheck] Error pre-loading models:", error);
         // Non-critical - models will load on-demand if needed
       });
-  }, []);
+  }, [email, name]); // Re-run when email/name become available
 
   // Step 1: Browser Compatibility Check
   const checkBrowser = useCallback((): boolean => {

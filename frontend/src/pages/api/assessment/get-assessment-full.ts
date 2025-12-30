@@ -30,6 +30,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
     console.error("Error in get-assessment-full API route:", error);
+    console.error("Error details:", {
+      status: error?.response?.status,
+      statusText: error?.response?.statusText,
+      data: error?.response?.data,
+      message: error?.message,
+      url: error?.config?.url,
+      params: error?.config?.params,
+    });
     const statusCode = error?.response?.status || 500;
     const errorMessage =
       error?.response?.data?.detail ||
@@ -39,6 +47,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(statusCode).json({
       success: false,
       message: errorMessage,
+      detail: error?.response?.data?.detail || errorMessage,
     });
   }
 }
