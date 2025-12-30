@@ -1803,11 +1803,21 @@ async def update_assessment_draft(
     """Update assessment draft data (preserves placeholder data). SINGLE DRAFT: Always updates the same draft."""
     # SINGLE DRAFT LOGIC: If assessmentId is provided, use it. Otherwise, find existing draft.
     if payload.assessmentId:
-        assessment = await _get_assessment(db, payload.assessmentId)
-        _check_assessment_access(assessment, current_user)
-        # Ensure it's a draft
-        if assessment.get("status") != "draft":
-            raise HTTPException(status_code=400, detail="Assessment is not a draft")
+        try:
+            assessment = await _get_assessment(db, payload.assessmentId)
+            _check_assessment_access(assessment, current_user)
+            # Allow updates for draft and paused assessments (paused assessments need schedule updates)
+            current_status = assessment.get("status")
+            if current_status not in ["draft", "paused"]:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Assessment cannot be updated (current status: {current_status}). Only 'draft' or 'paused' assessments can be updated via this endpoint."
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching assessment {payload.assessmentId}: {e}")
+            raise HTTPException(status_code=400, detail=f"Failed to fetch assessment: {str(e)}")
     else:
         # Find existing draft
         assessment = await _find_or_get_existing_draft(db, current_user)
@@ -1997,8 +2007,13 @@ async def update_assessment_draft(
     if payload.assessmentUrl is not None:
         assessment["assessmentUrl"] = payload.assessmentUrl
     
-    # Ensure status remains draft
-    assessment["status"] = "draft"
+    # Preserve status: keep as draft if draft, keep as paused if paused
+    # Don't overwrite paused status with draft
+    current_status = assessment.get("status")
+    if current_status != "paused":
+        assessment["status"] = "draft"
+    # If paused, keep it paused (don't change status)
+    
     assessment["updatedAt"] = _now_utc()
     
     await _save_assessment(db, assessment)
@@ -2957,6 +2972,23 @@ async def get_candidate_results(
                     "submittedAt": response.get("submittedAt") or response.get("answers", {}).get("submittedAt"),
                     "startedAt": response.get("startedAt"),
                 }
+                
+                # Include candidate info (requirements filled during assessment)
+                candidate_info = response.get("candidateInfo", {})
+                if candidate_info:
+                    result_item["candidateInfo"] = {
+                        "phone": candidate_info.get("phone"),
+                        "hasResume": candidate_info.get("hasResume", False),
+                        "savedAt": candidate_info.get("savedAt"),
+                    }
+                    # Include LinkedIn, GitHub, and custom fields if available
+                    if "linkedIn" in candidate_info:
+                        result_item["candidateInfo"]["linkedIn"] = candidate_info.get("linkedIn")
+                    if "github" in candidate_info:
+                        result_item["candidateInfo"]["github"] = candidate_info.get("github")
+                    if "customFields" in candidate_info:
+                        result_item["candidateInfo"]["customFields"] = candidate_info.get("customFields")
+                
                 results.append(result_item)
         
         return success_response("Candidate results fetched successfully", results)
@@ -2970,6 +3002,106 @@ async def get_candidate_results(
         ) from exc
 
 
+@router.post("/start-session")
+async def start_assessment_session(
+    payload: Dict[str, Any],
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Start an assessment session for a candidate.
+    Records startedAt timestamp in candidateResponses.
+    This endpoint does not require authentication (public endpoint for candidates).
+    """
+    try:
+        assessment_id = payload.get("assessmentId")
+        token = payload.get("token")
+        email = payload.get("email")
+        name = payload.get("name")
+        
+        if not assessment_id or not token or not email or not name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing required fields: assessmentId, token, email, name"
+            )
+        
+        assessment_id_obj = to_object_id(assessment_id)
+        assessment = await db.assessments.find_one({"_id": assessment_id_obj})
+        
+        if not assessment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found"
+            )
+        
+        # Validate token
+        assessment_token = assessment.get("assessmentToken")
+        if not assessment_token or assessment_token != token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid or expired assessment token"
+            )
+        
+        # Create candidate key
+        candidate_key = f"{email.strip().lower()}_{name.strip().lower()}"
+        
+        # Initialize candidateResponses if needed
+        if "candidateResponses" not in assessment:
+            assessment["candidateResponses"] = {}
+        
+        if candidate_key not in assessment["candidateResponses"]:
+            assessment["candidateResponses"][candidate_key] = {
+                "email": email.strip().lower(),
+                "name": name.strip(),
+                "logs": [],
+                "answers": {},
+            }
+        
+        # Record startedAt if not already set (don't overwrite if already started)
+        now_utc = datetime.now(timezone.utc)
+        started_at_iso = now_utc.isoformat()
+        
+        if "startedAt" not in assessment["candidateResponses"][candidate_key]:
+            assessment["candidateResponses"][candidate_key]["startedAt"] = started_at_iso
+            
+            # Log the event
+            if "logs" not in assessment["candidateResponses"][candidate_key]:
+                assessment["candidateResponses"][candidate_key]["logs"] = []
+            
+            assessment["candidateResponses"][candidate_key]["logs"].append({
+                "eventType": "ASSESSMENT_STARTED",
+                "timestamp": started_at_iso,
+                "metadata": {
+                    "email": email,
+                    "name": name,
+                }
+            })
+            
+            # Update assessment in database
+            await db.assessments.update_one(
+                {"_id": assessment_id_obj},
+                {"$set": {"candidateResponses": assessment["candidateResponses"]}}
+            )
+        else:
+            # Use existing startedAt
+            started_at_iso = assessment["candidateResponses"][candidate_key]["startedAt"]
+        
+        # Return startedAt and serverTime
+        return success_response(
+            "Session started successfully",
+            {
+                "startedAt": started_at_iso,
+                "serverTime": now_utc.isoformat(),
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Error starting assessment session: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start session: {str(exc)}"
+        ) from exc
 
 
 @router.get("/{assessment_id}/candidate/{candidate_email}/detailed-results")
@@ -4562,6 +4694,23 @@ async def get_candidate_results(
                     "submittedAt": response.get("submittedAt") or response.get("answers", {}).get("submittedAt"),
                     "startedAt": response.get("startedAt"),
                 }
+                
+                # Include candidate info (requirements filled during assessment)
+                candidate_info = response.get("candidateInfo", {})
+                if candidate_info:
+                    result_item["candidateInfo"] = {
+                        "phone": candidate_info.get("phone"),
+                        "hasResume": candidate_info.get("hasResume", False),
+                        "savedAt": candidate_info.get("savedAt"),
+                    }
+                    # Include LinkedIn, GitHub, and custom fields if available
+                    if "linkedIn" in candidate_info:
+                        result_item["candidateInfo"]["linkedIn"] = candidate_info.get("linkedIn")
+                    if "github" in candidate_info:
+                        result_item["candidateInfo"]["github"] = candidate_info.get("github")
+                    if "customFields" in candidate_info:
+                        result_item["candidateInfo"]["customFields"] = candidate_info.get("customFields")
+                
                 results.append(result_item)
         
         return success_response("Candidate results fetched successfully", results)

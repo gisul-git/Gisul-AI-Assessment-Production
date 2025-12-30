@@ -520,6 +520,16 @@ export default function CandidateRequirementsPage() {
       // For custom MCQ, data is stored in sessionStorage and sent with assessment submission
       if (isAIFlow) {
         try {
+          // Prepare custom fields object
+          const customFieldsObj: Record<string, string> = {};
+          if (Object.keys(customFieldValues).length > 0) {
+            customFields.forEach((field) => {
+              if (customFieldValues[field.label]) {
+                customFieldsObj[field.label] = customFieldValues[field.label];
+              }
+            });
+          }
+          
           await axios.post("/api/assessment/save-candidate-info", {
             assessmentId: id,
             token,
@@ -527,6 +537,9 @@ export default function CandidateRequirementsPage() {
             name: finalName,
             phone: phone.trim() || null,
             hasResume: !!resumeFile,
+            linkedIn: linkedInUrl.trim() || null,
+            github: githubUrl.trim() || null,
+            customFields: Object.keys(customFieldsObj).length > 0 ? customFieldsObj : null,
           });
         } catch (saveError: any) {
           console.warn("Failed to save candidate info (non-blocking):", saveError);

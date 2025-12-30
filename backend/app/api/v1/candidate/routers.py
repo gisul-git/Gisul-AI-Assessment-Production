@@ -75,28 +75,36 @@ async def verify_candidate(
                 detail="Assessment not found"
             )
         
+        # Check access mode early to handle public links correctly
+        access_mode = assessment.get("accessMode", "private")
+        
         # Check if assessment is paused
         assessment_status = assessment.get("status")
         if assessment_status == "paused":
-            # Check if candidate has already started (has startedAt)
-            candidates = assessment.get("candidates", [])
-            candidate_entry = None
-            for candidate in candidates:
-                if (candidate.get("email", "").lower() == request.email.lower() and
-                    candidate.get("name", "").strip().lower() == request.name.strip().lower()):
-                    candidate_entry = candidate
-                    break
-            
-            # If candidate has started before pause, allow them to continue
-            if candidate_entry and candidate_entry.get("startedAt"):
-                # Allow continuation
+            # For public mode, allow access even if paused (anyone with link can access)
+            if access_mode == "public":
+                # Public mode: allow access regardless of pause status
                 pass
             else:
-                # New entry attempt - block with user-friendly message
-                raise HTTPException(
-                    status_code=status.HTTP_423_LOCKED,
-                    detail="This assessment is currently paused. Please try again later."
-                )
+                # For private mode, check if candidate has already started (has startedAt)
+                candidates = assessment.get("candidates", [])
+                candidate_entry = None
+                for candidate in candidates:
+                    if (candidate.get("email", "").lower() == request.email.lower() and
+                        candidate.get("name", "").strip().lower() == request.name.strip().lower()):
+                        candidate_entry = candidate
+                        break
+                
+                # If candidate has started before pause, allow them to continue
+                if candidate_entry and candidate_entry.get("startedAt"):
+                    # Allow continuation
+                    pass
+                else:
+                    # New entry attempt - block with user-friendly message
+                    raise HTTPException(
+                        status_code=status.HTTP_423_LOCKED,
+                        detail="This assessment is currently paused. Please try again later."
+                    )
         
         # Check assessment start time validation (no access time window)
         from datetime import datetime
@@ -239,10 +247,7 @@ async def verify_candidate(
                     # Allow access if parsing fails (graceful degradation)
         
         # IMPORTANT: If we reach here, access time validation has passed (or was not required)
-        # Now check token and access mode
-        
-        access_mode = assessment.get("accessMode", "private")
-        
+        # Access mode was already checked earlier, but verify again for public mode
         # For public mode, anyone with the link can access
         if access_mode == "public":
             return success_response({
@@ -992,6 +997,9 @@ class SaveCandidateInfoRequest(BaseModel):
     name: str
     phone: Optional[str] = None
     hasResume: bool = False
+    linkedIn: Optional[str] = None
+    github: Optional[str] = None
+    customFields: Optional[Dict[str, Any]] = None
 
 
 class SaveReferenceFaceRequest(BaseModel):
@@ -1033,13 +1041,23 @@ async def save_candidate_info(
             }
         
         # Store candidate info
-        assessment["candidateResponses"][candidate_key]["candidateInfo"] = {
+        candidate_info = {
             "email": request.email.lower().strip(),
             "name": request.name.strip(),
             "phone": request.phone.strip() if request.phone else None,
             "hasResume": request.hasResume,
             "savedAt": datetime.now(timezone.utc).isoformat(),
         }
+        
+        # Add LinkedIn, GitHub, and custom fields if provided
+        if request.linkedIn:
+            candidate_info["linkedIn"] = request.linkedIn.strip()
+        if request.github:
+            candidate_info["github"] = request.github.strip()
+        if request.customFields:
+            candidate_info["customFields"] = request.customFields
+        
+        assessment["candidateResponses"][candidate_key]["candidateInfo"] = candidate_info
         
         # Log the event
         if "logs" not in assessment["candidateResponses"][candidate_key]:
