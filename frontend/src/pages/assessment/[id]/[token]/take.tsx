@@ -391,9 +391,18 @@ export default function CandidateAssessmentPage() {
 
     liveProctoringStartedRef.current = true;
 
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    // Live proctoring backend expects raw email or token, not formatted userId
+    let rawCandidateId = candidateIdStr;
+    if (candidateIdStr.startsWith('email:')) {
+      rawCandidateId = candidateIdStr.replace('email:', '');
+    } else if (candidateIdStr.startsWith('public:')) {
+      rawCandidateId = candidateIdStr.replace('public:', '');
+    }
+
     const liveService = new CandidateLiveService({
       assessmentId: assessmentIdStr,
-      candidateId: candidateIdStr,
+      candidateId: rawCandidateId, // Use raw email/token for live proctoring
       debugMode: debugMode,
     });
 

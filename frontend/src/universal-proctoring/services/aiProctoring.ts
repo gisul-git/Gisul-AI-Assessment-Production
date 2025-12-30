@@ -922,35 +922,38 @@ export class AIProctoringService {
     const shouldCheck = (now - this.lastVerificationCheck) >= FACE_VERIFICATION_CHECK_INTERVAL;
     
     // Debug logging for check conditions (only when actually checking or every 60 frames if no embedding)
-    if (shouldCheck && this.referenceEmbedding) {
-      // Log when we're actually about to check
-      console.log("[AIProctoringService] 🔍 Face Verification check conditions:", {
-        serviceReady: this.faceVerificationService?.isReady() || false,
-        hasReferenceEmbedding: !!this.referenceEmbedding,
-        faceCount: newStableFaceCount,
-        timeSinceLastCheck: `${(timeSinceLastCheck / 1000).toFixed(1)}s`,
-        shouldCheck,
-        checkInterval: `${FACE_VERIFICATION_CHECK_INTERVAL / 1000}s`,
-      });
-    } else if (!this.referenceEmbedding && this.frameCount % 300 === 0) {
-      // Log every ~25 seconds (300 frames at 12 FPS) if no embedding exists (to reduce spam)
-      console.log("[AIProctoringService] ⚠️ Face verification disabled: no reference embedding found in sessionStorage");
-    }
+    // COMMENTED OUT: Only show logs when mismatch is detected
+    // if (shouldCheck && this.referenceEmbedding) {
+    //   // Log when we're actually about to check
+    //   console.log("[AIProctoringService] 🔍 Face Verification check conditions:", {
+    //     serviceReady: this.faceVerificationService?.isReady() || false,
+    //     hasReferenceEmbedding: !!this.referenceEmbedding,
+    //     faceCount: newStableFaceCount,
+    //     timeSinceLastCheck: `${(timeSinceLastCheck / 1000).toFixed(1)}s`,
+    //     shouldCheck,
+    //     checkInterval: `${FACE_VERIFICATION_CHECK_INTERVAL / 1000}s`,
+    //   });
+    // } else if (!this.referenceEmbedding && this.frameCount % 300 === 0) {
+    //   // Log every ~25 seconds (300 frames at 12 FPS) if no embedding exists (to reduce spam)
+    //   console.log("[AIProctoringService] ⚠️ Face verification disabled: no reference embedding found in sessionStorage");
+    // }
     
     if (this.faceVerificationService?.isReady() && 
         this.referenceEmbedding && 
         newStableFaceCount === 1 && // Only check if exactly one face detected
         shouldCheck) {
-      console.log("[AIProctoringService] ✅ All conditions met - running face verification check...");
+      // COMMENTED OUT: Only show logs when mismatch is detected
+      // console.log("[AIProctoringService] ✅ All conditions met - running face verification check...");
       this.lastVerificationCheck = now;
       this.checkFaceVerification();
     } else if (shouldCheck) {
-      // Log why check is being skipped
-      const reasons = [];
-      if (!this.faceVerificationService?.isReady()) reasons.push("service not ready");
-      if (!this.referenceEmbedding) reasons.push("no reference embedding");
-      if (newStableFaceCount !== 1) reasons.push(`face count is ${newStableFaceCount} (need 1)`);
-      console.log("[AIProctoringService] ⏭️ Skipping face verification check:", reasons.join(", "));
+      // COMMENTED OUT: Only show logs when mismatch is detected
+      // // Log why check is being skipped
+      // const reasons = [];
+      // if (!this.faceVerificationService?.isReady()) reasons.push("service not ready");
+      // if (!this.referenceEmbedding) reasons.push("no reference embedding");
+      // if (newStableFaceCount !== 1) reasons.push(`face count is ${newStableFaceCount} (need 1)`);
+      // console.log("[AIProctoringService] ⏭️ Skipping face verification check:", reasons.join(", "));
     }
   }
 
@@ -1233,21 +1236,24 @@ export class AIProctoringService {
    */
   private async checkFaceVerification(): Promise<void> {
     if (!this.faceVerificationService?.isReady() || !this.referenceEmbedding || !this.videoElement) {
-      console.warn("[AIProctoringService] ⚠️ Cannot run face verification check - missing prerequisites:", {
-        serviceReady: this.faceVerificationService?.isReady() || false,
-        hasReferenceEmbedding: !!this.referenceEmbedding,
-        hasVideoElement: !!this.videoElement,
-      });
+      // COMMENTED OUT: Only show logs when mismatch is detected
+      // console.warn("[AIProctoringService] ⚠️ Cannot run face verification check - missing prerequisites:", {
+      //   serviceReady: this.faceVerificationService?.isReady() || false,
+      //   hasReferenceEmbedding: !!this.referenceEmbedding,
+      //   hasVideoElement: !!this.videoElement,
+      // });
       return;
     }
 
     try {
-      console.log("[AIProctoringService] 🔍 Running face verification check...");
+      // COMMENTED OUT: Only show logs when mismatch is detected
+      // console.log("[AIProctoringService] 🔍 Running face verification check...");
       
       // QUALITY-BASED FILTERING: Check current frame quality before processing
       const frameQuality = await this.assessFrameQuality();
       if (!frameQuality.isGood) {
-        console.log("[AIProctoringService] ⏭️ Frame quality too low - skipping verification:", frameQuality.reason);
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] ⏭️ Frame quality too low - skipping verification:", frameQuality.reason);
         return;
       }
       
@@ -1256,11 +1262,13 @@ export class AIProctoringService {
       
       if (!currentEmbedding) {
         // No face detected in current frame - skip check
-        console.log("[AIProctoringService] ⏭️ No face detected in current frame - skipping verification");
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] ⏭️ No face detected in current frame - skipping verification");
         return;
       }
 
-      console.log("[AIProctoringService] ✅ Current frame embedding extracted");
+      // COMMENTED OUT: Only show logs when mismatch is detected
+      // console.log("[AIProctoringService] ✅ Current frame embedding extracted");
 
       // Quality check: Validate current embedding has sufficient variance
       const currentEmbeddingArray = Array.isArray(currentEmbedding) ? currentEmbedding : Array.from(currentEmbedding);
@@ -1269,7 +1277,8 @@ export class AIProctoringService {
       const currentStdDev = Math.sqrt(currentVariance);
       
       if (currentStdDev < 0.01) {
-        console.warn("[AIProctoringService] ⚠️ Current frame embedding has low variance - skipping comparison (face may be obscured)");
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.warn("[AIProctoringService] ⚠️ Current frame embedding has low variance - skipping comparison (face may be obscured)");
         return;
       }
 
@@ -1280,7 +1289,8 @@ export class AIProctoringService {
       const referenceStdDev = Math.sqrt(referenceVariance);
       
       if (referenceStdDev < 0.01) {
-        console.error("[AIProctoringService] ❌ Reference embedding has low variance - invalid reference photo");
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.error("[AIProctoringService] ❌ Reference embedding has low variance - invalid reference photo");
         return;
       }
 
@@ -1307,11 +1317,12 @@ export class AIProctoringService {
       
       if (timeSinceStart < FACE_VERIFICATION_BASELINE_DURATION && !this.baselineEstablished) {
         this.baselineSimilarities.push(averagedSimilarity);
-        console.log("[AIProctoringService] 📊 Baseline tracking:", {
-          samples: this.baselineSimilarities.length,
-          timeRemaining: `${((FACE_VERIFICATION_BASELINE_DURATION - timeSinceStart) / 1000).toFixed(0)}s`,
-          currentSimilarity: averagedSimilarity.toFixed(3),
-        });
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] 📊 Baseline tracking:", {
+        //   samples: this.baselineSimilarities.length,
+        //   timeRemaining: `${((FACE_VERIFICATION_BASELINE_DURATION - timeSinceStart) / 1000).toFixed(0)}s`,
+        //   currentSimilarity: averagedSimilarity.toFixed(3),
+        // });
         
         // Establish baseline if we have enough samples
         if (this.baselineSimilarities.length >= FACE_VERIFICATION_BASELINE_MIN_SAMPLES) {
@@ -1320,11 +1331,12 @@ export class AIProctoringService {
           this.baselineMean = baselineMean;
           this.baselineStdDev = Math.sqrt(baselineVariance);
           this.baselineEstablished = true;
-          console.log("[AIProctoringService] ✅ Baseline established:", {
-            mean: baselineMean.toFixed(3),
-            stdDev: this.baselineStdDev.toFixed(3),
-            samples: this.baselineSimilarities.length,
-          });
+          // COMMENTED OUT: Only show logs when mismatch is detected
+          // console.log("[AIProctoringService] ✅ Baseline established:", {
+          //   mean: baselineMean.toFixed(3),
+          //   stdDev: this.baselineStdDev.toFixed(3),
+          //   samples: this.baselineSimilarities.length,
+          // });
         }
       }
       
@@ -1347,13 +1359,14 @@ export class AIProctoringService {
         thresholdUsed = Math.max(outlierThreshold, FACE_VERIFICATION_SIMILARITY_THRESHOLD * 0.8); // Don't go too low
         isMismatch = averagedSimilarity < outlierThreshold && averagedSimilarity < FACE_VERIFICATION_SIMILARITY_THRESHOLD;
         
-        console.log("[AIProctoringService] 📊 Using baseline-based detection:", {
-          baselineMean: this.baselineMean.toFixed(3),
-          baselineStdDev: this.baselineStdDev.toFixed(3),
-          outlierThreshold: outlierThreshold.toFixed(3),
-          currentSimilarity: averagedSimilarity.toFixed(3),
-          isOutlier: averagedSimilarity < outlierThreshold,
-        });
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] 📊 Using baseline-based detection:", {
+        //   baselineMean: this.baselineMean.toFixed(3),
+        //   baselineStdDev: this.baselineStdDev.toFixed(3),
+        //   outlierThreshold: outlierThreshold.toFixed(3),
+        //   currentSimilarity: averagedSimilarity.toFixed(3),
+        //   isOutlier: averagedSimilarity < outlierThreshold,
+        // });
       } else {
         // Use fixed threshold with dynamic adjustment
         const isHighSimilarity = averagedSimilarity >= FACE_VERIFICATION_HIGH_SIMILARITY_THRESHOLD;
@@ -1369,35 +1382,38 @@ export class AIProctoringService {
       
       // CONFIDENCE FILTER: Only trigger if confidence is high enough
       if (isMismatch && confidence < FACE_VERIFICATION_MIN_CONFIDENCE) {
-        console.log("[AIProctoringService] ⏭️ Mismatch detected but confidence too low - skipping violation:", {
-          similarity: averagedSimilarity.toFixed(3),
-          confidence: confidence.toFixed(3),
-          minConfidence: FACE_VERIFICATION_MIN_CONFIDENCE,
-        });
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] ⏭️ Mismatch detected but confidence too low - skipping violation:", {
+        //   similarity: averagedSimilarity.toFixed(3),
+        //   confidence: confidence.toFixed(3),
+        //   minConfidence: FACE_VERIFICATION_MIN_CONFIDENCE,
+        // });
         isMismatch = false; // Don't trigger violation if confidence is low
       }
       
-      console.log("[AIProctoringService] 📊 Face verification result (enhanced):", {
-        currentSimilarity: result.similarity.toFixed(3),
-        averagedSimilarity: averagedSimilarity.toFixed(3),
-        historySize: this.similarityHistory.length,
-        threshold: thresholdUsed.toFixed(3),
-        confidence: confidence.toFixed(3),
-        baselineEstablished: this.baselineEstablished,
-        baselineMean: this.baselineMean?.toFixed(3) || "N/A",
-        baselineStdDev: this.baselineStdDev?.toFixed(3) || "N/A",
-        isMatch: result.isMatch,
-        isMismatch,
-        qualityFactor: frameQuality.score.toFixed(2),
-        currentEmbeddingVariance: currentStdDev.toFixed(4),
-        referenceEmbeddingVariance: referenceStdDev.toFixed(4),
-        verdict: isMismatch ? "❌ MISMATCH" : "✅ MATCH",
-      });
+      // COMMENTED OUT: Only show logs when mismatch is detected
+      // console.log("[AIProctoringService] 📊 Face verification result (enhanced):", {
+      //   currentSimilarity: result.similarity.toFixed(3),
+      //   averagedSimilarity: averagedSimilarity.toFixed(3),
+      //   historySize: this.similarityHistory.length,
+      //   threshold: thresholdUsed.toFixed(3),
+      //   confidence: confidence.toFixed(3),
+      //   baselineEstablished: this.baselineEstablished,
+      //   baselineMean: this.baselineMean?.toFixed(3) || "N/A",
+      //   baselineStdDev: this.baselineStdDev?.toFixed(3) || "N/A",
+      //   isMatch: result.isMatch,
+      //   isMismatch,
+      //   qualityFactor: frameQuality.score.toFixed(2),
+      //   currentEmbeddingVariance: currentStdDev.toFixed(4),
+      //   referenceEmbeddingVariance: referenceStdDev.toFixed(4),
+      //   verdict: isMismatch ? "❌ MISMATCH" : "✅ MATCH",
+      // });
       
       // Handle mismatch incident with improved logic (use averaged similarity)
       this.handleFaceMismatchIncident(isMismatch, averagedSimilarity);
     } catch (error) {
-      console.error("[AIProctoringService] ❌ Face verification error:", error);
+      // COMMENTED OUT: Only show logs when mismatch is detected
+      // console.error("[AIProctoringService] ❌ Face verification error:", error);
     }
   }
   
@@ -1514,13 +1530,15 @@ export class AIProctoringService {
         incident.lastSimilarity = 1.0;
         // Reset similarity history on cooldown expiry
         this.similarityHistory = [];
-        console.log("[AIProctoringService] ✅ Face mismatch cooldown expired, reset to idle");
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] ✅ Face mismatch cooldown expired, reset to idle");
       } else {
-        console.log("[AIProctoringService] ⏸️ Face mismatch in cooldown:", {
-          cooldownElapsed: `${(cooldownElapsed / 1000).toFixed(1)}s`,
-          cooldownDuration: `${FACE_VERIFICATION_COOLDOWN / 1000}s`,
-          isMismatch,
-        });
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] ⏸️ Face mismatch in cooldown:", {
+        //   cooldownElapsed: `${(cooldownElapsed / 1000).toFixed(1)}s`,
+        //   cooldownDuration: `${FACE_VERIFICATION_COOLDOWN / 1000}s`,
+        //   isMismatch,
+        // });
       }
       return;
     }
@@ -1532,11 +1550,12 @@ export class AIProctoringService {
       incident.detectionStartTime = now;
       incident.consecutiveMismatches = 1;
       incident.lastSimilarity = similarity;
-      console.log("[AIProctoringService] ⚠️ Face mismatch detected - starting tracking (1st detection):", {
-        similarity: similarity.toFixed(3),
-        threshold: FACE_VERIFICATION_SIMILARITY_THRESHOLD,
-        required: FACE_VERIFICATION_CONSECUTIVE_REQUIRED,
-      });
+      // COMMENTED OUT: Only show logs when mismatch is detected
+      // console.log("[AIProctoringService] ⚠️ Face mismatch detected - starting tracking (1st detection):", {
+      //   similarity: similarity.toFixed(3),
+      //   threshold: FACE_VERIFICATION_SIMILARITY_THRESHOLD,
+      //   required: FACE_VERIFICATION_CONSECUTIVE_REQUIRED,
+      // });
       return;
     }
 
@@ -1551,10 +1570,11 @@ export class AIProctoringService {
         incident.lastSimilarity = similarity;
         // Reset similarity history when condition clears
         this.similarityHistory = [];
-        console.log("[AIProctoringService] ✅ Face mismatch cleared - similarity returned to normal:", {
-          similarity: similarity.toFixed(3),
-          detectionDuration: `${(detectionDuration / 1000).toFixed(1)}s`,
-        });
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] ✅ Face mismatch cleared - similarity returned to normal:", {
+        //   similarity: similarity.toFixed(3),
+        //   detectionDuration: `${(detectionDuration / 1000).toFixed(1)}s`,
+        // });
         return;
       }
 
@@ -1588,15 +1608,17 @@ export class AIProctoringService {
         incident.state = 'cooldown';
         incident.detectionStartTime = null;
         incident.consecutiveMismatches = 0;
-        console.log("[AIProctoringService] ⏸️ Face mismatch violation emitted, entering cooldown");
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] ⏸️ Face mismatch violation emitted, entering cooldown");
         return;
       } else {
         // Still detecting - waiting for more consecutive mismatches
-        console.log("[AIProctoringService] ⏳ Face mismatch still detected:", {
-          similarity: similarity.toFixed(3),
-          consecutiveMismatches: incident.consecutiveMismatches,
-          required: FACE_VERIFICATION_CONSECUTIVE_REQUIRED,
-        });
+        // COMMENTED OUT: Only show logs when mismatch is detected
+        // console.log("[AIProctoringService] ⏳ Face mismatch still detected:", {
+        //   similarity: similarity.toFixed(3),
+        //   consecutiveMismatches: incident.consecutiveMismatches,
+        //   required: FACE_VERIFICATION_CONSECUTIVE_REQUIRED,
+        // });
       }
     }
     
@@ -1648,6 +1670,24 @@ export class AIProctoringService {
       return;
     }
 
+    // Extract candidate email from sessionStorage for metadata (backup for analytics filtering)
+    let candidateEmail: string | null = null;
+    try {
+      if (typeof window !== 'undefined') {
+        candidateEmail = sessionStorage.getItem('candidateEmail') || null;
+      }
+    } catch (e) {
+      // Ignore sessionStorage errors (SSR or private browsing)
+    }
+
+    // Extract email from userId if it's in email: format
+    const emailFromUserId = this.session.userId.startsWith('email:')
+      ? this.session.userId.replace('email:', '')
+      : null;
+
+    // Use email from userId if available, otherwise from sessionStorage
+    const finalCandidateEmail = emailFromUserId || candidateEmail;
+
     const violation: ProctoringViolation = {
       eventType,
       timestamp: getTimestamp(),
@@ -1656,6 +1696,8 @@ export class AIProctoringService {
       metadata: {
         severity,
         details,
+        // Store candidate email in metadata for analytics filtering (backup)
+        ...(finalCandidateEmail && { candidateEmail: finalCandidateEmail }),
         ...(snapshotBase64 && {
           evidence: {
             type: 'image',

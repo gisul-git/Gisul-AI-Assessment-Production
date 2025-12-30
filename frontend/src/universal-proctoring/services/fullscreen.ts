@@ -290,12 +290,18 @@ export class FullscreenService {
       return;
     }
 
+    // Extract candidate email for metadata (backup for analytics filtering)
+    const candidateEmail = this.getCandidateEmail();
+
     const violation: ProctoringViolation = {
       eventType,
       timestamp: getTimestamp(),
       assessmentId: this.session.assessmentId,
       userId: this.session.userId,
-      metadata,
+      metadata: {
+        ...metadata,
+        ...(candidateEmail && { candidateEmail }),
+      },
     };
 
     debugLog("Recording violation:", eventType, metadata);
@@ -317,6 +323,27 @@ export class FullscreenService {
     if (this.callbacks) {
       this.callbacks.onStateChange(partial);
     }
+  }
+
+  /**
+   * Extract candidate email from userId or sessionStorage.
+   */
+  private getCandidateEmail(): string | null {
+    // Extract email from userId if it's in email: format
+    if (this.session?.userId?.startsWith('email:')) {
+      return this.session.userId.replace('email:', '');
+    }
+
+    // Fallback to sessionStorage
+    try {
+      if (typeof window !== 'undefined') {
+        return sessionStorage.getItem('candidateEmail') || null;
+      }
+    } catch (e) {
+      // Ignore sessionStorage errors (SSR or private browsing)
+    }
+
+    return null;
   }
 }
 

@@ -396,18 +396,45 @@ export class UniversalProctoringService {
   ): void {
     if (!this.session) return;
 
+    // Extract candidate email for metadata (backup for analytics filtering)
+    const candidateEmail = this.getCandidateEmail();
+
     const violation: ProctoringViolation = {
       eventType,
       timestamp: new Date().toISOString(),
       assessmentId: this.session.assessmentId,
       userId: this.session.userId,
-      metadata,
+      metadata: {
+        ...metadata,
+        ...(candidateEmail && { candidateEmail }),
+      },
     };
 
     this.violations.push(violation);
 
     // Send to backend (informational)
     this.sendViolationToBackend(violation);
+  }
+
+  /**
+   * Extract candidate email from userId or sessionStorage.
+   */
+  private getCandidateEmail(): string | null {
+    // Extract email from userId if it's in email: format
+    if (this.session?.userId?.startsWith('email:')) {
+      return this.session.userId.replace('email:', '');
+    }
+
+    // Fallback to sessionStorage
+    try {
+      if (typeof window !== 'undefined') {
+        return sessionStorage.getItem('candidateEmail') || null;
+      }
+    } catch (e) {
+      // Ignore sessionStorage errors (SSR or private browsing)
+    }
+
+    return null;
   }
 
   /**
