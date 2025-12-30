@@ -46,6 +46,13 @@ interface Candidate {
   invitedAt?: string
   startedAt?: string
   completedAt?: string
+  candidateInfo?: {
+    phone?: string | null
+    linkedIn?: string | null
+    github?: string | null
+    hasResume?: boolean
+    customFields?: Record<string, any>
+  } | null
 }
 
 export default function AnalyticsPage() {
