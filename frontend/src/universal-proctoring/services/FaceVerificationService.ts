@@ -103,7 +103,7 @@ export class FaceVerificationService {
         const embedding = await prediction.data();
         tensor.dispose();
         prediction.dispose();
-        const embeddingArray = Array.from(embedding);
+        const embeddingArray = Array.from(embedding) as number[];
         console.log("[FaceVerificationService] ✅ Embedding extracted via TensorFlow.js:", {
           dimensions: embeddingArray.length,
         });
