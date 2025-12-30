@@ -47,6 +47,10 @@ from .ai_utils import (
 from .ai_coding_generator import _generate_coding_questions
 from .ai_sql_generator import _generate_sql_questions
 from .ai_aiml_generator import _generate_aiml_questions
+from .ai_quality import (
+    validate_question_quality,
+    _get_difficulty_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +163,12 @@ async def generate_questions_for_row_v2(
             difficulty=difficulty,
             count=questions_count,
             experience_mode=experience_mode,
-            additional_requirements=additional_requirements
+            additional_requirements=additional_requirements,
+            job_designation=job_designation,
+            experience_min=experience_min,
+            experience_max=experience_max,
+            company_name=company_name,
+            assessment_requirements=assessment_requirements
         )
     
     elif question_type_upper in ["AIML", "AI/ML", "MACHINE LEARNING", "ML"]:
@@ -168,7 +177,12 @@ async def generate_questions_for_row_v2(
             difficulty=difficulty,
             count=questions_count,
             experience_mode=experience_mode,
-            additional_requirements=additional_requirements
+            additional_requirements=additional_requirements,
+            job_designation=job_designation,
+            experience_min=experience_min,
+            experience_max=experience_max,
+            company_name=company_name,
+            assessment_requirements=assessment_requirements
         )
     
     elif question_type_upper in ["MCQ", "MULTIPLE CHOICE"]:
@@ -349,17 +363,27 @@ Example Improvements:
         
         # Determine seniority level
         if experience_max <= 2:
-            seniority = "Junior/Entry-level"
+            seniority = "Junior"
+            focus_areas = "Focus on: execution, syntax, debugging, basic problem-solving"
         elif experience_max <= 5:
-            seniority = "Mid-level"
+            seniority = "Mid"
+            focus_areas = "Focus on: design patterns, best practices, code reviews, system design basics"
         elif experience_max <= 10:
-            seniority = "Senior-level"
+            seniority = "Senior"
+            focus_areas = "Focus on: architecture, scalability, team impact, technology choices"
         else:
-            seniority = "Principal/Lead-level"
+            seniority = "Lead"
+            focus_areas = "Focus on: strategic decisions, business impact, cross-team collaboration"
         
         context_parts.append(f"**Experience Required**: {years_text} ({seniority})")
+        context_parts.append(f"**Focus Areas**: {focus_areas}")
+    else:
+        seniority = "Mid"  # Default
     
     personalization_context = "\n".join(context_parts) if context_parts else ""
+    
+    # Get difficulty calibration rules
+    difficulty_rules = _get_difficulty_rules("MCQ", difficulty, seniority)
     
     # Build prompt with personalization
     prompt = f"""You are an expert technical assessment writer. Generate EXACTLY {count} Multiple Choice Question(s) for the topic: {topic}.
@@ -393,20 +417,33 @@ MANDATORY PERSONALIZATION REQUIREMENTS:
    ❌ WITHOUT CONTEXT (generic - AVOID IF CONTEXT PROVIDED):
    "Which caching strategy is best for APIs?"
 
+{'=' * 80}
+DIFFICULTY CALIBRATION (CRITICAL - MUST FOLLOW EXACTLY)
+{'=' * 80}
+
+Current Difficulty: {difficulty}
+Seniority Level: {seniority}
+
+**{difficulty.upper()} Difficulty Rules for MCQ ({seniority}):**
+
+{difficulty_rules}
+
+VALIDATION:
+- Read the rules above CAREFULLY
+- Generate questions that EXACTLY match the difficulty level
+- If unsure, err on the side of being MORE challenging
+- Easy ≠ Medium ≠ Hard - they must be DISTINCTLY different
+
+{'=' * 80}
+
 STANDARD MCQ REQUIREMENTS:
 3. Each question MUST have exactly 4 options (no more, no less)
 4. One option must be the correct answer
-5. Difficulty level: {difficulty}
+5. Difficulty level: {difficulty} (MUST follow difficulty rules above)
 6. Experience mode: {experience_mode}
 7. All options must be plausible - avoid obviously wrong answers
 8. Options should be similar in length and structure
 9. Vary question types (conceptual, application, problem-solving)
-
-PERSONALIZATION GUIDELINES BY EXPERIENCE:
-- For Junior roles: Focus on foundational concepts, syntax, basic problem-solving
-- For Mid-level roles: Include design patterns, best practices, trade-offs
-- For Senior roles: Add architecture decisions, scalability, team implications
-- For Lead roles: Strategic decisions, technology choices, business impact
 
 Output format (JSON object with questions array):
 {{
@@ -452,19 +489,47 @@ Return ONLY a JSON object with questions array."""
         logger.error(f"Unexpected response format for MCQ questions: {data}")
         raise HTTPException(status_code=500, detail="Invalid response format from AI")
     
-    # Format and validate questions
+    # Format and validate questions with quality check
     result = []
+    validated_questions = []
+    
     for q in questions_list[:count]:
         if isinstance(q, dict) and "question" in q and "options" in q and "correctAnswer" in q:
             # Validate that we have exactly 4 options
             if len(q["options"]) == 4:
-                result.append({
+                question_obj = {
                     "question": q["question"],
                     "options": q["options"],
                     "correctAnswer": q["correctAnswer"],
                     "type": "MCQ",
                     "difficulty": difficulty
-                })
+                }
+                
+                # Quality validation
+                try:
+                    metrics = await validate_question_quality(
+                        question=question_obj,
+                        question_type="MCQ",
+                        difficulty=difficulty,
+                        experience_min=experience_min,
+                        experience_max=experience_max,
+                        job_designation=job_designation,
+                        assessment_requirements=assessment_requirements,
+                        topic=topic
+                    )
+                    
+                    if metrics.overall_score >= 0.75:  # Quality threshold
+                        validated_questions.append((question_obj, metrics.overall_score))
+                        result.append(question_obj)
+                        logger.debug(f"✅ MCQ quality score: {metrics.overall_score:.2f}")
+                    else:
+                        logger.warning(
+                            f"⚠️ Low quality MCQ (score={metrics.overall_score:.2f}): "
+                            f"{q.get('question', '')[:100]}... Issues: {', '.join(metrics.issues[:3])}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Quality validation failed for MCQ: {e}, including question anyway")
+                    result.append(question_obj)  # Include even if validation fails
     
     # ⭐ CRITICAL FIX: Ensure we generate the requested number of questions
     if len(result) < count:
@@ -630,17 +695,27 @@ Example Improvements:
         
         # Determine seniority level
         if experience_max <= 2:
-            seniority = "Junior/Entry-level"
+            seniority = "Junior"
+            focus_areas = "Focus on: execution, syntax, debugging, basic problem-solving"
         elif experience_max <= 5:
-            seniority = "Mid-level"
+            seniority = "Mid"
+            focus_areas = "Focus on: design patterns, best practices, code reviews, system design basics"
         elif experience_max <= 10:
-            seniority = "Senior-level"
+            seniority = "Senior"
+            focus_areas = "Focus on: architecture, scalability, team impact, technology choices"
         else:
-            seniority = "Principal/Lead-level"
+            seniority = "Lead"
+            focus_areas = "Focus on: strategic decisions, business impact, cross-team collaboration"
         
         context_parts.append(f"**Experience Required**: {years_text} ({seniority})")
+        context_parts.append(f"**Focus Areas**: {focus_areas}")
+    else:
+        seniority = "Mid"  # Default
     
     personalization_context = "\n".join(context_parts) if context_parts else ""
+    
+    # Get difficulty calibration rules
+    difficulty_rules = _get_difficulty_rules("Subjective", difficulty, seniority)
     
     # Build prompt with personalization
     prompt = f"""You are an expert technical assessment writer. Generate EXACTLY {count} scenario-based subjective question(s) for the topic: {topic}.
@@ -692,6 +767,25 @@ MANDATORY PERSONALIZATION REQUIREMENTS:
    - Mid-level (3-5 years): Add system design basics, code reviews, mentoring junior developers
    - Senior (5-10 years): Include architecture decisions, team leadership, cross-team collaboration
    - Principal/Lead (10+ years): Strategic planning, stakeholder management, technical direction
+
+{'=' * 80}
+DIFFICULTY CALIBRATION (CRITICAL - MUST FOLLOW EXACTLY)
+{'=' * 80}
+
+Current Difficulty: {difficulty}
+Seniority Level: {seniority}
+
+**{difficulty.upper()} Difficulty Rules for Subjective ({seniority}):**
+
+{difficulty_rules}
+
+VALIDATION:
+- Read the rules above CAREFULLY
+- Generate questions that EXACTLY match the difficulty level
+- If unsure, err on the side of being MORE challenging
+- Easy ≠ Medium ≠ Hard - they must be DISTINCTLY different
+
+{'=' * 80}
 
 4. **QUESTION STRUCTURE** (2-4 sentences minimum):
    - Sentence 1: Context (role, company, current situation using provided context)
@@ -752,15 +846,43 @@ Return ONLY a JSON object with questions array."""
         logger.error(f"Unexpected response format for subjective questions: {data}")
         raise HTTPException(status_code=500, detail="Invalid response format from AI")
     
-    # Format questions
+    # Format and validate questions with quality check
     result = []
+    validated_questions = []
+    
     for q in questions_list[:count]:
         if isinstance(q, dict) and "question" in q:
-            result.append({
+            question_obj = {
                 "question": q["question"],
                 "type": "Subjective",
                 "difficulty": difficulty
-            })
+            }
+            
+            # Quality validation
+            try:
+                metrics = await validate_question_quality(
+                    question=question_obj,
+                    question_type="Subjective",
+                    difficulty=difficulty,
+                    experience_min=experience_min,
+                    experience_max=experience_max,
+                    job_designation=job_designation,
+                    assessment_requirements=assessment_requirements,
+                    topic=topic
+                )
+                
+                if metrics.overall_score >= 0.75:  # Quality threshold
+                    validated_questions.append((question_obj, metrics.overall_score))
+                    result.append(question_obj)
+                    logger.debug(f"✅ Subjective quality score: {metrics.overall_score:.2f}")
+                else:
+                    logger.warning(
+                        f"⚠️ Low quality Subjective (score={metrics.overall_score:.2f}): "
+                        f"{q.get('question', '')[:100]}... Issues: {', '.join(metrics.issues[:3])}"
+                    )
+            except Exception as e:
+                logger.warning(f"Quality validation failed for Subjective: {e}, including question anyway")
+                result.append(question_obj)  # Include even if validation fails
     
     # ⭐ CRITICAL FIX: Ensure we generate the requested number of questions
     if len(result) < count:

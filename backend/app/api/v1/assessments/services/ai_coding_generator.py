@@ -50,6 +50,10 @@ except (ImportError, ModuleNotFoundError) as e:
     )
 
 from .ai_utils import _get_openai_client, _parse_json_response
+from .ai_quality import (
+    validate_question_quality,
+    _get_difficulty_rules,
+)
 from .judge0_utils import (
     _get_judge0_language_id,
     _get_starter_code_template,
@@ -185,6 +189,22 @@ async def _generate_coding_questions(
     # Fallback: Basic coding question generation using OpenAI (matching DSA format)
     logger.info(f"Using basic Coding question generation (OpenAI) with DSA format - generating {count} question(s)")
     
+    # Determine seniority for difficulty rules
+    if experience_max is not None:
+        if experience_max <= 2:
+            seniority = "Junior"
+        elif experience_max <= 5:
+            seniority = "Mid"
+        elif experience_max <= 10:
+            seniority = "Senior"
+        else:
+            seniority = "Lead"
+    else:
+        seniority = "Mid"  # Default
+    
+    # Get Coding-specific difficulty rules
+    difficulty_rules = _get_difficulty_rules("Coding", difficulty, seniority)
+    
     questions = []
     for question_num in range(count):
         # Build personalization context
@@ -214,7 +234,53 @@ MUST generate COMPLETELY DIFFERENT question. DO NOT repeat similar concepts or p
 Topic: {topic}
 Difficulty: {difficulty}
 Language for starter code: {coding_language}
-{personalization}
+
+{'=' * 80}
+CONTEXT-AWARE PERSONALIZATION (HIGHEST PRIORITY - USE IF PROVIDED)
+{'=' * 80}
+{personalization if personalization else "(No specific context provided - generate professional LeetCode-style questions)"}
+{'=' * 80}
+
+**CONTEXT USAGE GUIDELINES:**
+- If company/role/requirements provided: Frame problem in that context
+- Example: "At Gisul, you're building a payment API. Implement rate limiting..."
+- If no context: Generate high-quality LeetCode-style problems
+
+{'=' * 80}
+DIFFICULTY CALIBRATION (CRITICAL - MUST FOLLOW EXACTLY)
+{'=' * 80}
+
+Current Difficulty: {difficulty}
+Seniority Level: {seniority}
+
+**{difficulty.upper()} Difficulty Rules for Coding ({seniority}):**
+
+{difficulty_rules}
+
+**Examples by Difficulty:**
+
+EASY:
+- Junior: "Implement binary search on sorted array" (single algorithm, clear steps)
+- Mid: "Find two sum with O(n) time" (standard with optimization)
+- Senior: "Implement LRU cache with O(1) operations" (well-known + edge cases)
+
+MEDIUM:
+- Junior: "Find longest substring without repeating chars" (two-pointer)
+- Mid: "Coin change problem with space optimization" (basic DP)
+- Senior: "Design Twitter feed with real-time updates" (complex DP + system)
+
+HARD:
+- Junior: "Merge k sorted lists efficiently" (complex multi-step)
+- Mid: "Find shortest path with constraints" (advanced graph + optimization)
+- Senior: "Design autocomplete at scale" (system constraints + performance)
+
+VALIDATION:
+- Read the rules above CAREFULLY
+- Generate questions that EXACTLY match the difficulty level
+- If unsure, err on the side of being MORE challenging
+- Easy ≠ Medium ≠ Hard - they must be DISTINCTLY different
+
+{'=' * 80}
 
 ⚠️ JUDGE0 PLATFORM REQUIREMENTS:
 - stdin/stdout based execution ONLY
@@ -543,7 +609,33 @@ Return ONLY valid JSON, no markdown."""
         logger.info(f"  - Function signature: {function_signature is not None}")
         logger.info(f"  - Starter code: {len(starter_code)} chars")
         
-        questions.append(final_question)
+        # Quality validation
+        try:
+            metrics = await validate_question_quality(
+                question=final_question,
+                question_type="Coding",
+                difficulty=difficulty,
+                experience_min=experience_min,
+                experience_max=experience_max,
+                job_designation=job_designation,
+                assessment_requirements=assessment_requirements,
+                topic=topic
+            )
+            
+            if metrics.overall_score >= 0.75:
+                questions.append(final_question)
+                logger.debug(f"✅ Coding quality score: {metrics.overall_score:.2f}")
+            else:
+                logger.warning(
+                    f"⚠️ Low quality Coding (score={metrics.overall_score:.2f}): "
+                    f"{final_question.get('title', '')[:100]}... Issues: {', '.join(metrics.issues[:3])}"
+                )
+                # Include anyway if not too low
+                if metrics.overall_score >= 0.60:
+                    questions.append(final_question)
+        except Exception as e:
+            logger.warning(f"Quality validation failed for Coding: {e}, including anyway")
+            questions.append(final_question)
     
     if not questions:
         raise HTTPException(status_code=500, detail="Failed to generate any Coding questions")

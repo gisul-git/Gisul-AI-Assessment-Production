@@ -46,6 +46,10 @@ except (ImportError, ModuleNotFoundError) as e:
     )
 
 from .ai_utils import _get_openai_client, _parse_json_response
+from .ai_quality import (
+    validate_question_quality,
+    _get_difficulty_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +63,12 @@ async def _generate_aiml_questions(
     difficulty: str,
     count: int,
     experience_mode: str = "corporate",
-    additional_requirements: Optional[str] = None
+    additional_requirements: Optional[str] = None,
+    job_designation: Optional[str] = None,
+    experience_min: Optional[int] = None,
+    experience_max: Optional[int] = None,
+    company_name: Optional[str] = None,
+    assessment_requirements: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Generate AIML (AI/ML + data science) questions using structured format from AIML generator.
@@ -145,16 +154,91 @@ async def _generate_aiml_questions(
         else:  # hard
             libraries = ["Python", "NumPy", "Pandas", "Scikit-learn", "TensorFlow"]
     
+    # Determine seniority for difficulty rules
+    if experience_max is not None:
+        if experience_max <= 2:
+            seniority = "Junior"
+        elif experience_max <= 5:
+            seniority = "Mid"
+        elif experience_max <= 10:
+            seniority = "Senior"
+        else:
+            seniority = "Lead"
+    else:
+        seniority = "Mid"  # Default
+    
+    # Get AIML-specific difficulty rules
+    difficulty_rules = _get_difficulty_rules("AIML", difficulty, seniority)
+    
     prompt = f"""You are an expert AI/ML and Data Science assessment writer for a Jupyter-style IDE platform.
 Generate EXACTLY {count} comprehensive AIML question(s) for the topic: {topic}.
 
 CRITICAL: You MUST generate EXACTLY {count} question(s). Do NOT generate fewer or more than {count} questions.
+
+**HARDWARE CONSTRAINTS**: Candidates run code on laptops in Jupyter notebooks.
+Keep datasets SMALL for fast execution, but make questions COMPLEX through:
+- Multiple models comparison
+- Hyperparameter tuning
+- Feature engineering
+- Business analysis
+- Cross-validation
 
 Difficulty: {difficulty}
 Experience Mode: {experience_mode}
 Required Libraries: {', '.join(libraries)}
 Dataset Required: {"YES - MUST include dataset" if requires_dataset else "Optional"}
 {f"Additional Requirements: {additional_requirements}" if additional_requirements else ""}
+
+**TARGET EXECUTION TIME** (on candidate laptops):
+- Easy: < 30 seconds
+- Medium: < 1 minute
+- Hard: < 2 minutes
+
+{'=' * 80}
+AIML QUESTION QUALITY STANDARDS (CRITICAL - MUST FOLLOW)
+{'=' * 80}
+
+Current Difficulty: {difficulty}
+Seniority Level: {seniority}
+
+**CRITICAL: AIML questions must reflect REAL ML workflows**
+
+**{difficulty.upper()} Difficulty Rules for AIML ({seniority}):**
+
+{difficulty_rules}
+
+**FORBIDDEN (too simple for Hard, even with small datasets):**
+❌ "What is gradient descent?" (this is Easy)
+❌ "Explain the difference between supervised and unsupervised learning" (Easy/Medium)
+❌ "What does fit() do in sklearn?" (Easy)
+❌ Single model only (just Logistic Regression)
+❌ Just fit() and predict() with no analysis
+❌ Accuracy as the only metric
+❌ No hyperparameter tuning
+❌ No business context
+
+**REQUIRED for Hard (even with 100-200 rows):**
+✅ Multiple models comparison (3+ models)
+✅ Hyperparameter tuning (GridSearchCV/RandomizedSearchCV with 3+ parameters)
+✅ Cross-validation (5-fold minimum)
+✅ Business metrics (cost analysis, ROI, threshold tuning)
+✅ Feature engineering (interaction features, encoding, scaling)
+✅ Class imbalance handling (SMOTE, class_weight if applicable)
+✅ Model evaluation beyond accuracy (precision/recall/F1/AUC)
+✅ Decision threshold optimization for business goals
+
+**Examples by Difficulty (Notice: complexity, not dataset size):**
+
+**Easy (30-50 rows):**
+"Load CSV with pandas, handle missing values, split train/test (80/20), train Logistic Regression, report accuracy"
+
+**Medium (50-100 rows):**
+"Build pipeline: StandardScaler + feature engineering (2 interaction features), compare 3 models (Logistic Regression, Random Forest, XGBoost) with 5-fold cross-validation, report precision/recall/F1/AUC, select best model"
+
+**Hard (100-200 rows):**
+"Customer purchase prediction with class imbalance (15% positive). Compare 3+ models with cross-validation, tune hyperparameters with GridSearchCV, analyze business costs (false positive: $5 wasted marketing, false negative: $50 missed revenue), find optimal decision threshold minimizing total cost, provide feature importance insights for marketing strategy"
+
+{'=' * 80}
 
 CRITICAL STRUCTURE REQUIREMENTS:
 Each question MUST include:
@@ -164,25 +248,62 @@ Each question MUST include:
 4. **libraries**: {libraries}
 5. **dataset** (if required): {{
      "schema": [{{"name": "col", "type": "int|float|string|bool"}}],
-     "rows": [EXACTLY 30 rows of data as arrays]
+     "rows": [dataset rows as arrays - size depends on difficulty]
    }}
 
+**CRITICAL DATASET SIZE REQUIREMENTS (HARDWARE-FRIENDLY):**
+
+**HARDWARE CONSTRAINTS**: Candidates run code on laptops in Jupyter notebooks.
+Keep datasets SMALL for fast execution, but make questions COMPLEX through:
+- Multiple models comparison
+- Hyperparameter tuning
+- Feature engineering
+- Business analysis
+- Cross-validation
+
+**DATASET SIZE GUIDELINES** (considering candidate hardware):
+- **Easy**: 30-50 rows, 4-6 columns (basic ML workflow, < 30 seconds execution)
+- **Medium**: 50-100 rows, 6-10 columns (model comparison + tuning, < 1 minute execution)
+- **Hard**: 100-200 rows, 8-12 columns (full ML pipeline + business analysis, < 2 minutes execution)
+
+**IMPORTANT**: 
+- Dataset size does NOT determine difficulty
+- Difficulty comes from: model complexity, feature engineering, business analysis
+- Keep datasets small for fast execution on candidate hardware
+- Focus on ML thinking, not big data processing
+
 DIFFICULTY GUIDELINES:
-- Easy: Basic operations, simple models (no dataset OR optional dataset)
-- Medium: Feature engineering, ML models (dataset REQUIRED, 30 rows)
-- Hard: End-to-end pipeline, deep learning (dataset REQUIRED, 30 rows)
+- **Easy**: Basic operations, single model, accuracy only (dataset: 30-50 rows OR optional)
+- **Medium**: Feature engineering, 2-3 models comparison, cross-validation, multiple metrics (dataset REQUIRED: 50-100 rows)
+- **Hard**: Advanced feature engineering, 3+ models, GridSearchCV, business cost analysis, threshold tuning (dataset REQUIRED: 100-200 rows)
 
 DATASET RULES (if required):
-- EXACTLY 30 rows (mandatory)
+- Dataset size MUST match difficulty level (see requirements above)
 - 4-7 columns
 - Include target/label column for ML tasks
-- Realistic, meaningful data
+- Realistic, meaningful data that reflects real-world scenarios
 - Dataset MUST be in structured format (schema + rows arrays)
+- For Hard: Include realistic data distributions, missing values, outliers
 
-QUESTION COMPLEXITY BY DIFFICULTY:
-- Easy: {{"description": "...", "tasks": [...], "constraints": [...], "dataset": null}}
-- Medium: {{"description": "...", "tasks": [...], "constraints": [...], "dataset": {{"schema": [...], "rows": [[...]]}}}}
-- Hard: {{"description": "...", "tasks": [...], "constraints": [...], "dataset": {{"schema": [...], "rows": [[...]]}}}}
+QUESTION COMPLEXITY BY DIFFICULTY (Notice: same dataset size range, different complexity):
+
+- **Easy** (30-50 rows, 4-6 columns):
+  {{"description": "...", "tasks": ["Load data", "Handle missing values", "Split train/test", "Train single model (Logistic Regression)", "Report accuracy"], "constraints": [...], "dataset": {{"schema": [...], "rows": [30-50 rows]}}}}
+  
+- **Medium** (50-100 rows, 6-10 columns):
+  {{"description": "...", "tasks": ["Feature engineering (create 2 interaction features)", "Handle class imbalance with class_weight", "Compare 3 models with 5-fold cross-validation", "Report precision, recall, F1, AUC", "Select best model"], "constraints": [...], "dataset": {{"schema": [...], "rows": [50-100 rows]}}}}
+  
+- **Hard** (100-200 rows, 8-12 columns):
+  {{"description": "Production scenario with business context...", "tasks": ["Advanced feature engineering + SMOTE for imbalance", "Compare 3+ models with 5-fold cross-validation", "Hyperparameter tuning with GridSearchCV (3+ parameters)", "Business cost analysis (false positive vs false negative costs)", "Find optimal decision threshold minimizing total cost", "Feature importance analysis with business recommendations"], "constraints": ["Performance requirements", "Business constraints"], "dataset": {{"schema": [...], "rows": [100-200 rows]}}}}
+
+**DIFFICULTY IS DETERMINED BY**:
+1. Number of models to compare (Easy: 1, Medium: 2-3, Hard: 3+)
+2. Hyperparameter tuning (Easy: none, Medium: basic, Hard: GridSearchCV/RandomizedSearchCV)
+3. Feature engineering complexity (Easy: basic, Medium: moderate, Hard: advanced)
+4. Business analysis depth (Easy: none, Medium: basic metrics, Hard: cost analysis + threshold tuning)
+5. Class imbalance handling (Medium+: SMOTE, class_weight)
+6. Cross-validation strategy (Medium+: k-fold)
+7. Evaluation metrics (Easy: accuracy only, Medium: precision/recall/F1/AUC, Hard: business metrics + threshold optimization)
 
 Output format (JSON object with questions array):
 {{
@@ -205,11 +326,15 @@ Output format (JSON object with questions array):
 }}
 
 CRITICAL: 
-- If dataset is included, it MUST have EXACTLY 30 rows
-- Schema must have 4-7 columns
+- If dataset is included, row count MUST match difficulty (hardware-friendly):
+  * Easy: 30-50 rows, 4-6 columns
+  * Medium: 50-100 rows, 6-10 columns
+  * Hard: 100-200 rows, 8-12 columns
+- Schema must have appropriate columns for difficulty level
 - Tasks must be actionable and specific
-- Description must be 2-3 paragraphs
+- Description must be 2-3 paragraphs with business context
 - NO markdown, NO code blocks, ONLY JSON
+- **Remember**: Difficulty comes from task complexity, not dataset size!
 
 Return ONLY a JSON object with questions array."""
 
@@ -262,16 +387,29 @@ Return ONLY a JSON object with questions array."""
             schema = dataset.get("schema", [])
             rows = dataset.get("rows", [])
             
-            # Validate row count
-            if len(rows) != 30:
-                logger.warning(f"Dataset has {len(rows)} rows, expected 30. Adjusting...")
-                if len(rows) > 30:
-                    dataset["rows"] = rows[:30]
-                elif len(rows) > 0:
-                    # Repeat last row to reach 30
-                    last_row = rows[-1] if rows else []
-                    while len(dataset["rows"]) < 30:
-                        dataset["rows"].append(last_row.copy() if isinstance(last_row, list) else last_row)
+            # Validate row count based on difficulty (hardware-friendly sizes)
+            if difficulty.lower() == "easy":
+                expected_min, expected_max = 30, 50
+            elif difficulty.lower() == "medium":
+                expected_min, expected_max = 50, 100
+            else:  # hard
+                expected_min, expected_max = 100, 200
+            
+            if len(rows) < expected_min:
+                logger.warning(
+                    f"Dataset has {len(rows)} rows, expected {expected_min}-{expected_max} for {difficulty} difficulty. "
+                    f"Current size may be too small, but complexity matters more than size."
+                )
+                # Be lenient - focus on task complexity, not strict size
+                if len(rows) >= expected_min * 0.7:  # Allow 70% of minimum
+                    logger.info(f"Accepting {len(rows)} rows for {difficulty} (focus on task complexity)")
+            elif len(rows) > expected_max:
+                logger.warning(
+                    f"Dataset has {len(rows)} rows, larger than recommended {expected_max} for {difficulty}. "
+                    f"Consider smaller dataset for faster execution on candidate hardware. "
+                    f"Keeping all rows but recommend {expected_max} max for optimal performance."
+                )
+                # Keep all rows but warn about hardware constraints
             
             # Validate column count
             if len(schema) < 4 or len(schema) > 7:
@@ -298,7 +436,7 @@ Return ONLY a JSON object with questions array."""
             for row in rows:
                 question_text += "| " + " | ".join(str(val) for val in row) + " |\n"
             
-            question_text += f"\n*(Full dataset contains 30 rows)*"
+            question_text += f"\n*(Full dataset contains {len(dataset.get('rows', []))} rows)*"
         
         if question_libraries:
             question_text += f"\n\n**Required Libraries:** {', '.join(question_libraries)}"
@@ -319,7 +457,33 @@ Return ONLY a JSON object with questions array."""
             }
         }
         
-        result.append(question_obj)
+        # Quality validation
+        try:
+            metrics = await validate_question_quality(
+                question=question_obj,
+                question_type="AIML",
+                difficulty=difficulty,
+                experience_min=experience_min,
+                experience_max=experience_max,
+                job_designation=job_designation,
+                assessment_requirements=assessment_requirements,
+                topic=topic
+            )
+            
+            if metrics.overall_score >= 0.75:
+                result.append(question_obj)
+                logger.debug(f"✅ AIML quality score: {metrics.overall_score:.2f}")
+            else:
+                logger.warning(
+                    f"⚠️ Low quality AIML (score={metrics.overall_score:.2f}): "
+                    f"{description[:100]}... Issues: {', '.join(metrics.issues[:3])}"
+                )
+                # Include anyway if not too low
+                if metrics.overall_score >= 0.60:
+                    result.append(question_obj)
+        except Exception as e:
+            logger.warning(f"Quality validation failed for AIML: {e}, including anyway")
+            result.append(question_obj)
     
     if not result:
         raise HTTPException(status_code=500, detail="No valid AIML questions generated")

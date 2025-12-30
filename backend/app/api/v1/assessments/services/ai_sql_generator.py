@@ -45,6 +45,10 @@ except (ImportError, ModuleNotFoundError) as e:
     )
 
 from .ai_utils import _get_openai_client, _parse_json_response
+from .ai_quality import (
+    validate_question_quality,
+    _get_difficulty_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +77,12 @@ async def _generate_sql_questions(
     difficulty: str,
     count: int,
     experience_mode: str = "corporate",
-    additional_requirements: Optional[str] = None
+    additional_requirements: Optional[str] = None,
+    job_designation: Optional[str] = None,
+    experience_min: Optional[int] = None,
+    experience_max: Optional[int] = None,
+    company_name: Optional[str] = None,
+    assessment_requirements: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Generate SQL questions using structured format from DSA SQL generator.
@@ -144,6 +153,22 @@ async def _generate_sql_questions(
     elif any(kw in topic_lower for kw in ["insert", "update", "delete", "manipulate"]):
         sql_category = "manipulation"
     
+    # Determine seniority for difficulty rules
+    if experience_max is not None:
+        if experience_max <= 2:
+            seniority = "Junior"
+        elif experience_max <= 5:
+            seniority = "Mid"
+        elif experience_max <= 10:
+            seniority = "Senior"
+        else:
+            seniority = "Lead"
+    else:
+        seniority = "Mid"  # Default
+    
+    # Get SQL-specific difficulty rules
+    difficulty_rules = _get_difficulty_rules("SQL", difficulty, seniority)
+    
     # Determine table count based on difficulty
     if difficulty.lower() == "easy":
         table_count = "1-2 tables"
@@ -163,6 +188,43 @@ SQL Category: {sql_category}
 Experience Mode: {experience_mode}
 Recommended Tables: {table_count}
 {f"Additional Requirements: {additional_requirements}" if additional_requirements else ""}
+
+{'=' * 80}
+SQL QUESTION QUALITY STANDARDS (CRITICAL - MUST FOLLOW)
+{'=' * 80}
+
+Current Difficulty: {difficulty}
+Seniority Level: {seniority}
+
+**CRITICAL: SQL difficulty is about PROBLEM COMPLEXITY, not query length**
+
+**{difficulty.upper()} Difficulty Rules for SQL ({seniority}):**
+
+{difficulty_rules}
+
+**FORBIDDEN (too simple for Hard):**
+❌ Just adding more JOINs (length ≠ difficulty)
+❌ "Write a query with 5 JOINs" (arbitrary complexity)
+
+**REQUIRED for Hard:**
+✅ Performance analysis
+✅ Optimization decisions
+✅ Indexing strategy
+✅ Execution plan understanding
+✅ Scale considerations (10M+ rows)
+
+**EXAMPLES BY DIFFICULTY:**
+- **Easy**: "Find all users who registered in the last 30 days" (simple SELECT + WHERE)
+- **Medium**: "Find top 3 products per category by revenue, showing YoY growth %" (JOINs + window functions)
+- **Hard**: "This query takes 30 seconds on 50M rows. Optimize it. Explain your indexing strategy and expected performance improvement." (optimization + scale)
+
+**CRITICAL: For Hard questions, provide:**
+- A slow query scenario (or describe the performance problem)
+- Ask candidate to optimize it
+- Require explanation of indexing strategy
+- Include scale considerations (10M+ rows)
+
+{'=' * 80}
 
 === GENERATE JSON WITH THIS EXACT STRUCTURE ===
 
@@ -405,7 +467,33 @@ IMPORTANT: Return ONLY valid JSON. No markdown code blocks, no explanations."""
             }
         }
         
-        result.append(question_obj)
+        # Quality validation
+        try:
+            metrics = await validate_question_quality(
+                question=question_obj,
+                question_type="SQL",
+                difficulty=difficulty,
+                experience_min=experience_min,
+                experience_max=experience_max,
+                job_designation=job_designation,
+                assessment_requirements=assessment_requirements,
+                topic=topic
+            )
+            
+            if metrics.overall_score >= 0.75:
+                result.append(question_obj)
+                logger.debug(f"✅ SQL quality score: {metrics.overall_score:.2f}")
+            else:
+                logger.warning(
+                    f"⚠️ Low quality SQL (score={metrics.overall_score:.2f}): "
+                    f"{title[:100]}... Issues: {', '.join(metrics.issues[:3])}"
+                )
+                # Include anyway if not too low
+                if metrics.overall_score >= 0.60:
+                    result.append(question_obj)
+        except Exception as e:
+            logger.warning(f"Quality validation failed for SQL: {e}, including anyway")
+            result.append(question_obj)
     
     if not result:
         raise HTTPException(status_code=500, detail="No valid SQL questions generated")
