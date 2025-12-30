@@ -1357,7 +1357,19 @@ export default function PrecheckPage() {
     }
     
     // Route to new instructions page
-    router.push(`/assessment/${assessmentId}/${token}/instructions-new`);
+    // Use replace to avoid adding to history stack and prevent navigation conflicts
+    if (router.isReady && assessmentId && token) {
+      try {
+        await router.replace(`/assessment/${assessmentId}/${token}/instructions-new`);
+      } catch (error: any) {
+        // Ignore navigation cancellation errors (expected when navigating quickly)
+        if (error?.name === 'AbortError' || error?.message?.includes('Abort')) {
+          console.log("[Precheck] Navigation was cancelled (expected)");
+          return;
+        }
+        console.error("[Precheck] Navigation error:", error);
+      }
+    }
   }, [steps, assessmentId, token, email, name, capturedPhoto, router]);
   
   const allStepsPassed = steps.every(step => step.status === "passed");

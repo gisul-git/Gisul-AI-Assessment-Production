@@ -255,7 +255,7 @@ class GenerateQuestionsForTopicsRequest(BaseModel):
 
 class UpdateAssessmentDraftRequest(BaseModel):
     """Request to update assessment draft data."""
-    assessmentId: str
+    assessmentId: Optional[str] = None
     # Optional fields that can be updated directly
     title: Optional[str] = None
     description: Optional[str] = None

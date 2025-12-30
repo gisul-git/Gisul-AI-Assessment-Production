@@ -403,6 +403,8 @@ export default function AnalyticsPage() {
     invitedAt: selectedCandidateFromAssessment?.invitedAt || null,
     startedAt: selectedCandidateFromAssessment?.startedAt || null,
     completedAt: selectedCandidateFromAssessment?.completedAt || selectedCandidateFromResults?.submittedAt || null,
+    // Include candidateInfo (requirements) from results
+    candidateInfo: selectedCandidateFromResults?.candidateInfo || selectedCandidateFromAssessment?.candidateInfo || null,
   } : null
 
   // Calculate overall statistics
@@ -1112,6 +1114,84 @@ export default function AnalyticsPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Candidate Requirements Section */}
+                {selectedCandidateData.candidateInfo && (
+                  <div style={{
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "0.75rem",
+                    padding: "1.5rem",
+                    backgroundColor: "#ffffff",
+                  }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
+                      Candidate Requirements
+                    </h2>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+                      {selectedCandidateData.candidateInfo.phone && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Phone</div>
+                          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{selectedCandidateData.candidateInfo.phone}</div>
+                        </div>
+                      )}
+                      {selectedCandidateData.candidateInfo.linkedIn && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>LinkedIn</div>
+                          <div style={{ fontSize: "1rem" }}>
+                            <a 
+                              href={selectedCandidateData.candidateInfo.linkedIn} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              style={{ color: "#3b82f6", textDecoration: "none", fontWeight: 600 }}
+                            >
+                              {selectedCandidateData.candidateInfo.linkedIn}
+                            </a>
+                          </div>
+                        </div>
+                      )}
+                      {selectedCandidateData.candidateInfo.github && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>GitHub</div>
+                          <div style={{ fontSize: "1rem" }}>
+                            <a 
+                              href={selectedCandidateData.candidateInfo.github} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              style={{ color: "#3b82f6", textDecoration: "none", fontWeight: 600 }}
+                            >
+                              {selectedCandidateData.candidateInfo.github}
+                            </a>
+                          </div>
+                        </div>
+                      )}
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Resume</div>
+                        <div style={{ fontSize: "1rem", fontWeight: 600 }}>
+                          {selectedCandidateData.candidateInfo.hasResume ? (
+                            <span style={{ color: "#10b981" }}>✓ Uploaded</span>
+                          ) : (
+                            <span style={{ color: "#94a3b8" }}>Not provided</span>
+                          )}
+                        </div>
+                      </div>
+                      {selectedCandidateData.candidateInfo.customFields && 
+                       Object.keys(selectedCandidateData.candidateInfo.customFields).length > 0 && (
+                        <div style={{ gridColumn: "1 / -1" }}>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.5rem" }}>Custom Fields</div>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+                            {Object.entries(selectedCandidateData.candidateInfo.customFields).map(([key, value]) => (
+                              <div key={key}>
+                                <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>
+                                  {key.charAt(0).toUpperCase() + key.slice(1)}
+                                </div>
+                                <div style={{ fontSize: "1rem", fontWeight: 600 }}>{String(value)}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Overall Summary */}
                 <div style={{

@@ -171,29 +171,41 @@ async def generate_aiml_question(
     # Auto-select libraries
     libraries = _select_libraries(skill, topic, difficulty)
     
-    # Build difficulty-specific guidance
+    # Build difficulty-specific guidance with strict calibration
     difficulty_guidance = {
-        "easy": """EASY difficulty:
-- Python basics or NumPy basics
-- No dataset OR dataset not required
-- No ML/DL models
-- Simple operations that can be solved with in-memory examples""",
+        "easy": """EASY difficulty - NON-NEGOTIABLE CALIBRATION:
+- DIRECT, EXPLICIT INSTRUCTIONS: Problem provides clear, unambiguous direction
+- SINGLE CLEAR SOLUTION PATH: One obvious, straightforward approach - no ambiguity about which method to use
+- MINIMAL AMBIGUITY: Problem statement is clear, requirements are explicit
+- FOCUS ON BASIC CONCEPTS: Tests basic syntax, data structures, or simple transformations
+- Difficulty comes from correct application of fundamental concepts, not from choosing between approaches
+- For Python topics: Focus on Python language usage (syntax, data types, basic operations)
+- For ML/DL topics: Focus on basic model usage or simple transformations
+- No trade-offs or conflicting requirements
+- Straightforward reasoning: Apply known patterns or techniques directly""",
         
-        "medium": """MEDIUM difficulty:
-- Pandas + NumPy operations
-- Dataset REQUIRED
-- Feature preprocessing
-- Scikit-learn models
-- Train-test split
-- Evaluation metrics""",
+        "medium": """MEDIUM difficulty - NON-NEGOTIABLE CALIBRATION:
+- MULTIPLE VALID APPROACHES: Several viable solutions exist, candidate must SELECT
+- REQUIRES SELECTION, COMPARISON, OR REASONING: Must choose between approaches with justification
+- MODERATE AMBIGUITY: Problem has some ambiguity that requires reasoning to resolve
+- COMBINES LOGIC WITH STRUCTURED THINKING: Not just execution, requires understanding trade-offs
+- Decision-oriented tasks: "Which approach is better and why?" not "Do X, then Y"
+- Requires understanding of when and why to use different methods
+- Real-world scenarios with practical constraints that inform decisions
+- Tasks must be outcome-focused with justification required for choices
+- Difficulty reflects reasoning depth: understanding trade-offs and making informed selections""",
         
-        "hard": """HARD difficulty:
-- End-to-end ML or DL pipeline
-- Dataset REQUIRED
-- TensorFlow / PyTorch
-- Model training + evaluation
-- Overfitting awareness
-- Metric interpretation"""
+        "hard": """HARD difficulty - NON-NEGOTIABLE CALIBRATION:
+- NO OBVIOUS OR SINGLE BEST SOLUTION: Multiple approaches exist, each with different trade-offs
+- CONFLICTING CONSTRAINTS OR TRADE-OFFS: Problem has competing requirements that create tension
+- REQUIRES DESIGN DECISIONS, INTERPRETATION, OR ARCHITECTURAL THINKING: Not just implementation
+- FORCES DEEPER REASONING BEYOND EXECUTION: Must analyze limitations, interpret results, justify decisions
+- Real-world constraints and edge cases that create ambiguity requiring judgment
+- MANDATORY: At least ONE task involving interpretation of results OR analysis of limitations OR trade-off discussion
+- Interpretation/limitation tasks must NOT reveal solutions but require critical thinking
+- Must address questions like "what are the limitations?" or "how would you interpret this?" or "what are the trade-offs?"
+- Tasks require deep reasoning, strategic thinking, and critical evaluation
+- Difficulty reflects reasoning depth: navigating ambiguity, analyzing trade-offs, and interpreting limitations"""
     }
     
     diff_guide = difficulty_guidance.get(difficulty.lower(), difficulty_guidance["medium"])
@@ -203,8 +215,11 @@ async def generate_aiml_question(
     
     prompt = f"""You are an AI assessment generator for an AIML competency assessment platform.
 
-Your responsibility is to generate ONE complete AIML/Python competency question.
+Your responsibility is to generate ONE complete AIML/Python competency question that reflects REAL-WORLD scenarios and requires DECISION-MAKING.
 You may optionally generate a dataset depending on the complexity of the question.
+
+CRITICAL PRINCIPLE: Difficulty reflects REASONING DEPTH, not procedural steps or library complexity.
+This applies globally across Python, AI, ML, DL, and Data Science questions.
 
 ==================================================
 SYSTEM CONTEXT
@@ -218,6 +233,207 @@ This platform evaluates candidates on:
 - Data Science libraries
 
 All questions are solved in a JUPYTER-STYLE IDE (cell-based execution).
+
+IMPORTANT: Question difficulty must reflect REASONING DEPTH across all domains:
+- A hard Python question requires deep reasoning, not just complex syntax
+- A hard ML question requires trade-off analysis, not just using advanced libraries
+- A hard DL question requires architectural reasoning, not just model complexity
+- A hard Data Science question requires analytical judgment, not just data manipulation steps
+
+==================================================
+ASSESSMENT TITLE INTEGRATION (CRITICAL)
+==================================================
+
+The Assessment Title "{title}" is the PRIMARY context for this question.
+
+You MUST:
+- Generate a question that directly relates to and reflects the Assessment Title
+- Use the title to inform the real-world scenario, domain, and problem context
+- Ensure the question aligns with the assessment's purpose and focus
+- The title should guide the problem domain, industry context, or application area
+
+Example: If title is "E-commerce Customer Segmentation", create a question about customer segmentation in e-commerce context, not generic ML.
+
+==================================================
+SKILL-TOPIC ALIGNMENT (STRICT - NON-NEGOTIABLE)
+==================================================
+
+CRITICAL: Ensure the actual tasks test the SELECTED TOPIC, not adjacent skills.
+
+STRICT ALIGNMENT RULES:
+
+1. TOPIC-SPECIFIC TESTING (MANDATORY):
+   - If topic is Python-specific (e.g., data types, list comprehensions, generators, OOP, decorators, context managers):
+     * The difficulty MUST come from Python language usage, NOT from ML or business reasoning
+     * Tasks must require using the specific Python feature/concept
+     * Example: If topic is "List Comprehensions", tasks must require list comprehensions, not just any Python code
+   - If topic is ML-specific (e.g., feature engineering, model evaluation, cross-validation):
+     * Tasks must test ML concepts, not just Python syntax
+     * Difficulty comes from ML reasoning, not Python complexity
+   - If topic is DL-specific (e.g., CNNs, RNNs, transfer learning):
+     * Tasks must test DL concepts, not just framework usage
+   - If topic is Data Science-specific (e.g., EDA, data preprocessing):
+     * Tasks must test data analysis reasoning, not just library calls
+
+2. TOPIC CANNOT BE BYPASSED (MANDATORY):
+   - Do NOT allow questions where the topic can be bypassed or ignored
+   - The selected topic must be ESSENTIAL to solving the problem
+   - Candidates cannot solve the problem without engaging with the topic
+   - Example: If topic is "Generators", the solution MUST use generators, not lists or other alternatives
+
+3. SKILL-TOPIC MATCHING:
+   - Skill: Python, Topic: "List Comprehensions" → Test Python list comprehension usage
+   - Skill: Python, Topic: "OOP" → Test object-oriented programming in Python
+   - Skill: Machine Learning, Topic: "Feature Engineering" → Test feature engineering reasoning
+   - Skill: Deep Learning, Topic: "CNNs" → Test CNN architecture and reasoning
+   - Skill: Data Science, Topic: "EDA" → Test exploratory data analysis thinking
+
+4. DIFFICULTY SOURCE MUST MATCH TOPIC:
+   - For Python topics: Difficulty from Python language complexity, not ML reasoning
+   - For ML topics: Difficulty from ML reasoning, not Python syntax
+   - For DL topics: Difficulty from DL architecture/design, not just implementation
+   - For Data Science topics: Difficulty from analytical reasoning, not data manipulation steps
+
+5. VALIDATION CHECK:
+   - Ask: "Can this question be solved without using the selected topic?" If yes, redesign.
+   - Ask: "Does the difficulty come from the selected topic area?" If no, recalibrate.
+   - Ask: "Are the tasks testing the selected topic directly?" If no, refocus.
+
+Current Input:
+- Skill: {skill}
+- Topic: {topic if topic else "None"}
+
+You MUST ensure the question directly tests the topic "{topic if topic else skill}" and cannot be solved by bypassing it.
+
+==================================================
+QUESTION DESCRIPTION REQUIREMENTS (MANDATORY)
+==================================================
+
+Every question description MUST include ALL THREE components:
+
+1. REAL-WORLD DOMAIN CONTEXT (Required):
+   - Specific industry or domain (e.g., healthcare, finance, e-commerce, manufacturing, logistics)
+   - Domain-specific terminology and context
+   - Realistic business scenario or use case
+   - Reference the Assessment Title: "{title}" to inform the domain
+
+2. CLEAR OBJECTIVE (Required):
+   - Explicitly state what needs to be accomplished
+   - Define the desired outcome or goal
+   - Explain the business value or purpose
+
+3. AT LEAST ONE PRACTICAL CONSTRAINT OR TRADE-OFF (Required):
+   - Resource limitations (time, compute, data size)
+   - Business constraints (interpretability, latency, cost)
+   - Conflicting requirements (accuracy vs. speed, complexity vs. interpretability)
+   - Data quality issues or limitations
+   - Regulatory or ethical considerations
+
+Example structure:
+"[Domain Context] You are a data scientist at [company/industry]. [Business scenario with domain specifics]. [Clear Objective] Your goal is to [specific outcome]. [Constraint/Trade-off] However, you must balance [requirement A] with [requirement B], and [limitation]."
+
+==================================================
+TASK DESIGN (QUALITY UPGRADE - MANDATORY)
+==================================================
+
+REPLACE procedural step-based tasks with outcome-driven, decision-oriented tasks.
+Each task must test THINKING, not just execution.
+
+This applies globally across Python, AI, ML, DL, and Data Science questions.
+
+QUALITY REQUIREMENTS:
+
+1. OUTCOME-DRIVEN, NOT PROCEDURAL (MANDATORY):
+   ❌ AVOID step-based/procedural tasks like:
+   - "Load the dataset"
+   - "Train a model"
+   - "Split the data"
+   - "Calculate metrics"
+   - "Implement function X"
+   - "Use algorithm Y"
+   - "Create a class"
+   - "Write a function"
+   
+   ✅ USE outcome-driven, decision-oriented tasks requiring:
+   - JUSTIFICATION: "Determine the most appropriate [approach] for [constraint] and justify your choice"
+   - INTERPRETATION: "Interpret the results considering [context] and explain what they mean"
+   - DESIGN CHOICES: "Design a [solution] that addresses [challenge] and explain your design decisions"
+   - TRADE-OFF ANALYSIS: "Analyze the trade-offs between [approach A] and [approach B] and recommend the best option"
+   - REASONING: "Select and implement a [solution] that balances [requirement A] and [requirement B], explaining your reasoning"
+   - EVALUATION: "Evaluate [approach] considering [constraints] and recommend improvements"
+
+2. TEST THINKING, NOT JUST EXECUTION (MANDATORY):
+   - Each task must require reasoning, justification, interpretation, or design choices
+   - Tasks must test understanding of WHY, not just HOW
+   - Focus on WHAT to achieve and WHY, not just HOW (outcome-focused)
+   - Present scenarios where candidates must make decisions, not follow steps
+   - Tasks should require candidates to think about trade-offs, constraints, and alternatives
+
+3. AVOID REPETITIVE PATTERNS (MANDATORY):
+   - Do NOT use the same task structure across multiple questions
+   - Vary task types and approaches
+   - Use different internal archetypes to create diverse task structures
+   - Avoid formulaic task patterns (e.g., always starting with "Load data", then "Preprocess", then "Train")
+   - Create unique, engaging task sequences that test different aspects of reasoning
+
+4. DIFFICULTY-APPROPRIATE TASK COMPLEXITY:
+   - For Easy: Provide explicit guidance but still require outcome-focused thinking (single clear path)
+   - For Medium: Require choosing between multiple valid approaches with justification (selection/comparison)
+   - For Hard: Require trade-off analysis, interpretation, limitation discussion, or architectural thinking (deep reasoning)
+
+5. TOPIC-SPECIFIC TASK FOCUS:
+   - Tasks must directly test the selected topic
+   - For Python topics: Tasks should require Python language features (e.g., "Design a generator that...")
+   - For ML topics: Tasks should require ML reasoning (e.g., "Select a model that balances...")
+   - Tasks cannot be solved without engaging with the selected topic
+
+==================================================
+INTERNAL QUESTION ARCHETYPES (NOT EXPOSED IN OUTPUT)
+==================================================
+
+Use these INTERNAL archetypes to vary question structure (do NOT mention archetype in output):
+
+1. ANALYSIS: Analyze data/patterns and draw insights with reasoning
+2. MODEL COMPARISON: Compare multiple models/approaches and justify selection
+3. DEBUGGING: Diagnose issues in code/model behavior and propose solutions
+4. FEATURE REASONING: Engineer features with domain knowledge and justify choices
+5. PIPELINE DESIGN: Design end-to-end solutions considering constraints
+6. OPTIMIZATION: Improve existing solutions with trade-off analysis
+7. INTERPRETATION: Interpret results, identify limitations, and make recommendations
+8. PROBLEM-SOLVING: Solve business problems with appropriate ML/AI techniques
+
+Rotate between these archetypes internally to avoid repetitive task structures. The archetype guides your question design but is NOT mentioned in the output JSON.
+
+==================================================
+DIFFICULTY CALIBRATION (NON-NEGOTIABLE)
+==================================================
+
+Difficulty MUST be calibrated strictly according to these rules.
+This applies globally across Python, AI, ML, DL, and Data Science questions.
+
+{diff_guide}
+
+KEY PRINCIPLES (Non-Negotiable):
+- Easy: Direct explicit instructions, single clear solution path, minimal ambiguity, focus on basic concepts
+- Medium: Multiple valid approaches, requires selection/comparison/reasoning, moderate ambiguity, combines logic with structured thinking
+- Hard: No obvious best solution, conflicting constraints/trade-offs, requires design decisions/interpretation/architectural thinking, forces deeper reasoning beyond execution
+- Difficulty is NOT about:
+  * Number of procedural steps
+  * Library complexity (e.g., using TensorFlow doesn't make it hard)
+  * Code length or syntax complexity
+  * Number of features or data size
+  * Business context complexity
+- Difficulty IS about:
+  * Depth of reasoning required
+  * Complexity of decision-making
+  * Ambiguity and trade-off analysis needed
+  * Interpretation and critical thinking required
+  * Design decisions and architectural thinking
+- For Python topics: Difficulty comes from Python language reasoning (e.g., when to use generators vs lists, OOP design decisions)
+- For ML topics: Difficulty comes from ML reasoning (e.g., model selection, feature engineering trade-offs)
+- For DL topics: Difficulty comes from architectural reasoning (e.g., layer design, optimization strategies)
+- For Data Science topics: Difficulty comes from analytical reasoning (e.g., interpreting patterns, handling ambiguity)
+- An "easy" question can use advanced libraries if the reasoning path is straightforward and explicit
 
 ==================================================
 CRITICAL DECISION RULE (MANDATORY)
@@ -243,44 +459,179 @@ If a dataset is NOT required:
 - Set "dataset": null
 
 ==================================================
-DIFFICULTY-BASED LOGIC (STRICT)
-==================================================
-
-{diff_guide}
-
-==================================================
-QUESTION REQUIREMENTS
+QUESTION REQUIREMENTS (GLOBAL ENFORCEMENT)
 ==================================================
 
 You MUST generate:
 - ONE AIML competency coding question
 
-The question MUST:
+The question MUST (applies globally across Python, AI, ML, DL, and Data Science):
 - Be runnable in a Jupyter notebook
 - Require writing executable Python code
-- Clearly describe tasks to perform
-- Match the selected difficulty
+- Include ALL THREE in description (MANDATORY):
+  * (1) Real-world domain context: Specific industry/domain with realistic scenario
+  * (2) Clear objective: Explicitly state what needs to be accomplished
+  * (3) At least one realistic constraint: Time, memory, interpretability, cost, risk, regulatory, etc.
+- Use outcome-driven, decision-oriented tasks (NOT step-based/procedural tasks)
+- Each task must test THINKING, not just execution
+- Require justification, interpretation, or design choices in tasks
+- Match the selected difficulty based on NON-NEGOTIABLE calibration rules
+- Test the SELECTED TOPIC directly (cannot be bypassed)
 - NOT be multiple-choice
 - NOT include solutions or hints
+- Include decision-making elements appropriate to difficulty level
+- Be grounded in real-world context
+- Relate to the Assessment Title: "{title}"
+- Avoid repetitive task patterns (use varied structures)
+- For Hard difficulty (MANDATORY): Include at least one task involving:
+  * Interpretation of results, OR
+  * Analysis of limitations, OR
+  * Trade-off discussion
+  * Must NOT provide hints or solutions
 
 ==================================================
-DATASET REQUIREMENTS (ONLY IF GENERATED)
+REALISTIC DATASET REQUIREMENTS (ONLY IF GENERATED)
 ==================================================
 
-If a dataset is generated:
+CRITICAL: These rules apply WHENEVER a dataset is generated, across ALL question types (Python, AI, ML, DL, Data Science) and ALL difficulty levels.
+
+Generate datasets with REALISTIC COMPLEXITY rather than clean, deterministic patterns.
+
+If a dataset is generated, it MUST be REALISTIC and MEANINGFUL with these requirements:
+
+SIZE CONSTRAINTS (Preserved):
 - EXACTLY 30 rows
 - 4 to 7 columns
-- Realistic, meaningful data
-- Include a label/target column for ML/DL tasks
-- Dataset must directly support the question
-- Dataset must be FORMAT-AGNOSTIC
 
-You MUST provide:
-- schema (array of {{"name": "...", "type": "int|float|string|bool"}})
-- rows (array of arrays, where each inner array represents one row)
+DOMAIN-SPECIFIC REALISM (Required):
+- Domain-specific feature names that reflect the Assessment Title context: "{title}"
+- Feature names should be realistic for the domain (e.g., "patient_age", "transaction_amount", "product_rating")
+- Values should be domain-appropriate and realistic (not random numbers)
+- Realistic distributions and relationships between features
+- Data patterns that reflect real-world scenarios
+
+DATA QUALITY CHARACTERISTICS - REALISTIC COMPLEXITY (Required):
+
+CRITICAL: Generate datasets with REALISTIC COMPLEXITY, not clean deterministic patterns.
+Apply these rules whenever a dataset is generated:
+
+1. AVOID TRIVIAL CORRELATIONS AND TARGET LEAKAGE (MANDATORY):
+   * NO features that directly encode or reveal the target
+   * NO derived or redundant features that perfectly predict the target
+   * NO features that would not be available at prediction time
+   * NO features derived from the target variable
+   * Ensure features are causally appropriate and temporally valid
+   * Features should not have perfect or near-perfect correlation with target
+   * Avoid features that make the problem trivial (e.g., "is_churned" for churn prediction)
+
+2. INTRODUCE MILD AMBIGUITY (MANDATORY):
+   * Include CONTRADICTORY SAMPLES: Similar feature values should map to DIFFERENT outcomes
+   * Create overlapping feature distributions where the same feature combination can lead to different results
+   * Add realistic ambiguity that requires reasoning, not deterministic patterns
+   * Example: Two customers with similar profiles (age, spend, tenure) but different outcomes (churned vs. retained)
+
+3. ADD REALISTIC NOISE OR UNCERTAINTY (MANDATORY):
+   * Include slight inconsistencies or imperfect signals
+   * Add realistic noise while keeping the dataset small (30 rows)
+   * For classification: Slight class imbalance (e.g., 60/40 or 70/30 split, not 50/50)
+   * For regression: Minor outliers or noise in target variable
+   * Missing values or slight inconsistencies (if appropriate for difficulty)
+   * Imperfect correlations and realistic variance
+
+4. ENSURE NO SINGLE FEATURE CAN PERFECTLY PREDICT TARGET (MANDATORY):
+   * No single feature or category alone can perfectly predict the target
+   * Multiple features must work together to make predictions
+   * Create realistic complexity where feature interactions matter
+   * Avoid deterministic rules that make the problem too simple
+
+5. PREFER DOMAIN-RELEVANT BUT IMPERFECT FEATURES (MANDATORY):
+   * Use domain-relevant feature names and values (reflect Assessment Title: "{title}")
+   * Features should be realistic for the domain but NOT perfectly clean
+   * Prefer imperfect, noisy features over clean synthetic ones
+   * Real-world data is messy - reflect this in the dataset
+   * Domain-appropriate features with realistic imperfections
+
+6. MEANINGFULLY INFLUENCE DECISIONS:
+   * Dataset should enable meaningful feature selection choices (some features more relevant than others)
+   * Data should support model comparison decisions (different models may perform differently)
+   * Include features that create interesting trade-offs (e.g., interpretability vs. predictive power)
+   * Data characteristics should influence preprocessing, feature engineering, or model selection decisions
+   * Dataset should require reasoning about data quality, feature importance, or model suitability
+   * Contradictory samples and noise should require candidates to reason about data quality and model robustness
+
+TARGET/LABEL COLUMN:
+- Include a label/target column for ML/DL tasks
+- Target should be realistic and meaningful for the domain
+
+FORMAT:
+- Dataset must be FORMAT-AGNOSTIC
+- You MUST provide:
+  * schema (array of {{"name": "...", "type": "int|float|string|bool"}})
+  * rows (array of arrays, where each inner array represents one row)
+
+Example: For "Customer Churn Prediction" in e-commerce:
+- Features: customer_id, account_age_months, monthly_spend, support_tickets_last_month, avg_order_value, is_premium_member
+- Target: churned (0/1)
+- Realistic complexity: account_age_months has moderate correlation (not perfect), support_tickets may indicate issues but not deterministically
+- Mild ambiguity: Include contradictory samples - e.g., two customers with similar profiles (age=35, spend=$200, premium=yes) but different outcomes (one churned, one retained)
+- Realistic noise: Slight inconsistencies in data (e.g., some high-spend customers churned, some low-spend retained - realistic variance)
+- Mild imbalance: 65% non-churned, 35% churned
+- No trivial correlations: No single feature perfectly predicts churn (e.g., not all premium members retained, not all high-spend customers retained)
+- No leakage: Don't include "days_since_last_purchase" or "churn_date" (not available at prediction time)
+- Imperfect features: Domain-relevant but imperfect (e.g., support_tickets may correlate but not perfectly, monthly_spend has variance)
+- Meaningful decisions: Dataset enables feature selection choices, supports model comparison, requires reasoning about data quality
 
 If dataset is NOT required:
 - Set "dataset": null
+
+==================================================
+QUESTION DESCRIPTION GUIDELINES
+==================================================
+
+The "description" field MUST include (MANDATORY - all three required):
+1. REAL-WORLD DOMAIN CONTEXT: Specific industry/domain with realistic scenario
+   - Include domain-specific terminology and context
+   - Reference the Assessment Title context: "{title}"
+   - Set up a believable scenario that a professional would encounter
+
+2. CLEAR OBJECTIVE: Explicitly state what needs to be accomplished
+   - Define the desired outcome or goal
+   - Explain the business value or purpose
+   - Be specific about what success looks like
+
+3. AT LEAST ONE REALISTIC CONSTRAINT (MANDATORY):
+   - Time constraints (e.g., "must complete within 2 hours")
+   - Memory/compute constraints (e.g., "limited to 4GB RAM")
+   - Interpretability requirements (e.g., "model must be explainable to stakeholders")
+   - Cost constraints (e.g., "budget limited to $X")
+   - Risk constraints (e.g., "false positives are costly")
+   - Regulatory constraints (e.g., "must comply with GDPR")
+   - Data quality constraints (e.g., "missing values cannot be imputed")
+   - Performance constraints (e.g., "latency must be under 100ms")
+   - Or other realistic business/technical constraints
+
+Additional guidelines:
+- Be 2-3 paragraphs total
+- NO examples in description
+- NO detailed technical constraints in description (high-level constraints only; detailed technical constraints go in "constraints" field)
+- Focus on the problem statement, domain context, objective, and key realistic constraints
+
+The "tasks" field MUST:
+- Include 3-5 decision-oriented, outcome-focused tasks (NOT step-based/procedural)
+- Replace procedural steps with tasks requiring justification, interpretation, or design choices
+- For EASY: Tasks provide explicit guidance but should still be outcome-oriented (single clear solution path)
+- For MEDIUM: At least 2 tasks must require choosing between multiple valid approaches and justifying the selection
+- For HARD: At least 2 tasks must require decision-making with trade-off analysis, AND at least 1 task must be interpretation of results OR analysis of limitations (e.g., "Analyze the limitations of your approach", "Interpret the results considering [constraint]", "What are the potential issues with this solution?", "How would you explain these results to stakeholders?")
+- Hard interpretation/limitation tasks must NOT reveal solutions but require critical thinking
+- Tasks should build upon each other logically
+- Focus on WHAT to achieve and WHY, not just HOW (outcome-focused)
+- Require reasoning depth appropriate to difficulty level
+
+The "constraints" field should:
+- Include technical constraints (e.g., "Use scikit-learn", "No external data sources")
+- Include performance or quality requirements
+- Include any specific requirements or limitations
+- Complement the constraints/trade-offs mentioned in the description
 
 ==================================================
 CRITICAL TECHNICAL RULES
@@ -291,19 +642,24 @@ CRITICAL TECHNICAL RULES
 ❌ DO NOT include explanations outside JSON
 ❌ DO NOT mention answers or solutions
 ❌ DO NOT convert dataset into selected format
+❌ DO NOT add explanations or hints in the dataset (dataset should be raw data only)
 
 ✅ Output MUST be STRICT JSON ONLY
 ✅ Dataset field MUST exist (object or null)
 ✅ Question text must remain unchanged for all users
+✅ Question must reflect Assessment Title: "{title}"
+✅ Question must include decision-making elements
+✅ Question must be grounded in real-world context
+✅ Dataset must be realistic complexity (not clean deterministic patterns)
 
 ==================================================
 INPUT PROVIDED TO YOU
 ==================================================
 
-Assessment Title: {title}
+Assessment Title: {title} ⭐ PRIMARY CONTEXT - Use this to guide the problem domain and scenario
 Skill: {skill}
 Topic (optional): {topic if topic else "None"}
-Difficulty: {difficulty}
+Difficulty: {difficulty} (reflects REASONING COMPLEXITY, not library usage)
 Selected Dataset Format: {dataset_format} (for backend conversion only - you must NOT generate files in this format)
 
 ==================================================
@@ -322,15 +678,16 @@ MANDATORY JSON OUTPUT SCHEMA
   "question": {{
     "type": "aiml_coding",
     "execution_environment": "jupyter_notebook",
-    "description": "Clear problem statement explaining what needs to be done. Include what the code should accomplish. 2-3 paragraphs. NO examples here, NO constraints here. Just the problem description.",
+    "description": "[REAL-WORLD DOMAIN CONTEXT: 2-3 sentences with specific industry/domain, referencing Assessment Title '{title}'] [CLEAR OBJECTIVE: What needs to be accomplished and why] [AT LEAST ONE PRACTICAL CONSTRAINT OR TRADE-OFF: Resource limitations, business constraints, or conflicting requirements]. 2-3 paragraphs total. NO examples, NO detailed constraints (those go in constraints field).",
     "tasks": [
-      "Task 1: ...",
-      "Task 2: ...",
-      "Task 3: ..."
+      "Task 1: [Outcome-oriented task requiring reasoning/justification, NOT procedural]",
+      "Task 2: [Decision-making task - e.g., 'Determine which approach... and justify' or 'Choose between... based on...']",
+      "Task 3: [Outcome-oriented task with decision element]",
+      "Task 4: [For HARD only: Interpretation/limitation-analysis task - e.g., 'Analyze limitations...' or 'Interpret results considering...']"
     ],
     "constraints": [
-      "Constraint 1: ...",
-      "Constraint 2: ..."
+      "Constraint 1: [Technical constraint]",
+      "Constraint 2: [Requirement or limitation]"
     ]
   }},
   "dataset": null
@@ -350,15 +707,16 @@ OR (if dataset is required):
   "question": {{
     "type": "aiml_coding",
     "execution_environment": "jupyter_notebook",
-    "description": "Clear problem statement explaining what needs to be done. Include what the code should accomplish. 2-3 paragraphs. NO examples here, NO constraints here. Just the problem description.",
+    "description": "[REAL-WORLD DOMAIN CONTEXT: 2-3 sentences with specific industry/domain, referencing Assessment Title '{title}'] [CLEAR OBJECTIVE: What needs to be accomplished and why] [AT LEAST ONE PRACTICAL CONSTRAINT OR TRADE-OFF: Resource limitations, business constraints, or conflicting requirements]. 2-3 paragraphs total. NO examples, NO detailed constraints (those go in constraints field).",
     "tasks": [
-      "Task 1: ...",
-      "Task 2: ...",
-      "Task 3: ..."
+      "Task 1: [Outcome-oriented task requiring reasoning/justification, NOT procedural]",
+      "Task 2: [Decision-making task - e.g., 'Determine which approach... and justify' or 'Choose between... based on...']",
+      "Task 3: [Outcome-oriented task with decision element]",
+      "Task 4: [For HARD only: Interpretation/limitation-analysis task - e.g., 'Analyze limitations...' or 'Interpret results considering...']"
     ],
     "constraints": [
-      "Constraint 1: ...",
-      "Constraint 2: ..."
+      "Constraint 1: [Technical constraint]",
+      "Constraint 2: [Requirement or limitation]"
     ]
   }},
   "dataset": {{
@@ -380,13 +738,67 @@ OR (if dataset is required):
 FINAL VALIDATION BEFORE RESPONSE
 ==================================================
 
-Before responding, VERIFY:
+Before responding, VERIFY (Global Enforcement):
+
+STRUCTURE & SCHEMA:
 ✓ JSON is valid and parsable
-✓ Question matches difficulty and skill
-✓ Libraries are appropriate: {json.dumps(libraries)}
-✓ Dataset included ONLY when required: {requires_dataset}
-✓ Dataset has EXACTLY 30 rows if present
+✓ All required fields present (preserved JSON schema)
 ✓ No text outside JSON
+✓ Internal archetype used but NOT exposed in output
+
+SKILL-TOPIC ALIGNMENT (STRICT - NON-NEGOTIABLE):
+✓ Question directly tests the SELECTED TOPIC: "{topic if topic else skill}"
+✓ Topic cannot be bypassed or ignored - it is ESSENTIAL to solving the problem
+✓ For Python topics: Difficulty comes from Python language usage, NOT from ML or business reasoning
+✓ For ML topics: Difficulty comes from ML reasoning, NOT from Python syntax
+✓ For DL topics: Difficulty comes from DL architecture/design, NOT just implementation
+✓ For Data Science topics: Difficulty comes from analytical reasoning, NOT data manipulation steps
+✓ Tasks require using/testing the selected topic directly
+✓ Validation: Question cannot be solved without engaging with the selected topic
+
+QUESTION CONTENT (Global - applies to Python, AI, ML, DL, Data Science):
+✓ Question reflects Assessment Title: "{title}"
+✓ Description includes ALL THREE: (1) Real-world domain context, (2) Clear objective, (3) At least one realistic constraint (time, memory, interpretability, cost, risk, etc.)
+✓ Question is grounded in REAL-WORLD context (not abstract)
+✓ Question matches skill: {skill} and topic: {topic if topic else "None"}
+
+TASK DESIGN QUALITY (Quality Upgrade - Mandatory):
+✓ Tasks are OUTCOME-DRIVEN and DECISION-ORIENTED (NOT step-based/procedural like "load data", "train model")
+✓ Each task tests THINKING, not just execution
+✓ Tasks require justification, interpretation, or design choices
+✓ Tasks avoid repetitive patterns (varied structures, not formulaic)
+✓ Tasks are topic-specific and cannot be solved without the selected topic
+✓ For Easy: Single clear solution path with explicit guidance
+✓ For Medium: Multiple valid approaches requiring selection/comparison/reasoning
+✓ For Hard: Requires design decisions, interpretation, or architectural thinking
+
+DIFFICULTY CALIBRATION (NON-NEGOTIABLE):
+✓ For EASY: Direct explicit instructions, single clear solution path, minimal ambiguity, focus on basic concepts
+✓ For MEDIUM: Multiple valid approaches, requires selection/comparison/reasoning, moderate ambiguity, combines logic with structured thinking
+✓ For HARD: No obvious best solution, conflicting constraints/trade-offs, requires design decisions/interpretation/architectural thinking, forces deeper reasoning beyond execution
+✓ For HARD (MANDATORY): At least one task involving interpretation of results OR analysis of limitations OR trade-off discussion
+✓ Hard interpretation/limitation task does NOT reveal solutions or provide hints
+✓ Difficulty reflects reasoning depth, NOT procedural steps, library complexity, or code length
+✓ Difficulty source matches topic type (Python language reasoning for Python topics, ML reasoning for ML topics, etc.)
+
+DATASET (If Generated) - REALISTIC COMPLEXITY:
+✓ Dataset included ONLY when required: {requires_dataset}
+✓ Dataset has EXACTLY 30 rows if present (preserved constraint)
+✓ Dataset has 4-7 columns (preserved constraint)
+✓ Dataset uses DOMAIN-SPECIFIC feature names (not generic, reflects Assessment Title: "{title}")
+✓ Dataset has REALISTIC COMPLEXITY (not clean deterministic patterns)
+✓ Dataset includes MILD AMBIGUITY (contradictory samples: similar features → different outcomes)
+✓ Dataset includes REALISTIC NOISE/UNCERTAINTY (slight inconsistencies, imperfect signals)
+✓ Dataset AVOIDS TRIVIAL CORRELATIONS (no perfect/near-perfect correlations with target)
+✓ Dataset AVOIDS TARGET LEAKAGE (no features revealing target, no derived/redundant features encoding target)
+✓ NO SINGLE FEATURE can perfectly predict target (multiple features must work together)
+✓ Dataset uses DOMAIN-RELEVANT BUT IMPERFECT features (prefer imperfect over clean synthetic)
+✓ Dataset MEANINGFULLY INFLUENCES DECISIONS (enables feature selection, model comparison, trade-off analysis)
+✓ Dataset requires reasoning about data quality, ambiguity, and model robustness
+
+TECHNICAL:
+✓ Libraries are appropriate: {json.dumps(libraries)}
+✓ All validation logic preserved
 
 ==================================================
 GENERATE THE RESPONSE NOW
@@ -405,7 +817,7 @@ Return ONLY valid JSON. No markdown code blocks, no explanations, just the JSON 
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert AI assessment generator for AIML competency assessment. Always return valid JSON only. Never include markdown code blocks or explanations outside JSON."
+                    "content": "You are an expert AI assessment generator for AIML competency assessment. You create real-world, decision-based questions that test reasoning complexity, not just library knowledge. Always return valid JSON only. Never include markdown code blocks or explanations outside JSON."
                 },
                 {"role": "user", "content": prompt}
             ],

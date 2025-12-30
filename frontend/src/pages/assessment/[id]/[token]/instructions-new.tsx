@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
 import { getGateContext } from "@/lib/gateContext";
@@ -13,8 +13,15 @@ export default function AssessmentInstructionsPage() {
   const [acknowledged, setAcknowledged] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isNavigating, setIsNavigating] = useState(false);
+  const hasCheckedRef = useRef(false); // Prevent multiple redirects
   
   useEffect(() => {
+    // Wait for router to be ready
+    if (!router.isReady) return;
+    
+    // Prevent multiple redirects
+    if (hasCheckedRef.current) return;
+    
     const storedEmail = sessionStorage.getItem("candidateEmail");
     const storedName = sessionStorage.getItem("candidateName");
     
@@ -23,6 +30,7 @@ export default function AssessmentInstructionsPage() {
     
     if (!storedEmail || !storedName) {
       if (id && token) {
+        hasCheckedRef.current = true;
         const ctx = getGateContext(id as string);
         router.replace(ctx?.entryUrl || `/assessment/${id}/${token}`);
       }
@@ -32,14 +40,17 @@ export default function AssessmentInstructionsPage() {
     // Check precheck completion
     const precheckCompleted = sessionStorage.getItem(`precheckCompleted_${id}`);
     if (!precheckCompleted && id && token) {
+      hasCheckedRef.current = true;
       router.replace(`/precheck/${id}/${token}`);
       return;
     }
     
+    hasCheckedRef.current = true;
+    
     const ctx = getGateContext(id as string);
     const isAIFlow = !ctx || ctx.flowType === "ai";
 
-    // AI: fetch schedule; non-AI: skip fetch and show defaults to
+    // AI: fetch schedule; non-AI: skip fetch and show defaults
     if (!isAIFlow) {
       setAssessmentInfo(null);
       setIsLoading(false);
@@ -66,7 +77,7 @@ export default function AssessmentInstructionsPage() {
   }, [id, token, router]);
   
   const handleAcknowledge = useCallback(async () => {
-    if (!id || isNavigating) return;
+    if (!id || isNavigating || !router.isReady) return;
     
     setIsNavigating(true);
     setAcknowledged(true);
@@ -74,10 +85,17 @@ export default function AssessmentInstructionsPage() {
     
     try {
       // Route to candidate requirements page
-      await router.push(`/assessment/${id}/${token}/candidate-requirements`);
-    } catch (error) {
+      // Use replace instead of push to avoid adding to history stack
+      await router.replace(`/assessment/${id}/${token}/candidate-requirements`);
+    } catch (error: any) {
+      // Ignore navigation cancellation errors (they're expected when navigating quickly)
+      if (error?.name === 'AbortError' || error?.message?.includes('Abort')) {
+        console.log("[Instructions] Navigation was cancelled (expected)");
+        return;
+      }
       console.error("[Instructions] Navigation error:", error);
       setIsNavigating(false);
+      setAcknowledged(false);
     }
   }, [id, token, router, isNavigating]);
   
