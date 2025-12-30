@@ -2445,6 +2445,7 @@ export default function CreateNewAssessmentPage() {
   const urlTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const categorySaveDebounceRef = useRef<NodeJS.Timeout | null>(null);
   const topicsV2Ref = useRef<any[]>([]);
+  const difficultySaveDebounceRef = useRef<NodeJS.Timeout | null>(null);
   
   // CSV Upload state (kept for backward compatibility but not used in UI)
   const [activeMethod, setActiveMethod] = useState<"role" | "manual" | "csv">("role");
@@ -6617,6 +6618,16 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
             if (hasGeneratedQuestions && (field === "questionType" || field === "difficulty")) {
               updated.status = "pending";
               updated.questions = []; // Clear existing questions
+              updated.locked = false; // ✅ FIX 1: Unlock to allow regeneration
+            }
+            
+            // ✅ FIX 2: Also update difficulty in existing questions if they exist
+            // This ensures the difficulty is reflected in the UI immediately
+            if (field === "difficulty" && updated.questions && updated.questions.length > 0) {
+              updated.questions = updated.questions.map((q: any) => ({
+                ...q,
+                difficulty: value, // Update difficulty in each question object
+              }));
             }
             
             return updated;
@@ -6635,6 +6646,36 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
       }
       return t;
     }));
+    
+    // ✅ FIX 3: Auto-save to draft immediately after difficulty change
+    if (assessmentId && field === "difficulty") {
+      // Clear any existing debounce timeout
+      if (difficultySaveDebounceRef.current) {
+        clearTimeout(difficultySaveDebounceRef.current);
+      }
+      
+      // Debounce the save to avoid too many API calls
+      difficultySaveDebounceRef.current = setTimeout(async () => {
+        try {
+          // Get the latest topics state (state was already updated above)
+          // Use functional update to get current state without triggering another update
+          setTopicsV2(currentTopics => {
+            // State is already updated, just save it to draft
+            axios.put("/api/assessments/update-draft", {
+              assessmentId,
+              topics_v2: currentTopics,
+            }).catch((err: any) => {
+              console.error("Error auto-saving difficulty change:", err);
+            });
+            
+            // Return unchanged to avoid double state update
+            return currentTopics;
+          });
+        } catch (err: any) {
+          console.error("Error auto-saving difficulty change:", err);
+        }
+      }, 500); // 500ms debounce
+    }
   };
 
   const handleQuestionTypeChangeFromDropdown = async (
