@@ -209,19 +209,20 @@ export class FaceVerificationService {
     // Determine if it's a match based on threshold
     const isMatch = combinedSimilarity >= this.config.similarityThreshold;
 
-    // Debug logging with more details
-    console.log("[FaceVerificationService] 📊 Face comparison result:", {
-      cosineSimilarity: cosineSim.toFixed(3),
-      euclideanSimilarity: normalizedEuclideanSim.toFixed(3),
-      correlationSimilarity: correlationSim.toFixed(3),
-      combinedSimilarity: combinedSimilarity.toFixed(3),
-      threshold: this.config.similarityThreshold,
-      euclideanDistance: euclideanDist.toFixed(3),
-      isMatch,
-      embedding1Length: e1.length,
-      embedding2Length: e2.length,
-      verdict: isMatch ? "✅ MATCH" : "❌ MISMATCH",
-    });
+    // COMMENTED OUT: Only show logs when mismatch is detected (logged in aiProctoring.ts)
+    // // Debug logging with more details
+    // console.log("[FaceVerificationService] 📊 Face comparison result:", {
+    //   cosineSimilarity: cosineSim.toFixed(3),
+    //   euclideanSimilarity: normalizedEuclideanSim.toFixed(3),
+    //   correlationSimilarity: correlationSim.toFixed(3),
+    //   combinedSimilarity: combinedSimilarity.toFixed(3),
+    //   threshold: this.config.similarityThreshold,
+    //   euclideanDistance: euclideanDist.toFixed(3),
+    //   isMatch,
+    //   embedding1Length: e1.length,
+    //   embedding2Length: e2.length,
+    //   verdict: isMatch ? "✅ MATCH" : "❌ MISMATCH",
+    // });
 
     return {
       isMatch,

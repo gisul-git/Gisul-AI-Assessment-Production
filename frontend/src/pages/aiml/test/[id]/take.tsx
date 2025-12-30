@@ -299,9 +299,18 @@ export default function AIMLTestTakePage() {
     console.log('[AIML Take] 🚀 Admin connected! Starting WebRTC...')
     liveProctoringStartedRef.current = true
 
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    // Live proctoring backend expects raw email or token, not formatted userId
+    let rawCandidateId = localCandidateIdStr;
+    if (localCandidateIdStr.startsWith('email:')) {
+      rawCandidateId = localCandidateIdStr.replace('email:', '');
+    } else if (localCandidateIdStr.startsWith('public:')) {
+      rawCandidateId = localCandidateIdStr.replace('public:', '');
+    }
+
     const liveService = new CandidateLiveService({
       assessmentId: localAssessmentIdStr,
-      candidateId: localCandidateIdStr,
+      candidateId: rawCandidateId, // Use raw email/token for live proctoring
       debugMode: debugMode,
     })
 
@@ -357,12 +366,21 @@ export default function AIMLTestTakePage() {
     console.log('[AIML Take] 📝 Registering Live Proctoring session...')
     
     // Phase 2.2: Register session with backend
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    // Live proctoring backend expects raw email or token, not formatted userId
+    let rawCandidateId = localCandidateIdStr;
+    if (localCandidateIdStr.startsWith('email:')) {
+      rawCandidateId = localCandidateIdStr.replace('email:', '');
+    } else if (localCandidateIdStr.startsWith('public:')) {
+      rawCandidateId = localCandidateIdStr.replace('public:', '');
+    }
+
     fetch('/api/v1/proctor/live/start-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         assessmentId: localAssessmentIdStr,
-        candidateId: localCandidateIdStr,
+        candidateId: rawCandidateId, // Use raw email/token for live proctoring
       }),
     })
       .then((res) => res.json())
@@ -373,7 +391,8 @@ export default function AIMLTestTakePage() {
           console.log(`[AIML Take] ✅ Session registered: ${sessionId}`);
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
-          const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${localCandidateIdStr}`;
+          // Use rawCandidateId (without email: or public: prefix) for WebSocket URL
+          const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${rawCandidateId}`;
           const ws = new WebSocket(wsUrl);
           candidateWsRef.current = ws;
 

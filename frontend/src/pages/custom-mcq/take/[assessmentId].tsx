@@ -187,9 +187,18 @@ export default function CustomMCQTakePage() {
     console.log('[Custom MCQ Take] 🚀 Admin connected! Starting WebRTC...');
     liveProctoringStartedRef.current = true;
 
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    // Live proctoring backend expects raw email or token, not formatted userId
+    let rawCandidateId = candidateIdStr;
+    if (candidateIdStr.startsWith('email:')) {
+      rawCandidateId = candidateIdStr.replace('email:', '');
+    } else if (candidateIdStr.startsWith('public:')) {
+      rawCandidateId = candidateIdStr.replace('public:', '');
+    }
+
     const liveService = new CandidateLiveService({
       assessmentId: assessmentIdStr,
-      candidateId: candidateIdStr,
+      candidateId: rawCandidateId, // Use raw email/token for live proctoring
       debugMode: debugMode,
     });
 
@@ -243,12 +252,20 @@ export default function CustomMCQTakePage() {
     console.log('[Custom MCQ Take] 📝 Registering Live Proctoring session...');
     
     // Phase 2.2: Register session with backend
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    let rawCandidateId = candidateIdStr;
+    if (candidateIdStr.startsWith('email:')) {
+      rawCandidateId = candidateIdStr.replace('email:', '');
+    } else if (candidateIdStr.startsWith('public:')) {
+      rawCandidateId = candidateIdStr.replace('public:', '');
+    }
+
     fetch('/api/v1/proctor/live/start-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         assessmentId: assessmentIdStr,
-        candidateId: candidateIdStr,
+        candidateId: rawCandidateId, // Use raw email/token for live proctoring
       }),
     })
       .then((res) => res.json())
@@ -260,8 +277,9 @@ export default function CustomMCQTakePage() {
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
           // CRITICAL FIX: Use backend URL instead of frontend URL
+          // Use rawCandidateId (without email: or public: prefix) for WebSocket URL
           const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
-          const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, candidateIdStr);
+          const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, rawCandidateId);
           console.log('[Custom MCQ Take] Candidate WS connecting to backend...', wsUrl);
           const ws = new WebSocket(wsUrl);
           candidateWsRef.current = ws;
