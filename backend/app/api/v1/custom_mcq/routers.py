@@ -2106,3 +2106,116 @@ async def resume_custom_mcq_assessment(
     except Exception as exc:
         logger.error(f"Error resuming custom MCQ assessment: {exc}", exc_info=True)
         return error_response(f"Failed to resume assessment: {str(exc)}", status_code=500)
+
+
+@router.post("/{assessment_id}/save-candidate-info")
+async def save_custom_mcq_candidate_info(
+    assessment_id: str,
+    request: Dict[str, Any] = Body(...),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Save candidate information for Custom MCQ assessments (phone, LinkedIn, GitHub, resume).
+    This is called from the candidate requirements page.
+    """
+    try:
+        from datetime import datetime, timezone
+        
+        assessment_oid = to_object_id(assessment_id)
+        if not assessment_oid:
+            return error_response("Invalid assessment ID", status_code=400)
+        
+        # Get assessment
+        assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_oid})
+        if not assessment:
+            return error_response("Assessment not found", status_code=404)
+        
+        email = request.get("email", "").strip().lower()
+        name = request.get("name", "").strip()
+        token = request.get("token", "").strip()
+        phone = request.get("phone", "").strip() if request.get("phone") else None
+        hasResume = request.get("hasResume", False)
+        resume = request.get("resume")  # Base64 encoded resume
+        linkedIn = request.get("linkedIn", "").strip() if request.get("linkedIn") else None
+        github = request.get("github", "").strip() if request.get("github") else None
+        
+        if not email or not name:
+            return error_response("Email and name are required", status_code=400)
+        
+        # Verify token
+        assessment_token = assessment.get("assessmentToken")
+        if not assessment_token or assessment_token != token:
+            return error_response("Invalid assessment token", status_code=403)
+        
+        # Create candidate key (same format as used in submissions)
+        candidate_key = f"{email}_{name.strip().lower()}"
+        
+        # Get existing submissions
+        submissions = assessment.get("submissions", {})
+        existing_submission = submissions.get(candidate_key, {})
+        
+        # Prepare candidate info to store in submission
+        candidate_info = {
+            "email": email,
+            "name": name,
+            "phone": phone,
+            "hasResume": hasResume,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        # Store resume if provided
+        if resume:
+            candidate_info["resume"] = resume
+        elif hasResume and existing_submission.get("candidateInfo", {}).get("resume"):
+            # Preserve existing resume if hasResume is True but no new resume provided
+            candidate_info["resume"] = existing_submission.get("candidateInfo", {}).get("resume")
+        
+        if linkedIn:
+            candidate_info["linkedIn"] = linkedIn
+        elif existing_submission.get("candidateInfo", {}).get("linkedIn"):
+            candidate_info["linkedIn"] = existing_submission.get("candidateInfo", {}).get("linkedIn")
+        
+        if github:
+            candidate_info["github"] = github
+        elif existing_submission.get("candidateInfo", {}).get("github"):
+            candidate_info["github"] = existing_submission.get("candidateInfo", {}).get("github")
+        
+        # Update or create submission entry with candidate info
+        # This allows us to store candidate requirements before they submit the assessment
+        now = _now_utc()
+        update_doc = {
+            f"submissions.{candidate_key}.candidateInfo": candidate_info,
+            "updated_at": now,
+        }
+        
+        # If this is a new submission entry, initialize it
+        if candidate_key not in submissions:
+            update_doc[f"submissions.{candidate_key}"] = {
+                "candidateInfo": candidate_info,
+                "status": "in_progress",
+                "startedAt": None,
+                "submittedAt": None,
+                "score": None,
+                "submissions": [],
+            }
+        
+        result = await db.custom_mcq_assessments.update_one(
+            {"_id": assessment_oid},
+            {"$set": update_doc}
+        )
+        
+        if result.modified_count == 0 and candidate_key in submissions:
+            # If submission already existed, try again with just the candidateInfo update
+            await db.custom_mcq_assessments.update_one(
+                {"_id": assessment_oid},
+                {"$set": {f"submissions.{candidate_key}.candidateInfo": candidate_info, "updated_at": now}}
+            )
+        
+        return success_response(
+            "Candidate information saved successfully",
+            {"candidateInfo": candidate_info}
+        )
+        
+    except Exception as exc:
+        logger.exception(f"Error saving custom MCQ candidate info: {exc}")
+        return error_response(f"Failed to save candidate information: {str(exc)}", status_code=500)

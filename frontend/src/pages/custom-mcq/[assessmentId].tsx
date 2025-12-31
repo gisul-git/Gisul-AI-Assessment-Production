@@ -31,6 +31,21 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [expandedRequirementsUser, setExpandedRequirementsUser] = useState<string | null>(null);
   const [showCandidates, setShowCandidates] = useState(false);
   const [referencePhotos, setReferencePhotos] = useState<Record<string, string | null>>({});
+  const [showAddCandidateModal, setShowAddCandidateModal] = useState(false);
+  const [newCandidateName, setNewCandidateName] = useState("");
+  const [newCandidateEmail, setNewCandidateEmail] = useState("");
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [addingCandidate, setAddingCandidate] = useState(false);
+  const [showEmailTemplateModal, setShowEmailTemplateModal] = useState(false);
+  const [emailTemplate, setEmailTemplate] = useState({
+    logoUrl: "",
+    companyName: "",
+    message: "You have been invited to take a Custom MCQ assessment. Please click the link below to start.",
+    footer: "",
+    sentBy: "AI Assessment Platform",
+  });
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [sendingInvitations, setSendingInvitations] = useState(false);
   // Removed isLiveProctoringCooldown - no longer needed
 
   useEffect(() => {
@@ -67,6 +82,175 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
       setError(err.message || "Failed to load assessment");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const validateEmail = (email: string): boolean => {
+    const emailPattern = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    return emailPattern.test(email);
+  };
+
+  const handleAddCandidate = async () => {
+    if (!assessmentId || typeof assessmentId !== "string" || !assessment) return;
+
+    // Validate email
+    if (!validateEmail(newCandidateEmail.trim())) {
+      setEmailError("Please enter a valid email address.");
+      return;
+    }
+
+    if (!newCandidateName.trim()) {
+      setEmailError("Please enter a candidate name.");
+      return;
+    }
+
+    setEmailError(null);
+    setAddingCandidate(true);
+
+    try {
+      // Get existing candidates
+      const existingCandidates = assessment.candidates || [];
+      
+      // Check if candidate already exists
+      const emailLower = newCandidateEmail.trim().toLowerCase();
+      if (existingCandidates.some((c: any) => c.email?.toLowerCase() === emailLower)) {
+        setEmailError("A candidate with this email already exists.");
+        setAddingCandidate(false);
+        return;
+      }
+
+      // Add new candidate to the array
+      const updatedCandidates = [
+        ...existingCandidates,
+        {
+          name: newCandidateName.trim(),
+          email: emailLower,
+        },
+      ];
+
+      // Update assessment with new candidates array
+      await customMCQApi.updateAssessment(assessmentId, {
+        candidates: updatedCandidates,
+      });
+
+      // Refresh assessment to get updated candidates list
+      await loadAssessment();
+
+      // Close modal and reset form
+      setShowAddCandidateModal(false);
+      setNewCandidateName("");
+      setNewCandidateEmail("");
+      setEmailError(null);
+      alert("Candidate added successfully!");
+    } catch (err: any) {
+      setEmailError(err.response?.data?.detail || err.response?.data?.message || err.message || "Failed to add candidate");
+    } finally {
+      setAddingCandidate(false);
+    }
+  };
+
+  const handleSaveEmailTemplate = async () => {
+    // For Custom MCQ, we'll just save to local state since there's no backend template storage
+    // The template will be used when sending invitations
+    setSavingTemplate(true);
+    try {
+      setShowEmailTemplateModal(false);
+      alert("Email template saved! It will be used for sending invitations.");
+    } catch (err: any) {
+      alert(err.message || "Failed to save email template");
+    } finally {
+      setSavingTemplate(false);
+    }
+  };
+
+  const handleSendInvitationsToAll = async () => {
+    if (!assessmentId || typeof assessmentId !== "string" || !assessment) return;
+
+    const candidates = assessment.candidates || [];
+    if (candidates.length === 0) {
+      alert("No candidates to send invitations to.");
+      return;
+    }
+
+    if (!confirm(`Send invitation emails to all ${candidates.length} candidates?`)) {
+      return;
+    }
+
+    setSendingInvitations(true);
+    try {
+      // Build assessment URL
+      const assessmentToken = (assessment as any).assessmentToken || "";
+      const assessmentUrl = `${window.location.origin}/custom-mcq/entry/${assessmentId}?token=${assessmentToken}`;
+
+      // Prepare template
+      const template = {
+        message: emailTemplate.message,
+        footer: emailTemplate.footer,
+        sentBy: emailTemplate.sentBy,
+      };
+
+      const response = await customMCQApi.sendInvitations(
+        assessmentId,
+        candidates.map((c: any) => ({ name: c.name, email: c.email })),
+        assessmentUrl,
+        template
+      );
+
+      // Refresh assessment to get updated invite statuses
+      await loadAssessment();
+
+        if (response.failedCount === 0) {
+          alert(`Successfully sent invitation emails to all ${response.sentCount} candidates!`);
+        } else {
+          const skippedCount = (response as any).skippedCount || 0;
+          alert(
+            `Invitation emails sent:\n` +
+              `✓ Success: ${response.sentCount}\n` +
+              `✗ Failed: ${response.failedCount}\n` +
+              `${skippedCount > 0 ? `⊘ Skipped: ${skippedCount}\n` : ""}\n` +
+              `Check the console for details.`
+          );
+          console.error("Failed emails:", response.failedEmails);
+        }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.message || err.message || "Failed to send invitation emails");
+    } finally {
+      setSendingInvitations(false);
+    }
+  };
+
+  const handleResendInvitation = async (email: string, name: string) => {
+    if (!assessmentId || typeof assessmentId !== "string" || !assessment) return;
+
+    if (!confirm(`Resend invitation email to ${name} (${email})?`)) {
+      return;
+    }
+
+    try {
+      // Build assessment URL
+      const assessmentToken = (assessment as any).assessmentToken || "";
+      const assessmentUrl = `${window.location.origin}/custom-mcq/entry/${assessmentId}?token=${assessmentToken}`;
+
+      // Prepare template
+      const template = {
+        message: emailTemplate.message,
+        footer: emailTemplate.footer,
+        sentBy: emailTemplate.sentBy,
+      };
+
+      await customMCQApi.sendInvitations(
+        assessmentId,
+        [{ name, email }],
+        assessmentUrl,
+        template
+      );
+
+      // Refresh assessment to get updated invite status
+      await loadAssessment();
+
+      alert("Invitation sent successfully!");
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.message || err.message || "Failed to resend invitation");
     }
   };
 
@@ -308,24 +492,68 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
             <h2 style={{ margin: 0, color: "#1E5A3B" }}>Assessment Details</h2>
-            {assessment.candidates && assessment.candidates.length > 0 && (
+            <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+              {assessment.candidates && assessment.candidates.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleSendInvitationsToAll}
+                  disabled={sendingInvitations}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    backgroundColor: sendingInvitations ? "#94a3b8" : "#ffffff",
+                    color: sendingInvitations ? "#ffffff" : "#2D7A52",
+                    border: "1px solid #2D7A52",
+                    borderRadius: "0.5rem",
+                    cursor: sendingInvitations ? "not-allowed" : "pointer",
+                    fontWeight: 600,
+                    fontSize: "0.875rem",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    opacity: sendingInvitations ? 0.6 : 1,
+                  }}
+                >
+                  {sendingInvitations ? "Sending..." : "📧 Send Email to All"}
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => setShowCandidates(!showCandidates)}
+                onClick={() => setShowAddCandidateModal(true)}
                 style={{
                   padding: "0.5rem 1rem",
-                  backgroundColor: showCandidates ? "#2D7A52" : "#ffffff",
-                  color: showCandidates ? "#ffffff" : "#2D7A52",
+                  backgroundColor: "#2D7A52",
+                  color: "#ffffff",
                   border: "1px solid #2D7A52",
                   borderRadius: "0.5rem",
                   cursor: "pointer",
                   fontWeight: 600,
                   fontSize: "0.875rem",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
                 }}
               >
-                {showCandidates ? "Hide" : "View"} Added Candidates ({assessment.candidates.length})
+                ➕ Add Candidate
               </button>
-            )}
+              {assessment.candidates && assessment.candidates.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowCandidates(!showCandidates)}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    backgroundColor: showCandidates ? "#2D7A52" : "#ffffff",
+                    color: showCandidates ? "#ffffff" : "#2D7A52",
+                    border: "1px solid #2D7A52",
+                    borderRadius: "0.5rem",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                    fontSize: "0.875rem",
+                  }}
+                >
+                  {showCandidates ? "Hide" : "View"} Added Candidates ({assessment.candidates.length})
+                </button>
+              )}
+            </div>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "1rem" }}>
             <div>
@@ -367,9 +595,37 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                 borderRadius: "0.5rem",
               }}
             >
-              <h3 style={{ marginBottom: "1rem", color: "#1E5A3B", fontSize: "1.125rem" }}>
-                Added Candidates for this Assessment
-              </h3>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                <h3 style={{ margin: 0, color: "#1E5A3B", fontSize: "1.125rem" }}>
+                  Added Candidates for this Assessment
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowEmailTemplateModal(true)}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    backgroundColor: "#ffffff",
+                    color: "#2D7A52",
+                    border: "1px solid #2D7A52",
+                    borderRadius: "0.5rem",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                    fontSize: "0.875rem",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                  }}
+                >
+                  ✏️ Edit Email Template
+                </button>
+              </div>
+              <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "1rem" }}>
+                {emailTemplate.message !== "You have been invited to take a Custom MCQ assessment. Please click the link below to start." ? (
+                  <span style={{ color: "#10b981" }}>✓ Custom email template is configured</span>
+                ) : (
+                  <span>Using default email template</span>
+                )}
+              </div>
               <div style={{ width: "100%", overflowX: "auto" }}>
                 <table
                   style={{
@@ -394,6 +650,9 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                       </th>
                       <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.85rem", color: "#1E5A3B" }}>
                         Invite Sent At
+                      </th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontSize: "0.85rem", color: "#1E5A3B" }}>
+                        Actions
                       </th>
                     </tr>
                   </thead>
@@ -445,6 +704,23 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                           {candidate.inviteSentAt
                             ? new Date(candidate.inviteSentAt).toLocaleString()
                             : "Not sent"}
+                        </td>
+                        <td style={{ padding: "0.75rem" }}>
+                          <button
+                            type="button"
+                            onClick={() => handleResendInvitation(candidate.email, candidate.name)}
+                            style={{
+                              padding: "0.25rem 0.75rem",
+                              fontSize: "0.75rem",
+                              backgroundColor: "#10b981",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: "pointer",
+                            }}
+                          >
+                            Resend Invitation
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -561,6 +837,9 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                     const hasAnswerLogs = (submission as any).answerLogs && Object.keys((submission as any).answerLogs).length > 0;
                     const candidateRequirements = (submission as any).candidateRequirements || {};
                     const hasRequirements = candidateRequirements && Object.keys(candidateRequirements).length > 0;
+                    // Resume can be in candidateInfo or candidateRequirements
+                    const candidateResume = (candidateInfo as any).resume || candidateRequirements.resume;
+                    const hasResume = (candidateInfo as any).hasResume || !!candidateResume;
                     
                     // Debug: Log candidate requirements to console
                     if (idx === 0) {
@@ -974,7 +1253,7 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                                     >
                                       Candidate Requirements
                                     </div>
-                                    {hasRequirements || candidateInfo.name || candidateInfo.email ? (
+                                    {hasRequirements || candidateInfo.name || candidateInfo.email || hasResume ? (
                                       <div
                                         style={{
                                           display: "grid",
@@ -1089,6 +1368,58 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
                                             </div>
                                           </div>
                                         )}
+                                        {hasResume && candidateResume && (
+                                          <div
+                                            style={{
+                                              padding: "0.625rem",
+                                              backgroundColor: "#ffffff",
+                                              borderRadius: "0.375rem",
+                                              border: "1px solid #e5e7eb",
+                                            }}
+                                          >
+                                            <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.25rem" }}>
+                                              Resume
+                                            </div>
+                                            <div style={{ fontSize: "0.875rem", color: "#1e293b" }}>
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  if (candidateResume) {
+                                                    // Handle both base64 data URLs and plain base64
+                                                    let dataUrl = candidateResume;
+                                                    if (!dataUrl.startsWith('data:')) {
+                                                      dataUrl = `data:application/pdf;base64,${candidateResume}`;
+                                                    }
+                                                    const link = document.createElement('a');
+                                                    link.href = dataUrl;
+                                                    link.download = `${candidateInfo.name || candidateInfo.email || 'resume'}_resume.pdf`;
+                                                    document.body.appendChild(link);
+                                                    link.click();
+                                                    document.body.removeChild(link);
+                                                  }
+                                                }}
+                                                style={{
+                                                  color: "#6953a3",
+                                                  textDecoration: "none",
+                                                  background: "none",
+                                                  border: "none",
+                                                  cursor: "pointer",
+                                                  padding: 0,
+                                                  fontSize: "0.875rem",
+                                                  fontWeight: 500,
+                                                }}
+                                                onMouseEnter={(e) => {
+                                                  e.currentTarget.style.textDecoration = "underline";
+                                                }}
+                                                onMouseLeave={(e) => {
+                                                  e.currentTarget.style.textDecoration = "none";
+                                                }}
+                                              >
+                                                View/Download Resume
+                                              </button>
+                                            </div>
+                                          </div>
+                                        )}
                                       </div>
                                     ) : (
                                       <div
@@ -1141,6 +1472,376 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
           </button>
         </div>
       </div>
+
+      {/* Add Candidate Modal */}
+      {showAddCandidateModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+          onClick={() => {
+            if (!addingCandidate) {
+              setShowAddCandidateModal(false);
+              setNewCandidateName("");
+              setNewCandidateEmail("");
+              setEmailError(null);
+            }
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: "#ffffff",
+              borderRadius: "0.75rem",
+              padding: "2rem",
+              width: "90%",
+              maxWidth: "600px",
+              maxHeight: "90vh",
+              overflow: "auto",
+              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.1)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2
+              style={{
+                fontSize: "1.5rem",
+                fontWeight: 600,
+                marginBottom: "1.5rem",
+                color: "#2D7A52",
+              }}
+            >
+              Add Candidate
+            </h2>
+
+            {/* Manual Add Section */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
+                    color: "#1e293b",
+                  }}
+                >
+                  Full Name <span style={{ color: "#ef4444" }}>*</span>
+                </label>
+                <input
+                  type="text"
+                  value={newCandidateName}
+                  onChange={(e) => {
+                    setNewCandidateName(e.target.value);
+                    setEmailError(null);
+                  }}
+                  placeholder="Enter candidate's full name"
+                  style={{
+                    width: "100%",
+                    padding: "0.75rem",
+                    border: "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                  }}
+                  disabled={addingCandidate}
+                />
+              </div>
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
+                    color: "#1e293b",
+                  }}
+                >
+                  Email Address <span style={{ color: "#ef4444" }}>*</span>
+                </label>
+                <input
+                  type="email"
+                  value={newCandidateEmail}
+                  onChange={(e) => {
+                    setNewCandidateEmail(e.target.value);
+                    setEmailError(null);
+                  }}
+                  placeholder="Enter candidate's email address"
+                  style={{
+                    width: "100%",
+                    padding: "0.75rem",
+                    border: emailError ? "1px solid #ef4444" : "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                  }}
+                  disabled={addingCandidate}
+                />
+                {emailError && (
+                  <p style={{ color: "#ef4444", fontSize: "0.875rem", marginTop: "0.25rem" }}>
+                    {emailError}
+                  </p>
+                )}
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "0.5rem",
+                  justifyContent: "flex-end",
+                  marginTop: "1rem",
+                }}
+              >
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setShowAddCandidateModal(false);
+                    setNewCandidateName("");
+                    setNewCandidateEmail("");
+                    setEmailError(null);
+                  }}
+                  disabled={addingCandidate}
+                  style={{ marginTop: 0 }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleAddCandidate}
+                  disabled={addingCandidate}
+                  style={{ marginTop: 0 }}
+                >
+                  {addingCandidate ? "Adding..." : "Add Candidate"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Email Template Edit Modal */}
+      {showEmailTemplateModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+          onClick={() => {
+            if (!savingTemplate) {
+              setShowEmailTemplateModal(false);
+            }
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: "#ffffff",
+              borderRadius: "0.75rem",
+              padding: "2rem",
+              width: "90%",
+              maxWidth: "700px",
+              maxHeight: "90vh",
+              overflow: "auto",
+              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.1)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2
+              style={{
+                fontSize: "1.5rem",
+                fontWeight: 600,
+                marginBottom: "1.5rem",
+                color: "#2D7A52",
+              }}
+            >
+              Edit Email Template
+            </h2>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
+                    color: "#1e293b",
+                  }}
+                >
+                  Logo URL (optional)
+                </label>
+                <input
+                  type="text"
+                  value={emailTemplate.logoUrl}
+                  onChange={(e) => setEmailTemplate({ ...emailTemplate, logoUrl: e.target.value })}
+                  placeholder="https://example.com/logo.png"
+                  style={{
+                    width: "100%",
+                    padding: "0.75rem",
+                    border: "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                  }}
+                  disabled={savingTemplate}
+                />
+              </div>
+
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
+                    color: "#1e293b",
+                  }}
+                >
+                  Company Name (optional)
+                </label>
+                <input
+                  type="text"
+                  value={emailTemplate.companyName}
+                  onChange={(e) => setEmailTemplate({ ...emailTemplate, companyName: e.target.value })}
+                  placeholder="Your Company Name"
+                  style={{
+                    width: "100%",
+                    padding: "0.75rem",
+                    border: "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                  }}
+                  disabled={savingTemplate}
+                />
+              </div>
+
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
+                    color: "#1e293b",
+                  }}
+                >
+                  Message <span style={{ color: "#ef4444" }}>*</span>
+                </label>
+                <textarea
+                  value={emailTemplate.message}
+                  onChange={(e) => setEmailTemplate({ ...emailTemplate, message: e.target.value })}
+                  placeholder="You have been invited to take a Custom MCQ assessment. Please click the link below to start."
+                  rows={6}
+                  style={{
+                    width: "100%",
+                    padding: "0.75rem",
+                    border: "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                    fontFamily: "inherit",
+                  }}
+                  disabled={savingTemplate}
+                />
+                <p style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.25rem" }}>
+                  Available placeholders: {"{{candidate_name}}"}, {"{{candidate_email}}"}, {"{{exam_url}}"}, {"{{assessment_url}}"}, {"{{company_name}}"}
+                </p>
+              </div>
+
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
+                    color: "#1e293b",
+                  }}
+                >
+                  Footer (optional)
+                </label>
+                <textarea
+                  value={emailTemplate.footer}
+                  onChange={(e) => setEmailTemplate({ ...emailTemplate, footer: e.target.value })}
+                  placeholder="Additional footer text"
+                  rows={3}
+                  style={{
+                    width: "100%",
+                    padding: "0.75rem",
+                    border: "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                    fontFamily: "inherit",
+                  }}
+                  disabled={savingTemplate}
+                />
+              </div>
+
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    marginBottom: "0.5rem",
+                    fontWeight: 600,
+                    color: "#1e293b",
+                  }}
+                >
+                  Sent By (optional)
+                </label>
+                <input
+                  type="text"
+                  value={emailTemplate.sentBy}
+                  onChange={(e) => setEmailTemplate({ ...emailTemplate, sentBy: e.target.value })}
+                  placeholder="AI Assessment Platform"
+                  style={{
+                    width: "100%",
+                    padding: "0.75rem",
+                    border: "1px solid #A8E8BC",
+                    borderRadius: "0.5rem",
+                    fontSize: "1rem",
+                  }}
+                  disabled={savingTemplate}
+                />
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  gap: "0.5rem",
+                  justifyContent: "flex-end",
+                  marginTop: "1rem",
+                }}
+              >
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setShowEmailTemplateModal(false);
+                  }}
+                  disabled={savingTemplate}
+                  style={{ marginTop: 0 }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleSaveEmailTemplate}
+                  disabled={savingTemplate || !emailTemplate.message.trim()}
+                  style={{ marginTop: 0 }}
+                >
+                  {savingTemplate ? "Saving..." : "Save Template"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style jsx>{`
         @keyframes spin {
