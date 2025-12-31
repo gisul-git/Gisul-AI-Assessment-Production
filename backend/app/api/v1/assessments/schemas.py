@@ -390,6 +390,13 @@ class DeleteTopicQuestionsRequest(BaseModel):
 class FinalizeAssessmentRequest(BaseModel):
     """Request to finalize an assessment."""
     assessmentId: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    questionTypeTimes: Optional[Dict[str, int]] = None
+    enablePerSectionTimers: Optional[bool] = None
+    sectionTimers: Optional[Dict[str, int]] = None
+    scoringRules: Optional[Dict[str, int]] = None
+    passPercentage: Optional[int] = None
 
 
 class AddQuestionRowRequest(BaseModel):

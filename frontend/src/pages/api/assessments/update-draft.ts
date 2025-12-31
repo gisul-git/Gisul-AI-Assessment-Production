@@ -23,8 +23,18 @@ interface UpdateAssessmentDraftPayload {
     Subjective?: number;
     PseudoCode?: number;
     Coding?: number;
+    SQL?: number;
+    AIML?: number;
   };
   // Note: sectionTimers might be stored in questionTypeTimes or a separate field
+  scoringRules?: {
+    MCQ?: number;
+    Subjective?: number;
+    PseudoCode?: number;
+    Coding?: number;
+    SQL?: number;
+    AIML?: number;
+  };
   passPercentage?: number;
   schedule?: any;
   candidates?: Array<{ email: string; name: string }>;
@@ -44,6 +54,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   const payload = req.body as UpdateAssessmentDraftPayload;
+  
+  // Log what we're sending to backend
+  console.log("=".repeat(80));
+  console.log("[FRONTEND_API] update-draft route - Received request body:");
+  console.log("[FRONTEND_API] scoringRules:", payload.scoringRules);
+  console.log("[FRONTEND_API] passPercentage:", payload.passPercentage);
+  console.log("[FRONTEND_API] enablePerSectionTimers:", payload.enablePerSectionTimers);
+  console.log("[FRONTEND_API] sectionTimers:", payload.sectionTimers);
+  console.log("=".repeat(80));
 
   try {
     const token = (session as any)?.backendToken;
@@ -56,6 +75,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         },
       }
     );
+    
+    console.log("[FRONTEND_API] Backend response:", response.data);
+    
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
     console.error("Error in update-draft API route:", error);

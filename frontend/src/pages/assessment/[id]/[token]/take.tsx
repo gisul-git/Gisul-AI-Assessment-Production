@@ -225,6 +225,10 @@ export default function CandidateAssessmentPage() {
   const [hiddenSummary, setHiddenSummary] = useState<Record<string, { total: number; passed: number } | null>>({});
   const [submissionHistory, setSubmissionHistory] = useState<Record<string, SubmissionHistoryEntry[]>>({});
   const [questionStatus, setQuestionStatus] = useState<Record<string, 'not_attempted' | 'attempted' | 'solved'>>({});
+  // State for SQL test results
+  const [sqlTestResults, setSqlTestResults] = useState<Record<string, any>>({});
+  // State for AIML outputs
+  const [aimlOutputs, setAimlOutputs] = useState<Record<string, any[]>>({});
   const [timerRemaining, setTimerRemaining] = useState<number>(0); // in seconds (for overall timer)
   const [sectionTimers, setSectionTimers] = useState<Record<string, number>>({}); // per-section timers in seconds
   const [lockedSections, setLockedSections] = useState<Set<string>>(new Set()); // locked section keys
@@ -1399,23 +1403,185 @@ export default function CandidateAssessmentPage() {
 
       // Step 5: Mark attempt.status = "completed" and submit
       // Collect all answers for final submission
-      const allAnswers: Array<{ questionIndex: number; answer: string; timeSpent: number }> = [];
-      let globalIndex = 0;
+      // IMPORTANT: Use questions array (allQuestions) to maintain the same order as backend
+      // Backend expects answers in the order of topics_v2 -> questionRows -> questions
+      console.log("[Submit] Collecting all answers for submission...");
+      const allAnswers: Array<any> = [];
 
-      sectionOrder.forEach((section) => {
-        sections[section].forEach((question) => {
-          const questionId = question._id || `${section}-${globalIndex}`;
-          const answer = answers.get(questionId) || codeAnswers.get(questionId) || "";
-          if (answer.trim()) {
-            allAnswers.push({
-              questionIndex: globalIndex,
-              answer,
-              timeSpent: 0, // TODO: Track time spent per question
-            });
+      questions.forEach((question, globalIndex) => {
+        const questionId = question._id || question.id || `question-${globalIndex}`;
+        const answer = answers.get(questionId) || codeAnswers.get(questionId) || "";
+        const questionType = (question.type || question.question_type || "").toUpperCase();
+        
+        // Build answer object based on question type
+        const answerObj: any = {
+          questionIndex: globalIndex,
+          answer,
+          timeSpent: 0, // TODO: Track time spent per question
+        };
+        
+        // For CODING questions: include test results from submission history
+        if (questionType === "CODING" || questionType === "Coding") {
+          // Get latest submission from history which has test results
+          const latestSubmission = submissionHistory[questionId]?.[0];
+          if (latestSubmission?.results) {
+            answerObj.testResults = latestSubmission.results.map((r: any) => ({
+              input: r.input || r.visible?.input || "",
+              expected_output: r.expected || r.expected_output || "",
+              actual_output: r.output || r.stdout || r.actual_output || "",
+              stdout: r.stdout || r.output || "",
+              stderr: r.stderr || "",
+              compile_output: r.compile_output || "",
+              passed: r.passed !== undefined ? r.passed : false,
+              status: r.status || "unknown",
+              time: r.time,
+              memory: r.memory,
+              error: r.error || "",
+            }));
+            console.log(`[Submit] Coding question ${globalIndex}: Added ${answerObj.testResults.length} test results`);
+          } else if (publicResults[questionId] && publicResults[questionId].length > 0) {
+            // Fallback to publicResults if submission history not available
+            answerObj.testResults = publicResults[questionId].map((r: any) => ({
+              input: r.input || "",
+              expected_output: r.expected || r.expected_output || "",
+              actual_output: r.output || r.stdout || r.actual_output || "",
+              stdout: r.stdout || r.output || "",
+              stderr: r.stderr || "",
+              compile_output: r.compile_output || "",
+              passed: r.passed !== undefined ? r.passed : false,
+              status: r.status || "unknown",
+              time: r.time,
+              memory: r.memory,
+              error: r.error || "",
+            }));
+            console.log(`[Submit] Coding question ${globalIndex}: Added ${answerObj.testResults.length} test results from publicResults`);
           }
-          globalIndex++;
-        });
+          
+          // Also include source_code field for coding
+          if (answer.trim()) {
+            answerObj.source_code = answer;
+            answerObj.code = answer;
+          }
+        }
+        
+        // For SQL questions: include test result from sqlTestResults state
+        else if (questionType === "SQL") {
+          // Get SQL test result from state (stored when SQL is submitted)
+          const sqlTestResult = sqlTestResults[questionId];
+          if (sqlTestResult) {
+            answerObj.testResult = {
+              passed: sqlTestResult.passed !== undefined ? sqlTestResult.passed : false,
+              status: sqlTestResult.status || 'executed',
+              user_output: sqlTestResult.user_output || sqlTestResult.output || "",
+              expected_output: sqlTestResult.expected_output || "",
+              error: sqlTestResult.error || "",
+              time: sqlTestResult.time,
+              memory: sqlTestResult.memory,
+            };
+            console.log(`[Submit] SQL question ${globalIndex}: Added test result from sqlTestResults`);
+          } else {
+            // Fallback: try to get from output if test result not stored
+            const sqlOutput = output[questionId];
+            if (sqlOutput && (sqlOutput.stdout || sqlOutput.stderr || sqlOutput.status)) {
+              answerObj.testResult = {
+                passed: sqlOutput.status === 'success' || sqlOutput.status === 'executed',
+                status: sqlOutput.status || 'executed',
+                user_output: sqlOutput.stdout || "",
+                error: sqlOutput.stderr || sqlOutput.error || "",
+              };
+              console.log(`[Submit] SQL question ${globalIndex}: Added test result from output (fallback)`);
+            }
+          }
+          
+          // Include SQL query fields
+          if (answer.trim()) {
+            answerObj.sql_query = answer;
+            answerObj.query = answer;
+          }
+        }
+        
+        // For AIML questions: include outputs from notebook execution
+        else if (questionType === "AIML") {
+          // Get AIML outputs from state (stored when notebook cells are executed)
+          const outputs = aimlOutputs[questionId];
+          if (outputs && outputs.length > 0) {
+            // Parse outputs to extract images and text
+            const parsedOutputs = outputs.map((outputStr: string) => {
+              // Check if output contains base64 image
+              const imageMatch = outputStr.match(/data:([^;]+);base64,([^\s]+)/);
+              if (imageMatch) {
+                return {
+                  type: 'image',
+                  mime_type: imageMatch[1],
+                  data: imageMatch[2],
+                  output: outputStr
+                };
+              }
+              // Check for image format used by notebook cells
+              const imageMatch2 = outputStr.match(/__IMAGE_\d+__:([^\s]+)/);
+              if (imageMatch2) {
+                return {
+                  type: 'image',
+                  mime_type: 'image/png', // Default to PNG
+                  data: imageMatch2[1],
+                  output: outputStr
+                };
+              }
+              // Regular text output
+              return {
+                type: 'text',
+                output: outputStr
+              };
+            });
+            answerObj.outputs = parsedOutputs;
+            answerObj.aimlOutputs = parsedOutputs;
+            console.log(`[Submit] AIML question ${globalIndex}: Added ${parsedOutputs.length} outputs`);
+          }
+          
+          if (answer.trim()) {
+            answerObj.source_code = answer;
+            answerObj.code = answer;
+          }
+        }
+        
+        // For MCQ questions: check if answer is an array (selectedAnswers)
+        else if (questionType === "MCQ") {
+          try {
+            // Try to parse answer as JSON array or comma-separated values
+            const parsed = typeof answer === 'string' ? JSON.parse(answer) : answer;
+            if (Array.isArray(parsed)) {
+              answerObj.selectedAnswers = parsed;
+            } else if (typeof answer === 'string' && answer.includes(',')) {
+              answerObj.selectedAnswers = answer.split(',').map(a => a.trim());
+            } else {
+              answerObj.selectedAnswers = [answer];
+            }
+          } catch {
+            // If not JSON, treat as single answer or comma-separated
+            if (typeof answer === 'string' && answer.includes(',')) {
+              answerObj.selectedAnswers = answer.split(',').map(a => a.trim());
+            } else {
+              answerObj.selectedAnswers = [answer];
+            }
+          }
+        }
+        
+        // For Subjective/Pseudocode: include as textAnswer
+        else if (questionType === "SUBJECTIVE" || questionType === "PSEUDOCODE" || questionType === "PSEUDO CODE") {
+          if (answer.trim()) {
+            answerObj.textAnswer = answer;
+          }
+        }
+        
+        if (answer.trim() || answerObj.testResults || answerObj.testResult || answerObj.selectedAnswers) {
+          allAnswers.push(answerObj);
+          console.log(`[Submit] Collected answer for questionIndex ${globalIndex} (${questionType}): length=${answer.length}, hasTestResults=${!!answerObj.testResults}, hasTestResult=${!!answerObj.testResult}`);
+        } else {
+          console.log(`[Submit] Skipping empty answer for questionIndex ${globalIndex} (${questionType})`);
+        }
       });
+      
+      console.log(`[Submit] Total answers collected: ${allAnswers.length} out of ${questions.length} total questions`);
 
       // Step 5: Submit to backend with comprehensive data
       try {
@@ -2517,6 +2683,10 @@ export default function CandidateAssessmentPage() {
                         saveAnswer(questionIdStr, allCode, currentSection);
                       }}
                       onSubmit={(allCode, outputs) => {
+                        // Store AIML outputs in state
+                        if (outputs && outputs.length > 0) {
+                          setAimlOutputs(prev => ({ ...prev, [questionIdStr]: outputs }));
+                        }
                         saveAnswer(questionIdStr, allCode, currentSection);
                       }}
                       showSubmit={false}
@@ -2843,9 +3013,92 @@ export default function CandidateAssessmentPage() {
                               }
                             }}
                             onSubmit={async () => {
-                              const currentCode = code[questionIdStr] || codeAnswers.get(questionIdStr) || '';
-                              if (currentCode) {
-                                await saveAnswer(questionIdStr, currentCode, currentSection);
+                              const questionId = questionIdStr;
+                              const currentCode = code[questionId] || codeAnswers.get(questionId) || '';
+                              
+                              if (!currentCode || currentCode.trim() === '') {
+                                alert('Please write a SQL query before submitting.');
+                                return;
+                              }
+                              
+                              setSubmitting(true);
+                              setOutput(prev => ({
+                                ...prev,
+                                [questionId]: {
+                                  stdout: '⏳ Submitting SQL query for evaluation...',
+                                  status: 'running'
+                                }
+                              }));
+                              
+                              try {
+                                const assessmentId = router.query.id as string;
+                                if (!assessmentId) {
+                                  throw new Error('Assessment ID is missing');
+                                }
+                                
+                                // Call SQL submit endpoint via Next.js API route
+                                const response = await fetch('/api/assessment/submit-sql', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({
+                                    assessmentId: assessmentId,
+                                    questionId: questionIdStr,
+                                    sqlQuery: currentCode,
+                                  }),
+                                });
+                                
+                                if (!response.ok) {
+                                  const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+                                  throw new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
+                                }
+                                
+                                const result = await response.json();
+                                
+                                // Extract test result from backend response
+                                const testResult = {
+                                  passed: result.passed !== undefined ? result.passed : false,
+                                  status: result.status || (result.passed ? 'accepted' : 'wrong_answer'),
+                                  user_output: result.user_output || '',
+                                  expected_output: result.expected_output || '',
+                                  error: result.error || (result.passed ? '' : result.message || ''),
+                                  time: result.time,
+                                  memory: result.memory,
+                                };
+                                
+                                setSqlTestResults(prev => ({ ...prev, [questionId]: testResult }));
+                                
+                                if (result.passed && result.status === 'accepted') {
+                                  setOutput(prev => ({
+                                    ...prev,
+                                    [questionId]: {
+                                      stdout: `✅ ${result.message || 'Query produces correct results!'}\n\n${result.user_output || ''}`,
+                                      status: 'success'
+                                    }
+                                  }));
+                                  setQuestionStatus(prev => ({ ...prev, [questionId]: 'solved' }));
+                                } else {
+                                  setOutput(prev => ({
+                                    ...prev,
+                                    [questionId]: {
+                                      stderr: `❌ ${result.message || 'Query failed'}\n${result.expected_output ? `\nExpected:\n${result.expected_output}\n\nGot:\n${result.user_output}` : `\n${result.user_output || ''}`}`,
+                                      status: 'error'
+                                    }
+                                  }));
+                                  setQuestionStatus(prev => ({ ...prev, [questionId]: 'attempted' }));
+                                }
+                                
+                                await saveAnswer(questionId, currentCode, currentSection || 'sql');
+                              } catch (error: any) {
+                                console.error('SQL submit error:', error);
+                                setOutput(prev => ({
+                                  ...prev,
+                                  [questionId]: {
+                                    stderr: error.message || 'Failed to submit SQL query',
+                                    status: 'error'
+                                  }
+                                }));
+                              } finally {
+                                setSubmitting(false);
                               }
                             }}
                             onReset={() => {

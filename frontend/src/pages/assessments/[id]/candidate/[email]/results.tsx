@@ -22,10 +22,12 @@ interface QuestionResult {
     code?: string
     sqlQuery?: string
     selectedAnswers?: string[]
+    outputs?: any[]
   }
   evaluation?: any
   testResults?: any[]
   testResult?: any
+  aimlOutputs?: any[]
 }
 
 interface DetailedResults {
@@ -90,12 +92,35 @@ export default function CandidateResultsPage() {
         )
         
         if (response.data?.success) {
+          console.log('[RESULTS] Full response data:', response.data.data)
+          console.log('[RESULTS] Question results count:', response.data.data?.questionResults?.length || 0)
+          if (response.data.data?.questionResults) {
+            response.data.data.questionResults.forEach((qResult: any, idx: number) => {
+              console.log(`[RESULTS] Question ${idx} (${qResult.questionType}):`, {
+                questionId: qResult.questionId,
+                questionIndex: qResult.questionIndex,
+                questionType: qResult.questionType,
+                isAttempted: qResult.isAttempted,
+                candidateAnswer: qResult.candidateAnswer,
+                candidateAnswerKeys: Object.keys(qResult.candidateAnswer || {}),
+                hasTextAnswer: !!qResult.candidateAnswer?.textAnswer,
+                hasCode: !!qResult.candidateAnswer?.code,
+                hasSqlQuery: !!qResult.candidateAnswer?.sqlQuery,
+                hasSelectedAnswers: !!qResult.candidateAnswer?.selectedAnswers,
+                textAnswerLength: qResult.candidateAnswer?.textAnswer?.length || 0,
+                codeLength: qResult.candidateAnswer?.code?.length || 0,
+                sqlQueryLength: qResult.candidateAnswer?.sqlQuery?.length || 0,
+                hasEvaluation: !!qResult.evaluation,
+                hasTestResults: !!qResult.testResults,
+                hasTestResult: !!qResult.testResult
+              })
+            })
+          }
           setResults(response.data.data)
         } else {
           setError(response.data?.message || 'Failed to load results')
         }
       } catch (err: any) {
-        console.error('Error fetching results:', err)
         setError(err.response?.data?.detail || err.response?.data?.message || 'Failed to load results')
       } finally {
         setLoading(false)
@@ -419,21 +444,21 @@ export default function CandidateResultsPage() {
                   </div>
 
                   {/* Candidate Answer */}
-                  {qResult.isAttempted && (
+                  {qResult.isAttempted ? (
                     <div style={{ marginBottom: '1rem', padding: '1rem', backgroundColor: '#f8fafc', borderRadius: '0.5rem' }}>
                       <div style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.5rem', color: '#374151' }}>
                         Candidate Answer:
                       </div>
                       
-                      {/* MCQ Selected Answers */}
+                      {/* MCQ Selected Answers - Only for MCQ questions */}
                       {qResult.questionType === 'MCQ' && qResult.candidateAnswer.selectedAnswers && qResult.candidateAnswer.selectedAnswers.length > 0 && (
                         <div style={{ fontSize: '0.875rem', color: '#374151' }}>
                           Selected: {qResult.candidateAnswer.selectedAnswers.join(', ')}
                         </div>
                       )}
                       
-                      {/* Text Answer (Subjective, Pseudocode) */}
-                      {qResult.candidateAnswer.textAnswer && (
+                      {/* Text Answer - Only for Subjective and PseudoCode questions */}
+                      {(qResult.questionType === 'Subjective' || qResult.questionType === 'PseudoCode') && qResult.candidateAnswer.textAnswer && (
                         <div style={{
                           padding: '0.75rem',
                           backgroundColor: '#ffffff',
@@ -449,26 +474,126 @@ export default function CandidateResultsPage() {
                         </div>
                       )}
                       
-                      {/* Code Answer (Coding, AIML) */}
-                      {qResult.candidateAnswer.code && (
-                        <div style={{
-                          padding: '0.75rem',
-                          backgroundColor: '#1e293b',
-                          border: '1px solid #334155',
-                          borderRadius: '0.375rem',
-                          fontSize: '0.875rem',
-                          color: '#e2e8f0',
-                          fontFamily: 'monospace',
-                          whiteSpace: 'pre-wrap',
-                          maxHeight: '400px',
-                          overflowY: 'auto',
-                        }}>
-                          {qResult.candidateAnswer.code}
+                      {/* Code Answer - Only for CODING and AIML questions */}
+                      {(qResult.questionType?.toUpperCase() === 'CODING' || qResult.questionType?.toUpperCase() === 'AIML') && qResult.candidateAnswer.code && (
+                        <div>
+                          <div style={{
+                            padding: '0.75rem',
+                            backgroundColor: '#1e293b',
+                            border: '1px solid #334155',
+                            borderRadius: '0.375rem',
+                            fontSize: '0.875rem',
+                            color: '#e2e8f0',
+                            fontFamily: 'monospace',
+                            whiteSpace: 'pre-wrap',
+                            maxHeight: '400px',
+                            overflowY: 'auto',
+                          }}>
+                            {qResult.candidateAnswer.code}
+                          </div>
+                          
+                          {/* AIML Outputs */}
+                          {(qResult.questionType?.toUpperCase() === 'AIML' || qResult.questionType === 'AIML') && qResult.aimlOutputs && qResult.aimlOutputs.length > 0 && (
+                            <div style={{ marginTop: '1rem' }}>
+                              <div style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.5rem', color: '#374151' }}>
+                                Execution Outputs:
+                              </div>
+                              <div style={{ display: 'grid', gap: '0.75rem' }}>
+                                {qResult.aimlOutputs.map((output: any, outputIdx: number) => (
+                                  <div
+                                    key={outputIdx}
+                                    style={{
+                                      padding: '1rem',
+                                      backgroundColor: '#ffffff',
+                                      border: '1px solid #e2e8f0',
+                                      borderRadius: '0.375rem',
+                                    }}
+                                  >
+                                    {(() => {
+                                      // Check if output contains image
+                                      const outputStr = typeof output === 'string' ? output : JSON.stringify(output, null, 2);
+                                      if (outputStr.includes('[Image: data:image/')) {
+                                        const parts = outputStr.split('[Image: data:image/');
+                                        return (
+                                          <>
+                                            {parts.map((part: string, idx: number) => {
+                                              if (idx === 0 && part.trim()) {
+                                                return (
+                                                  <div key={`text-${idx}`} style={{ fontFamily: 'monospace', fontSize: '0.75rem', whiteSpace: 'pre-wrap', marginBottom: '0.5rem' }}>
+                                                    {part}
+                                                  </div>
+                                                );
+                                              }
+                                              const [imgType, ...rest] = part.split(']');
+                                              if (imgType) {
+                                                const [format, imgData] = imgType.split(';base64,');
+                                                const textAfter = rest.join(']');
+                                                return (
+                                                  <div key={`img-${idx}`} style={{ marginBottom: '0.5rem' }}>
+                                                    <img 
+                                                      src={`data:image/${format};base64,${imgData}`} 
+                                                      alt="Output" 
+                                                      style={{ maxWidth: '100%', backgroundColor: '#ffffff', borderRadius: '0.25rem', border: '1px solid #e2e8f0' }}
+                                                    />
+                                                    {textAfter.trim() && (
+                                                      <div style={{ fontFamily: 'monospace', fontSize: '0.75rem', whiteSpace: 'pre-wrap', marginTop: '0.5rem' }}>
+                                                        {textAfter}
+                                                      </div>
+                                                    )}
+                                                  </div>
+                                                );
+                                              }
+                                              return null;
+                                            })}
+                                          </>
+                                        );
+                                      }
+                                      
+                                      // Regular text output
+                                      if (outputStr.includes('[error]') || outputStr.includes('[stderr]') || outputStr.includes('Error:')) {
+                                        return (
+                                          <div style={{
+                                            padding: '0.75rem',
+                                            backgroundColor: '#fee2e2',
+                                            border: '1px solid #ef4444',
+                                            borderRadius: '0.25rem',
+                                            fontFamily: 'monospace',
+                                            fontSize: '0.75rem',
+                                            color: '#dc2626',
+                                            whiteSpace: 'pre-wrap',
+                                            maxHeight: '300px',
+                                            overflowY: 'auto',
+                                          }}>
+                                            {outputStr}
+                                          </div>
+                                        );
+                                      }
+                                      
+                                      return (
+                                        <div style={{
+                                          padding: '0.75rem',
+                                          backgroundColor: '#f8fafc',
+                                          borderRadius: '0.25rem',
+                                          fontFamily: 'monospace',
+                                          fontSize: '0.75rem',
+                                          whiteSpace: 'pre-wrap',
+                                          maxHeight: '300px',
+                                          overflowY: 'auto',
+                                        }}>
+                                          {outputStr}
+                                        </div>
+                                      );
+                                    })()}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
                       
-                      {/* SQL Query */}
-                      {qResult.candidateAnswer.sqlQuery && (
+                      {/* SQL Query - Only for SQL questions */}
+                      {(qResult.questionType?.toUpperCase() === 'SQL' || qResult.questionType === 'SQL') && qResult.candidateAnswer.sqlQuery && (
                         <div style={{
                           padding: '0.75rem',
                           backgroundColor: '#1e293b',
@@ -485,98 +610,259 @@ export default function CandidateResultsPage() {
                         </div>
                       )}
                     </div>
-                  )}
-
-                  {/* Test Case Results (Coding) */}
-                  {qResult.testResults && qResult.testResults.length > 0 && (
-                    <div style={{ marginBottom: '1rem', padding: '1rem', backgroundColor: '#f8fafc', borderRadius: '0.5rem' }}>
-                      <div style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.75rem', color: '#374151' }}>
-                        Test Case Results:
-                      </div>
-                      <div style={{ display: 'grid', gap: '0.5rem' }}>
-                        {qResult.testResults.map((test: any, testIdx: number) => (
-                          <div
-                            key={testIdx}
-                            style={{
-                              padding: '0.75rem',
-                              backgroundColor: '#ffffff',
-                              border: `1px solid ${test.passed ? '#10b981' : '#ef4444'}`,
-                              borderRadius: '0.375rem',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '0.5rem',
-                            }}
-                          >
-                            <div style={{
-                              width: '20px',
-                              height: '20px',
-                              borderRadius: '50%',
-                              backgroundColor: test.passed ? '#10b981' : '#ef4444',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              color: '#ffffff',
-                              fontSize: '0.75rem',
-                              fontWeight: 700,
-                            }}>
-                              {test.passed ? '✓' : '✗'}
-                            </div>
-                            <div style={{ flex: 1, fontSize: '0.875rem' }}>
-                              <div style={{ fontWeight: 600, color: '#374151' }}>Test Case {testIdx + 1}</div>
-                              {test.error && (
-                                <div style={{ fontSize: '0.75rem', color: '#dc2626', marginTop: '0.25rem' }}>
-                                  Error: {test.error}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                      <div style={{ marginTop: '0.75rem', fontSize: '0.875rem', color: '#64748b' }}>
-                        Passed: {qResult.testResults.filter((t: any) => t.passed).length} / {qResult.testResults.length}
+                  ) : (
+                    <div style={{ marginBottom: '1rem', padding: '1rem', backgroundColor: '#fef2f2', borderRadius: '0.5rem', border: '1px solid #fee2e2' }}>
+                      <div style={{ fontSize: '0.875rem', color: '#dc2626', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span>⚠️</span>
+                        <span>This question was not attempted by the candidate.</span>
                       </div>
                     </div>
                   )}
 
-                  {/* SQL Test Result */}
-                  {qResult.testResult && (
+                  {/* Test Case Results (Coding) - Only for CODING questions */}
+                  {(qResult.questionType?.toUpperCase() === 'CODING' || qResult.questionType === 'Coding') && qResult.testResults && qResult.testResults.length > 0 && (
                     <div style={{ marginBottom: '1rem', padding: '1rem', backgroundColor: '#f8fafc', borderRadius: '0.5rem' }}>
-                      <div style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.5rem', color: '#374151' }}>
-                        SQL Test Result:
+                      <div style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.75rem', color: '#374151' }}>
+                        Test Case Results ({qResult.testResults.filter((t: any) => t.passed).length} / {qResult.testResults.length} passed):
+                      </div>
+                      <div style={{ display: 'grid', gap: '0.75rem' }}>
+                        {qResult.testResults.map((test: any, testIdx: number) => (
+                          <div
+                            key={testIdx}
+                            style={{
+                              padding: '1rem',
+                              backgroundColor: '#ffffff',
+                              border: `1px solid ${test.passed ? '#10b981' : '#ef4444'}`,
+                              borderRadius: '0.375rem',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '0.5rem',
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                              <div style={{
+                                width: '24px',
+                                height: '24px',
+                                borderRadius: '50%',
+                                backgroundColor: test.passed ? '#10b981' : '#ef4444',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                color: '#ffffff',
+                                fontSize: '0.75rem',
+                                fontWeight: 700,
+                              }}>
+                                {test.passed ? '✓' : '✗'}
+                              </div>
+                              <div style={{ fontWeight: 600, color: '#374151', fontSize: '0.875rem' }}>
+                                Test Case {testIdx + 1} - {test.passed ? 'Passed' : 'Failed'}
+                              </div>
+                              {(test.time || test.memory) && (
+                                <div style={{ marginLeft: 'auto', fontSize: '0.75rem', color: '#64748b' }}>
+                                  {test.time && `⏱️ ${test.time}s`} {test.memory && `💾 ${test.memory} KB`}
+                                </div>
+                              )}
+                            </div>
+                            
+                            {/* Input */}
+                            {test.input && (
+                              <div>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: '0.25rem' }}>Input:</div>
+                                <div style={{
+                                  padding: '0.5rem',
+                                  backgroundColor: '#f1f5f9',
+                                  borderRadius: '0.25rem',
+                                  fontFamily: 'monospace',
+                                  fontSize: '0.75rem',
+                                  whiteSpace: 'pre-wrap',
+                                  maxHeight: '150px',
+                                  overflowY: 'auto',
+                                }}>
+                                  {test.input}
+                                </div>
+                              </div>
+                            )}
+                            
+                            {/* Expected Output */}
+                            {test.expected_output !== undefined && (
+                              <div>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: '0.25rem' }}>Expected Output:</div>
+                                <div style={{
+                                  padding: '0.5rem',
+                                  backgroundColor: '#d1fae5',
+                                  borderRadius: '0.25rem',
+                                  fontFamily: 'monospace',
+                                  fontSize: '0.75rem',
+                                  whiteSpace: 'pre-wrap',
+                                  maxHeight: '150px',
+                                  overflowY: 'auto',
+                                }}>
+                                  {test.expected_output || '(empty)'}
+                                </div>
+                              </div>
+                            )}
+                            
+                            {/* Actual Output */}
+                            {(test.actual_output !== undefined || test.stdout) && (
+                              <div>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: '0.25rem' }}>Actual Output:</div>
+                                <div style={{
+                                  padding: '0.5rem',
+                                  backgroundColor: test.passed ? '#d1fae5' : '#fee2e2',
+                                  borderRadius: '0.25rem',
+                                  fontFamily: 'monospace',
+                                  fontSize: '0.75rem',
+                                  whiteSpace: 'pre-wrap',
+                                  maxHeight: '150px',
+                                  overflowY: 'auto',
+                                }}>
+                                  {test.actual_output || test.stdout || '(empty)'}
+                                </div>
+                              </div>
+                            )}
+                            
+                            {/* Error Messages */}
+                            {(test.error || test.stderr || test.compile_output) && (
+                              <div>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#dc2626', marginBottom: '0.25rem' }}>
+                                  {test.compile_output ? 'Compilation Error:' : test.stderr ? 'Runtime Error:' : 'Error:'}
+                                </div>
+                                <div style={{
+                                  padding: '0.5rem',
+                                  backgroundColor: '#fee2e2',
+                                  borderRadius: '0.25rem',
+                                  fontFamily: 'monospace',
+                                  fontSize: '0.75rem',
+                                  color: '#dc2626',
+                                  whiteSpace: 'pre-wrap',
+                                  maxHeight: '200px',
+                                  overflowY: 'auto',
+                                }}>
+                                  {test.compile_output || test.stderr || test.error}
+                                </div>
+                              </div>
+                            )}
+                            
+                            {/* Status */}
+                            {test.status && test.status !== 'accepted' && (
+                              <div style={{ fontSize: '0.75rem', color: '#dc2626', fontStyle: 'italic' }}>
+                                Status: {test.status}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SQL Test Result - Only for SQL questions */}
+                  {(qResult.questionType?.toUpperCase() === 'SQL' || qResult.questionType === 'SQL') && qResult.testResult && (
+                    <div style={{ marginBottom: '1rem', padding: '1rem', backgroundColor: '#f8fafc', borderRadius: '0.5rem' }}>
+                      <div style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.75rem', color: '#374151' }}>
+                        SQL Execution Result:
                       </div>
                       <div style={{
-                        padding: '0.75rem',
+                        padding: '1rem',
                         backgroundColor: '#ffffff',
                         border: `1px solid ${qResult.testResult.passed ? '#10b981' : '#ef4444'}`,
                         borderRadius: '0.375rem',
                         display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.5rem',
+                        flexDirection: 'column',
+                        gap: '0.75rem',
                       }}>
-                        <div style={{
-                          width: '20px',
-                          height: '20px',
-                          borderRadius: '50%',
-                          backgroundColor: qResult.testResult.passed ? '#10b981' : '#ef4444',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          color: '#ffffff',
-                          fontSize: '0.75rem',
-                          fontWeight: 700,
-                        }}>
-                          {qResult.testResult.passed ? '✓' : '✗'}
-                        </div>
-                        <div style={{ flex: 1, fontSize: '0.875rem' }}>
-                          <div style={{ fontWeight: 600, color: '#374151' }}>
-                            {qResult.testResult.passed ? 'Query Passed' : 'Query Failed'}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <div style={{
+                            width: '24px',
+                            height: '24px',
+                            borderRadius: '50%',
+                            backgroundColor: qResult.testResult.passed ? '#10b981' : '#ef4444',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: '#ffffff',
+                            fontSize: '0.75rem',
+                            fontWeight: 700,
+                          }}>
+                            {qResult.testResult.passed ? '✓' : '✗'}
                           </div>
-                          {qResult.testResult.error && (
-                            <div style={{ fontSize: '0.75rem', color: '#dc2626', marginTop: '0.25rem' }}>
-                              Error: {qResult.testResult.error}
+                          <div style={{ fontWeight: 600, color: '#374151', fontSize: '0.875rem' }}>
+                            {qResult.testResult.passed ? 'Query Executed Successfully' : 'Query Failed'}
+                          </div>
+                          {(qResult.testResult.time || qResult.testResult.memory) && (
+                            <div style={{ marginLeft: 'auto', fontSize: '0.75rem', color: '#64748b' }}>
+                              {qResult.testResult.time && `⏱️ ${qResult.testResult.time}s`} {qResult.testResult.memory && `💾 ${qResult.testResult.memory} KB`}
                             </div>
                           )}
                         </div>
+                        
+                        {/* Expected Output */}
+                        {qResult.testResult.expected_output && (
+                          <div>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: '0.25rem' }}>Expected Result:</div>
+                            <div style={{
+                              padding: '0.5rem',
+                              backgroundColor: '#d1fae5',
+                              borderRadius: '0.25rem',
+                              fontFamily: 'monospace',
+                              fontSize: '0.75rem',
+                              whiteSpace: 'pre-wrap',
+                              maxHeight: '200px',
+                              overflowY: 'auto',
+                            }}>
+                              {typeof qResult.testResult.expected_output === 'string' 
+                                ? qResult.testResult.expected_output 
+                                : JSON.stringify(qResult.testResult.expected_output, null, 2)}
+                            </div>
+                          </div>
+                        )}
+                        
+                        {/* Actual Output */}
+                        {(qResult.testResult.user_output || qResult.testResult.output) && (
+                          <div>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: '0.25rem' }}>Actual Result:</div>
+                            <div style={{
+                              padding: '0.5rem',
+                              backgroundColor: qResult.testResult.passed ? '#d1fae5' : '#fee2e2',
+                              borderRadius: '0.25rem',
+                              fontFamily: 'monospace',
+                              fontSize: '0.75rem',
+                              whiteSpace: 'pre-wrap',
+                              maxHeight: '200px',
+                              overflowY: 'auto',
+                            }}>
+                              {typeof (qResult.testResult.user_output || qResult.testResult.output) === 'string'
+                                ? (qResult.testResult.user_output || qResult.testResult.output)
+                                : JSON.stringify(qResult.testResult.user_output || qResult.testResult.output, null, 2)}
+                            </div>
+                          </div>
+                        )}
+                        
+                        {/* Error Messages */}
+                        {qResult.testResult.error && (
+                          <div>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#dc2626', marginBottom: '0.25rem' }}>Error:</div>
+                            <div style={{
+                              padding: '0.5rem',
+                              backgroundColor: '#fee2e2',
+                              borderRadius: '0.25rem',
+                              fontFamily: 'monospace',
+                              fontSize: '0.75rem',
+                              color: '#dc2626',
+                              whiteSpace: 'pre-wrap',
+                              maxHeight: '200px',
+                              overflowY: 'auto',
+                            }}>
+                              {qResult.testResult.error}
+                            </div>
+                          </div>
+                        )}
+                        
+                        {/* Status */}
+                        {qResult.testResult.status && (
+                          <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                            Status: {qResult.testResult.status}
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}

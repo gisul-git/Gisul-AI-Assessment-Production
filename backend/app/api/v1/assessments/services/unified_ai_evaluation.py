@@ -410,7 +410,8 @@ async def evaluate_sql_answer(
     schemas: Optional[Dict[str, Any]] = None,
     test_result: Optional[Dict[str, Any]] = None,
     order_sensitive: bool = False,
-    difficulty: str = "Medium"
+    difficulty: str = "Medium",
+    use_cache: bool = True
 ) -> Dict[str, Any]:
     """
     Evaluate a SQL query with comprehensive AI evaluation.
@@ -440,12 +441,22 @@ async def evaluate_sql_answer(
     """
     # Input validation
     if not question_id or not question_description or not user_query:
-        logger.warning(f"Invalid input for SQL evaluation: question_id={question_id}")
+        logger.warning(f"Invalid input for SQL evaluation: question_id={question_id}, has_description={bool(question_description)}, has_query={bool(user_query)}")
         return _create_error_evaluation(question_id, "SQL", max_marks, section, "Invalid input parameters")
     
     if max_marks <= 0 or max_marks > 1000:
         logger.warning(f"Invalid max_marks: {max_marks}")
         return _create_error_evaluation(question_id, "SQL", max_marks, section, f"Invalid max_marks: {max_marks}")
+    
+    # If test_result not provided, create a basic one for evaluation (evaluate based on query quality only)
+    if not test_result:
+        logger.info(f"[SQL_EVAL] No test result provided for question {question_id}, evaluating based on query quality only")
+        test_result = {
+            "passed": False,  # Default to False when no test result
+            "status": "not_tested",
+            "user_output": "",
+            "error": "No test result available - query was not executed"
+        }
     
     # Sanitize input
     user_query = _sanitize_answer(user_query)
@@ -555,7 +566,8 @@ async def evaluate_coding_answer_enhanced(
     passed_count: int = 0,
     total_count: int = 0,
     starter_code: Optional[str] = None,
-    difficulty: str = "Medium"
+    difficulty: str = "Medium",
+    use_cache: bool = True
 ) -> Dict[str, Any]:
     """
     Enhanced evaluation for coding questions with detailed scoring.
@@ -584,27 +596,42 @@ async def evaluate_coding_answer_enhanced(
     Returns:
         Comprehensive evaluation result dictionary
     """
-    # Input validation
+    # Input validation - Allow evaluation even without test results (for cases where submission happened without running tests)
     if not question_id or not problem_statement or not source_code:
-        logger.warning(f"Invalid input for coding evaluation: question_id={question_id}")
+        logger.warning(f"Invalid input for coding evaluation: question_id={question_id}, has_problem={bool(problem_statement)}, has_code={bool(source_code)}")
         return _create_error_evaluation(question_id, "Coding", max_marks, section, "Invalid input parameters")
     
     if max_marks <= 0 or max_marks > 1000:
         logger.warning(f"Invalid max_marks: {max_marks}")
         return _create_error_evaluation(question_id, "Coding", max_marks, section, f"Invalid max_marks: {max_marks}")
     
+    # If test_results not provided, evaluate based on code quality only (no test case score)
+    if not test_results or len(test_results) == 0:
+        logger.info(f"[CODING_EVAL] No test results provided for question {question_id}, evaluating based on code quality only")
+        passed_count = 0
+        total_count = 0
+    
     # Sanitize input
     source_code = _sanitize_answer(source_code)
     problem_statement = _sanitize_question(problem_statement)
+    
+    logger.info(f"[CODING_EVAL] Starting evaluation with max_marks={max_marks} (type: {type(max_marks)})")
+    logger.info(f"[CODING_EVAL] use_cache={use_cache}")
     
     # Check cache
     if use_cache:
         cache_key = _generate_cache_key(question_id, source_code, "Coding")
         cached_result = _get_cached_evaluation(cache_key)
         if cached_result:
-            logger.info(f"Cache hit for coding question {question_id}")
+            logger.info(f"[CODING_EVAL] Cache hit for coding question {question_id}")
+            logger.info(f"[CODING_EVAL] Cached result score: {cached_result.get('score')}")
+            logger.info(f"[CODING_EVAL] Cached result max_marks: {cached_result.get('max_marks')}")
             cached_result["question_id"] = question_id
             cached_result["section"] = section or ""
+            # Ensure max_marks is preserved
+            if "max_marks" not in cached_result or cached_result.get("max_marks") != max_marks:
+                logger.info(f"[CODING_EVAL] Updating cached result max_marks from {cached_result.get('max_marks')} to {max_marks}")
+                cached_result["max_marks"] = max_marks
             return cached_result
     
     try:
@@ -679,11 +706,26 @@ Focus on test case pass rate, algorithm correctness, code quality, efficiency, a
             _cache_evaluation(cache_key, result)
         
         duration_ms = (time.time() - start_time) * 1000
-        logger.info(
-            f"Coding evaluation completed: question_id={question_id}, "
-            f"score={result['score']}/{max_marks}, tests={passed_count}/{total_count}, "
-            f"duration={duration_ms:.0f}ms"
-        )
+        
+        logger.info("=" * 80)
+        logger.info(f"[CODING_EVAL] Evaluation completed successfully")
+        logger.info(f"[CODING_EVAL] question_id={question_id}")
+        logger.info(f"[CODING_EVAL] Input max_marks: {max_marks}")
+        logger.info(f"[CODING_EVAL] Result score: {result.get('score', 0)}")
+        logger.info(f"[CODING_EVAL] Result max_marks: {result.get('max_marks', 'NOT_SET')}")
+        logger.info(f"[CODING_EVAL] Result percentage: {result.get('percentage', 0)}%")
+        logger.info(f"[CODING_EVAL] Duration: {duration_ms:.2f}ms")
+        logger.info(f"[CODING_EVAL] Result keys: {list(result.keys())}")
+        logger.info(f"[CODING_EVAL] Tests: {passed_count}/{total_count} passed")
+        
+        # Ensure max_marks is set in result
+        if "max_marks" not in result or result.get("max_marks") != max_marks:
+            logger.warning(f"[CODING_EVAL] Result max_marks ({result.get('max_marks', 'NOT_SET')}) doesn't match input ({max_marks}), updating...")
+            result["max_marks"] = max_marks
+        
+        logger.info(f"[CODING_EVAL] Final result max_marks: {result.get('max_marks')}")
+        logger.info(f"[CODING_EVAL] Final score display: {result.get('score', 0)}/{result.get('max_marks')}")
+        logger.info("=" * 80)
         
         return result
         
@@ -700,7 +742,8 @@ async def evaluate_subjective_answer_enhanced(
     section: Optional[str] = None,
     rubric: Optional[str] = None,
     answer_key: Optional[str] = None,
-    difficulty: str = "Medium"
+    difficulty: str = "Medium",
+    use_cache: bool = True
 ) -> Dict[str, Any]:
     """
     Enhanced evaluation for subjective questions with comprehensive feedback.
@@ -1323,7 +1366,7 @@ async def evaluate_aiml_answer(
     """
     try:
         # Import AIML evaluation service
-        from ....aiml.services.ai_feedback import evaluate_aiml_submission
+        from ...aiml.services.ai_feedback import evaluate_aiml_submission
         
         # Prepare submission format expected by AIML service
         source_code = candidate_answer.get("source_code") or candidate_answer.get("code", "")
@@ -1444,6 +1487,26 @@ async def evaluate_aiml_answer(
         
         return result
         
+    except ImportError as import_err:
+        logger.error(f"[AIML_EVAL] Import error - AIML module not available: {import_err}")
+        logger.error(f"[AIML_EVAL] Falling back to basic evaluation using coding evaluation")
+        # Fallback: Evaluate based on code quality using OpenAI directly (coding evaluation)
+        source_code = candidate_answer.get("source_code") or candidate_answer.get("code", "")
+        if not source_code:
+            return _create_error_evaluation(question_id, "AIML", max_marks, section, "No source code provided")
+        return await evaluate_coding_answer_enhanced(
+            question_id=question_id,
+            problem_statement=question_data.get("questionText") or question_data.get("description") or question_data.get("title", "AIML Question"),
+            source_code=source_code,
+            language="python",
+            max_marks=max_marks,
+            section=section,
+            test_results=None,
+            passed_count=0,
+            total_count=0,
+            starter_code=None,
+            difficulty=question_data.get("difficulty", "Medium")
+        )
     except Exception as e:
         logger.exception(f"Error evaluating AIML answer: {e}")
         return _create_error_evaluation(question_id, "AIML", max_marks, section, str(e))
@@ -1946,10 +2009,15 @@ async def evaluate_question_by_type(
     Returns:
         Comprehensive evaluation result
     """
+    logger.info("=" * 80)
     logger.info(f"[EVALUATE_QUESTION] Starting evaluation for question_id={question_id}, type={question_type}")
-    logger.info(f"[EVALUATE_QUESTION] Max marks: {max_marks}, Section: {section}")
+    logger.info(f"[EVALUATE_QUESTION] Max marks: {max_marks} (type: {type(max_marks)})")
+    logger.info(f"[EVALUATE_QUESTION] Section: {section}")
     logger.info(f"[EVALUATE_QUESTION] Candidate answer keys: {list(candidate_answer.keys())}")
+    logger.info(f"[EVALUATE_QUESTION] Question data keys: {list(question_data.keys())}")
     logger.info(f"[EVALUATE_QUESTION] Additional kwargs: {list(kwargs.keys())}")
+    logger.info(f"[EVALUATE_QUESTION] Additional kwargs values: {kwargs}")
+    logger.info("=" * 80)
     
     question_type_upper = question_type.upper()
     
@@ -1973,15 +2041,41 @@ async def evaluate_question_by_type(
         return result
     
     elif question_type_upper == "SUBJECTIVE":
+        # Extract question text from various possible fields
+        question_text = (
+            question_data.get("questionText") or 
+            question_data.get("question") or
+            question_data.get("description") or
+            question_data.get("title", "") or
+            ""
+        )
+        
+        # Extract answer
+        answer = (
+            candidate_answer.get("textAnswer") or 
+            candidate_answer.get("answer") or
+            ""
+        )
+        
+        # Validate required parameters
+        if not question_text:
+            logger.warning(f"[SUBJECTIVE_EVAL] Missing question_text for question {question_id}")
+            question_text = question_data.get("title", "Question") or "Question"
+        
+        if not answer:
+            logger.warning(f"[SUBJECTIVE_EVAL] Missing answer for question {question_id}")
+            return _create_error_evaluation(question_id, "Subjective", max_marks, section, "No answer provided")
+        
         return await evaluate_subjective_answer_enhanced(
             question_id=question_id,
-            question=question_data.get("question") or question_data.get("questionText", ""),
-            answer=candidate_answer.get("textAnswer") or candidate_answer.get("answer", ""),
+            question=question_text,
+            answer=answer,
             max_marks=max_marks,
             section=section,
-            rubric=kwargs.get("rubric"),
-            answer_key=kwargs.get("answer_key"),
-            difficulty=question_data.get("difficulty", "Medium")
+            rubric=kwargs.get("rubric") or question_data.get("rubric"),
+            answer_key=kwargs.get("answer_key") or question_data.get("answerKey"),
+            difficulty=question_data.get("difficulty", "Medium"),
+            use_cache=True
         )
     
     elif question_type_upper in ["PSEUDOCODE", "PSEUDO CODE"]:
@@ -1994,36 +2088,105 @@ async def evaluate_question_by_type(
             sample_input=kwargs.get("sample_input"),
             expected_output=kwargs.get("expected_output"),
             rubric=kwargs.get("rubric"),
-            difficulty=question_data.get("difficulty", "Medium")
+            difficulty=question_data.get("difficulty", "Medium"),
+            use_cache=True
         )
     
     elif question_type_upper == "CODING":
-        return await evaluate_coding_answer_enhanced(
+        # Extract problem statement from various possible fields
+        problem_statement = (
+            question_data.get("questionText") or 
+            question_data.get("problemStatement") or 
+            question_data.get("question") or
+            question_data.get("coding_data", {}).get("description") or
+            question_data.get("coding_data", {}).get("problem_statement") or
+            question_data.get("description") or
+            ""
+        )
+        
+        # Extract source code from candidate answer
+        source_code = (
+            candidate_answer.get("source_code") or 
+            candidate_answer.get("code") or 
+            candidate_answer.get("answer") or
+            ""
+        )
+        
+        # Validate required parameters
+        if not problem_statement:
+            logger.warning(f"[CODING_EVAL] Missing problem_statement for question {question_id}")
+            problem_statement = question_data.get("title", "Coding Question") or "Coding Problem"
+        
+        if not source_code:
+            logger.warning(f"[CODING_EVAL] Missing source_code for question {question_id}")
+            return _create_error_evaluation(question_id, "Coding", max_marks, section, "No source code provided")
+        
+        logger.info(f"[EVALUATE_QUESTION] Calling evaluate_coding_answer_enhanced with max_marks={max_marks}")
+        logger.info(f"[EVALUATE_QUESTION] Has test_results: {bool(kwargs.get('test_results'))}")
+        logger.info(f"[EVALUATE_QUESTION] test_results count: {len(kwargs.get('test_results', []))}")
+        
+        result = await evaluate_coding_answer_enhanced(
             question_id=question_id,
-            problem_statement=question_data.get("questionText") or question_data.get("problemStatement", ""),
-            source_code=candidate_answer.get("source_code") or candidate_answer.get("code", ""),
-            language=candidate_answer.get("language") or question_data.get("codingLanguage", "python"),
+            problem_statement=problem_statement,
+            source_code=source_code,
+            language=candidate_answer.get("language") or question_data.get("codingLanguage") or question_data.get("language", "python"),
             max_marks=max_marks,
             section=section,
             test_results=kwargs.get("test_results"),
             passed_count=kwargs.get("passed_count", 0),
             total_count=kwargs.get("total_count", 0),
-            starter_code=question_data.get("starterCode"),
-            difficulty=question_data.get("difficulty", "Medium")
+            starter_code=question_data.get("starterCode") or question_data.get("coding_data", {}).get("starter_code"),
+            difficulty=question_data.get("difficulty", "Medium"),
+            use_cache=True
         )
+        
+        logger.info(f"[EVALUATE_QUESTION] Coding evaluation returned:")
+        logger.info(f"[EVALUATE_QUESTION]   score: {result.get('score')}")
+        logger.info(f"[EVALUATE_QUESTION]   max_marks: {result.get('max_marks')}")
+        logger.info(f"[EVALUATE_QUESTION]   percentage: {result.get('percentage')}")
+        
+        return result
     
     elif question_type_upper == "SQL":
+        # Extract question description from various possible fields
+        question_description = (
+            question_data.get("question") or 
+            question_data.get("questionText") or
+            question_data.get("description") or
+            question_data.get("sql_data", {}).get("description") or
+            question_data.get("title", "") or
+            ""
+        )
+        
+        # Extract user query
+        user_query = (
+            candidate_answer.get("sql_query") or 
+            candidate_answer.get("query") or 
+            candidate_answer.get("answer") or
+            ""
+        )
+        
+        # Validate required parameters
+        if not question_description:
+            logger.warning(f"[SQL_EVAL] Missing question_description for question {question_id}")
+            question_description = question_data.get("title", "SQL Question") or "SQL Query Problem"
+        
+        if not user_query:
+            logger.warning(f"[SQL_EVAL] Missing user_query for question {question_id}")
+            return _create_error_evaluation(question_id, "SQL", max_marks, section, "No SQL query provided")
+        
         return await evaluate_sql_answer(
             question_id=question_id,
-            question_description=question_data.get("question") or question_data.get("questionText", ""),
-            user_query=candidate_answer.get("sql_query") or candidate_answer.get("query", ""),
-            reference_query=question_data.get("reference_query"),
+            question_description=question_description,
+            user_query=user_query,
+            reference_query=question_data.get("reference_query") or question_data.get("sql_data", {}).get("reference_query"),
             max_marks=max_marks,
             section=section,
             schemas=question_data.get("schemas") or question_data.get("sql_data", {}).get("schemas"),
             test_result=kwargs.get("test_result"),
-            order_sensitive=question_data.get("evaluation", {}).get("order_sensitive", False),
-            difficulty=question_data.get("difficulty", "Medium")
+            order_sensitive=question_data.get("evaluation", {}).get("order_sensitive", False) if question_data.get("evaluation") else False,
+            difficulty=question_data.get("difficulty", "Medium"),
+            use_cache=True
         )
     
     elif question_type_upper == "AIML":

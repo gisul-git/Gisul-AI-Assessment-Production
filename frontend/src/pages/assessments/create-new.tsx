@@ -2873,14 +2873,25 @@ export default function CreateNewAssessmentPage() {
     
     // Debounce draft updates
     const timeoutId = setTimeout(() => {
+      console.log("=".repeat(80));
+      console.log("[FRONTEND] Saving draft with scoringRules and settings");
+      console.log("[FRONTEND] assessmentId:", assessmentId);
+      console.log("[FRONTEND] scoringRules:", scoringRules);
+      console.log("[FRONTEND] passPercentage:", passPercentage);
+      console.log("[FRONTEND] enablePerSectionTimers:", enablePerSectionTimers);
+      console.log("[FRONTEND] sectionTimers:", enablePerSectionTimers ? sectionTimers : undefined);
+      console.log("=".repeat(80));
+      
       axios.put("/api/v1/assessments/update-draft", {
         assessmentId,
         scoringRules,
         passPercentage,
         enablePerSectionTimers,
         sectionTimers: enablePerSectionTimers ? sectionTimers : undefined,
+      }).then((response) => {
+        console.log("[FRONTEND] ✓ Draft saved successfully", response.data);
       }).catch((err) => {
-        console.error("Error saving review settings to draft:", err);
+        console.error("[FRONTEND] ❌ Error saving review settings to draft:", err);
       });
     }, 1000);
     
@@ -8121,12 +8132,29 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         console.error("Error fetching assessment for title:", err);
       }
 
+      console.log("=".repeat(80));
+      console.log("[FRONTEND] FINALIZING ASSESSMENT");
+      console.log("[FRONTEND] assessmentId:", assessmentId);
+      console.log("[FRONTEND] title:", assessmentTitle.trim() || "Untitled Assessment");
+      console.log("[FRONTEND] scoringRules:", scoringRules);
+      console.log("[FRONTEND] passPercentage:", passPercentage);
+      console.log("[FRONTEND] enablePerSectionTimers:", enablePerSectionTimers);
+      console.log("[FRONTEND] sectionTimers:", enablePerSectionTimers ? sectionTimers : undefined);
+      console.log("[FRONTEND] ScoringRules keys:", Object.keys(scoringRules));
+      console.log("[FRONTEND] ScoringRules values:", Object.values(scoringRules));
+      console.log("=".repeat(80));
+      
       const response = await axios.post("/api/assessments/finalize", {
         assessmentId,
         title: assessmentTitle.trim() || "Untitled Assessment",
         description: assessmentDescription.trim() || undefined,
         passPercentage: passPercentage,
+        scoringRules: scoringRules,
+        enablePerSectionTimers: enablePerSectionTimers,
+        sectionTimers: enablePerSectionTimers ? sectionTimers : undefined,
       });
+      
+      console.log("[FRONTEND] Finalize response:", response.data);
 
       if (response.data?.success) {
         // SINGLE DRAFT: No need to clear localStorage - backend maintains single draft
