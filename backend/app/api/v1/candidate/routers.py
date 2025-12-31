@@ -997,6 +997,7 @@ class SaveCandidateInfoRequest(BaseModel):
     name: str
     phone: Optional[str] = None
     hasResume: bool = False
+    resume: Optional[str] = None  # Base64 data URL of resume file
     linkedIn: Optional[str] = None
     github: Optional[str] = None
     customFields: Optional[Dict[str, Any]] = None
@@ -1048,6 +1049,10 @@ async def save_candidate_info(
             "hasResume": request.hasResume,
             "savedAt": datetime.now(timezone.utc).isoformat(),
         }
+        
+        # Store resume file if provided
+        if request.resume:
+            candidate_info["resume"] = request.resume
         
         # Add LinkedIn, GitHub, and custom fields if provided
         if request.linkedIn:

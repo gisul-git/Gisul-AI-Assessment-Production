@@ -17,6 +17,7 @@ class Schedule(BaseModel):
     startTime: Optional[datetime] = None
     endTime: Optional[datetime] = None
     duration: Optional[int] = None  # minutes, required for flexible mode
+    candidateRequirements: Optional[Dict[str, Any]] = None  # Candidate requirements (phone, resume, LinkedIn, GitHub)
 
 
 class QuestionTiming(BaseModel):

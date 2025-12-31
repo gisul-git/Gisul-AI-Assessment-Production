@@ -952,33 +952,36 @@ Within each range, adjust based on:
 
 {{
     "overall_score": <0-100 calculated as: base score from test pass rate (see guidelines above) ± adjustments for code quality, efficiency, and edge cases. Must be 100 if all tests pass>,
-    "feedback_summary": "<2-3 sentences providing a comprehensive overview. PRIORITIZE test cases passed. Include: (1) Overall assessment based on test results ({total_passed}/{total_tests} passed), (2) Code structure and implementation quality evaluation, (3) Time and space complexity analysis with context, (4) Brief mention of strengths and any areas that could be improved. Make it informative and educational.>",
+    "feedback_summary": "<4-6 sentences providing a comprehensive, detailed overview. PRIORITIZE test cases passed. Include: (1) Overall assessment based on test results ({total_passed}/{total_tests} passed) with specific details about what this means, (2) Detailed code structure and implementation quality evaluation explaining the approach taken, (3) Comprehensive time and space complexity analysis with detailed explanation of why this complexity is achieved, (4) Detailed discussion of strengths with specific examples from the code, (5) Detailed discussion of any areas that could be improved with specific examples, (6) Educational context about the algorithm/approach used. Make it highly informative, educational, and comprehensive. Provide substantial detail in every sentence.>",
     "one_liner": "<Brief summary: '✓ All tests passed | Time: O(n) | Space: O(1)' format>",
     "code_quality": {{
         "score": <0-100>,
-        "comments": "<Detailed 2-3 sentence analysis of code structure, implementation quality, clarity, readability, naming conventions, and maintainability. Discuss how well-organized the code is, the implementation approach, and whether it follows best practices. Ignore main/I/O code completely. Focus on code structure and implementation quality.>"
+        "comments": "<Comprehensive 4-6 sentence detailed analysis of code structure, implementation quality, clarity, readability, naming conventions, and maintainability. Discuss: (1) How well-organized the code is with specific examples, (2) The implementation approach taken and why it's effective or could be improved, (3) Code readability and clarity with specific observations, (4) Naming conventions and whether they follow best practices, (5) Maintainability considerations, (6) Whether it follows language-specific and general best practices. Ignore main/I/O code completely. Focus on code structure and implementation quality. Provide substantial detail and educational insights.>"
     }},
     "efficiency": {{
         "time_complexity": "<Big O notation - e.g., O(1), O(log n), O(√n), O(n), O(n log n), O(n²), etc. For prime checking with loop up to √n, use O(√n)>",
         "space_complexity": "<Big O notation>",
-        "comments": "<Comprehensive 3-4 sentence analysis: (1) Explain why this time/space complexity is achieved (e.g., for O(√n), explain that the loop iterates up to √n, making it more efficient than O(n)), (2) Discuss whether this is optimal for the problem, (3) Compare with alternative approaches if relevant, (4) Mention any trade-offs or optimizations that could be made. Be educational and detailed.>"
+        "comments": "<Comprehensive 5-7 sentence detailed analysis: (1) Explain in detail why this time/space complexity is achieved with specific code analysis (e.g., for O(√n), explain that the loop iterates up to √n, count the nested loops, explain the iteration bounds, making it more efficient than O(n)), (2) Discuss whether this is optimal for the problem with detailed reasoning, (3) Compare with alternative approaches if relevant, explaining trade-offs, (4) Mention any trade-offs or optimizations that could be made with specific examples, (5) Explain the algorithm's efficiency characteristics in detail, (6) Discuss scalability implications, (7) Provide educational context about the complexity class. Be highly educational, detailed, and comprehensive.>"
     }},
     "correctness": {{
         "score": <0-100 based on test pass rate - should be close to (total_passed/total_tests)*100>,
-        "comments": "<Detailed 2-3 sentence analysis: (1) Explain test results ({total_passed}/{total_tests} passed) and what this indicates about correctness, (2) Discuss edge case handling based on test results, (3) Evaluate the algorithm's logic and correctness based on test cases passed, (4) Mention any potential issues or bugs if tests failed.>"
+        "comments": "<Comprehensive 4-6 sentence detailed analysis: (1) Explain test results ({total_passed}/{total_tests} passed) in detail and what this indicates about correctness with specific interpretation, (2) Discuss edge case handling based on test results with examples of which edge cases were handled well or missed, (3) Evaluate the algorithm's logic and correctness based on test cases passed with detailed reasoning, (4) Analyze the approach taken and whether it's sound, (5) Mention any potential issues or bugs if tests failed with specific details, (6) Discuss the robustness of the solution. Provide substantial detail and educational insights.>"
     }},
-    "suggestions": ["<Detailed improvement suggestions for the FUNCTION only - be specific and actionable>", "<Additional suggestions>"],
-    "strengths": ["<Detailed strengths - explain what was done well and why it's good>", "<Additional strengths>"],
-    "areas_for_improvement": ["<Specific areas to improve with explanations>", "<Additional improvement areas>"],
+    "suggestions": ["<Comprehensive, detailed improvement suggestions for the FUNCTION only - be very specific, actionable, and educational. Explain why each suggestion would improve the code.>", "<Additional detailed suggestions with explanations>", "<More specific suggestions with code examples if applicable>"],
+    "strengths": ["<Comprehensive, detailed strengths - explain what was done well, why it's good, and provide specific examples from the code. Be educational and detailed.>", "<Additional detailed strengths with specific examples>", "<More strengths with explanations of why they matter>"],
+    "areas_for_improvement": ["<Comprehensive, specific areas to improve with detailed explanations, examples, and why these improvements matter. Be educational.>", "<Additional detailed improvement areas with explanations>", "<More improvement areas with specific actionable guidance>"],
     "deduction_reasons": ["<ONLY include if overall_score < 100. List specific reasons why points were deducted, e.g., 'Failed 2/6 test cases (33% failure rate)', 'Time complexity is O(n²) but optimal is O(n log n)', 'Missing edge case handling for empty input', etc.>"],
     "improvement_suggestions": ["<ONLY include if overall_score < 100. Provide specific, actionable suggestions to improve the score, e.g., 'Fix the logic for edge case X to pass all test cases', 'Optimize the algorithm to achieve O(n log n) time complexity', 'Add null/empty input validation', etc.>"]
 }}
 
 IMPORTANT: 
-- Make the feedback_summary 2-3 sentences with substantial detail and context
-- Make all comment fields detailed and educational (2-4 sentences each)
-- Provide specific, actionable feedback
-- Be comprehensive but clear
+- Make the feedback_summary 4-6 sentences with substantial detail, context, and educational insights
+- Make all comment fields highly detailed and educational (4-7 sentences each)
+- Provide very specific, actionable feedback with examples
+- Be comprehensive, thorough, and educational - explain the 'why' behind observations
+- Include specific code examples when discussing strengths or improvements
+- Provide educational context about algorithms, complexity, and best practices
+- Be detailed in every section - users want comprehensive feedback, not brief summaries
 - Score 100 if the function implementation is correct and passes all tests."""
 
         response = client.chat.completions.create(
@@ -986,7 +989,7 @@ IMPORTANT:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert code reviewer and algorithm analyst for a LeetCode-style platform. Users only write function implementations - never I/O. Your task is to: 1) PRIORITIZE test cases passed - this is the primary indicator of correctness, 2) Evaluate code structure and implementation quality, 3) Analyze the ACTUAL CODE STRUCTURE to determine precise time and space complexity (e.g., if a loop iterates up to √n, report O(√n), not O(n)), 4) Evaluate only the function logic, 5) Be language-agnostic, 6) Always respond with valid JSON, 7) Provide comprehensive, detailed feedback with educational context, 8) CRITICALLY IMPORTANT: If test cases passed, the user wrote actual code - evaluate based on test results, code structure, and implementation quality. If the user's code is identical to starter code AND 0 tests passed, return overall_score = 0. 9) For SQL queries: Be MORE LENIENT - use any reasonable criteria, focus on correctness and query structure, be flexible with syntax variations. Carefully examine loops, their bounds, data structures used, and algorithm logic to give accurate complexity analysis."
+                    "content": "You are an expert code reviewer and algorithm analyst for a LeetCode-style platform. Users only write function implementations - never I/O. Your task is to: 1) PRIORITIZE test cases passed - this is the primary indicator of correctness, 2) Evaluate code structure and implementation quality, 3) Analyze the ACTUAL CODE STRUCTURE to determine precise time and space complexity (e.g., if a loop iterates up to √n, report O(√n), not O(n)), 4) Evaluate only the function logic, 5) Be language-agnostic, 6) Always respond with valid JSON, 7) Provide COMPREHENSIVE, HIGHLY DETAILED feedback with extensive educational context - users want thorough, detailed feedback, not brief summaries. Every section should be 4-7 sentences with substantial detail, examples, and educational insights. Explain the 'why' behind every observation. Include specific code examples when discussing strengths or improvements. Be educational and comprehensive in every response. 8) CRITICALLY IMPORTANT: If test cases passed, the user wrote actual code - evaluate based on test results, code structure, and implementation quality. If the user's code is identical to starter code AND 0 tests passed, return overall_score = 0. 9) For SQL queries: Be MORE LENIENT - use any reasonable criteria, focus on correctness and query structure, be flexible with syntax variations. Carefully examine loops, their bounds, data structures used, and algorithm logic to give accurate complexity analysis. 10) PROVIDE EXTENSIVE DETAIL: Make feedback_summary 4-6 sentences, all comment fields 4-7 sentences, and include multiple detailed suggestions, strengths, and improvement areas."
                 },
                 {
                     "role": "user",
@@ -994,7 +997,7 @@ IMPORTANT:
                 }
             ],
             temperature=0.3,
-            max_tokens=2000,
+            max_tokens=4000,  # Increased to allow for more comprehensive feedback
         )
         
         # Parse the response

@@ -372,10 +372,14 @@ async def update_test(
             if start_dt >= final_end_time:
                 raise HTTPException(status_code=400, detail="End time must be after start time.")
         
-        # Extract candidateRequirements from schedule if provided
+        # Extract candidateRequirements from schedule if provided, otherwise preserve existing
+        existing_schedule = test.get("schedule") or {}
         candidate_requirements = {}
         if isinstance(schedule_data, dict) and "candidateRequirements" in schedule_data:
             candidate_requirements = schedule_data.get("candidateRequirements", {})
+        elif isinstance(existing_schedule, dict) and "candidateRequirements" in existing_schedule:
+            # Preserve existing candidateRequirements if not provided in update
+            candidate_requirements = existing_schedule.get("candidateRequirements", {})
         
         # Build schedule payload
         schedule_payload = {
@@ -386,7 +390,6 @@ async def update_test(
         }
         
         # Merge with existing schedule to preserve other fields
-        existing_schedule = test.get("schedule") or {}
         if isinstance(existing_schedule, dict):
             schedule_payload = {**existing_schedule, **schedule_payload}
         
@@ -2308,6 +2311,9 @@ async def get_candidate_analytics(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
     
+    # Get candidateInfo from candidate record (even if no submission)
+    candidate_info = candidate.get("candidateInfo", {})
+    
     # Get test submission
     submission = await db.test_submissions.find_one({
         "test_id": test_id,
@@ -2320,6 +2326,7 @@ async def get_candidate_analytics(
                 "name": candidate.get("name"),
                 "email": candidate.get("email")
             },
+            "candidateInfo": candidate_info if candidate_info else None,  # Include candidate requirements data
             "submission": None,
             "question_analytics": [],
             "activity_logs": []
@@ -2370,6 +2377,7 @@ async def get_candidate_analytics(
             "name": candidate.get("name"),
             "email": candidate.get("email")
         },
+        "candidateInfo": candidate_info if candidate_info else None,  # Include candidate requirements data
         "submission": {
             "score": submission.get("score", 0),
             "started_at": submission.get("started_at").isoformat() if submission.get("started_at") else None,
@@ -2381,6 +2389,315 @@ async def get_candidate_analytics(
         "question_analytics": question_analytics,
         "activity_logs": []  # AIML doesn't have proctoring logs yet
     }
+
+
+@router.post("/{test_id}/candidates/{user_id}/send-feedback")
+async def send_candidate_feedback(
+    test_id: str,
+    user_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Send AI feedback email to a candidate (only available after test end time).
+    Includes detailed feedback, scores, and improvement suggestions for AIML tests.
+    """
+    db = get_database()
+    
+    # Get current user ID
+    current_user_id = current_user.get("id") or current_user.get("_id")
+    if not current_user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    current_user_id = str(current_user_id).strip()
+    
+    # Verify test exists and belongs to current user
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # CRITICAL SECURITY CHECK: Verify ownership
+    test_created_by = test.get("created_by")
+    if not test_created_by or str(test_created_by).strip() != current_user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to send feedback for this test")
+    
+    # Check if test has ended
+    schedule = test.get("schedule", {})
+    end_time = schedule.get("endTime") if isinstance(schedule, dict) else None
+    if not end_time and hasattr(test, "endTime"):
+        end_time = test.get("endTime")
+    if not end_time and hasattr(test, "end_time"):
+        end_time = test.get("end_time")
+    
+    if end_time:
+        if isinstance(end_time, str):
+            from dateutil import parser
+            end_time = parser.parse(end_time)
+        if isinstance(end_time, datetime):
+            if datetime.utcnow() < end_time.replace(tzinfo=None):
+                raise HTTPException(status_code=400, detail="Cannot send feedback before test end time")
+    
+    # Get candidate
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    
+    candidate = await db.test_candidates.find_one({
+        "test_id": test_id,
+        "user_id": user_id
+    })
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    
+    candidate_name = candidate.get("name", "Candidate")
+    candidate_email = candidate.get("email", "")
+    
+    if not candidate_email:
+        raise HTTPException(status_code=400, detail="Candidate email not found")
+    
+    # Get candidate analytics (same logic as get_candidate_analytics)
+    submission = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "user_id": user_id
+    })
+    
+    if not submission:
+        raise HTTPException(status_code=400, detail="Candidate has not submitted the test yet")
+    
+    # Get question IDs from test
+    question_ids = test.get("question_ids", [])
+    
+    # Get submissions for each question
+    question_analytics = []
+    submissions_list = submission.get("submissions", [])
+    
+    for qid in question_ids:
+        question = await db.questions.find_one({"_id": ObjectId(qid)})
+        if not question:
+            continue
+        
+        # Find submission for this question
+        question_submission = None
+        for sub in submissions_list:
+            if sub.get("question_id") == str(qid):
+                question_submission = sub
+                break
+        
+        # Get AI feedback from submission if available
+        ai_feedback = question_submission.get("ai_feedback") if question_submission else None
+        question_score = question_submission.get("score", 0) if question_submission else 0
+        
+        question_analytics.append({
+            "question_id": str(qid),
+            "question_title": question.get("title", "Unknown"),
+            "description": question.get("description", ""),
+            "tasks": question.get("tasks", []),
+            "difficulty": question.get("difficulty", "medium"),
+            "language": question_submission.get("source_code", "")[:50] if question_submission else "N/A",
+            "code": question_submission.get("source_code", "") if question_submission else "",
+            "outputs": question_submission.get("outputs", []) if question_submission else [],
+            "submitted_at": question_submission.get("submitted_at").isoformat() if question_submission and question_submission.get("submitted_at") else None,
+            "score": question_score,
+            "ai_feedback": ai_feedback,
+        })
+    
+    # Check email service configuration
+    settings = get_settings()
+    if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+        raise HTTPException(status_code=500, detail="Email service is not configured")
+    
+    email_service = get_email_service()
+    
+    # Build HTML email with feedback
+    test_title = test.get("title", "AIML Test")
+    company_name = test.get("invitationTemplate", {}).get("companyName", "") if isinstance(test.get("invitationTemplate"), dict) else ""
+    logo_url = test.get("invitationTemplate", {}).get("logoUrl", "") if isinstance(test.get("invitationTemplate"), dict) else ""
+    
+    # Format feedback HTML
+    feedback_html = ""
+    total_score = submission.get("score", 0)
+    
+    for idx, qa in enumerate(question_analytics, 1):
+        ai_feedback = qa.get("ai_feedback", {})
+        if not ai_feedback:
+            continue
+        
+        feedback_html += f"""
+        <div style="margin-bottom: 2rem; padding: 1.5rem; background-color: #f8fafc; border-radius: 8px; border-left: 4px solid #3b82f6;">
+            <h3 style="margin-top: 0; color: #1e293b; font-size: 1.25rem;">Question {idx}: {qa.get('question_title', 'Unknown')}</h3>
+            <div style="margin-bottom: 1rem;">
+                <div style="font-weight: 600; color: #475569; margin-bottom: 0.5rem;">Question Details</div>
+                <div style="color: #64748b; font-size: 0.875rem;">
+                    Difficulty: {qa.get('difficulty', 'N/A')}<br>
+                    Language: {qa.get('language', 'N/A')}
+                </div>
+            </div>
+        """
+        
+        overall_score = ai_feedback.get("overall_score", 0)
+        if overall_score is not None:
+            feedback_html += f"""
+            <div style="margin-bottom: 1rem; padding: 1rem; background-color: #ffffff; border-radius: 6px;">
+                <div style="font-weight: 600; color: #1e293b; margin-bottom: 0.5rem;">AI Feedback</div>
+                <div style="font-size: 1.125rem; font-weight: 700; color: #3b82f6; margin-bottom: 0.5rem;">
+                    Score: {overall_score}/100
+                </div>
+            """
+            
+            if ai_feedback.get("feedback_summary"):
+                feedback_html += f"""
+                <div style="color: #475569; margin-bottom: 1rem; line-height: 1.6;">
+                    {ai_feedback.get('feedback_summary')}
+                </div>
+                """
+            
+            # Code Quality
+            code_quality = ai_feedback.get("code_quality", {})
+            if code_quality:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #f1f5f9; border-radius: 6px;">
+                    <div style="font-weight: 600; color: #334155; margin-bottom: 0.5rem;">Code Quality ({code_quality.get('score', 0)}/100)</div>
+                    <div style="color: #475569; font-size: 0.875rem; line-height: 1.6;">
+                        {code_quality.get('comments', '')}
+                    </div>
+                </div>
+                """
+            
+            # Correctness
+            correctness = ai_feedback.get("correctness", {})
+            if correctness:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #f1f5f9; border-radius: 6px;">
+                    <div style="font-weight: 600; color: #334155; margin-bottom: 0.5rem;">Correctness ({correctness.get('score', 0)}/100)</div>
+                    <div style="color: #475569; font-size: 0.875rem; line-height: 1.6;">
+                        {correctness.get('comments', '')}
+                    </div>
+                </div>
+                """
+            
+            # Library Usage
+            library_usage = ai_feedback.get("library_usage", {})
+            if library_usage:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #f1f5f9; border-radius: 6px;">
+                    <div style="font-weight: 600; color: #334155; margin-bottom: 0.5rem;">Library Usage ({library_usage.get('score', 0)}/100)</div>
+                    <div style="color: #475569; font-size: 0.875rem; line-height: 1.6;">
+                        {library_usage.get('comments', '')}
+                    </div>
+                </div>
+                """
+            
+            # Output Quality
+            output_quality = ai_feedback.get("output_quality", {})
+            if output_quality:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #f1f5f9; border-radius: 6px;">
+                    <div style="font-weight: 600; color: #334155; margin-bottom: 0.5rem;">Output Quality ({output_quality.get('score', 0)}/100)</div>
+                    <div style="color: #475569; font-size: 0.875rem; line-height: 1.6;">
+                        {output_quality.get('comments', '')}
+                    </div>
+                </div>
+                """
+            
+            # Task Completion
+            task_completion = ai_feedback.get("task_completion", {})
+            if task_completion:
+                completed = task_completion.get("completed", 0)
+                total = task_completion.get("total", 0)
+                details = task_completion.get("details", [])
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #f1f5f9; border-radius: 6px;">
+                    <div style="font-weight: 600; color: #334155; margin-bottom: 0.5rem;">Task Completion ({completed}/{total})</div>
+                    {f'<ul style="margin: 0; padding-left: 1.25rem; color: #475569; font-size: 0.875rem;"><li>' + '</li><li>'.join(details) + '</li></ul>' if details else ''}
+                </div>
+                """
+            
+            # Strengths
+            strengths = ai_feedback.get("strengths", [])
+            if strengths:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #d1fae5; border-radius: 6px; border-left: 3px solid #10b981;">
+                    <div style="font-weight: 600; color: #065f46; margin-bottom: 0.5rem;">✓ Strengths</div>
+                    <ul style="margin: 0; padding-left: 1.25rem; color: #047857; font-size: 0.875rem;">
+                        {''.join([f'<li style="margin-bottom: 0.25rem;">{s}</li>' for s in strengths])}
+                    </ul>
+                </div>
+                """
+            
+            # Areas for Improvement
+            areas_for_improvement = ai_feedback.get("areas_for_improvement", [])
+            if areas_for_improvement:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #fee2e2; border-radius: 6px; border-left: 3px solid #ef4444;">
+                    <div style="font-weight: 600; color: #991b1b; margin-bottom: 0.5rem;">⚠ Areas for Improvement</div>
+                    <ul style="margin: 0; padding-left: 1.25rem; color: #b91c1c; font-size: 0.875rem;">
+                        {''.join([f'<li style="margin-bottom: 0.25rem;">{a}</li>' for a in areas_for_improvement])}
+                    </ul>
+                </div>
+                """
+            
+            # Suggestions
+            suggestions = ai_feedback.get("suggestions", [])
+            if suggestions:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #e0e7ff; border-radius: 6px; border-left: 3px solid #6366f1;">
+                    <div style="font-weight: 600; color: #312e81; margin-bottom: 0.5rem;">💡 Suggestions</div>
+                    <ul style="margin: 0; padding-left: 1.25rem; color: #4338ca; font-size: 0.875rem;">
+                        {''.join([f'<li style="margin-bottom: 0.25rem;">{s}</li>' for s in suggestions])}
+                    </ul>
+                </div>
+                """
+            
+            feedback_html += "</div>"
+        
+        feedback_html += "</div>"
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 800px; margin: 0 auto; padding: 20px; }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .logo {{ max-width: 200px; margin-bottom: 20px; }}
+            .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+            .score-summary {{ background-color: #3b82f6; color: white; padding: 1.5rem; border-radius: 8px; text-align: center; margin-bottom: 2rem; }}
+            .score-summary h2 {{ margin: 0; font-size: 2rem; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                {f'<h1>{company_name}</h1>' if company_name else ''}
+            </div>
+            <div class="content">
+                <p>Dear {candidate_name},</p>
+                <p>Thank you for completing the <strong>{test_title}</strong>. Below is your detailed AI feedback and performance analysis.</p>
+                
+                <div class="score-summary">
+                    <h2>Overall Score: {total_score}/100</h2>
+                </div>
+                
+                {feedback_html if feedback_html else '<p>No feedback available at this time.</p>'}
+                
+                <p style="margin-top: 2rem;">We hope this feedback helps you understand your performance and areas for improvement.</p>
+            </div>
+            <div class="footer">
+                <p>Sent by {test.get('invitationTemplate', {}).get('sentBy', 'AI Assessment Platform') if isinstance(test.get('invitationTemplate'), dict) else 'AI Assessment Platform'}</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    subject = f"Your Test Feedback - {test_title}"
+    await email_service.send_email(candidate_email, subject, html_content)
+    
+    return {"message": "Feedback email sent successfully", "email": candidate_email}
 
 
 @router.delete("/{test_id}/candidates/{user_id}")

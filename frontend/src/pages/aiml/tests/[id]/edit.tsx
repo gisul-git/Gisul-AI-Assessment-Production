@@ -33,9 +33,9 @@ export default function EditAIMLCompetencyPage() {
 
   // Candidate Requirements
   const [requirePhone, setRequirePhone] = useState(false);
+  const [requireResume, setRequireResume] = useState(false);
   const [requireLinkedIn, setRequireLinkedIn] = useState(false);
   const [requireGithub, setRequireGithub] = useState(false);
-  const [customFields, setCustomFields] = useState<Array<{ id: string; label: string; required: boolean }>>([]);
 
   const [formData, setFormData] = useState({
     title: "",
@@ -146,6 +146,13 @@ export default function EditAIMLCompetencyPage() {
         setQuestionTimings(timings);
       }
 
+      // Set candidate requirements
+      const candidateReqs = test.schedule?.candidateRequirements || {};
+      setRequirePhone(candidateReqs.requirePhone === true);
+      setRequireResume(candidateReqs.requireResume === true);
+      setRequireLinkedIn(candidateReqs.requireLinkedIn === true);
+      setRequireGithub(candidateReqs.requireGithub === true);
+
       setFormData({
         title: test.title || "",
         description: test.description || "",
@@ -244,9 +251,9 @@ export default function EditAIMLCompetencyPage() {
           // Candidate Requirements
           candidateRequirements: {
             requirePhone,
+            requireResume,
             requireLinkedIn,
             requireGithub,
-            customFields: customFields.filter(f => f.label.trim()).map(f => ({ label: f.label.trim(), required: f.required })),
           },
         },
         startTime: new Date(formData.start_time).toISOString(),
@@ -578,6 +585,52 @@ export default function EditAIMLCompetencyPage() {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* Candidate Requirements */}
+            <div style={{ marginBottom: "1.5rem", padding: "1.25rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
+              <h3 style={{ marginBottom: "0.75rem", color: "#1a1625" }}>Candidate Requirements</h3>
+              <p style={{ marginBottom: "1rem", fontSize: "0.875rem", color: "#2D7A52" }}>
+                Select which information candidates must provide before taking the assessment.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requirePhone}
+                    onChange={(e) => setRequirePhone(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Phone Number</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requireResume}
+                    onChange={(e) => setRequireResume(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Resume (File Upload)</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requireLinkedIn}
+                    onChange={(e) => setRequireLinkedIn(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>LinkedIn URL</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requireGithub}
+                    onChange={(e) => setRequireGithub(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>GitHub URL</span>
+                </label>
+              </div>
             </div>
 
             <div style={{ marginBottom: "1.5rem" }}>

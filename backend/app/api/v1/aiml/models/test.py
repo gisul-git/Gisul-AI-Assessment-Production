@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
 from datetime import datetime
 
 class ProctoringSettings(BaseModel):
@@ -19,6 +19,7 @@ class Schedule(BaseModel):
     startTime: Optional[datetime] = None
     endTime: Optional[datetime] = None
     duration: Optional[int] = None  # minutes (required for flexible)
+    candidateRequirements: Optional[Dict[str, Any]] = None  # Candidate requirements (phone, resume, LinkedIn, GitHub)
 
 
 class TestCreate(BaseModel):

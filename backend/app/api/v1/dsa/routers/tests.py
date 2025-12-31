@@ -28,6 +28,9 @@ logger = logging.getLogger("backend")
 
 router = APIRouter(tags=["dsa"])
 
+# Debug: Log when router is initialized
+logger.info("[DSA Tests Router] Router initialized")
+
 def normalize_proctoring_settings(proctoring_settings: Optional[Dict[str, Any]]) -> Dict[str, bool]:
     """
     Normalize proctoringSettings to ensure boolean values are always explicit.
@@ -43,6 +46,19 @@ def normalize_proctoring_settings(proctoring_settings: Optional[Dict[str, Any]])
         "aiProctoringEnabled": bool(proctoring_settings.get("aiProctoringEnabled", False)),
         "liveProctoringEnabled": bool(proctoring_settings.get("liveProctoringEnabled", False)),
     }
+
+@router.get("/debug/routes", response_model=dict)
+async def debug_routes():
+    """Debug endpoint to list all registered routes."""
+    routes = []
+    for route in router.routes:
+        if hasattr(route, 'path') and hasattr(route, 'methods'):
+            routes.append({
+                "path": route.path,
+                "methods": list(route.methods) if route.methods else [],
+                "name": getattr(route, 'name', 'N/A')
+            })
+    return {"routes": routes, "total": len(routes)}
 
 @router.get("/debug/user-info", response_model=dict)
 async def debug_user_info(
@@ -173,12 +189,32 @@ async def create_test(
         if not duration_minutes or int(duration_minutes) <= 0:
             raise HTTPException(status_code=400, detail="Duration is required for flexible exam mode.")
 
+    # Extract candidateRequirements from schedule if provided
+    candidate_requirements = {}
+    if schedule_obj:
+        if hasattr(schedule_obj, "candidateRequirements") and schedule_obj.candidateRequirements is not None:
+            # Pydantic model with candidateRequirements field
+            candidate_requirements = schedule_obj.candidateRequirements if isinstance(schedule_obj.candidateRequirements, dict) else {}
+        elif isinstance(schedule_obj, dict):
+            # Plain dict
+            candidate_requirements = schedule_obj.get("candidateRequirements", {}) or {}
+    
+    logger.info(f"[create_test] Extracted candidateRequirements: {candidate_requirements}")
+    logger.info(f"[create_test] Schedule object type: {type(schedule_obj)}")
+    if schedule_obj:
+        logger.info(f"[create_test] Schedule object has candidateRequirements attr: {hasattr(schedule_obj, 'candidateRequirements')}")
+        if hasattr(schedule_obj, "candidateRequirements"):
+            logger.info(f"[create_test] Schedule object candidateRequirements value: {schedule_obj.candidateRequirements}")
+    
     # Build schedule payload (will be updated below for strict mode after calculating total_duration)
     schedule_payload = {
         "startTime": start_dt,
         "endTime": end_dt if exam_mode == "flexible" else None,  # Will be calculated for strict mode
         "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
+        "candidateRequirements": candidate_requirements,  # Store candidate requirements
     }
+    
+    logger.info(f"[create_test] Schedule payload with candidateRequirements: {schedule_payload}")
 
     test_dict = test.model_dump()
     test_dict["examMode"] = exam_mode
@@ -974,10 +1010,26 @@ async def update_test(
         from datetime import timedelta
         end_dt = start_dt + timedelta(minutes=int(duration_minutes))
 
+    # Preserve existing candidateRequirements from the test's schedule
+    existing_schedule = existing_test.get("schedule") or {}
+    existing_candidate_requirements = existing_schedule.get("candidateRequirements", {})
+    
+    # Extract candidateRequirements from new schedule if provided
+    schedule_obj = getattr(test, "schedule", None)
+    new_candidate_requirements = {}
+    if schedule_obj and hasattr(schedule_obj, "candidateRequirements"):
+        new_candidate_requirements = schedule_obj.candidateRequirements or {}
+    elif schedule_obj and isinstance(schedule_obj, dict):
+        new_candidate_requirements = schedule_obj.get("candidateRequirements", {})
+    
+    # Use new candidateRequirements if provided, otherwise preserve existing
+    final_candidate_requirements = new_candidate_requirements if new_candidate_requirements else existing_candidate_requirements
+    
     schedule_payload = {
         "startTime": start_dt,
         "endTime": end_dt,
         "duration": int(duration_minutes) if (exam_mode == "flexible" and duration_minutes is not None) else None,
+        "candidateRequirements": final_candidate_requirements,  # Preserve or update candidate requirements
     }
 
     # Prepare update data
@@ -1843,7 +1895,14 @@ async def process_question_evaluation_background(
         if starter_code:
             is_starter_only = is_starter_code_only(source_code, starter_code, language, total_passed, total_tests)
             if is_starter_only:
-                status = "no_code_written"
+                # CRITICAL: Only mark as starter code if tests actually failed
+                # If any tests passed, this cannot be starter code
+                if total_passed is not None and total_tests is not None and total_tests > 0 and total_passed > 0:
+                    logger.warning(f"[Background Evaluation] Tests passed ({total_passed}/{total_tests}) but is_starter_code_only returned True - overriding to False")
+                    is_starter_only = False
+                else:
+                    logger.info(f"[Background Evaluation] Detected starter code only for submission {submission_id} (passed={total_passed}/{total_tests})")
+                    status = "no_code_written"
         
         # Update submission with test results
         update_data = {
@@ -1868,10 +1927,15 @@ async def process_question_evaluation_background(
                 "evaluation_note": "Starter code only - no implementation provided"
             }
         
+        # CRITICAL: Never overwrite the code field - it contains the user's actual submission
+        # Only update status, test results, and feedback - preserve the original code
         await db.submissions.update_one(
             {"_id": ObjectId(submission_id)},
             {"$set": update_data}
         )
+        
+        # Log what was updated for debugging
+        logger.info(f"[Background Evaluation] Updated submission {submission_id}: status={status}, passed={total_passed}/{total_tests}, is_starter_only={is_starter_only}")
         
         # Schedule AI feedback if not starter code only (non-blocking)
         if not is_starter_only:
@@ -1997,6 +2061,10 @@ async def final_submit_test(
         question_type = question_type_raw.upper() if isinstance(question_type_raw, str) else ""
         is_sql_question = question_type == "SQL"
         
+        # Log the code being saved for debugging
+        code_length = len(q_sub.code) if q_sub.code else 0
+        logger.info(f"[final-submit] Saving code for question {question_id}: length={code_length}, language={q_sub.language}")
+        
         # Create submission record immediately with "processing" status
         # Test case execution and AI feedback will happen in background
         submission_data = {
@@ -2004,7 +2072,7 @@ async def final_submit_test(
             "question_id": question_id,
             "test_id": test_id,
             "language": q_sub.language if not is_sql_question else "sql",
-            "code": q_sub.code,
+            "code": q_sub.code,  # CRITICAL: Save the actual code submitted by user
             "status": "processing",  # Will be updated after test case execution
             "test_results": [],
             "public_results": [],
@@ -2031,12 +2099,12 @@ async def final_submit_test(
             test_id=test_id,
             user_id=user_id,
             question_id=question_id,
-            source_code=q_sub.code,
+            source_code=q_sub.code,  # CRITICAL: Pass the actual code to background evaluation
             language=q_sub.language if not is_sql_question else "sql",
             question=question
         ))
         
-        logger.info(f"Saved submission {submission_id} immediately, scheduled evaluation in background")
+        logger.info(f"Saved submission {submission_id} immediately with code (length={code_length}), scheduled evaluation in background")
         return submission_id
     
     # Removed old code - using save_question_submission + process_question_evaluation_background instead
@@ -2467,6 +2535,14 @@ async def final_submit_test(
         return submission_id
     
     # Save all submissions immediately (evaluation happens in background)
+    # Log all question submissions for debugging
+    for q_sub in request.question_submissions:
+        code_preview = (q_sub.code[:100] + "...") if q_sub.code and len(q_sub.code) > 100 else (q_sub.code or "")
+        logger.info(f"[final-submit] Processing question {q_sub.question_id}: code_length={len(q_sub.code) if q_sub.code else 0}, language={q_sub.language}, code_preview={code_preview}")
+        # Warn if code is empty or very short (might be starter code)
+        if not q_sub.code or len(q_sub.code.strip()) < 10:
+            logger.warning(f"[final-submit] WARNING: Question {q_sub.question_id} has very short or empty code (length={len(q_sub.code) if q_sub.code else 0})")
+    
     submission_tasks = [save_question_submission(q_sub) for q_sub in request.question_submissions]
     submission_ids = await asyncio.gather(*submission_tasks)
     final_submissions = [sid for sid in submission_ids if sid is not None]
@@ -3089,6 +3165,572 @@ async def bulk_add_candidates(
     }
 
 
+@router.get("/{test_id}/candidates/{user_id}/resume")
+async def get_candidate_resume(
+    test_id: str,
+    user_id: str,
+    email: str = Query(..., description="Candidate email"),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get candidate resume file for viewing in analytics.
+    Returns resume as base64 data URL if available.
+    """
+    logger.info(f"[get_candidate_resume] Request received: test_id={test_id}, user_id={user_id}, email={email}")
+    db = get_database()
+    
+    # Get current user ID
+    current_user_id = current_user.get("id") or current_user.get("_id")
+    if not current_user_id:
+        logger.error(f"[get_candidate_resume] Invalid user ID in current_user: {list(current_user.keys())}")
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    current_user_id = str(current_user_id).strip()
+    
+    # Verify test exists and belongs to current user
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        logger.warning(f"[get_candidate_resume] Test not found: {test_id}")
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # CRITICAL SECURITY CHECK: Verify ownership
+    test_created_by = test.get("created_by")
+    if not test_created_by or str(test_created_by).strip() != current_user_id:
+        logger.error(f"[get_candidate_resume] SECURITY ISSUE: User {current_user_id} attempted to access resume for test {test_id} created by {test_created_by}")
+        raise HTTPException(status_code=403, detail="You don't have permission to view resumes for this test")
+    
+    # Normalize email for query
+    normalized_email = email.strip().lower()
+    
+    # Try to find candidate by user_id first (more reliable, matches analytics endpoint), then fallback to email
+    candidate = None
+    query_attempts = []
+    
+    # Attempt 1: Query by user_id (preferred, matches analytics endpoint)
+    if ObjectId.is_valid(user_id):
+        query_by_user_id = {
+            "test_id": test_id,
+            "user_id": user_id
+        }
+        query_attempts.append(f"user_id={user_id}")
+        candidate = await db.test_candidates.find_one(query_by_user_id)
+        if candidate:
+            logger.info(f"[get_candidate_resume] Found candidate by user_id: {user_id}, email={candidate.get('email')}")
+    
+    # Attempt 2: Query by email (fallback)
+    if not candidate:
+        query_by_email = {
+            "test_id": test_id,
+            "email": normalized_email
+        }
+        query_attempts.append(f"email={normalized_email}")
+        candidate = await db.test_candidates.find_one(query_by_email)
+        if candidate:
+            logger.info(f"[get_candidate_resume] Found candidate by email: {normalized_email}, user_id={candidate.get('user_id')}")
+    
+    # Attempt 3: Try both user_id and email together (most specific)
+    if not candidate and ObjectId.is_valid(user_id):
+        query_both = {
+            "test_id": test_id,
+            "user_id": user_id,
+            "email": normalized_email
+        }
+        query_attempts.append(f"user_id={user_id} AND email={normalized_email}")
+        candidate = await db.test_candidates.find_one(query_both)
+        if candidate:
+            logger.info(f"[get_candidate_resume] Found candidate by both user_id and email")
+    
+    # Log all candidates for this test for debugging
+    if not candidate:
+        all_candidates = await db.test_candidates.find({"test_id": test_id}).to_list(length=100)
+        logger.warning(f"[get_candidate_resume] Candidate not found after trying: {', '.join(query_attempts)}")
+        logger.warning(f"[get_candidate_resume] Total candidates for test {test_id}: {len(all_candidates)}")
+        if all_candidates:
+            logger.warning(f"[get_candidate_resume] Sample candidate emails: {[c.get('email') for c in all_candidates[:5]]}")
+            logger.warning(f"[get_candidate_resume] Sample candidate user_ids: {[str(c.get('user_id')) for c in all_candidates[:5]]}")
+        raise HTTPException(status_code=404, detail=f"Candidate not found for test_id={test_id}, user_id={user_id}, email={normalized_email}")
+    
+    # Verify email matches if both were provided
+    candidate_email = candidate.get("email", "").strip().lower()
+    if candidate_email != normalized_email:
+        logger.warning(f"[get_candidate_resume] Email mismatch: candidate.email={candidate_email}, requested={normalized_email}")
+        # Don't fail, but log the mismatch
+    
+    # Get candidateInfo
+    candidate_info = candidate.get("candidateInfo", {})
+    
+    # Log candidateInfo structure for debugging
+    logger.info(f"[get_candidate_resume] CandidateInfo keys: {list(candidate_info.keys()) if candidate_info else 'None'}")
+    logger.info(f"[get_candidate_resume] hasResume={candidate_info.get('hasResume', False)}")
+    logger.info(f"[get_candidate_resume] resume field exists={('resume' in candidate_info)}")
+    
+    # Check if resume exists
+    if not candidate_info.get("hasResume", False):
+        logger.warning(f"[get_candidate_resume] Resume not uploaded (hasResume=False): test_id={test_id}, email={candidate_email}, user_id={user_id}")
+        raise HTTPException(status_code=404, detail="Resume not uploaded for this candidate")
+    
+    # Get resume from candidateInfo (stored as base64)
+    resume_data = candidate_info.get("resume")
+    if not resume_data:
+        logger.warning(f"[get_candidate_resume] Resume file not found in candidateInfo: test_id={test_id}, email={candidate_email}, user_id={user_id}, candidateInfo keys: {list(candidate_info.keys())}")
+        raise HTTPException(status_code=404, detail="Resume file not found in candidate record")
+    
+    # Validate resume data format
+    if not isinstance(resume_data, str):
+        logger.error(f"[get_candidate_resume] Resume data is not a string: type={type(resume_data)}")
+        raise HTTPException(status_code=500, detail="Invalid resume data format")
+    
+    resume_size = len(resume_data)
+    logger.info(f"[get_candidate_resume] Successfully retrieved resume: test_id={test_id}, email={candidate_email}, user_id={user_id}, size={resume_size} bytes")
+    
+    # Return resume as data URL
+    resume_data_url = resume_data if resume_data.startswith("data:") else f"data:application/pdf;base64,{resume_data}"
+    return {
+        "resume": resume_data_url,
+        "candidate_name": candidate.get("name", ""),
+        "candidate_email": candidate_email
+    }
+
+
+@router.get("/{test_id}/candidates/{user_id}/analytics")
+async def get_candidate_analytics(
+    test_id: str,
+    user_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get detailed analytics for a candidate including AI feedback (requires authentication and ownership)
+    Only test creators can view candidate analytics
+    """
+    db = get_database()
+    # Get current user ID
+    current_user_id = current_user.get("id") or current_user.get("_id")
+    if not current_user_id:
+        logger.error(f"[get_candidate_analytics] Invalid user ID in current_user: {list(current_user.keys())}")
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    current_user_id = str(current_user_id).strip()
+    
+    # Verify test exists and belongs to current user
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # CRITICAL SECURITY CHECK: Verify ownership
+    test_created_by = test.get("created_by")
+    if not test_created_by or str(test_created_by).strip() != current_user_id:
+        logger.error(f"[get_candidate_analytics] SECURITY ISSUE: User {current_user_id} attempted to access analytics for test {test_id} created by {test_created_by}")
+        raise HTTPException(status_code=403, detail="You don't have permission to view analytics for this test")
+    if not ObjectId.is_valid(test_id) or not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID or user ID")
+    
+    # Get candidate info
+    candidate = await db.test_candidates.find_one({
+        "test_id": test_id,
+        "user_id": user_id
+    })
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    
+    # Get candidateInfo from candidate record (even if no submission)
+    candidate_info = candidate.get("candidateInfo", {})
+    
+    # Get test submission
+    submission = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "user_id": user_id
+    })
+    
+    if not submission:
+        return {
+            "candidate": {
+                "name": candidate.get("name", ""),
+                "email": candidate.get("email", ""),
+            },
+            "candidateInfo": candidate_info if candidate_info else None,  # Include candidate requirements data
+            "submission": None,
+            "question_analytics": []
+        }
+    
+    # Get all submissions for this test
+    submission_ids = submission.get("submissions", [])
+    question_analytics = []
+    
+    for sub_id in submission_ids:
+        if isinstance(sub_id, ObjectId):
+            sub_id_str = str(sub_id)
+        else:
+            sub_id_str = sub_id
+        
+        try:
+            sub = await db.submissions.find_one({"_id": ObjectId(sub_id_str)})
+            if sub:
+                # Get question details
+                question = await db.questions.find_one({"_id": ObjectId(sub["question_id"])})
+                
+                question_analytics.append({
+                    "question_id": sub["question_id"],
+                    "question_title": question.get("title", "Unknown") if question else "Unknown",
+                    "language": sub.get("language", ""),
+                    "status": sub.get("status", ""),
+                    "passed_testcases": sub.get("passed_testcases", 0),
+                    "total_testcases": sub.get("total_testcases", 0),
+                    "execution_time": sub.get("execution_time"),
+                    "memory_used": sub.get("memory_used"),
+                    "code": sub.get("code", ""),
+                    "test_results": sub.get("test_results", []),
+                    "ai_feedback": sub.get("ai_feedback"),
+                    "created_at": sub.get("created_at").isoformat() if sub.get("created_at") else None,
+                })
+        except Exception:
+            continue
+    
+    # Get activity logs
+    activity_logs = submission.get("activity_logs", [])
+    
+    return {
+        "candidate": {
+            "name": candidate.get("name", ""),
+            "email": candidate.get("email", ""),
+        },
+        "candidateInfo": candidate_info if candidate_info else None,  # Include candidate requirements data
+        "submission": {
+            "score": submission.get("score", 0),
+            "started_at": submission.get("started_at").isoformat() if submission.get("started_at") else None,
+            "submitted_at": submission.get("submitted_at").isoformat() if submission.get("submitted_at") else None,
+            "is_completed": submission.get("is_completed", False),
+        },
+        "question_analytics": question_analytics,
+        "activity_logs": activity_logs,
+    }
+
+
+@router.post("/{test_id}/candidates/{user_id}/send-feedback")
+async def send_candidate_feedback(
+    test_id: str,
+    user_id: str,
+    current_user: Dict[str, Any] = Depends(require_editor)
+):
+    """
+    Send AI feedback email to a candidate (only available after test end time).
+    Includes detailed feedback, scores, test results, and improvement suggestions.
+    """
+    db = get_database()
+    
+    # Get current user ID
+    current_user_id = current_user.get("id") or current_user.get("_id")
+    if not current_user_id:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    current_user_id = str(current_user_id).strip()
+    
+    # Verify test exists and belongs to current user
+    if not ObjectId.is_valid(test_id):
+        raise HTTPException(status_code=400, detail="Invalid test ID")
+    
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    # CRITICAL SECURITY CHECK: Verify ownership
+    test_created_by = test.get("created_by")
+    if not test_created_by or str(test_created_by).strip() != current_user_id:
+        raise HTTPException(status_code=403, detail="You don't have permission to send feedback for this test")
+    
+    # Check if test has ended
+    schedule = test.get("schedule", {})
+    end_time = schedule.get("endTime") if isinstance(schedule, dict) else None
+    if not end_time and hasattr(test, "endTime"):
+        end_time = test.get("endTime")
+    if not end_time and hasattr(test, "end_time"):
+        end_time = test.get("end_time")
+    
+    if end_time:
+        if isinstance(end_time, str):
+            from dateutil import parser
+            end_time = parser.parse(end_time)
+        if isinstance(end_time, datetime):
+            if datetime.utcnow() < end_time.replace(tzinfo=None):
+                raise HTTPException(status_code=400, detail="Cannot send feedback before test end time")
+    
+    # Get candidate
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    
+    candidate = await db.test_candidates.find_one({
+        "test_id": test_id,
+        "user_id": user_id
+    })
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    
+    candidate_name = candidate.get("name", "Candidate")
+    candidate_email = candidate.get("email", "")
+    
+    if not candidate_email:
+        raise HTTPException(status_code=400, detail="Candidate email not found")
+    
+    # Get candidate analytics (same logic as get_candidate_analytics)
+    submission = await db.test_submissions.find_one({
+        "test_id": test_id,
+        "user_id": user_id
+    })
+    
+    if not submission:
+        raise HTTPException(status_code=400, detail="Candidate has not submitted the test yet")
+    
+    # Get all submissions for this test
+    submission_ids = submission.get("submissions", [])
+    question_analytics = []
+    
+    for sub_id in submission_ids:
+        if isinstance(sub_id, ObjectId):
+            sub_id_str = str(sub_id)
+        else:
+            sub_id_str = sub_id
+        
+        try:
+            sub = await db.submissions.find_one({"_id": ObjectId(sub_id_str)})
+            if sub:
+                # Get question details
+                question = await db.questions.find_one({"_id": ObjectId(sub["question_id"])})
+                
+                question_analytics.append({
+                    "question_id": sub["question_id"],
+                    "question_title": question.get("title", "Unknown") if question else "Unknown",
+                    "language": sub.get("language", ""),
+                    "status": sub.get("status", ""),
+                    "passed_testcases": sub.get("passed_testcases", 0),
+                    "total_testcases": sub.get("total_testcases", 0),
+                    "execution_time": sub.get("execution_time"),
+                    "memory_used": sub.get("memory_used"),
+                    "code": sub.get("code", ""),
+                    "test_results": sub.get("test_results", []),
+                    "ai_feedback": sub.get("ai_feedback"),
+                    "created_at": sub.get("created_at").isoformat() if sub.get("created_at") else None,
+                })
+        except Exception:
+            continue
+    
+    # Check email service configuration
+    settings = get_settings()
+    if not settings.sendgrid_api_key or not settings.sendgrid_from_email:
+        raise HTTPException(status_code=500, detail="Email service is not configured")
+    
+    email_service = get_email_service()
+    
+    # Build HTML email with feedback
+    test_title = test.get("title", "DSA Test")
+    company_name = test.get("invitationTemplate", {}).get("companyName", "") if isinstance(test.get("invitationTemplate"), dict) else ""
+    logo_url = test.get("invitationTemplate", {}).get("logoUrl", "") if isinstance(test.get("invitationTemplate"), dict) else ""
+    
+    # Format feedback HTML
+    feedback_html = ""
+    total_score = submission.get("score", 0)
+    
+    for idx, qa in enumerate(question_analytics, 1):
+        ai_feedback = qa.get("ai_feedback", {})
+        if not ai_feedback:
+            continue
+        
+        feedback_html += f"""
+        <div style="margin-bottom: 2rem; padding: 1.5rem; background-color: #f8fafc; border-radius: 8px; border-left: 4px solid #3b82f6;">
+            <h3 style="margin-top: 0; color: #1e293b; font-size: 1.25rem;">Question {idx}: {qa.get('question_title', 'Unknown')}</h3>
+            <div style="margin-bottom: 1rem;">
+                <span style="padding: 0.25rem 0.75rem; background-color: {'#d1fae5' if qa.get('status') == 'accepted' else '#fee2e2'}; color: {'#065f46' if qa.get('status') == 'accepted' else '#991b1b'}; border-radius: 9999px; font-size: 0.875rem; font-weight: 600;">
+                    {qa.get('status', 'pending').upper()}
+                </span>
+            </div>
+            
+            <div style="margin-bottom: 1rem;">
+                <div style="font-weight: 600; color: #475569; margin-bottom: 0.5rem;">Test Case Results</div>
+                <div style="color: #64748b; font-size: 0.875rem;">
+                    Language: {qa.get('language', 'N/A')}
+        """
+        
+        # Get test breakdown from AI feedback if available
+        test_breakdown = ai_feedback.get("test_breakdown", {})
+        if test_breakdown:
+            public_passed = test_breakdown.get("public_passed", 0)
+            public_total = test_breakdown.get("public_total", 0)
+            hidden_passed = test_breakdown.get("hidden_passed", 0)
+            hidden_total = test_breakdown.get("hidden_total", 0)
+            total_passed = test_breakdown.get("total_passed", 0)
+            total_tests = test_breakdown.get("total_tests", 0)
+            
+            feedback_html += f"""<br>
+                    Public Test Cases: {public_passed} / {public_total}<br>
+                    Hidden Test Cases: {hidden_passed} / {hidden_total}<br>
+                    <strong>Total: {total_passed} / {total_tests}</strong>
+                </div>
+            </div>
+        """
+        else:
+            # Fallback to basic test case info
+            feedback_html += f"""<br>
+                    Test Cases: {qa.get('passed_testcases', 0)} / {qa.get('total_testcases', 0)}
+                </div>
+            </div>
+        """
+        
+        overall_score = ai_feedback.get("overall_score", 0)
+        if overall_score is not None:
+            feedback_html += f"""
+            <div style="margin-bottom: 1rem; padding: 1rem; background-color: #ffffff; border-radius: 6px;">
+                <div style="font-weight: 600; color: #1e293b; margin-bottom: 0.5rem;">AI Feedback</div>
+                <div style="font-size: 1.125rem; font-weight: 700; color: #3b82f6; margin-bottom: 0.5rem;">
+                    Score: {overall_score}/100
+                </div>
+            """
+            
+            if ai_feedback.get("feedback_summary"):
+                feedback_html += f"""
+                <div style="color: #475569; margin-bottom: 1rem; line-height: 1.6;">
+                    {ai_feedback.get('feedback_summary')}
+                </div>
+                """
+            
+            # Code Quality
+            code_quality = ai_feedback.get("code_quality", {})
+            if code_quality:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #f1f5f9; border-radius: 6px;">
+                    <div style="font-weight: 600; color: #334155; margin-bottom: 0.5rem;">Code Quality ({code_quality.get('score', 0)}/100)</div>
+                    <div style="color: #475569; font-size: 0.875rem; line-height: 1.6;">
+                        {code_quality.get('comments', '')}
+                    </div>
+                </div>
+                """
+            
+            # Efficiency
+            efficiency = ai_feedback.get("efficiency", {})
+            if efficiency:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #f1f5f9; border-radius: 6px;">
+                    <div style="font-weight: 600; color: #334155; margin-bottom: 0.5rem;">Efficiency Analysis</div>
+                    <div style="color: #475569; font-size: 0.875rem; margin-bottom: 0.5rem;">
+                        <strong>Time Complexity:</strong> {efficiency.get('time_complexity', 'N/A')}<br>
+                        <strong>Space Complexity:</strong> {efficiency.get('space_complexity', 'N/A')}
+                    </div>
+                    {f'<div style="color: #475569; font-size: 0.875rem; line-height: 1.6;">{efficiency.get("comments", "")}</div>' if efficiency.get("comments") else ''}
+                </div>
+                """
+            
+            # Correctness
+            correctness = ai_feedback.get("correctness", {})
+            if correctness:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #f1f5f9; border-radius: 6px;">
+                    <div style="font-weight: 600; color: #334155; margin-bottom: 0.5rem;">Correctness ({correctness.get('score', 0)}/100)</div>
+                    <div style="color: #475569; font-size: 0.875rem; line-height: 1.6;">
+                        {correctness.get('comments', '')}
+                    </div>
+                </div>
+                """
+            
+            # Strengths
+            strengths = ai_feedback.get("strengths", [])
+            if strengths:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #d1fae5; border-radius: 6px; border-left: 3px solid #10b981;">
+                    <div style="font-weight: 600; color: #065f46; margin-bottom: 0.5rem;">✓ Strengths</div>
+                    <ul style="margin: 0; padding-left: 1.25rem; color: #047857; font-size: 0.875rem;">
+                        {''.join([f'<li style="margin-bottom: 0.25rem;">{s}</li>' for s in strengths])}
+                    </ul>
+                </div>
+                """
+            
+            # Areas for Improvement
+            areas_for_improvement = ai_feedback.get("areas_for_improvement", [])
+            if areas_for_improvement:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #fee2e2; border-radius: 6px; border-left: 3px solid #ef4444;">
+                    <div style="font-weight: 600; color: #991b1b; margin-bottom: 0.5rem;">⚠ Areas for Improvement</div>
+                    <ul style="margin: 0; padding-left: 1.25rem; color: #b91c1c; font-size: 0.875rem;">
+                        {''.join([f'<li style="margin-bottom: 0.25rem;">{a}</li>' for a in areas_for_improvement])}
+                    </ul>
+                </div>
+                """
+            
+            # Improvement Suggestions
+            improvement_suggestions = ai_feedback.get("improvement_suggestions", [])
+            if improvement_suggestions:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #dbeafe; border-radius: 6px; border-left: 3px solid #3b82f6;">
+                    <div style="font-weight: 600; color: #1e40af; margin-bottom: 0.5rem;">💡 Improvement Suggestions</div>
+                    <ul style="margin: 0; padding-left: 1.25rem; color: #1e3a8a; font-size: 0.875rem;">
+                        {''.join([f'<li style="margin-bottom: 0.25rem;">{s}</li>' for s in improvement_suggestions])}
+                    </ul>
+                </div>
+                """
+            
+            # Suggestions
+            suggestions = ai_feedback.get("suggestions", [])
+            if suggestions:
+                feedback_html += f"""
+                <div style="margin-bottom: 1rem; padding: 0.75rem; background-color: #e0e7ff; border-radius: 6px; border-left: 3px solid #6366f1;">
+                    <div style="font-weight: 600; color: #312e81; margin-bottom: 0.5rem;">💡 Suggestions</div>
+                    <ul style="margin: 0; padding-left: 1.25rem; color: #4338ca; font-size: 0.875rem;">
+                        {''.join([f'<li style="margin-bottom: 0.25rem;">{s}</li>' for s in suggestions])}
+                    </ul>
+                </div>
+                """
+            
+            feedback_html += "</div>"
+        
+        feedback_html += "</div>"
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 800px; margin: 0 auto; padding: 20px; }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .logo {{ max-width: 200px; margin-bottom: 20px; }}
+            .content {{ background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            .footer {{ text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 30px; }}
+            .score-summary {{ background-color: #3b82f6; color: white; padding: 1.5rem; border-radius: 8px; text-align: center; margin-bottom: 2rem; }}
+            .score-summary h2 {{ margin: 0; font-size: 2rem; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                {f'<img src="{logo_url}" alt="Logo" class="logo" />' if logo_url else ''}
+                {f'<h1>{company_name}</h1>' if company_name else ''}
+            </div>
+            <div class="content">
+                <p>Dear {candidate_name},</p>
+                <p>Thank you for completing the <strong>{test_title}</strong>. Below is your detailed AI feedback and performance analysis.</p>
+                
+                <div class="score-summary">
+                    <h2>Overall Score: {total_score}/100</h2>
+                </div>
+                
+                {feedback_html if feedback_html else '<p>No feedback available at this time.</p>'}
+                
+                <p style="margin-top: 2rem;">We hope this feedback helps you understand your performance and areas for improvement.</p>
+            </div>
+            <div class="footer">
+                <p>Sent by {test.get('invitationTemplate', {}).get('sentBy', 'AI Assessment Platform') if isinstance(test.get('invitationTemplate'), dict) else 'AI Assessment Platform'}</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    subject = f"Your Test Feedback - {test_title}"
+    await email_service.send_email(candidate_email, subject, html_content)
+    
+    return {"message": "Feedback email sent successfully", "email": candidate_email}
+
+
 @router.get("/{test_id}/candidates")
 async def get_test_candidates(
     test_id: str,
@@ -3159,39 +3801,36 @@ async def get_test_candidates(
     return result
 
 
-@router.get("/{test_id}/candidates/{user_id}/analytics")
-async def get_candidate_analytics(
+@router.delete("/{test_id}/candidates/{user_id}")
+async def remove_candidate(
     test_id: str,
     user_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(require_editor)
 ):
     """
-    Get detailed analytics for a candidate including AI feedback (requires authentication and ownership)
-    Only test creators can view candidate analytics
+    Remove a candidate from a DSA test (requires authentication and ownership)
     """
     db = get_database()
-    # Get current user ID
-    current_user_id = current_user.get("id") or current_user.get("_id")
-    if not current_user_id:
-        logger.error(f"[get_candidate_analytics] Invalid user ID in current_user: {list(current_user.keys())}")
+    admin_user_id = current_user.get("id") or current_user.get("_id")
+    if not admin_user_id:
         raise HTTPException(status_code=400, detail="Invalid user ID")
-    current_user_id = str(current_user_id).strip()
+    admin_user_id = str(admin_user_id).strip()
     
-    # Verify test exists and belongs to current user
     if not ObjectId.is_valid(test_id):
         raise HTTPException(status_code=400, detail="Invalid test ID")
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="Invalid user ID")
     
+    # Verify test ownership
     test = await db.tests.find_one({"_id": ObjectId(test_id)})
     if not test:
         raise HTTPException(status_code=404, detail="Test not found")
     
     # CRITICAL SECURITY CHECK: Verify ownership
     test_created_by = test.get("created_by")
-    if not test_created_by or str(test_created_by).strip() != current_user_id:
-        logger.error(f"[get_candidate_analytics] SECURITY ISSUE: User {current_user_id} attempted to access analytics for test {test_id} created by {test_created_by}")
-        raise HTTPException(status_code=403, detail="You don't have permission to view analytics for this test")
-    if not ObjectId.is_valid(test_id) or not ObjectId.is_valid(user_id):
-        raise HTTPException(status_code=400, detail="Invalid test ID or user ID")
+    if not test_created_by or str(test_created_by).strip() != admin_user_id:
+        logger.error(f"[remove_candidate] SECURITY ISSUE: User {admin_user_id} attempted to remove candidate from test {test_id} created by {test_created_by}")
+        raise HTTPException(status_code=403, detail="You don't have permission to remove candidates from this test")
     
     # Get candidate info
     candidate = await db.test_candidates.find_one({
@@ -3201,72 +3840,23 @@ async def get_candidate_analytics(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
     
-    # Get test submission
-    submission = await db.test_submissions.find_one({
+    candidate_email = candidate.get("email", "")
+    
+    # Remove candidate record
+    await db.test_candidates.delete_one({
         "test_id": test_id,
         "user_id": user_id
     })
     
-    if not submission:
-        return {
-            "candidate": {
-                "name": candidate.get("name", ""),
-                "email": candidate.get("email", ""),
-            },
-            "submission": None,
-            "question_analytics": []
-        }
+    # Remove from invited_users list
+    current_invited = set([str(e).strip().lower() for e in test.get("invited_users", [])])
+    current_invited.discard(candidate_email.lower())
+    await db.tests.update_one(
+        {"_id": ObjectId(test_id)},
+        {"$set": {"invited_users": list(current_invited)}}
+    )
     
-    # Get all submissions for this test
-    submission_ids = submission.get("submissions", [])
-    question_analytics = []
-    
-    for sub_id in submission_ids:
-        if isinstance(sub_id, ObjectId):
-            sub_id_str = str(sub_id)
-        else:
-            sub_id_str = sub_id
-        
-        try:
-            sub = await db.submissions.find_one({"_id": ObjectId(sub_id_str)})
-            if sub:
-                # Get question details
-                question = await db.questions.find_one({"_id": ObjectId(sub["question_id"])})
-                
-                question_analytics.append({
-                    "question_id": sub["question_id"],
-                    "question_title": question.get("title", "Unknown") if question else "Unknown",
-                    "language": sub.get("language", ""),
-                    "status": sub.get("status", ""),
-                    "passed_testcases": sub.get("passed_testcases", 0),
-                    "total_testcases": sub.get("total_testcases", 0),
-                    "execution_time": sub.get("execution_time"),
-                    "memory_used": sub.get("memory_used"),
-                    "code": sub.get("code", ""),
-                    "test_results": sub.get("test_results", []),
-                    "ai_feedback": sub.get("ai_feedback"),
-                    "created_at": sub.get("created_at").isoformat() if sub.get("created_at") else None,
-                })
-        except Exception:
-            continue
-    
-    # Get activity logs
-    activity_logs = submission.get("activity_logs", [])
-    
-    return {
-        "candidate": {
-            "name": candidate.get("name", ""),
-            "email": candidate.get("email", ""),
-        },
-        "submission": {
-            "score": submission.get("score", 0),
-            "started_at": submission.get("started_at").isoformat() if submission.get("started_at") else None,
-            "submitted_at": submission.get("submitted_at").isoformat() if submission.get("submitted_at") else None,
-            "is_completed": submission.get("is_completed", False),
-        },
-        "question_analytics": question_analytics,
-        "activity_logs": activity_logs,
-    }
+    return {"message": "Candidate removed successfully"}
 
 
 @router.post("/{test_id}/bulk-add-candidates")
@@ -3407,186 +3997,6 @@ async def bulk_add_candidates(
     }
 
 
-@router.get("/{test_id}/candidates")
-async def get_test_candidates(
-    test_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """
-    Get all candidates for a test (requires authentication and ownership)
-    Only test creators can view candidates
-    """
-    db = get_database()
-    # Get current user ID
-    user_id = current_user.get("id") or current_user.get("_id")
-    if not user_id:
-        logger.error(f"[get_test_candidates] Invalid user ID in current_user: {list(current_user.keys())}")
-        raise HTTPException(status_code=400, detail="Invalid user ID")
-    user_id = str(user_id).strip()
-    
-    # Verify test exists and belongs to current user
-    if not ObjectId.is_valid(test_id):
-        raise HTTPException(status_code=400, detail="Invalid test ID")
-    
-    test = await db.tests.find_one({"_id": ObjectId(test_id)})
-    if not test:
-        raise HTTPException(status_code=404, detail="Test not found")
-    
-    # CRITICAL SECURITY CHECK: Verify ownership
-    test_created_by = test.get("created_by")
-    if not test_created_by or str(test_created_by).strip() != user_id:
-        logger.error(f"[get_test_candidates] SECURITY ISSUE: User {user_id} attempted to access candidates for test {test_id} created by {test_created_by}")
-        raise HTTPException(status_code=403, detail="You don't have permission to view candidates for this test")
-    
-    candidates = await db.test_candidates.find({"test_id": test_id}).sort("created_at", -1).to_list(length=1000)
-    
-    result = []
-    for candidate in candidates:
-        # Get submission status
-        submission = await db.test_submissions.find_one({
-            "test_id": test_id,
-            "user_id": candidate["user_id"]
-        })
-        
-        # Determine status based on candidate record and submission
-        # Priority: completed > started > invited (from DB) > pending
-        candidate_status = candidate.get("status", "pending")
-        if submission and submission.get("is_completed", False):
-            candidate_status = "completed"
-        elif submission:
-            candidate_status = "started"
-        elif candidate.get("status") == "invited" or candidate.get("invited", False) or candidate.get("invited_at"):
-            candidate_status = "invited"
-        else:
-            candidate_status = "pending"
-        
-        result.append({
-            "candidate_id": str(candidate["_id"]),
-            "user_id": candidate["user_id"],
-            "name": candidate.get("name", ""),
-            "email": candidate.get("email", ""),
-            "status": candidate_status,
-            "invited": candidate.get("invited", False),
-            "invited_at": candidate.get("invited_at").isoformat() if candidate.get("invited_at") else None,
-            "created_at": candidate.get("created_at").isoformat() if candidate.get("created_at") else None,
-            "has_submitted": submission is not None and submission.get("is_completed", False),
-            "submission_score": submission.get("score", 0) if submission else 0,
-            "submitted_at": submission.get("submitted_at").isoformat() if submission and submission.get("submitted_at") else None,
-        })
-    
-    return result
-
-
-@router.get("/{test_id}/candidates/{user_id}/analytics")
-async def get_candidate_analytics(
-    test_id: str,
-    user_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """
-    Get detailed analytics for a candidate including AI feedback (requires authentication and ownership)
-    Only test creators can view candidate analytics
-    """
-    db = get_database()
-    # Get current user ID
-    current_user_id = current_user.get("id") or current_user.get("_id")
-    if not current_user_id:
-        logger.error(f"[get_candidate_analytics] Invalid user ID in current_user: {list(current_user.keys())}")
-        raise HTTPException(status_code=400, detail="Invalid user ID")
-    current_user_id = str(current_user_id).strip()
-    
-    # Verify test exists and belongs to current user
-    if not ObjectId.is_valid(test_id):
-        raise HTTPException(status_code=400, detail="Invalid test ID")
-    
-    test = await db.tests.find_one({"_id": ObjectId(test_id)})
-    if not test:
-        raise HTTPException(status_code=404, detail="Test not found")
-    
-    # CRITICAL SECURITY CHECK: Verify ownership
-    test_created_by = test.get("created_by")
-    if not test_created_by or str(test_created_by).strip() != current_user_id:
-        logger.error(f"[get_candidate_analytics] SECURITY ISSUE: User {current_user_id} attempted to access analytics for test {test_id} created by {test_created_by}")
-        raise HTTPException(status_code=403, detail="You don't have permission to view analytics for this test")
-    if not ObjectId.is_valid(test_id) or not ObjectId.is_valid(user_id):
-        raise HTTPException(status_code=400, detail="Invalid test ID or user ID")
-    
-    # Get candidate info
-    candidate = await db.test_candidates.find_one({
-        "test_id": test_id,
-        "user_id": user_id
-    })
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    
-    # Get test submission
-    submission = await db.test_submissions.find_one({
-        "test_id": test_id,
-        "user_id": user_id
-    })
-    
-    if not submission:
-        return {
-            "candidate": {
-                "name": candidate.get("name", ""),
-                "email": candidate.get("email", ""),
-            },
-            "submission": None,
-            "question_analytics": []
-        }
-    
-    # Get all submissions for this test
-    submission_ids = submission.get("submissions", [])
-    question_analytics = []
-    
-    for sub_id in submission_ids:
-        if isinstance(sub_id, ObjectId):
-            sub_id_str = str(sub_id)
-        else:
-            sub_id_str = sub_id
-        
-        try:
-            sub = await db.submissions.find_one({"_id": ObjectId(sub_id_str)})
-            if sub:
-                # Get question details
-                question = await db.questions.find_one({"_id": ObjectId(sub["question_id"])})
-                
-                question_analytics.append({
-                    "question_id": sub["question_id"],
-                    "question_title": question.get("title", "Unknown") if question else "Unknown",
-                    "language": sub.get("language", ""),
-                    "status": sub.get("status", ""),
-                    "passed_testcases": sub.get("passed_testcases", 0),
-                    "total_testcases": sub.get("total_testcases", 0),
-                    "execution_time": sub.get("execution_time"),
-                    "memory_used": sub.get("memory_used"),
-                    "code": sub.get("code", ""),
-                    "test_results": sub.get("test_results", []),
-                    "ai_feedback": sub.get("ai_feedback"),
-                    "created_at": sub.get("created_at").isoformat() if sub.get("created_at") else None,
-                })
-        except Exception:
-            continue
-    
-    # Get activity logs
-    activity_logs = submission.get("activity_logs", [])
-    
-    return {
-        "candidate": {
-            "name": candidate.get("name", ""),
-            "email": candidate.get("email", ""),
-        },
-        "submission": {
-            "score": submission.get("score", 0),
-            "started_at": submission.get("started_at").isoformat() if submission.get("started_at") else None,
-            "submitted_at": submission.get("submitted_at").isoformat() if submission.get("submitted_at") else None,
-            "is_completed": submission.get("is_completed", False),
-        },
-        "question_analytics": question_analytics,
-        "activity_logs": activity_logs,
-    }
-
-
 @router.get("/{test_id}/verify-link")
 async def verify_test_link(test_id: str, token: str):
     """
@@ -3608,10 +4018,20 @@ async def verify_test_link(test_id: str, token: str):
     if not test.get("is_published", False):
         raise HTTPException(status_code=403, detail="Test is not published")
     
+    # Return schedule with candidateRequirements for candidate requirements page
+    schedule = test.get("schedule") or {}
+    logger.info(f"[verify_test_link] Test schedule: {schedule}")
+    logger.info(f"[verify_test_link] CandidateRequirements in schedule: {schedule.get('candidateRequirements', {})}")
+    
     return {
         "test_id": test_id,
         "test_title": test.get("title", ""),
+        "title": test.get("title", ""),  # Also return as 'title' for consistency
         "test_description": test.get("description", ""),
+        "description": test.get("description", ""),  # Also return as 'description' for consistency
+        "duration_minutes": test.get("duration_minutes", 60),
+        "duration": test.get("duration_minutes", 60),  # Also return as 'duration' for consistency
+        "schedule": schedule,  # Include schedule with candidateRequirements
         "valid": True
     }
 
@@ -3625,7 +4045,10 @@ async def verify_candidate(
     """
     Verify candidate email/name and return user_id
     Used with shared test link
+    NEW: Also checks if test has started/ended and returns timing info
     """
+    from datetime import datetime, timedelta
+    
     db = get_database()
     if not ObjectId.is_valid(test_id):
         raise HTTPException(status_code=400, detail="Invalid test ID")
@@ -3643,11 +4066,95 @@ async def verify_candidate(
     if candidate.get("name", "").lower() != name.strip().lower():
         raise HTTPException(status_code=400, detail="Name does not match the email")
     
+    user_id = candidate["user_id"]
+    
+    # Check access time windows based on exam mode
+    test = await db.tests.find_one({"_id": ObjectId(test_id)})
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+    
+    exam_mode = test.get("examMode", "strict")
+    schedule = test.get("schedule") or {}
+    start_time_raw = schedule.get("startTime") if isinstance(schedule, dict) else None
+    end_time_raw = schedule.get("endTime") if isinstance(schedule, dict) else None
+    duration_minutes = schedule.get("duration") if isinstance(schedule, dict) else test.get("duration_minutes")
+    access_time_before_start = test.get("accessTimeBeforeStart", 15)
+    
+    # Parse datetime (handle both string and datetime objects)
+    def _parse_datetime(val):
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val.replace(tzinfo=None) if val.tzinfo else val
+        if isinstance(val, str):
+            try:
+                return datetime.fromisoformat(val.replace('Z', '+00:00')).replace(tzinfo=None)
+            except (ValueError, AttributeError):
+                try:
+                    from dateutil import parser
+                    parsed = parser.parse(val)
+                    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                except (ImportError, ValueError):
+                    return None
+        return None
+    
+    start_time_dt = _parse_datetime(start_time_raw) if start_time_raw else _parse_datetime(test.get("start_time"))
+    end_time_dt = _parse_datetime(end_time_raw) if end_time_raw else _parse_datetime(test.get("end_time"))
+    
+    now = datetime.utcnow()
+    
+    # Check start time and return info (don't block if test hasn't started, let frontend show popup)
+    test_has_started = False
+    test_has_ended = False
+    
+    if exam_mode == "strict" and start_time_dt:
+        # Strict mode: Check access time before start
+        access_start_time = start_time_dt - timedelta(minutes=access_time_before_start)
+        
+        if now < access_start_time:
+            # Too early - cannot access yet
+            access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+            raise HTTPException(
+                status_code=403,
+                detail=f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}."
+            )
+        
+        # Calculate end time if not provided
+        if not end_time_dt and duration_minutes:
+            end_time_dt = start_time_dt + timedelta(minutes=int(duration_minutes))
+        
+        # Check if test has actually started (after access window opens)
+        test_has_started = now >= start_time_dt
+        
+        # Check if test has ended
+        if end_time_dt:
+            test_has_ended = now >= end_time_dt
+    
+    elif exam_mode == "flexible":
+        if not start_time_dt:
+            raise HTTPException(status_code=400, detail="Assessment schedule is not properly configured")
+        
+        # For flexible mode, check if we're before start time (but don't block - let frontend show popup)
+        if now < start_time_dt:
+            test_has_started = False
+            # Don't raise error - let frontend show popup
+        else:
+            test_has_started = True
+        
+        # Check if test has ended (window has closed - return info but don't block, let frontend show popup)
+        if end_time_dt:
+            test_has_ended = now > end_time_dt
+    
     return {
-        "user_id": candidate["user_id"],
+        "user_id": user_id,
         "name": candidate["name"],
         "email": candidate["email"],
-        "test_id": test_id
+        "test_id": test_id,
+        "test_has_started": test_has_started,
+        "test_has_ended": test_has_ended,
+        "start_time": start_time_dt.isoformat() if start_time_dt else None,
+        "end_time": end_time_dt.isoformat() if end_time_dt else None,
+        "exam_mode": exam_mode,
     }
 
 
@@ -3721,6 +4228,163 @@ async def publish_test(
         "test_token": test.get("test_token"),
     }
     return test_dict
+
+
+@router.post("/{test_id}/save-candidate-info")
+async def save_dsa_candidate_info(
+    test_id: str,
+    payload: Dict[str, Any]
+):
+    """
+    Save candidate information for DSA tests (phone, LinkedIn, GitHub, resume status).
+    This is called from the candidate requirements page.
+    """
+    from datetime import datetime, timezone
+    
+    db = get_database()
+    
+    try:
+        if not ObjectId.is_valid(test_id):
+            raise HTTPException(status_code=400, detail="Invalid test ID")
+        
+        test = await db.tests.find_one({"_id": ObjectId(test_id)})
+        if not test:
+            raise HTTPException(status_code=404, detail="Test not found")
+        
+        email = payload.get("email", "").strip().lower()
+        name = payload.get("name", "").strip()
+        phone = payload.get("phone", "").strip() if payload.get("phone") else None
+        hasResume = payload.get("hasResume", False)
+        resume = payload.get("resume") 
+        linkedIn = payload.get("linkedIn", "").strip() if payload.get("linkedIn") else None
+        github = payload.get("github", "").strip() if payload.get("github") else None
+        customFields = payload.get("customFields", {}) if payload.get("customFields") else {}
+        
+        if not email or not name:
+            raise HTTPException(status_code=400, detail="Email and name are required")
+        
+        # Find candidate by email (normalized)
+        logger.info(f"[save_dsa_candidate_info] Looking for candidate: test_id={test_id}, email={email}")
+        candidate = await db.test_candidates.find_one({
+            "test_id": test_id,
+            "email": email
+        })
+        
+        if not candidate:
+            # Try to find all candidates for this test to help debug
+            all_candidates = await db.test_candidates.find({"test_id": test_id}).to_list(length=100)
+            logger.warning(f"[save_dsa_candidate_info] Candidate not found: test_id={test_id}, email={email}")
+            logger.warning(f"[save_dsa_candidate_info] Total candidates for test: {len(all_candidates)}")
+            if all_candidates:
+                logger.warning(f"[save_dsa_candidate_info] Sample candidate emails: {[c.get('email') for c in all_candidates[:5]]}")
+            raise HTTPException(status_code=404, detail="Candidate not found for this test")
+        
+        logger.info(f"[save_dsa_candidate_info] Found candidate: user_id={candidate.get('user_id')}, email={candidate.get('email')}, name={candidate.get('name')}")
+        
+        # Get existing candidateInfo to preserve resume if it exists
+        # Re-fetch candidate right before update to get latest data (handles race conditions)
+        latest_candidate = await db.test_candidates.find_one({
+            "test_id": test_id,
+            "email": email
+        })
+        existing_candidate_info = latest_candidate.get("candidateInfo", {}) if latest_candidate else {}
+        existing_resume = existing_candidate_info.get("resume")
+        
+        if existing_resume:
+            logger.info(f"[save_dsa_candidate_info] Found existing resume in DB: size={len(existing_resume) if isinstance(existing_resume, str) else 0} bytes")
+        else:
+            logger.info(f"[save_dsa_candidate_info] No existing resume found in DB")
+        
+        # Store candidate info
+        candidate_info = {
+            "email": email,
+            "name": name,
+            "phone": phone,
+            "hasResume": hasResume,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        # Store resume file if provided
+        if resume:
+            resume_size = len(resume) if isinstance(resume, str) else 0
+            logger.info(f"[save_dsa_candidate_info] Storing resume: size={resume_size} bytes, hasResume={hasResume}")
+            candidate_info["resume"] = resume
+        elif hasResume:
+            # If hasResume is True but no resume provided, preserve existing resume
+            if existing_resume:
+                logger.info(f"[save_dsa_candidate_info] Preserving existing resume (hasResume=True but no new resume provided)")
+                candidate_info["resume"] = existing_resume
+            else:
+                # hasResume is True but no resume exists - this shouldn't happen, but log it
+                logger.warning(f"[save_dsa_candidate_info] hasResume=True but no resume data provided and no existing resume found. This may indicate a race condition or failed upload.")
+                # Don't set resume field - let hasResume be True but resume be missing (will be caught by validation)
+        else:
+            logger.info(f"[save_dsa_candidate_info] No resume data provided, hasResume={hasResume}, existing_resume={'exists' if existing_resume else 'none'}")
+            # If hasResume is False, don't include resume field
+        
+        if linkedIn:
+            candidate_info["linkedIn"] = linkedIn
+        elif existing_candidate_info.get("linkedIn"):
+            # Preserve existing LinkedIn if not provided
+            candidate_info["linkedIn"] = existing_candidate_info.get("linkedIn")
+        
+        if github:
+            candidate_info["github"] = github
+        elif existing_candidate_info.get("github"):
+            # Preserve existing GitHub if not provided
+            candidate_info["github"] = existing_candidate_info.get("github")
+        
+        if customFields:
+            # Merge with existing customFields
+            existing_custom_fields = existing_candidate_info.get("customFields", {})
+            if existing_custom_fields:
+                candidate_info["customFields"] = {**existing_custom_fields, **customFields}
+            else:
+                candidate_info["customFields"] = customFields
+        elif existing_candidate_info.get("customFields"):
+            # Preserve existing customFields if not provided
+            candidate_info["customFields"] = existing_candidate_info.get("customFields")
+        
+        # Update candidate record with candidateInfo
+        update_result = await db.test_candidates.update_one(
+            {"test_id": test_id, "email": email},
+            {"$set": {"candidateInfo": candidate_info}}
+        )
+        
+        logger.info(f"[save_dsa_candidate_info] Update result: matched={update_result.matched_count}, modified={update_result.modified_count}")
+        
+        # Verify the update was successful
+        if update_result.matched_count == 0:
+            logger.error(f"[save_dsa_candidate_info] Failed to update candidate record: test_id={test_id}, email={email}")
+            raise HTTPException(status_code=500, detail="Failed to save candidate information")
+        
+        # Verify the resume was saved
+        if resume:
+            updated_candidate = await db.test_candidates.find_one({
+                "test_id": test_id,
+                "email": email
+            })
+            if updated_candidate:
+                saved_candidate_info = updated_candidate.get("candidateInfo", {})
+                saved_resume = saved_candidate_info.get("resume")
+                if saved_resume:
+                    logger.info(f"[save_dsa_candidate_info] Resume verified in DB: size={len(saved_resume) if isinstance(saved_resume, str) else 0} bytes")
+                else:
+                    logger.error(f"[save_dsa_candidate_info] Resume NOT found in DB after save!")
+        
+        return {
+            "success": True,
+            "message": "Candidate information saved successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error saving DSA candidate info: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save candidate info: {str(e)}"
+        )
 
 
 @router.post("/{test_id}/pause", response_model=dict)
