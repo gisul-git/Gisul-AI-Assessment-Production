@@ -2597,24 +2597,11 @@ export default function TestTakePage() {
               </div>
             )}
             {submittedQuestions[currentQuestion.id] && currentQuestionIndex === questions.length - 1 && (
-              <div className="bg-blue-600/20 border-t border-blue-500 p-3 flex items-center justify-between flex-shrink-0">
+              <div className="bg-blue-600/20 border-t border-blue-500 p-3 flex items-center justify-center flex-shrink-0">
                 <div className="flex items-center gap-2 text-blue-400">
-                  <span>🎉</span>
+                  
                   <span className="font-medium text-sm">All done!</span>
                 </div>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    console.log('[Submit] Button clicked (mobile)')
-                    handleSubmit(false)
-                  }}
-                  disabled={submitting || !testId || !userId}
-                  className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  type="button"
-                >
-                  {submitting ? 'Submitting...' : 'Submit Test'}
-                </button>
               </div>
             )}
           </div>

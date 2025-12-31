@@ -30,6 +30,7 @@ export default function CandidateRequirementsPage() {
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
   const [fetchingAssessment, setFetchingAssessment] = useState(true);
   const [assessmentInfo, setAssessmentInfo] = useState<any>(null);
   const [customFields, setCustomFields] = useState<Array<{ label: string; required: boolean }>>([]);
@@ -41,7 +42,14 @@ export default function CandidateRequirementsPage() {
     requireLinkedIn?: boolean;
     requireGithub?: boolean;
   }>(DEFAULT_REQUIREMENTS);
- 
+
+  // Determine flow type (accessible in render)
+  const ctx = getGateContext(id as string);
+  const isAIFlow = !ctx || ctx?.flowType === "ai";
+  const isCustomMCQFlow = ctx?.flowType === "custom-mcq";
+  const isAIMLFlow = ctx?.flowType === "aiml";
+  const isDSAFlow = ctx?.flowType === "dsa";
+
   useEffect(() => {
     const storedEmail = sessionStorage.getItem("candidateEmail");
     const storedName = sessionStorage.getItem("candidateName");
@@ -72,13 +80,107 @@ export default function CandidateRequirementsPage() {
       return;
     }
    
-    const ctx = getGateContext(id as string);
-    const isAIFlow = !ctx || ctx.flowType === "ai";
-    const isCustomMCQFlow = ctx?.flowType === "custom-mcq";
-    const isAIMLFlow = ctx?.flowType === "aiml";
+    // For DSA flow, fetch requirements from DSA test
+    if (isDSAFlow && id && token) {
+      const fetchDSATest = async () => {
+        try {
+          setFetchingAssessment(true);
+          setError(null);
+
+          // Fetch DSA test using verify-link endpoint (public, no auth required)
+          const response = await axios.get(
+            `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/dsa/tests/${id}/verify-link`,
+            {
+              params: { token }
+            }
+          );
+
+          const test = response.data;
+          console.log("DSA Test API response:", test);
+          
+          if (!test || typeof test !== "object" || !test.valid) {
+            console.warn("No DSA test found or invalid token, using default requirements");
+            setAssessmentInfo(null);
+            setCandidateRequirements(DEFAULT_REQUIREMENTS);
+            setFetchingAssessment(false);
+            return;
+          }
+
+          setAssessmentInfo(test);
+
+          // Get candidate requirements from schedule
+          const schedule = test?.schedule || {};
+          console.log("[DSA] Full test object:", JSON.stringify(test, null, 2));
+          console.log("[DSA] Schedule from DSA test:", JSON.stringify(schedule, null, 2));
+          console.log("[DSA] Schedule type:", typeof schedule, "Is object?", schedule && typeof schedule === "object");
+          
+          const candidateReqs = schedule?.candidateRequirements || {};
+          console.log("[DSA] Candidate requirements from schedule:", JSON.stringify(candidateReqs, null, 2));
+          console.log("[DSA] Candidate requirements type:", typeof candidateReqs);
+          console.log("[DSA] Raw values - requirePhone:", candidateReqs?.requirePhone, "type:", typeof candidateReqs?.requirePhone);
+          console.log("[DSA] Raw values - requireResume:", candidateReqs?.requireResume, "type:", typeof candidateReqs?.requireResume);
+          console.log("[DSA] Raw values - requireLinkedIn:", candidateReqs?.requireLinkedIn, "type:", typeof candidateReqs?.requireLinkedIn);
+          console.log("[DSA] Raw values - requireGithub:", candidateReqs?.requireGithub, "type:", typeof candidateReqs?.requireGithub);
+
+          // More robust normalization - handle both boolean and string "true"/"false"
+          const normalizeBool = (val: any): boolean => {
+            if (val === true || val === "true" || val === 1 || val === "1") return true;
+            if (val === false || val === "false" || val === 0 || val === "0" || val === null || val === undefined) return false;
+            return Boolean(val);
+          };
+
+          const normalizedRequirements = {
+            requireEmail: false, // Email is always collected in entry page
+            requireName: false, // Name is always collected in entry page
+            requirePhone: normalizeBool(candidateReqs?.requirePhone),
+            requireResume: normalizeBool(candidateReqs?.requireResume),
+            requireLinkedIn: normalizeBool(candidateReqs?.requireLinkedIn),
+            requireGithub: normalizeBool(candidateReqs?.requireGithub),
+          };
+
+          console.log("[DSA] Normalized candidate requirements:", JSON.stringify(normalizedRequirements, null, 2));
+          setCandidateRequirements(normalizedRequirements);
+          
+          // Check if any requirements are enabled
+          const hasAnyRequirement =
+            normalizedRequirements.requirePhone ||
+            normalizedRequirements.requireResume ||
+            normalizedRequirements.requireLinkedIn ||
+            normalizedRequirements.requireGithub;
+
+          console.log("[DSA] Has any requirement?", hasAnyRequirement);
+
+          // If no requirements are enabled, skip this page (but add a small delay to prevent race conditions)
+          if (!hasAnyRequirement && id && token) {
+            console.log("[DSA] No candidate requirements enabled, will skip to identity verification after short delay");
+            // Use setTimeout to prevent immediate navigation that might cause abort errors
+            setTimeout(() => {
+              sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
+              router.replace(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+                // Ignore abort errors during navigation
+                if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
+                  console.error("[DSA] Navigation error:", err);
+                }
+              });
+            }, 100);
+          }
+          
+          setFetchingAssessment(false);
+        } catch (err: any) {
+          console.error("Error fetching DSA test:", err);
+          setError(err.response?.data?.detail || "Failed to fetch test information");
+          setCandidateRequirements(DEFAULT_REQUIREMENTS);
+          setFetchingAssessment(false);
+        }
+      };
+
+      fetchDSATest();
+      return;
+    }
 
     // For AIML flow, fetch requirements from AIML test
-    if (isAIMLFlow && id && token) {
+    // Only fetch if explicitly AIML flow (not DSA)
+    if (isAIMLFlow && !isDSAFlow && id && token) {
       const fetchAIMLTest = async () => {
         try {
           setFetchingAssessment(true);
@@ -112,13 +214,20 @@ export default function CandidateRequirementsPage() {
           const candidateReqs = schedule?.candidateRequirements || {};
           console.log("Candidate requirements from schedule:", candidateReqs);
 
+          // More robust normalization - handle both boolean and string "true"/"false"
+          const normalizeBool = (val: any): boolean => {
+            if (val === true || val === "true" || val === 1 || val === "1") return true;
+            if (val === false || val === "false" || val === 0 || val === "0" || val === null || val === undefined) return false;
+            return Boolean(val);
+          };
+
           const normalizedRequirements = {
             requireEmail: false, // Email is always collected in entry page
             requireName: false, // Name is always collected in entry page
-            requirePhone: candidateReqs?.requirePhone === true,
-            requireResume: false, // Not supported for AIML yet
-            requireLinkedIn: candidateReqs?.requireLinkedIn === true,
-            requireGithub: candidateReqs?.requireGithub === true,
+            requirePhone: normalizeBool(candidateReqs?.requirePhone),
+            requireResume: normalizeBool(candidateReqs?.requireResume),
+            requireLinkedIn: normalizeBool(candidateReqs?.requireLinkedIn),
+            requireGithub: normalizeBool(candidateReqs?.requireGithub),
           };
 
           // Handle custom fields
@@ -131,6 +240,7 @@ export default function CandidateRequirementsPage() {
 
           const hasAnyRequirement =
             normalizedRequirements.requirePhone ||
+            normalizedRequirements.requireResume ||
             normalizedRequirements.requireLinkedIn ||
             normalizedRequirements.requireGithub ||
             (customFieldsData.length > 0);
@@ -139,7 +249,11 @@ export default function CandidateRequirementsPage() {
           if (!hasAnyRequirement && id && token) {
             console.log("No candidate requirements enabled for AIML, skipping to identity verification");
             sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
-            router.push(`/assessment/${id}/${token}/identity-verify`);
+            router.push(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+              if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
+                console.error("Navigation error:", err);
+              }
+            });
           }
 
           setError(null);
@@ -223,7 +337,11 @@ export default function CandidateRequirementsPage() {
           if (!hasAnyRequirement && id && token) {
             console.log("No candidate requirements enabled for custom MCQ, skipping to identity verification");
             sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
-            router.push(`/assessment/${id}/${token}/identity-verify`);
+            router.push(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+              if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
+                console.error("Navigation error:", err);
+              }
+            });
           }
 
           setError(null);
@@ -245,10 +363,15 @@ export default function CandidateRequirementsPage() {
       return;
     }
 
-    // Non-AI flows (other than custom-mcq): skip AI-only backend calls entirely and proceed
-    if (!isAIFlow && !isCustomMCQFlow && id && token) {
+    // Non-AI flows (other than custom-mcq and dsa): skip AI-only backend calls entirely and proceed
+    // DSA and AIML flows are handled above with their own fetch logic
+    if (!isAIFlow && !isCustomMCQFlow && !isDSAFlow && !isAIMLFlow && id && token) {
       sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
-      router.replace(`/assessment/${id}/${token}/identity-verify`);
+          router.replace(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+            if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
+              console.error("Navigation error:", err);
+            }
+          });
       setFetchingAssessment(false);
       return;
     }
@@ -375,6 +498,9 @@ export default function CandidateRequirementsPage() {
     // Determine flow type
     const ctx = getGateContext(id as string);
     const isAIFlow = !ctx || ctx.flowType === "ai";
+    const isDSAFlow = ctx?.flowType === "dsa";
+    const isCustomMCQFlow = ctx?.flowType === "custom-mcq";
+    const isAIMLFlow = ctx?.flowType === "aiml";
    
     // Validate only required fields
     if (candidateRequirements.requireEmail && !email.trim()) {
@@ -495,7 +621,7 @@ export default function CandidateRequirementsPage() {
         ? name.trim() 
         : (sessionStorage.getItem("candidateName") || "");
      
-      // Upload resume if provided
+      // Upload resume if provided - MUST complete before saving candidate info
       if (resumeFile) {
         const formData = new FormData();
         formData.append("resume", resumeFile);
@@ -505,18 +631,25 @@ export default function CandidateRequirementsPage() {
         formData.append("name", finalName);
        
         try {
-          await axios.post("/api/assessment/upload-resume", formData, {
+          const uploadResponse = await axios.post("/api/assessment/upload-resume", formData, {
             headers: {
               "Content-Type": "multipart/form-data",
             },
           });
+          console.log("[Candidate Requirements] Resume upload successful:", uploadResponse.data);
         } catch (uploadError: any) {
-          console.warn("Resume upload failed (non-blocking):", uploadError);
-          // Don't block submission if resume upload fails
+          console.error("Resume upload failed:", uploadError);
+          // Show error but don't block - backend will preserve existing resume if upload failed
+          setError("Resume upload failed. Please try again or continue without resume.");
         }
       }
      
-      // Save candidate requirements to backend (only for AI flow, not custom MCQ)
+      // Small delay to ensure resume upload completes and is saved to DB
+      if (resumeFile) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+     
+      // Save candidate requirements to backend
       // For custom MCQ, data is stored in sessionStorage and sent with assessment submission
       if (isAIFlow) {
         try {
@@ -544,17 +677,62 @@ export default function CandidateRequirementsPage() {
         } catch (saveError: any) {
           console.warn("Failed to save candidate info (non-blocking):", saveError);
         }
+      } else if (isDSAFlow) {
+        // For DSA flow, use DSA-specific endpoint
+        try {
+          // Prepare custom fields object
+          const customFieldsObj: Record<string, string> = {};
+          if (Object.keys(customFieldValues).length > 0) {
+            customFields.forEach((field) => {
+              if (customFieldValues[field.label]) {
+                customFieldsObj[field.label] = customFieldValues[field.label];
+              }
+            });
+          }
+          
+          await axios.post(
+            `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/dsa/tests/${id}/save-candidate-info`,
+            {
+              email: finalEmail,
+              name: finalName,
+              phone: phone.trim() || null,
+              hasResume: !!resumeFile,
+              linkedIn: linkedInUrl.trim() || null,
+              github: githubUrl.trim() || null,
+              customFields: Object.keys(customFieldsObj).length > 0 ? customFieldsObj : null,
+            }
+          );
+        } catch (saveError: any) {
+          console.warn("Failed to save DSA candidate info (non-blocking):", saveError);
+        }
       }
      
       // Mark this step as completed
       sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
      
-      // Route to identity verification
-      router.push(`/assessment/${id}/${token}/identity-verify`);
+      // Show success message briefly, then navigate
+      setSuccess(true);
+      setError(null);
+     
+      // Keep loading state true during navigation to show "Redirecting..." in button
+      // Navigate to identity verification page after a brief delay to show success message
+      setTimeout(() => {
+        router.push(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+          // Ignore abort errors during navigation
+          if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
+            console.error("Navigation error:", err);
+            setError("Failed to navigate to next page. Please try again.");
+            setLoading(false);
+            setSuccess(false);
+          }
+        });
+      }, 500);
+      // Note: We don't set loading to false in finally block - let it stay true during navigation
+      // The page will unmount when navigation completes, so loading state doesn't matter
     } catch (err: any) {
       console.error("Error submitting candidate requirements:", err);
       setError(err.response?.data?.message || "Failed to submit information. Please try again.");
-    } finally {
+      setSuccess(false);
       setLoading(false);
     }
   };
@@ -625,6 +803,56 @@ export default function CandidateRequirementsPage() {
               fontSize: "0.8125rem"
             }}>
               ⚠️ {error}
+            </div>
+          )}
+          
+          {/* Show message if no fields are required */}
+          {!fetchingAssessment && 
+           !candidateRequirements.requireEmail && 
+           !candidateRequirements.requireName && 
+           !candidateRequirements.requirePhone && 
+           !candidateRequirements.requireResume && 
+           !candidateRequirements.requireLinkedIn && 
+           !candidateRequirements.requireGithub && 
+           customFields.length === 0 && (
+            <div style={{
+              padding: "1rem",
+              backgroundColor: "#f0f9ff",
+              border: "1px solid #bae6fd",
+              borderRadius: "0.375rem",
+              color: "#0369a1",
+              marginBottom: "1rem",
+              textAlign: "center"
+            }}>
+              No additional information is required. You can proceed directly.
+            </div>
+          )}
+          
+          {/* Warning if DSA flow but no requirements found */}
+          {!fetchingAssessment && isDSAFlow && 
+           !candidateRequirements.requirePhone && 
+           !candidateRequirements.requireResume && 
+           !candidateRequirements.requireLinkedIn && 
+           !candidateRequirements.requireGithub && (
+            <div style={{
+              padding: "1rem",
+              backgroundColor: "#fef3c7",
+              border: "1px solid #fde68a",
+              borderRadius: "0.375rem",
+              color: "#92400e",
+              marginBottom: "1rem",
+              fontSize: "0.875rem"
+            }}>
+              ⚠️ <strong>No candidate requirements found for this test.</strong>
+              <p style={{ margin: "0.5rem 0 0 0" }}>
+                This page will automatically redirect you to the next step. If you expected to see input fields here:
+              </p>
+              <ul style={{ margin: "0.5rem 0 0 1.5rem", padding: 0 }}>
+                <li><strong>Create a NEW test</strong> with the candidate requirements checkboxes enabled</li>
+                <li>Old tests created before this feature was added won't have requirements saved</li>
+                <li>Check the browser console for detailed logs about what was fetched</li>
+                <li>Check the debug section below to see the schedule data</li>
+              </ul>
             </div>
           )}
           
@@ -913,6 +1141,21 @@ export default function CandidateRequirementsPage() {
               )}
             </div>
            
+            {/* Success Message */}
+            {success && (
+              <div style={{
+                padding: "0.625rem 0.75rem",
+                backgroundColor: "#d1fae5",
+                border: "1px solid #86efac",
+                borderRadius: "0.375rem",
+                color: "#065f46",
+                marginBottom: "1rem",
+                fontSize: "0.8125rem"
+              }}>
+                ✓ Information saved successfully!
+              </div>
+            )}
+            
             {/* Error Message */}
             {error && (
               <div style={{
@@ -976,7 +1219,7 @@ export default function CandidateRequirementsPage() {
                 transition: "all 0.2s ease"
               }}
             >
-              {loading ? "Submitting..." : "Continue to Assessment →"}
+              {loading ? (success ? "Redirecting..." : "Submitting...") : "Continue to Assessment →"}
             </button>
           </form>
         </div>

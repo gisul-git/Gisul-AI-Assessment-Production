@@ -7,7 +7,7 @@ import { MONACO_LANGUAGES } from '../../../lib/dsa/judge0'
 import { EditorToolbar } from './EditorToolbar'
 import { ExpectedOutputsPanel } from './ExpectedOutputsPanel'
 import { OutputConsole } from './OutputConsole'
-import { ChevronDown, ChevronUp, Lightbulb, TrendingUp, AlertCircle, CheckCircle2, Target } from 'lucide-react'
+import { ChevronDown, ChevronUp, Lightbulb, TrendingUp, AlertCircle, AlertTriangle, CheckCircle2, Target } from 'lucide-react'
 
 // Lazy load Monaco Editor with loading optimization
 // Start loading immediately when component mounts (don't wait for user interaction)
@@ -57,6 +57,8 @@ export interface AIFeedback {
   suggestions?: string[]
   strengths?: string[]
   areas_for_improvement?: string[]
+  improvement_suggestions?: string[]
+  deduction_reasons?: string[]
 }
 
 export interface SubmissionHistoryEntry {
@@ -239,18 +241,54 @@ function AIFeedbackDisplay({ feedback }: { feedback: AIFeedback }) {
             </div>
           )}
 
+          {/* Improvement Suggestions */}
+          {feedback.improvement_suggestions && feedback.improvement_suggestions.length > 0 && (
+            <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-lg p-3">
+              <h4 className="text-xs font-semibold text-indigo-400 mb-2 flex items-center gap-2">
+                <Lightbulb className="w-3 h-3" />
+                Improvement Suggestions
+              </h4>
+              <ul className="space-y-2">
+                {feedback.improvement_suggestions.map((suggestion, idx) => (
+                  <li key={idx} className="text-sm text-indigo-300/80 flex items-start gap-2">
+                    <span className="text-indigo-400 mt-1">→</span>
+                    <span>{suggestion}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {/* Suggestions */}
           {feedback.suggestions && feedback.suggestions.length > 0 && (
             <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
               <h4 className="text-xs font-semibold text-blue-400 mb-2 flex items-center gap-2">
                 <Lightbulb className="w-3 h-3" />
-                Suggestions for Improvement
+                Suggestions
               </h4>
               <ul className="space-y-2">
                 {feedback.suggestions.map((suggestion, idx) => (
                   <li key={idx} className="text-sm text-blue-300/80 flex items-start gap-2">
                     <span className="text-blue-400 mt-1">→</span>
                     <span>{suggestion}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Deduction Reasons */}
+          {feedback.deduction_reasons && feedback.deduction_reasons.length > 0 && (
+            <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+              <h4 className="text-xs font-semibold text-red-400 mb-2 flex items-center gap-2">
+                <AlertTriangle className="w-3 h-3" />
+                Deduction Reasons
+              </h4>
+              <ul className="space-y-2">
+                {feedback.deduction_reasons.map((reason, idx) => (
+                  <li key={idx} className="text-sm text-red-300/80 flex items-start gap-2">
+                    <span className="text-red-400 mt-1">⚠</span>
+                    <span>{reason}</span>
                   </li>
                 ))}
               </ul>

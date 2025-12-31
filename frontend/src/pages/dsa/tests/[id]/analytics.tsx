@@ -10,6 +10,7 @@ import dsaApi from '../../../../lib/dsa/api'
 import axios from 'axios'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video, Loader2 } from 'lucide-react'
 import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
+import { LiveProctoringDashboard } from '../../../../components/proctor'
 
 interface AIFeedback {
   overall_score?: number
@@ -78,6 +79,13 @@ interface CandidateAnalytics {
     name: string
     email: string
   }
+  candidateInfo?: {
+    phone?: string | null
+    linkedIn?: string | null
+    github?: string | null
+    hasResume?: boolean
+    customFields?: Record<string, any>
+  } | null
   submission: {
     score: number
     started_at: string | null
@@ -128,7 +136,13 @@ export default function AnalyticsPage() {
   })
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
+  const [sendingFeedback, setSendingFeedback] = useState<string | null>(null)
+  const [showLiveProctoring, setShowLiveProctoring] = useState(false)
+  const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   const [referencePhoto, setReferencePhoto] = useState<string | null>(null)
+  const [showResumeModal, setShowResumeModal] = useState(false)
+  const [resumeUrl, setResumeUrl] = useState<string | null>(null)
+  const [loadingResume, setLoadingResume] = useState(false)
   
   // Memoize proctorAssessmentId to prevent infinite loops
   const proctorAssessmentId = useMemo(() => (testId as string) || "", [testId])
@@ -366,6 +380,34 @@ export default function AnalyticsPage() {
     }
   }
 
+  const fetchResume = async (candidateEmail: string) => {
+    if (!testId || typeof testId !== 'string' || !candidateEmail) {
+      return
+    }
+
+    setLoadingResume(true)
+    try {
+      const response = await dsaApi.get(`/tests/${testId}/candidates/${selectedCandidate}/resume`, {
+        params: {
+          email: candidateEmail,
+        },
+      })
+
+      if (response.data?.resume) {
+        // Resume is returned as base64 data URL
+        setResumeUrl(response.data.resume)
+        setShowResumeModal(true)
+      } else {
+        alert('Resume not found')
+      }
+    } catch (error: any) {
+      console.error('Error fetching resume:', error)
+      alert(error.response?.data?.detail || 'Failed to load resume')
+    } finally {
+      setLoadingResume(false)
+    }
+  }
+
   const handleCandidateSelect = (userId: string) => {
     const candidate = candidates.find(c => c.user_id === userId)
     console.log('[DSA Analytics] 👤 Candidate selected:', {
@@ -487,9 +529,16 @@ export default function AnalyticsPage() {
     if (!confirm(`Are you sure you want to remove ${candidate.name} (${candidate.email}) from this test?`)) return
     
     try {
-      // Note: DSA API may need a remove-candidate endpoint
-      // For now, we'll show an alert that this feature needs backend support
-      alert("Remove candidate functionality requires backend API support. Please contact support.")
+      await dsaApi.delete(`/tests/${testId}/candidates/${userId}`)
+      // Refresh candidates list
+      const candidatesResponse = await dsaApi.get(`/tests/${testId}/candidates`)
+      setCandidates(candidatesResponse.data || [])
+      // Clear selection if removed candidate was selected
+      if (selectedCandidate === userId) {
+        setSelectedCandidate(null)
+        setAnalytics(null)
+      }
+      alert("Candidate removed successfully!")
     } catch (err: any) {
       alert(err.response?.data?.detail || err.response?.data?.message || "Failed to remove candidate")
     }
@@ -562,6 +611,41 @@ export default function AnalyticsPage() {
       setSendingInvitations(false)
     }
   }
+
+  const handleSendFeedback = async (userId: string) => {
+    if (!testId || typeof testId !== 'string') return
+    
+    const candidate = candidates.find(c => c.user_id === userId)
+    if (!candidate) return
+    
+    if (!confirm(`Send AI feedback email to ${candidate.name} (${candidate.email})?`)) {
+      return
+    }
+    
+    setSendingFeedback(userId)
+    try {
+      const response = await dsaApi.post(`/tests/${testId}/candidates/${userId}/send-feedback`)
+      if (response.data) {
+        alert("Feedback email sent successfully!")
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.message || "Failed to send feedback email")
+    } finally {
+      setSendingFeedback(null)
+    }
+  }
+
+  // Check if test has ended
+  const isTestEnded = useMemo(() => {
+    if (!testInfo?.schedule?.endTime) return false
+    try {
+      const endTime = new Date(testInfo.schedule.endTime)
+      const now = new Date()
+      return now >= endTime
+    } catch {
+      return false
+    }
+  }, [testInfo])
 
   if (loading) {
     return (
@@ -798,6 +882,25 @@ export default function AnalyticsPage() {
                         >
                           Resend Invitation
                         </button>
+                        {isTestEnded && candidate.status === "completed" && (
+                          <button
+                            type="button"
+                            onClick={() => handleSendFeedback(candidate.user_id)}
+                            disabled={sendingFeedback === candidate.user_id}
+                            style={{
+                              padding: "0.25rem 0.75rem",
+                              fontSize: "0.75rem",
+                              backgroundColor: sendingFeedback === candidate.user_id ? "#94a3b8" : "#3b82f6",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: sendingFeedback === candidate.user_id ? "not-allowed" : "pointer",
+                              opacity: sendingFeedback === candidate.user_id ? 0.6 : 1,
+                            }}
+                          >
+                            {sendingFeedback === candidate.user_id ? "Sending..." : "📧 Send Feedback"}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => handleRemoveCandidate(candidate.user_id)}
@@ -1100,6 +1203,87 @@ export default function AnalyticsPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Candidate Requirements Section */}
+                {analytics.candidateInfo && (
+                  <div style={{
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "0.75rem",
+                    padding: "1.5rem",
+                    backgroundColor: "#ffffff",
+                  }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
+                      Candidate Requirements
+                    </h2>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+                      {analytics.candidateInfo.phone && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Phone</div>
+                          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidateInfo.phone}</div>
+                        </div>
+                      )}
+                      {analytics.candidateInfo.linkedIn && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>LinkedIn</div>
+                          <a 
+                            href={analytics.candidateInfo.linkedIn} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            style={{ fontSize: "1rem", fontWeight: 600, color: "#3b82f6", textDecoration: "none" }}
+                          >
+                            {analytics.candidateInfo.linkedIn}
+                          </a>
+                        </div>
+                      )}
+                      {analytics.candidateInfo.github && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>GitHub</div>
+                          <a 
+                            href={analytics.candidateInfo.github} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            style={{ fontSize: "1rem", fontWeight: 600, color: "#3b82f6", textDecoration: "none" }}
+                          >
+                            {analytics.candidateInfo.github}
+                          </a>
+                        </div>
+                      )}
+                      {analytics.candidateInfo.hasResume !== undefined && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Resume</div>
+                          {analytics.candidateInfo.hasResume ? (
+                            <button
+                              type="button"
+                              onClick={() => fetchResume(analytics.candidate.email)}
+                              disabled={loadingResume}
+                              style={{
+                                fontSize: "1rem",
+                                fontWeight: 600,
+                                color: "#3b82f6",
+                                background: "none",
+                                border: "none",
+                                cursor: loadingResume ? "not-allowed" : "pointer",
+                                textDecoration: "underline",
+                                padding: 0,
+                                opacity: loadingResume ? 0.6 : 1,
+                              }}
+                            >
+                              {loadingResume ? "Loading..." : "View Resume"}
+                            </button>
+                          ) : (
+                            <div style={{ fontSize: "1rem", fontWeight: 600 }}>Not Provided</div>
+                          )}
+                        </div>
+                      )}
+                      {analytics.candidateInfo?.customFields && Object.keys(analytics.candidateInfo.customFields).map(key => (
+                        <div key={key}>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>{key}</div>
+                          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidateInfo?.customFields?.[key]}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Overall Performance Summary */}
                 <div style={{
@@ -1404,6 +1588,117 @@ export default function AnalyticsPage() {
                               <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
                                   {qa.ai_feedback.feedback_summary}
                                 </p>
+                              </div>
+                            )}
+
+                            {/* Code Quality */}
+                            {qa.ai_feedback.code_quality && qa.ai_feedback.code_quality.comments && (
+                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem" }}>
+                                Code Quality {qa.ai_feedback.code_quality.score !== undefined && `(${qa.ai_feedback.code_quality.score}/100)`}
+                              </h4>
+                              <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
+                                  {qa.ai_feedback.code_quality.comments}
+                                </p>
+                              </div>
+                            )}
+
+                            {/* Efficiency Comments */}
+                            {qa.ai_feedback.efficiency && qa.ai_feedback.efficiency.comments && (
+                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem" }}>
+                                Efficiency Analysis
+                              </h4>
+                              <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
+                                  {qa.ai_feedback.efficiency.comments}
+                                </p>
+                              </div>
+                            )}
+
+                            {/* Correctness Comments */}
+                            {qa.ai_feedback.correctness && qa.ai_feedback.correctness.comments && (
+                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem" }}>
+                                Correctness {qa.ai_feedback.correctness.score !== undefined && `(${qa.ai_feedback.correctness.score}/100)`}
+                              </h4>
+                              <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
+                                  {qa.ai_feedback.correctness.comments}
+                                </p>
+                              </div>
+                            )}
+
+                            {/* Strengths */}
+                            {qa.ai_feedback.strengths && qa.ai_feedback.strengths.length > 0 && (
+                            <div style={{ backgroundColor: "#064e3b", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #10b981" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#6ee7b7", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <CheckCircle2 style={{ width: "12px", height: "12px" }} />
+                                  Strengths
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#a7f3d0", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.strengths.map((strength, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{strength}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Areas for Improvement */}
+                            {qa.ai_feedback.areas_for_improvement && qa.ai_feedback.areas_for_improvement.length > 0 && (
+                            <div style={{ backgroundColor: "#7c2d12", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #f97316" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#fdba74", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <AlertTriangle style={{ width: "12px", height: "12px" }} />
+                                  Areas for Improvement
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#fed7aa", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.areas_for_improvement.map((area, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{area}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Improvement Suggestions */}
+                            {qa.ai_feedback.improvement_suggestions && qa.ai_feedback.improvement_suggestions.length > 0 && (
+                            <div style={{ backgroundColor: "#1e3a8a", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #3b82f6" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#93c5fd", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <Lightbulb style={{ width: "12px", height: "12px" }} />
+                                  Improvement Suggestions
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#bfdbfe", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.improvement_suggestions.map((suggestion, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{suggestion}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Suggestions (if different from improvement_suggestions) */}
+                            {qa.ai_feedback.suggestions && qa.ai_feedback.suggestions.length > 0 && (
+                            <div style={{ backgroundColor: "#1e3a8a", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #3b82f6" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#93c5fd", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <Lightbulb style={{ width: "12px", height: "12px" }} />
+                                  Suggestions
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#bfdbfe", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.suggestions.map((suggestion, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{suggestion}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Deduction Reasons */}
+                            {qa.ai_feedback.deduction_reasons && qa.ai_feedback.deduction_reasons.length > 0 && (
+                            <div style={{ backgroundColor: "#7f1d1d", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #ef4444" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#fca5a5", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <AlertTriangle style={{ width: "12px", height: "12px" }} />
+                                  Deduction Reasons
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#fecaca", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.deduction_reasons.map((reason, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{reason}</li>
+                                  ))}
+                                </ul>
                               </div>
                             )}
                           </div>
@@ -1804,6 +2099,15 @@ export default function AnalyticsPage() {
         </div>
       )}
 
+      {/* Live Proctoring Dashboard */}
+      {showLiveProctoring && testId && typeof testId === 'string' && session?.user && (
+        <LiveProctoringDashboard
+          isOpen={showLiveProctoring}
+          onClose={() => setShowLiveProctoring(false)}
+          assessmentId={testId}
+          adminId={session.user.email || session.user.id || 'admin'}
+        />
+      )}
       <style jsx>{`
         @keyframes spin {
           from {
