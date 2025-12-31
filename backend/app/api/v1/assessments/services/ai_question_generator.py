@@ -463,8 +463,9 @@ Return ONLY a JSON object with questions array."""
 
     client = _get_openai_client()
     try:
+        # ✅ SPEED OPTIMIZATION: Use gpt-4o-mini for MCQ (faster, cheaper)
         response = await client.chat.completions.create(
-            model="gpt-4-turbo-preview",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             response_format={"type": "json_object"}
@@ -567,8 +568,9 @@ Return ONLY a JSON object with questions array:
 }}"""
         
         try:
+            # ✅ SPEED OPTIMIZATION: Use gpt-4o-mini for MCQ retry (faster, cheaper)
             retry_response = await client.chat.completions.create(
-                model="gpt-4-turbo-preview",
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": retry_prompt}],
                 temperature=0.7,
                 response_format={"type": "json_object"}
@@ -820,8 +822,9 @@ Return ONLY a JSON object with questions array."""
 
     client = _get_openai_client()
     try:
+        # ✅ SPEED OPTIMIZATION: Use gpt-4o-mini for Subjective (faster, cheaper)
         response = await client.chat.completions.create(
-            model="gpt-4-turbo-preview",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             response_format={"type": "json_object"}
@@ -914,8 +917,9 @@ Return ONLY a JSON object with questions array:
 }}"""
         
         try:
+            # ✅ SPEED OPTIMIZATION: Use gpt-4o-mini for Subjective retry (faster, cheaper)
             retry_response = await client.chat.completions.create(
-                model="gpt-4-turbo-preview",
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": retry_prompt}],
                 temperature=0.7,
                 response_format={"type": "json_object"}

@@ -163,6 +163,15 @@ async def _save_assessment(db: AsyncIOMotorDatabase, assessment: Dict[str, Any])
         raise RuntimeError("Assessment document missing _id")
     assessment["updatedAt"] = _now_utc()
     await db.assessments.replace_one({"_id": assessment_id}, assessment)
+    # ✅ SPEED OPTIMIZATION: Invalidate cache after saving
+    try:
+        from .services.assessment_cache import invalidate_assessment_cache_async
+        await invalidate_assessment_cache_async(str(assessment_id))
+    except Exception as e:
+        logger.warning(f"Failed to invalidate cache for assessment {assessment_id}: {e}")
+    # ✅ SPEED OPTIMIZATION: Invalidate cache after saving
+    from .services.assessment_cache import invalidate_assessment_cache_async
+    await invalidate_assessment_cache_async(str(assessment_id))
 
 
 async def _find_or_get_existing_draft(
@@ -3648,6 +3657,11 @@ async def regenerate_topic_endpoint_v2(
     Only allowed when topic.locked == False AND fullTopicRegenLocked == False.
     """
     try:
+        # ✅ SPEED OPTIMIZATION: Get cached context (or load from MongoDB if not cached)
+        from .services.assessment_cache import get_assessment_context
+        cached_context = await get_assessment_context(db, payload.assessmentId)
+        
+        # Still need full assessment for topics_v2
         # Get assessment
         assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
         if not assessment:
@@ -3751,6 +3765,11 @@ async def generate_question_endpoint_v2(
     Sets fullTopicRegenLocked = True on assessment.
     """
     try:
+        # ✅ SPEED OPTIMIZATION: Get cached context (or load from MongoDB if not cached)
+        from .services.assessment_cache import get_assessment_context
+        cached_context = await get_assessment_context(db, payload.assessmentId)
+        
+        # Still need full assessment for topics_v2
         # Get assessment
         assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
         if not assessment:
@@ -3812,41 +3831,32 @@ async def generate_question_endpoint_v2(
         
         logger.info(f"Generating {questions_count} {question_type} question(s) for topic: {payload.topicLabel}, difficulty: {difficulty}, canUseJudge0: {can_use_judge0} (using row.questionType from DB)")
         
-        # Get coding language from assessment (fallback to python)
-        coding_language = assessment.get("codingLanguage", "python")
-        
-        # Generate questions
-        # Get experience mode from payload or assessment
-        experience_mode = payload.experienceMode or assessment.get("experienceMode", "corporate")
-        
-        # Get company context (new unified field) or websiteSummary (legacy)
-        company_context = assessment.get("contextSummary")  # New field
-        website_summary = None
-        if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
-            website_summary = assessment["websiteSummary"]  # Legacy fallback
-        
-        # Priority order for additional requirements/context:
-        # 1. Topic/row-level (payload.additionalRequirements) - highest priority
-        # 2. Assessment-level (assessment.additionalRequirements) - fallback
-        # 3. Company context - new unified field
-        # 4. Website summary - legacy fallback
-        additional_requirements = payload.additionalRequirements  # Topic/row-level (highest priority)
-        if not additional_requirements:
-            additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
-        
-        # ⭐ Extract context-aware personalization parameters
-        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
-        job_designation = assessment.get("jobDesignation")
-        experience_min = assessment.get("experienceMin")
-        experience_max = assessment.get("experienceMax")
-        company_name = company_context.get("company_name") if company_context else None
-        
-        # ⭐ Extract context-aware personalization parameters
-        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
-        job_designation = assessment.get("jobDesignation")
-        experience_min = assessment.get("experienceMin")
-        experience_max = assessment.get("experienceMax")
-        company_name = company_context.get("company_name") if company_context else None
+        # ✅ SPEED OPTIMIZATION: Use cached context instead of extracting from assessment
+        if cached_context:
+            coding_language = cached_context.get("coding_language", "python")
+            experience_mode = payload.experienceMode or cached_context.get("experience_mode", "corporate")
+            company_context = cached_context.get("company_context")
+            website_summary = cached_context.get("website_summary")
+            assessment_requirements = cached_context.get("assessment_requirements")
+            job_designation = cached_context.get("job_designation")
+            experience_min = cached_context.get("experience_min")
+            experience_max = cached_context.get("experience_max")
+            company_name = cached_context.get("company_name")
+            additional_requirements = payload.additionalRequirements or cached_context.get("additional_requirements")
+        else:
+            # Fallback to assessment if cache fails
+            coding_language = assessment.get("codingLanguage", "python")
+            experience_mode = payload.experienceMode or assessment.get("experienceMode", "corporate")
+            company_context = assessment.get("contextSummary")
+            website_summary = None
+            if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
+                website_summary = assessment["websiteSummary"]
+            additional_requirements = payload.additionalRequirements or assessment.get("additionalRequirements")
+            assessment_requirements = assessment.get("requirements")
+            job_designation = assessment.get("jobDesignation")
+            experience_min = assessment.get("experienceMin")
+            experience_max = assessment.get("experienceMax")
+            company_name = company_context.get("company_name") if company_context else None
         
         # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
         # The payload might have stale data if frontend state wasn't updated
@@ -3922,6 +3932,11 @@ async def generate_all_questions_endpoint_v2(
     Sets allQuestionsGenerated = True on assessment.
     """
     try:
+        # ✅ SPEED OPTIMIZATION: Get cached context (or load from MongoDB if not cached)
+        from .services.assessment_cache import get_assessment_context
+        cached_context = await get_assessment_context(db, payload.assessmentId)
+        
+        # Still need full assessment for topics_v2
         # Get assessment
         assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
         if not assessment:
@@ -4985,6 +5000,11 @@ async def regenerate_topic_endpoint_v2(
     Only allowed when topic.locked == False AND fullTopicRegenLocked == False.
     """
     try:
+        # ✅ SPEED OPTIMIZATION: Get cached context (or load from MongoDB if not cached)
+        from .services.assessment_cache import get_assessment_context
+        cached_context = await get_assessment_context(db, payload.assessmentId)
+        
+        # Still need full assessment for topics_v2
         # Get assessment
         assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
         if not assessment:
@@ -5191,6 +5211,11 @@ async def generate_question_endpoint_v2(
     Sets fullTopicRegenLocked = True on assessment.
     """
     try:
+        # ✅ SPEED OPTIMIZATION: Get cached context (or load from MongoDB if not cached)
+        from .services.assessment_cache import get_assessment_context
+        cached_context = await get_assessment_context(db, payload.assessmentId)
+        
+        # Still need full assessment for topics_v2
         # Get assessment
         assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
         if not assessment:
@@ -5252,41 +5277,32 @@ async def generate_question_endpoint_v2(
         
         logger.info(f"Generating {questions_count} {question_type} question(s) for topic: {payload.topicLabel}, difficulty: {difficulty}, canUseJudge0: {can_use_judge0} (using row.questionType from DB)")
         
-        # Get coding language from assessment (fallback to python)
-        coding_language = assessment.get("codingLanguage", "python")
-        
-        # Generate questions
-        # Get experience mode from payload or assessment
-        experience_mode = payload.experienceMode or assessment.get("experienceMode", "corporate")
-        
-        # Get company context (new unified field) or websiteSummary (legacy)
-        company_context = assessment.get("contextSummary")  # New field
-        website_summary = None
-        if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
-            website_summary = assessment["websiteSummary"]  # Legacy fallback
-        
-        # Priority order for additional requirements/context:
-        # 1. Topic/row-level (payload.additionalRequirements) - highest priority
-        # 2. Assessment-level (assessment.additionalRequirements) - fallback
-        # 3. Company context - new unified field
-        # 4. Website summary - legacy fallback
-        additional_requirements = payload.additionalRequirements  # Topic/row-level (highest priority)
-        if not additional_requirements:
-            additional_requirements = assessment.get("additionalRequirements")  # Assessment-level (fallback)
-        
-        # ⭐ Extract context-aware personalization parameters
-        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
-        job_designation = assessment.get("jobDesignation")
-        experience_min = assessment.get("experienceMin")
-        experience_max = assessment.get("experienceMax")
-        company_name = company_context.get("company_name") if company_context else None
-        
-        # ⭐ Extract context-aware personalization parameters
-        assessment_requirements = assessment.get("requirements")  # Global assessment requirements
-        job_designation = assessment.get("jobDesignation")
-        experience_min = assessment.get("experienceMin")
-        experience_max = assessment.get("experienceMax")
-        company_name = company_context.get("company_name") if company_context else None
+        # ✅ SPEED OPTIMIZATION: Use cached context instead of extracting from assessment
+        if cached_context:
+            coding_language = cached_context.get("coding_language", "python")
+            experience_mode = payload.experienceMode or cached_context.get("experience_mode", "corporate")
+            company_context = cached_context.get("company_context")
+            website_summary = cached_context.get("website_summary")
+            assessment_requirements = cached_context.get("assessment_requirements")
+            job_designation = cached_context.get("job_designation")
+            experience_min = cached_context.get("experience_min")
+            experience_max = cached_context.get("experience_max")
+            company_name = cached_context.get("company_name")
+            additional_requirements = payload.additionalRequirements or cached_context.get("additional_requirements")
+        else:
+            # Fallback to assessment if cache fails
+            coding_language = assessment.get("codingLanguage", "python")
+            experience_mode = payload.experienceMode or assessment.get("experienceMode", "corporate")
+            company_context = assessment.get("contextSummary")
+            website_summary = None
+            if not company_context and assessment.get("websiteSummary") and assessment["websiteSummary"].get("useForQuestions"):
+                website_summary = assessment["websiteSummary"]
+            additional_requirements = payload.additionalRequirements or assessment.get("additionalRequirements")
+            assessment_requirements = assessment.get("requirements")
+            job_designation = assessment.get("jobDesignation")
+            experience_min = assessment.get("experienceMin")
+            experience_max = assessment.get("experienceMax")
+            company_name = company_context.get("company_name") if company_context else None
         
         # ⭐ CRITICAL FIX: Use question type from database row (source of truth), not payload
         # The payload might have stale data if frontend state wasn't updated
@@ -5362,6 +5378,11 @@ async def generate_all_questions_endpoint_v2(
     Sets allQuestionsGenerated = True on assessment.
     """
     try:
+        # ✅ SPEED OPTIMIZATION: Get cached context (or load from MongoDB if not cached)
+        from .services.assessment_cache import get_assessment_context
+        cached_context = await get_assessment_context(db, payload.assessmentId)
+        
+        # Still need full assessment for topics_v2
         # Get assessment
         assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
         if not assessment:
@@ -6065,6 +6086,11 @@ async def improve_topic_endpoint(
     Preserves questionRows and question state.
     """
     try:
+        # ✅ SPEED OPTIMIZATION: Get cached context (or load from MongoDB if not cached)
+        from .services.assessment_cache import get_assessment_context
+        cached_context = await get_assessment_context(db, payload.assessmentId)
+        
+        # Still need full assessment for topics_v2
         # Get assessment
         assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
         if not assessment:
@@ -6202,6 +6228,11 @@ async def improve_all_topics_endpoint(
     Preserves questionRows and question state for all topics.
     """
     try:
+        # ✅ SPEED OPTIMIZATION: Get cached context (or load from MongoDB if not cached)
+        from .services.assessment_cache import get_assessment_context
+        cached_context = await get_assessment_context(db, payload.assessmentId)
+        
+        # Still need full assessment for topics_v2
         # Get assessment
         assessment = await db.assessments.find_one({"_id": to_object_id(payload.assessmentId)})
         if not assessment:
