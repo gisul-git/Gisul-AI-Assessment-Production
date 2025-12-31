@@ -355,12 +355,22 @@ Return ONLY valid JSON, no markdown."""
         
         client = _get_openai_client()
         try:
-            response = await client.chat.completions.create(
-                model="gpt-4-turbo-preview",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                response_format={"type": "json_object"}
-            )
+            # ✅ SPEED OPTIMIZATION: Use gpt-4o (newer, faster) with fallback to gpt-4-turbo-preview
+            try:
+                response = await client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    response_format={"type": "json_object"}
+                )
+            except Exception as gpt4o_error:
+                logger.warning(f"gpt-4o failed, falling back to gpt-4-turbo-preview: {gpt4o_error}")
+                response = await client.chat.completions.create(
+                    model="gpt-4-turbo-preview",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    response_format={"type": "json_object"}
+                )
         except Exception as exc:
             logger.error(f"OpenAI API error in _generate_coding_questions: {exc}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to generate Coding questions") from exc

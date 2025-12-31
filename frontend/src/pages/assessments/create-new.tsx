@@ -4,6 +4,7 @@ import { GetServerSideProps } from "next";
 import { requireAuth } from "../../lib/auth";
 import Link from "next/link";
 import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
+import { QuestionGenerationSkeleton } from "@/components/QuestionGenerationSkeleton";
 
 // ============================================
 // QUESTION RENDERING COMPONENTS
@@ -2500,6 +2501,15 @@ export default function CreateNewAssessmentPage() {
   const [allQuestionsGenerated, setAllQuestionsGenerated] = useState(false);
   const [generatingRowId, setGeneratingRowId] = useState<string | null>(null);
   const [generatingAllQuestions, setGeneratingAllQuestions] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState({
+    total: 0,
+    completed: 0,
+    failed: 0,
+    currentTopic: '',
+    currentQuestionType: '',
+    estimatedTimeRemaining: 0,
+  });
+  const [showGenerationSkeleton, setShowGenerationSkeleton] = useState(false);
   const [customTopicInputV2, setCustomTopicInputV2] = useState("");
   
   // Topic suggestion states
@@ -4877,76 +4887,201 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
     setGeneratingAllQuestions(true);
     setError(null);
 
+    // ✅ SPEED OPTIMIZATION: Calculate total tasks for progress tracking
+    const totalTasks = topicsToGenerate.reduce((sum, { rows }) => sum + rows.length, 0);
+    setGenerationProgress({
+      total: totalTasks,
+      completed: 0,
+      failed: 0,
+      currentTopic: '',
+      currentQuestionType: '',
+      estimatedTimeRemaining: totalTasks * 3, // ~3 seconds per question initial estimate
+    });
+    setShowGenerationSkeleton(true);
+
+    const startTime = Date.now();
+
     try {
-      // Generate questions sequentially to avoid overwhelming the API
+      // ✅ SPEED OPTIMIZATION: Parallel generation with concurrency limit (5)
+      const CONCURRENCY_LIMIT = 5;
+      
+      // Create all tasks
+      const allTasks: Array<{
+        topic: TopicV2;
+        rowId: string;
+        row: QuestionRow;
+        task: () => Promise<any>;
+      }> = [];
+
       for (const { topic, rows } of topicsToGenerate) {
         for (const { rowId, row } of rows) {
-          try {
-            const response = await axios.post("/api/assessments/generate-question", {
-              assessmentId: assessmentId,
-              topicId: topic.id,
-              rowId: rowId,
-              topicLabel: topic.label,
-              questionType: row.questionType,
-              difficulty: row.difficulty,
-              questionsCount: row.questionsCount,
-              canUseJudge0: row.canUseJudge0 || false,
-              category: topic.category || "technical",
-              experienceMin: experienceMin,
-              experienceMax: experienceMax,
-              experienceMode: experienceMode,
-              additionalRequirements: row.additionalRequirements || undefined,
-            });
+          allTasks.push({
+            topic,
+            rowId,
+            row,
+            task: async () => {
+              let retries = 0;
+              const maxRetries = 3;
+              const baseDelay = 1000; // 1 second
 
-            if (response.data?.success) {
-              const updatedRow = response.data.data.row;
-              
-              // Add timer to each question if not present
-              if (updatedRow.questions && Array.isArray(updatedRow.questions)) {
-                updatedRow.questions = updatedRow.questions.map((q: any) => {
-                  if (!q.timer) {
-                    // Calculate timer based on question type and difficulty
-                    const baseTime = getBaseTimePerQuestion(row.questionType);
-                    const multiplier = getDifficultyMultiplier(row.difficulty);
-                    let questionTime = baseTime * multiplier;
-                    
-                    // Cap MCQ questions at 40 seconds maximum
-                    if (row.questionType === "MCQ" && questionTime > 40) {
-                      questionTime = 40;
+              while (retries <= maxRetries) {
+                try {
+                  const response = await axios.post("/api/assessments/generate-question", {
+                    assessmentId: assessmentId,
+                    topicId: topic.id,
+                    rowId: rowId,
+                    topicLabel: topic.label,
+                    questionType: row.questionType,
+                    difficulty: row.difficulty,
+                    questionsCount: row.questionsCount,
+                    canUseJudge0: row.canUseJudge0 || false,
+                    category: topic.category || "technical",
+                    experienceMin: experienceMin,
+                    experienceMax: experienceMax,
+                    experienceMode: experienceMode,
+                    additionalRequirements: row.additionalRequirements || undefined,
+                  });
+
+                  if (response.data?.success) {
+                    return { success: true, topic, rowId, row, response: response.data };
+                  } else {
+                    throw new Error(`Failed to generate questions for topic ${topic.label}, row ${rowId}`);
+                  }
+                } catch (err: any) {
+                  // ✅ SPEED OPTIMIZATION: Automatic backoff for rate limiting
+                  if (err.response?.status === 429 || err.response?.status === 503) {
+                    // Rate limit hit - exponential backoff
+                    if (retries < maxRetries) {
+                      const delay = baseDelay * Math.pow(2, retries);
+                      console.warn(`Rate limit hit for ${topic.label}/${rowId}, retrying in ${delay}ms...`);
+                      await new Promise(resolve => setTimeout(resolve, delay));
+                      retries++;
+                      continue;
                     }
-                    
-                    // Convert to minutes (minimum 1 minute)
-                    q.timer = Math.max(1, Math.ceil(questionTime / 60));
                   }
-                  // Initialize oldVersions if not present
-                  if (!q.oldVersions) {
-                    q.oldVersions = [];
+                  
+                  // Other errors or max retries reached
+                  if (retries < maxRetries) {
+                    const delay = baseDelay * Math.pow(2, retries);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    retries++;
+                  } else {
+                    throw err;
                   }
-                  return q;
-                });
+                }
               }
               
-              // Update the topic in state
-              setTopicsV2(prev => prev.map(t => 
-                t.id === topic.id 
-                  ? {
-                      ...t,
-                      questionRows: t.questionRows.map(r => 
-                        r.rowId === rowId ? updatedRow : r
-                      ),
-                      // Update topic status to "generated" after successful generation
-                      status: "generated" as const
-                    }
-                  : t
-              ));
-            } else {
-              console.warn(`Failed to generate questions for topic ${topic.label}, row ${rowId}`);
+              return { success: false, topic, rowId, row, error: "Max retries reached" };
             }
-          } catch (err: any) {
-            console.error(`Error generating questions for topic ${topic.label}, row ${rowId}:`, err);
-            // Continue with other rows even if one fails
-          }
+          });
         }
+      }
+
+      // ✅ SPEED OPTIMIZATION: Execute tasks with concurrency limit using batch processing
+      let completedCount = 0;
+      let failedCount = 0;
+
+      const processBatch = async (batch: typeof allTasks) => {
+        return Promise.allSettled(
+          batch.map(async (taskData) => {
+            try {
+              // Update current task before starting
+              setGenerationProgress(prev => ({
+                ...prev,
+                currentTopic: taskData.topic.label,
+                currentQuestionType: taskData.row.questionType,
+              }));
+
+              const result = await taskData.task();
+              
+              // Calculate time-based progress
+              const elapsed = (Date.now() - startTime) / 1000;
+              const processed = completedCount + failedCount + 1;
+              const avgTimePerQuestion = processed > 0 ? elapsed / processed : 3;
+              const remaining = totalTasks - processed;
+              
+              if (result.success) {
+                completedCount++;
+                const { topic, rowId, row, response } = result;
+                const updatedRow = response.data.row;
+                
+                // Add timer to each question if not present
+                if (updatedRow.questions && Array.isArray(updatedRow.questions)) {
+                  updatedRow.questions = updatedRow.questions.map((q: any) => {
+                    if (!q.timer) {
+                      // Calculate timer based on question type and difficulty
+                      const baseTime = getBaseTimePerQuestion(row.questionType);
+                      const multiplier = getDifficultyMultiplier(row.difficulty);
+                      let questionTime = baseTime * multiplier;
+                      
+                      // Cap MCQ questions at 40 seconds maximum
+                      if (row.questionType === "MCQ" && questionTime > 40) {
+                        questionTime = 40;
+                      }
+                      
+                      // Convert to minutes (minimum 1 minute)
+                      q.timer = Math.max(1, Math.ceil(questionTime / 60));
+                    }
+                    // Initialize oldVersions if not present
+                    if (!q.oldVersions) {
+                      q.oldVersions = [];
+                    }
+                    return q;
+                  });
+                }
+                
+                // Update the topic in state
+                setTopicsV2(prev => prev.map(t => 
+                  t.id === topic.id 
+                    ? {
+                        ...t,
+                        questionRows: t.questionRows.map(r => 
+                          r.rowId === rowId ? updatedRow : r
+                        ),
+                        // Update topic status to "generated" after successful generation
+                        status: "generated" as const
+                      }
+                    : t
+                ));
+              } else {
+                failedCount++;
+                console.warn(`Failed to generate questions for topic ${result.topic.label}, row ${result.rowId}`);
+              }
+              
+              // Update progress with all metrics
+              setGenerationProgress(prev => ({
+                ...prev,
+                completed: completedCount,
+                failed: failedCount,
+                estimatedTimeRemaining: Math.max(0, Math.ceil(avgTimePerQuestion * remaining)),
+              }));
+              
+              return result;
+            } catch (err) {
+              failedCount++;
+              const elapsed = (Date.now() - startTime) / 1000;
+              const processed = completedCount + failedCount;
+              const avgTimePerQuestion = processed > 0 ? elapsed / processed : 3;
+              const remaining = totalTasks - processed;
+              
+              setGenerationProgress(prev => ({
+                ...prev,
+                completed: completedCount,
+                failed: failedCount,
+                estimatedTimeRemaining: Math.max(0, Math.ceil(avgTimePerQuestion * remaining)),
+              }));
+              
+              console.error(`Error generating questions for topic ${taskData.topic.label}, row ${taskData.rowId}:`, err);
+              return { success: false, topic: taskData.topic, rowId: taskData.rowId, error: err };
+            }
+          })
+        );
+      };
+
+      // Process tasks in batches with concurrency limit
+      for (let i = 0; i < allTasks.length; i += CONCURRENCY_LIMIT) {
+        const batch = allTasks.slice(i, i + CONCURRENCY_LIMIT);
+        await processBatch(batch);
       }
 
       // Save draft after generation with updated statuses
@@ -5013,11 +5148,13 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         });
       }
 
-      // Move to Review Questions station
+      // Hide skeleton and move to Review Questions station
+      setShowGenerationSkeleton(false);
       setCurrentStation(3);
     } catch (err: any) {
       console.error("Error generating questions:", err);
       setError(err.response?.data?.message || err.message || "Failed to generate some questions. Please try again.");
+      setShowGenerationSkeleton(false);
     } finally {
       setGeneratingAllQuestions(false);
     }
@@ -8006,9 +8143,16 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
   };
 
   return (
-    <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", padding: "2rem 0" }}>
-      <div className="container">
-        <div className="card">
+    <>
+      {/* Loading Skeleton Overlay */}
+      <QuestionGenerationSkeleton
+        progress={generationProgress}
+        show={showGenerationSkeleton}
+      />
+      
+      <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", padding: "2rem 0" }}>
+        <div className="container">
+          <div className="card">
           {/* Progress Line */}
           <div style={{ marginBottom: "3rem" }}>
             <div
@@ -11939,6 +12083,7 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
         }
       `}</style>
     </div>
+    </>
   );
 }
 
