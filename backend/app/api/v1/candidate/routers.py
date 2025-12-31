@@ -664,6 +664,8 @@ async def submit_answers(
                             "rowId": row_id,
                             "questionType": row.get("questionType"),
                             "difficulty": row.get("difficulty"),
+                            # Preserve marks if they exist in the question or row
+                            "marks": q.get("marks") or row.get("marks") or q.get("maxMarks") or row.get("maxMarks"),
                         }
                         questions_map[q_id] = question_obj
                         questions_ordered.append((q_id, question_obj, question_index_global))
@@ -797,7 +799,70 @@ async def submit_answers(
                 
                 question = questions_map[question_id]
                 question_type = question.get("questionType") or question.get("question_type", "").upper()
-                max_marks = float(question.get("marks", question.get("maxMarks", 1)))
+                
+                logger.info("=" * 80)
+                logger.info(f"[MARKS_EXTRACTION] Extracting max_marks for question {question_id}")
+                logger.info(f"[MARKS_EXTRACTION] Question type: {question_type}")
+                logger.info(f"[MARKS_EXTRACTION] Question keys: {list(question.keys())}")
+                logger.info(f"[MARKS_EXTRACTION] question.get('marks'): {question.get('marks')}")
+                logger.info(f"[MARKS_EXTRACTION] question.get('maxMarks'): {question.get('maxMarks')}")
+                
+                # Extract max_marks from multiple possible locations
+                # Priority: question.marks > question.maxMarks > scoringRules[questionType] > row.marks > default 1
+                max_marks = 1.0
+                marks_source = "default"
+                
+                if question.get("marks"):
+                    max_marks = float(question.get("marks"))
+                    marks_source = "question.marks"
+                    logger.info(f"[MARKS_EXTRACTION] Found marks in question.marks: {max_marks}")
+                elif question.get("maxMarks"):
+                    max_marks = float(question.get("maxMarks"))
+                    marks_source = "question.maxMarks"
+                    logger.info(f"[MARKS_EXTRACTION] Found marks in question.maxMarks: {max_marks}")
+                else:
+                    # Try to get from scoringRules (stored at assessment level)
+                    scoring_rules = assessment.get("scoringRules", {})
+                    logger.info(f"[MARKS_EXTRACTION] Checking scoringRules: {scoring_rules}")
+                    
+                    if scoring_rules and isinstance(scoring_rules, dict):
+                        # Normalize question type to match scoringRules keys
+                        qtype_normalized = question_type
+                        if question_type == "PSEUDOCODE" or question_type == "PSEUDO CODE":
+                            qtype_normalized = "PseudoCode"
+                        elif question_type not in ["MCQ", "Subjective", "Coding", "SQL", "AIML"]:
+                            qtype_normalized = question_type.capitalize()
+                        
+                        logger.info(f"[MARKS_EXTRACTION] Normalized question type: {qtype_normalized}")
+                        logger.info(f"[MARKS_EXTRACTION] scoringRules keys: {list(scoring_rules.keys())}")
+                        
+                        if qtype_normalized in scoring_rules:
+                            max_marks = float(scoring_rules[qtype_normalized])
+                            marks_source = f"scoringRules[{qtype_normalized}]"
+                            logger.info(f"[MARKS_EXTRACTION] Found marks in scoringRules[{qtype_normalized}]: {max_marks}")
+                        # Try alternate formats
+                        elif question_type in scoring_rules:
+                            max_marks = float(scoring_rules[question_type])
+                            marks_source = f"scoringRules[{question_type}]"
+                            logger.info(f"[MARKS_EXTRACTION] Found marks in scoringRules[{question_type}]: {max_marks}")
+                        else:
+                            logger.warning(f"[MARKS_EXTRACTION] No marks found in scoringRules for type: {question_type} or {qtype_normalized}")
+                    else:
+                        logger.warning(f"[MARKS_EXTRACTION] scoringRules is empty or not a dict: {type(scoring_rules)}")
+                
+                # Ensure max_marks is valid
+                try:
+                    max_marks = float(max_marks)
+                    if max_marks <= 0:
+                        logger.warning(f"[MARKS_EXTRACTION] max_marks was <= 0, resetting to 1.0")
+                        max_marks = 1.0
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[MARKS_EXTRACTION] Error converting max_marks to float: {e}, using default 1.0")
+                    max_marks = 1.0
+                
+                logger.info(f"[MARKS_EXTRACTION] Final max_marks: {max_marks} (source: {marks_source})")
+                logger.info("=" * 80)
+                
                 section = question.get("topicLabel") or question.get("section", "")
                 
                 logger.info(f"  ✓ Question found in map")
@@ -813,20 +878,136 @@ async def submit_answers(
                     
                     if question_type == "MCQ":
                         # For MCQ, check correctness first
-                        selected_answers = answer_data.get("selectedAnswers", [])
-                        correct_answers = question.get("correctAn", "").split(",") if question.get("correctAn") else []
-                        correct_answers = [a.strip() for a in correct_answers]
+                        selected_answers_raw = answer_data.get("selectedAnswers", [])
+                        
+                        # Get correct answer from multiple possible fields
+                        correct_ans_raw = (
+                            question.get("correctAn") or 
+                            question.get("correctAnswer") or 
+                            question.get("correct_answer") or 
+                            ""
+                        )
+                        
+                        logger.info(f"[MCQ_EVAL] Question ID: {question_id}")
+                        logger.info(f"[MCQ_EVAL] Raw selected_answers: {selected_answers_raw}")
+                        logger.info(f"[MCQ_EVAL] Raw correct_ans_raw: {correct_ans_raw}")
+                        logger.info(f"[MCQ_EVAL] Available question fields: {list(question.keys())}")
+                        
+                        # Get options to help map between formats
+                        options = question.get("options", [])
+                        logger.info(f"[MCQ_EVAL] Options: {options}")
+                        
+                        # Normalize selected answers (handle array or single value)
+                        if not isinstance(selected_answers_raw, list):
+                            selected_answers_raw = [selected_answers_raw] if selected_answers_raw else []
+                        
+                        # Normalize selected answers to strings and trim
+                        selected_answers = [str(ans).strip() for ans in selected_answers_raw if ans is not None and str(ans).strip()]
+                        
+                        # Parse correct answer(s) - can be comma-separated string or array
+                        if isinstance(correct_ans_raw, list):
+                            correct_answers_raw = correct_ans_raw
+                        elif isinstance(correct_ans_raw, str):
+                            correct_answers_raw = [a.strip() for a in correct_ans_raw.split(",") if a.strip()]
+                        else:
+                            correct_answers_raw = []
+                        
+                        # Build mapping between labels (A, B, C, D), indices (0, 1, 2, 3), and option text
+                        label_to_text = {}
+                        index_to_text = {}
+                        index_to_label = {}
+                        text_to_label = {}
+                        
+                        if options:
+                            for idx, opt in enumerate(options):
+                                if isinstance(opt, dict):
+                                    # Custom MCQ format: {label: "A", text: "Option text"}
+                                    label = str(opt.get("label", "")).strip().upper()
+                                    text = str(opt.get("text", "")).strip()
+                                    if label:
+                                        label_to_text[label] = text.upper()
+                                        text_to_label[text.upper()] = label
+                                    if text:
+                                        index_to_text[idx] = text.upper()
+                                    if label:
+                                        index_to_label[idx] = label
+                                elif isinstance(opt, str):
+                                    # AI-generated format: ["Option 1", "Option 2", ...]
+                                    text = opt.strip()
+                                    label = chr(65 + idx) if idx < 26 else str(idx + 1)  # A, B, C, D, ...
+                                    label_to_text[label] = text.upper()
+                                    text_to_label[text.upper()] = label
+                                    index_to_text[idx] = text.upper()
+                                    index_to_label[idx] = label
+                        
+                        logger.info(f"[MCQ_EVAL] label_to_text mapping: {label_to_text}")
+                        logger.info(f"[MCQ_EVAL] text_to_label mapping: {text_to_label}")
+                        
+                        # Normalize selected answers - try multiple formats
+                        selected_answers_normalized = []
+                        for ans in selected_answers:
+                            ans_upper = ans.upper()
+                            # Check if it's already a label
+                            if ans_upper in label_to_text:
+                                selected_answers_normalized.append(ans_upper)
+                            # Check if it's an index (convert to int and check)
+                            elif ans.isdigit() and int(ans) in index_to_label:
+                                selected_answers_normalized.append(index_to_label[int(ans)])
+                            # Check if it's option text (try to find label)
+                            elif ans_upper in text_to_label:
+                                selected_answers_normalized.append(text_to_label[ans_upper])
+                            # Otherwise, keep as-is (might match correct answer directly)
+                            else:
+                                selected_answers_normalized.append(ans_upper)
+                        
+                        # Normalize correct answers - try multiple formats
+                        correct_answers_normalized = []
+                        for ans in correct_answers_raw:
+                            ans_str = str(ans).strip()
+                            ans_upper = ans_str.upper()
+                            # Check if it's already a label
+                            if ans_upper in label_to_text:
+                                correct_answers_normalized.append(ans_upper)
+                            # Check if it's an index
+                            elif ans_str.isdigit() and int(ans_str) in index_to_label:
+                                correct_answers_normalized.append(index_to_label[int(ans_str)])
+                            # Check if it's option text
+                            elif ans_upper in text_to_label:
+                                correct_answers_normalized.append(text_to_label[ans_upper])
+                            # Otherwise, keep as-is (might be direct text match)
+                            else:
+                                correct_answers_normalized.append(ans_upper)
+                        
+                        logger.info(f"[MCQ_EVAL] Normalized selected_answers: {selected_answers_normalized}")
+                        logger.info(f"[MCQ_EVAL] Normalized correct_answers: {correct_answers_normalized}")
+                        
+                        # Get answer type (single, multiple_all, multiple_any)
+                        answer_type = question.get("answerType") or question.get("answer_type") or "single"
+                        logger.info(f"[MCQ_EVAL] Answer type: {answer_type}")
                         
                         # Check if correct (handle single/multiple choice)
-                        answer_type = question.get("answerType", "single")
+                        is_correct = False
                         if answer_type == "single":
-                            is_correct = len(selected_answers) == 1 and selected_answers[0] in correct_answers
+                            # For single choice, must have exactly one answer that matches
+                            if len(selected_answers_normalized) == 1 and len(correct_answers_normalized) > 0:
+                                is_correct = selected_answers_normalized[0] in correct_answers_normalized
+                                logger.info(f"[MCQ_EVAL] Single choice: selected={selected_answers_normalized[0]}, correct={correct_answers_normalized}, match={is_correct}")
+                            else:
+                                logger.warning(f"[MCQ_EVAL] Single choice: invalid selection count - selected={len(selected_answers_normalized)}, correct={len(correct_answers_normalized)}")
                         elif answer_type == "multiple_all":
-                            is_correct = set(selected_answers) == set(correct_answers)
+                            # For multiple_all, must match all correct answers exactly
+                            is_correct = (len(selected_answers_normalized) == len(correct_answers_normalized) and 
+                                        set(selected_answers_normalized) == set(correct_answers_normalized))
+                            logger.info(f"[MCQ_EVAL] Multiple all: selected_set={set(selected_answers_normalized)}, correct_set={set(correct_answers_normalized)}, match={is_correct}")
                         else:  # multiple_any
-                            is_correct = any(ans in correct_answers for ans in selected_answers)
+                            # For multiple_any, at least one answer must match
+                            intersection = set(selected_answers_normalized).intersection(set(correct_answers_normalized))
+                            is_correct = len(intersection) > 0
+                            logger.info(f"[MCQ_EVAL] Multiple any: intersection={intersection}, match={is_correct}")
                         
                         score = max_marks if is_correct else 0.0
+                        logger.info(f"[MCQ_EVAL] Final result: is_correct={is_correct}, score={score}/{max_marks}")
+                        
                         eval_kwargs["is_correct"] = is_correct
                         eval_kwargs["score"] = score
                     
@@ -850,15 +1031,34 @@ async def submit_answers(
                         if code_outputs:
                             eval_kwargs["code_outputs"] = code_outputs
                     
-                    # Prepare candidate answer format
-                    candidate_answer = {
-                        "textAnswer": answer_data.get("textAnswer") or answer_data.get("answer", ""),
-                        "selectedAnswers": answer_data.get("selectedAnswers", []),
-                        "source_code": answer_data.get("source_code") or answer_data.get("code", ""),
-                        "sql_query": answer_data.get("sql_query") or answer_data.get("query", ""),
-                        "code": answer_data.get("source_code") or answer_data.get("code", ""),
-                        "answer": answer_data.get("textAnswer") or answer_data.get("answer", ""),
-                    }
+                    # Prepare candidate answer format - extract based on question type
+                    candidate_answer = {}
+                    
+                    if question_type == "MCQ":
+                        candidate_answer["selectedAnswers"] = answer_data.get("selectedAnswers", [])
+                        candidate_answer["textAnswer"] = answer_data.get("textAnswer") or answer_data.get("answer", "")
+                    elif question_type in ["SUBJECTIVE", "PSEUDOCODE", "PSEUDO CODE"]:
+                        candidate_answer["textAnswer"] = answer_data.get("textAnswer") or answer_data.get("answer", "")
+                        candidate_answer["answer"] = answer_data.get("textAnswer") or answer_data.get("answer", "")
+                    elif question_type == "CODING":
+                        candidate_answer["source_code"] = answer_data.get("source_code") or answer_data.get("code") or answer_data.get("answer", "")
+                        candidate_answer["code"] = candidate_answer["source_code"]
+                        candidate_answer["answer"] = candidate_answer["source_code"]
+                    elif question_type == "SQL":
+                        candidate_answer["sql_query"] = answer_data.get("sql_query") or answer_data.get("query") or answer_data.get("answer", "")
+                        candidate_answer["query"] = candidate_answer["sql_query"]
+                        candidate_answer["answer"] = candidate_answer["sql_query"]
+                    elif question_type == "AIML":
+                        candidate_answer["source_code"] = answer_data.get("source_code") or answer_data.get("code") or answer_data.get("answer", "")
+                        candidate_answer["code"] = candidate_answer["source_code"]
+                        candidate_answer["answer"] = candidate_answer["source_code"]
+                    else:
+                        # Fallback for unknown types
+                        candidate_answer["answer"] = answer_data.get("answer", "")
+                    
+                    # Also include common fields for compatibility
+                    if "answer" not in candidate_answer:
+                        candidate_answer["answer"] = answer_data.get("answer", "")
                     
                     # Evaluate the answer
                     evaluation = await evaluate_question_by_type(
@@ -872,9 +1072,21 @@ async def submit_answers(
                     )
                     
                     evaluations[question_id] = evaluation
-                    logger.info(f"  ✓ Evaluation completed successfully")
-                    logger.info(f"  Score: {evaluation.get('score', 0)}/{max_marks}")
-                    logger.info(f"  Percentage: {evaluation.get('percentage', 0)}%")
+                    logger.info("=" * 80)
+                    logger.info(f"[EVALUATION_RESULT] Evaluation completed successfully for question {question_id}")
+                    logger.info(f"[EVALUATION_RESULT] Question type: {question_type}")
+                    logger.info(f"[EVALUATION_RESULT] Evaluation keys: {list(evaluation.keys())}")
+                    eval_score = evaluation.get('score', 0)
+                    eval_max_marks = evaluation.get('max_marks', max_marks)
+                    eval_percentage = evaluation.get('percentage', 0)
+                    logger.info(f"[EVALUATION_RESULT] Score: {eval_score}")
+                    logger.info(f"[EVALUATION_RESULT] Max marks (from eval): {eval_max_marks}")
+                    logger.info(f"[EVALUATION_RESULT] Max marks (passed to eval): {max_marks}")
+                    logger.info(f"[EVALUATION_RESULT] Percentage: {eval_percentage}%")
+                    logger.info(f"[EVALUATION_RESULT] Score display: {eval_score}/{eval_max_marks}")
+                    logger.info(f"[EVALUATION_RESULT] Has feedback: {bool(evaluation.get('feedback'))}")
+                    logger.info(f"[EVALUATION_RESULT] Has criteria_scores: {bool(evaluation.get('criteria_scores'))}")
+                    logger.info("=" * 80)
                     
                 except Exception as eval_error:
                     logger.error("=" * 80)
@@ -887,6 +1099,18 @@ async def submit_answers(
                         "question_id": question_id,
                         "error": str(eval_error)
                     })
+                    
+                    # Create error evaluation instead of skipping
+                    from ..assessments.services.unified_ai_evaluation import _create_error_evaluation
+                    error_evaluation = _create_error_evaluation(
+                        question_id=question_id,
+                        question_type=question_type,
+                        max_marks=max_marks,
+                        section=section,
+                        error_message=str(eval_error)
+                    )
+                    evaluations[question_id] = error_evaluation
+                    logger.info(f"  ✓ Error evaluation created (score: 0/{max_marks})")
                     # Continue with other evaluations
             
             # Store evaluations
