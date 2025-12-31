@@ -1615,7 +1615,7 @@ export default function CandidateAssessmentPage() {
       questions.forEach((question, globalIndex) => {
         const questionId = question._id || question.id || `question-${globalIndex}`;
         const answer = answers.get(questionId) || codeAnswers.get(questionId) || "";
-        const questionType = (question.type || question.questionType || "").toUpperCase();
+        const questionType = (question.type || question.question_type || "").toUpperCase();
         
         // Build answer object based on question type
         const answerObj: any = {
