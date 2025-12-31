@@ -3726,7 +3726,37 @@ async def send_candidate_feedback(
     """
     
     subject = f"Your Test Feedback - {test_title}"
-    await email_service.send_email(candidate_email, subject, html_content)
+    try:
+        await email_service.send_email(candidate_email, subject, html_content)
+    except RuntimeError as e:
+        error_msg = str(e)
+        # Check if it's a SendGrid authentication/authorization error
+        if "403" in error_msg or "Forbidden" in error_msg:
+            logger.error(f"SendGrid authentication error when sending feedback email: {error_msg}")
+            raise HTTPException(
+                status_code=502,
+                detail="Email service authentication failed. Please check SendGrid API key configuration."
+            )
+        # Check for other SendGrid errors
+        elif "HTTP error" in error_msg or "SendGrid" in error_msg:
+            logger.error(f"SendGrid error when sending feedback email: {error_msg}")
+            raise HTTPException(
+                status_code=502,
+                detail="Failed to send email via email service. Please try again later or contact support."
+            )
+        # Generic email error
+        else:
+            logger.error(f"Error sending feedback email: {error_msg}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to send feedback email: {error_msg}"
+            )
+    except Exception as e:
+        logger.error(f"Unexpected error sending feedback email: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while sending the feedback email. Please try again later."
+        )
     
     return {"message": "Feedback email sent successfully", "email": candidate_email}
 

@@ -214,13 +214,20 @@ export default function CandidateRequirementsPage() {
           const candidateReqs = schedule?.candidateRequirements || {};
           console.log("Candidate requirements from schedule:", candidateReqs);
 
+          // More robust normalization - handle both boolean and string "true"/"false"
+          const normalizeBool = (val: any): boolean => {
+            if (val === true || val === "true" || val === 1 || val === "1") return true;
+            if (val === false || val === "false" || val === 0 || val === "0" || val === null || val === undefined) return false;
+            return Boolean(val);
+          };
+
           const normalizedRequirements = {
             requireEmail: false, // Email is always collected in entry page
             requireName: false, // Name is always collected in entry page
-            requirePhone: candidateReqs?.requirePhone === true,
-            requireResume: false, // Not supported for AIML yet
-            requireLinkedIn: candidateReqs?.requireLinkedIn === true,
-            requireGithub: candidateReqs?.requireGithub === true,
+            requirePhone: normalizeBool(candidateReqs?.requirePhone),
+            requireResume: normalizeBool(candidateReqs?.requireResume),
+            requireLinkedIn: normalizeBool(candidateReqs?.requireLinkedIn),
+            requireGithub: normalizeBool(candidateReqs?.requireGithub),
           };
 
           // Handle custom fields
@@ -233,6 +240,7 @@ export default function CandidateRequirementsPage() {
 
           const hasAnyRequirement =
             normalizedRequirements.requirePhone ||
+            normalizedRequirements.requireResume ||
             normalizedRequirements.requireLinkedIn ||
             normalizedRequirements.requireGithub ||
             (customFieldsData.length > 0);

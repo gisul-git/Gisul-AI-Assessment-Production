@@ -10,6 +10,7 @@ import dsaApi from '../../../../lib/dsa/api'
 import axios from 'axios'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video, Loader2 } from 'lucide-react'
 import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
+import { LiveProctoringDashboard } from '../../../../components/proctor'
 
 interface AIFeedback {
   overall_score?: number
@@ -135,6 +136,7 @@ export default function AnalyticsPage() {
   })
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
+  const [sendingFeedback, setSendingFeedback] = useState<string | null>(null)
   const [showLiveProctoring, setShowLiveProctoring] = useState(false)
   const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   const [referencePhoto, setReferencePhoto] = useState<string | null>(null)

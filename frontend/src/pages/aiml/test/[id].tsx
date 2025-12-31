@@ -227,21 +227,6 @@ export default function AIMLTestVerifyPage() {
               )}
             </button>
           </form>
-          
-          {/* Info note */}
-          <div className="mt-6 p-4 bg-emerald-50 rounded-xl">
-            <h4 className="text-sm font-medium text-emerald-800 mb-2 flex items-center gap-1">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              About this assessment
-            </h4>
-            <ul className="text-sm text-emerald-700 space-y-1">
-              <li>• Uses a Jupyter-like notebook interface</li>
-              <li>• Execute Python code with NumPy, Pandas, Matplotlib</li>
-              <li>• Auto-saves your progress</li>
-            </ul>
-          </div>
         </div>
       </div>
 

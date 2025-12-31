@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Body, Depends, status, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, Body, Depends, status, UploadFile, File, BackgroundTasks
 from typing import List, Dict, Any, Optional
 from bson import ObjectId
 from datetime import datetime, timedelta
@@ -1268,26 +1268,122 @@ async def submit_answer(
     }
 
 
+async def process_ai_evaluation_background(
+    test_id: str,
+    user_id: str,
+    test_submission_id: str,
+    existing_submissions: Dict[str, Dict[str, Any]],
+    questions: Dict[str, Dict[str, Any]]
+):
+    """
+    Background task to evaluate all submissions with AI and update the test submission.
+    This runs asynchronously after the test submission is marked as completed.
+    """
+    from ..services.ai_feedback import evaluate_aiml_submission
+    import asyncio
+    
+    db = get_database()
+    try:
+        logger.info(f"Starting background AI evaluation for test {test_id}, user {user_id}")
+        
+        evaluations = []
+        total_score = 0
+        max_possible_score = len(questions) * 100 if questions else 100
+        
+        for question_id, question in questions.items():
+            submission = existing_submissions.get(question_id, {})
+            
+            # Run AI evaluation (use thread pool to avoid blocking)
+            try:
+                # Use a helper function to properly capture variables for the executor
+                def _evaluate_submission(sub, q):
+                    return evaluate_aiml_submission(sub, q)
+                
+                loop = asyncio.get_event_loop()
+                evaluation = await loop.run_in_executor(
+                    None,  # Use default ThreadPoolExecutor
+                    _evaluate_submission,
+                    submission,
+                    question
+                )
+            except Exception as e:
+                logger.error(f"AI evaluation failed for question {question_id}: {e}")
+                evaluation = {
+                    "overall_score": 0,
+                    "feedback_summary": "Evaluation failed. Please contact support.",
+                    "one_liner": "Evaluation error",
+                    "ai_generated": False,
+                    "error": str(e)
+                }
+            
+            question_score = evaluation.get("overall_score", 0)
+            total_score += question_score
+            
+            # Store evaluation with submission
+            submission_data = {
+                "question_id": question_id,
+                "source_code": submission.get("source_code", ""),
+                "outputs": submission.get("outputs", []),
+                "submitted_at": submission.get("submitted_at", datetime.utcnow()),
+                "status": "evaluated",
+                "ai_feedback": evaluation,
+                "score": question_score
+            }
+            
+            evaluations.append({
+                "question_id": question_id,
+                "question_title": question.get("title", "Unknown"),
+                "score": question_score,
+                "feedback": evaluation
+            })
+            
+            # Update in existing_submissions
+            existing_submissions[question_id] = submission_data
+        
+        # Calculate final score out of 100
+        final_score = round((total_score / max_possible_score) * 100) if max_possible_score > 0 else 0
+        
+        # Update test submission with evaluations
+        await db.test_submissions.update_one(
+            {"_id": ObjectId(test_submission_id)},
+            {"$set": {
+                "submissions": list(existing_submissions.values()),
+                "score": final_score,
+                "evaluations": evaluations,
+                "ai_feedback_status": "completed"
+            }}
+        )
+        
+        logger.info(f"Background AI evaluation completed for test {test_id}, user {user_id}. Score: {final_score}/100")
+    except Exception as e:
+        logger.error(f"Error in background AI evaluation for test {test_id}, user {user_id}: {e}", exc_info=True)
+        # Update status to indicate error
+        try:
+            await db.test_submissions.update_one(
+                {"_id": ObjectId(test_submission_id)},
+                {"$set": {"ai_feedback_status": "error", "ai_feedback_error": str(e)}}
+            )
+        except Exception as update_error:
+            logger.error(f"Failed to update error status: {update_error}")
+
+
 @router.post("/{test_id}/submit")
 async def submit_test(
     test_id: str,
     user_id: str = Body(..., description="User ID from link token"),
     answers: List[Dict[str, Any]] = Body(default=[], description="Final answers with question_id and source_code"),
-    candidateRequirements: Optional[Dict[str, Any]] = Body(default=None, description="Candidate requirements details (phone, linkedIn, github, custom fields, etc.)")
+    candidateRequirements: Optional[Dict[str, Any]] = Body(default=None, description="Candidate requirements details (phone, linkedIn, github, custom fields, etc.)"),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
-    Final test submission - evaluates all code with AI and generates scores/feedback.
+    Final test submission - marks test as completed immediately and evaluates code with AI in background.
     
     This endpoint:
     1. Collects all submitted answers
-    2. Sends each answer to AI for evaluation
-    3. Calculates total score (out of 100)
-    4. Stores AI feedback for each question
-    5. Marks the test as completed
+    2. Marks the test as completed immediately (fast response)
+    3. Schedules AI evaluation in background task
+    4. Returns immediately with submission confirmation
     """
-    from ..services.ai_feedback import evaluate_aiml_submission
-    import asyncio
-    
     db = get_database()
     if not ObjectId.is_valid(test_id):
         raise HTTPException(status_code=400, detail="Invalid test ID")
@@ -1400,62 +1496,14 @@ async def submit_test(
             if q:
                 questions[str(qid)] = q
     
-    # Evaluate each submission with AI
-    evaluations = []
-    total_score = 0
-    max_possible_score = len(questions) * 100 if questions else 100
-    
-    for question_id, question in questions.items():
-        submission = existing_submissions.get(question_id, {})
-        
-        # Run AI evaluation
-        try:
-            evaluation = evaluate_aiml_submission(submission, question)
-        except Exception as e:
-            logger.error(f"AI evaluation failed for question {question_id}: {e}")
-            evaluation = {
-                "overall_score": 0,
-                "feedback_summary": "Evaluation failed. Please contact support.",
-                "one_liner": "Evaluation error",
-                "ai_generated": False,
-                "error": str(e)
-            }
-        
-        question_score = evaluation.get("overall_score", 0)
-        total_score += question_score
-        
-        # Store evaluation with submission
-        submission_data = {
-            "question_id": question_id,
-            "source_code": submission.get("source_code", ""),
-            "outputs": submission.get("outputs", []),
-            "submitted_at": submission.get("submitted_at", datetime.utcnow()),
-            "status": "evaluated",
-            "ai_feedback": evaluation,
-            "score": question_score
-        }
-        
-        evaluations.append({
-            "question_id": question_id,
-            "question_title": question.get("title", "Unknown"),
-            "score": question_score,
-            "feedback": evaluation
-        })
-        
-        # Update in existing_submissions
-        existing_submissions[question_id] = submission_data
-    
-    # Calculate final score out of 100
-    final_score = round((total_score / max_possible_score) * 100) if max_possible_score > 0 else 0
-    
-    # Update test submission
+    # Mark test as completed immediately (fast response)
+    # AI evaluation will happen in background
     update_data = {
         "submissions": list(existing_submissions.values()),
-        "score": final_score,
+        "score": 0,  # Will be updated by background task
         "is_completed": True,
         "submitted_at": datetime.utcnow(),
-        "evaluations": evaluations,
-        "ai_feedback_status": "completed"
+        "ai_feedback_status": "evaluating"  # Status will be updated to "completed" by background task
     }
     
     # Store candidate requirements if provided
@@ -1467,16 +1515,25 @@ async def submit_test(
         {"$set": update_data}
     )
     
-    logger.info(f"AIML test {test_id} submitted by user {user_id}. Score: {final_score}/100")
+    # Schedule AI evaluation in background
+    background_tasks.add_task(
+        process_ai_evaluation_background,
+        test_id=test_id,
+        user_id=user_id,
+        test_submission_id=str(test_submission["_id"]),
+        existing_submissions=existing_submissions,
+        questions=questions
+    )
+    
+    logger.info(f"AIML test {test_id} submitted by user {user_id}. AI evaluation scheduled in background.")
     
     return {
-        "message": "Test submitted successfully",
+        "message": "Test submitted successfully. AI evaluation is in progress.",
         "test_id": test_id,
         "user_id": user_id,
-        "score": final_score,
         "total_questions": len(questions),
-        "evaluations": evaluations,
         "is_completed": True,
+        "ai_feedback_status": "evaluating",
         "submitted_at": datetime.utcnow().isoformat()
     }
 

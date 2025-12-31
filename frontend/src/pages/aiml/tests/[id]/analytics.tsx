@@ -754,7 +754,7 @@ export default function AnalyticsPage() {
                         >
                           Resend Invitation
                         </button>
-                        {isTestEnded && candidate.status === "completed" && (
+                        {isTestEnded && (candidate.status === "completed" || candidate.has_submitted) && (
                           <button
                             type="button"
                             onClick={() => handleSendFeedback(candidate.user_id)}

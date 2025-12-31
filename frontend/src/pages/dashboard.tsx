@@ -316,12 +316,23 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                 status = 'active'; // Use 'active' instead of 'published' to match AI assessment pattern
               }
               
+              // Extract schedule information (similar to DSA)
+              const schedule = test.schedule || {};
+              const startTime = schedule.startTime || test.start_time;
+              const endTime = schedule.endTime || test.end_time;
+              const hasSchedule = !!(startTime && endTime);
+              
               return {
                 id: test.id || test._id,
                 title: test.title || 'Untitled AIML Test',
                 status: status as 'draft' | 'active' | 'paused',
-                hasSchedule: false, // AIML tests don't have schedule yet
-                scheduleStatus: null,
+                hasSchedule: hasSchedule,
+                scheduleStatus: hasSchedule ? {
+                  startTime: startTime,
+                  endTime: endTime,
+                  duration: schedule.duration || test.duration_minutes || 0,
+                  isActive: test.is_published || false
+                } : null,
                 createdAt: test.created_at || null,
                 updatedAt: test.updated_at || null,
                 type: 'aiml' as const
