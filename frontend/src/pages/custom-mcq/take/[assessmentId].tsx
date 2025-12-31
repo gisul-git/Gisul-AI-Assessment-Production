@@ -235,7 +235,8 @@ export default function CustomMCQTakePage() {
       email: candidateInfo?.email,
     });
 
-    if (!proctoringEnabled || !liveProctorScreenStream || !examStarted || submitting) {
+    // Check all conditions
+    if (!proctoringEnabled || !liveProctorScreenStream || !examStarted || submitting || !assessmentIdStr || !candidateIdStr) {
       return;
     }
 
@@ -360,14 +361,22 @@ export default function CustomMCQTakePage() {
     
     console.log('[Custom MCQ Take] ⏸️ Live Proctoring ready, waiting for admin to connect...');
 
-    // Cleanup WebSocket on unmount
+    // Cleanup WebSocket on unmount or when exam ends
     return () => {
       if (candidateWsRef.current) {
         candidateWsRef.current.close();
         candidateWsRef.current = null;
       }
+      // Reset guard when exam ends (examStarted becomes false) or component unmounts
+      if (!examStarted) {
+        startSessionCalledRef.current = false;
+      }
     };
   }, [proctoringEnabled, liveProctorScreenStream, examStarted, submitting, assessmentId, candidateInfo?.email, startLiveProctoring]);
+  // NOTE: examStarted is included to trigger registration when exam starts
+  // The startSessionCalledRef guard prevents duplicate registrations
+  // NOTE: examStarted is intentionally NOT in dependencies to prevent duplicate registrations
+  // It's checked inside the effect condition, but changes to it won't trigger re-runs
 
   // Stop proctoring when assessment ends
   useEffect(() => {

@@ -5,8 +5,7 @@ import { requireAuth } from '../../../../lib/auth'
 import Link from 'next/link'
 import aimlApi from '../../../../lib/aiml/api'
 import axios from 'axios'
-import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Loader2 } from 'lucide-react'
-import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
+import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video, Loader2 } from 'lucide-react'
 import { useSession } from 'next-auth/react'
 import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
 
@@ -88,8 +87,6 @@ export default function AnalyticsPage() {
   const [eventTypeLabels, setEventTypeLabels] = useState<Record<string, string>>({})
   const [loadingProctorLogs, setLoadingProctorLogs] = useState(false)
   const [showProctorLogs, setShowProctorLogs] = useState(false)
-  const [showLiveProctoring, setShowLiveProctoring] = useState(false)
-  const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
   const [newCandidateName, setNewCandidateName] = useState("")
   const [newCandidateEmail, setNewCandidateEmail] = useState("")
@@ -109,12 +106,21 @@ export default function AnalyticsPage() {
   const [referencePhoto, setReferencePhoto] = useState<string | null>(null)
 
   const fetchReferencePhoto = async (candidateEmail: string) => {
+    console.log('[AIML Analytics] 🔍 fetchReferencePhoto called:', { testId, candidateEmail })
+    
     if (!testId || typeof testId !== 'string' || !candidateEmail) {
+      console.warn('[AIML Analytics] ⚠️ Missing required params:', { testId, candidateEmail })
       setReferencePhoto(null)
       return
     }
 
     try {
+      console.log('[AIML Analytics] 📡 Fetching reference photo from API...', {
+        assessmentId: testId,
+        candidateEmail,
+        endpoint: '/api/v1/candidate/get-reference-photo'
+      })
+      
       // For DSA/AIML tests, identity verification uses testId as assessmentId
       const response = await axios.get(`/api/v1/candidate/get-reference-photo`, {
         params: {
@@ -123,13 +129,37 @@ export default function AnalyticsPage() {
         },
       })
 
+      console.log('[AIML Analytics] 📥 API Response:', {
+        success: response.data?.success,
+        hasReferenceImage: !!response.data?.data?.referenceImage,
+        dataKeys: response.data?.data ? Object.keys(response.data.data) : [],
+        message: response.data?.message,
+        fullResponse: response.data
+      })
+      
+      // Log the assessmentId mismatch if photo not found
+      if (!response.data?.data?.referenceImage && response.data?.message === 'No reference photo found') {
+        console.warn('[AIML Analytics] ⚠️ Reference photo not found. Check if assessmentId matches:', {
+          testIdUsed: testId,
+          candidateEmail,
+          note: 'Photo might have been saved with a different assessmentId. Check candidate side logs for the actual assessmentId used when saving.'
+        })
+      }
+
       if (response.data?.success && response.data?.data?.referenceImage) {
+        console.log('[AIML Analytics] ✅ Reference photo fetched successfully')
         setReferencePhoto(response.data.data.referenceImage)
       } else {
+        console.warn('[AIML Analytics] ⚠️ No reference image in response:', response.data)
         setReferencePhoto(null)
       }
-    } catch (error) {
-      // Silently fail - reference photo might not exist
+    } catch (error: any) {
+      console.error('[AIML Analytics] ❌ Error fetching reference photo:', {
+        error: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        fullError: error
+      })
       setReferencePhoto(null)
     }
   }
@@ -226,8 +256,16 @@ export default function AnalyticsPage() {
           fetchAnalytics(candidateUserId)
           // Try to fetch reference photo if candidate email is available
           const candidate = candidatesData.find((c: any) => c.user_id === candidateUserId)
+          console.log('[AIML Analytics] 🔍 Initial candidate load for reference photo:', {
+            candidateUserId,
+            candidateFound: !!candidate,
+            candidateEmail: candidate?.email
+          })
           if (candidate?.email) {
+            console.log('[AIML Analytics] 📞 Scheduling fetchReferencePhoto with email:', candidate.email)
             setTimeout(() => fetchReferencePhoto(candidate.email), 100)
+          } else {
+            console.warn('[AIML Analytics] ⚠️ Candidate email not found in initial load')
           }
         }
       } catch (error) {
@@ -246,8 +284,17 @@ export default function AnalyticsPage() {
     fetchAnalytics(userId)
     // Try to fetch reference photo if candidate email is available
     const candidate = candidates.find(c => c.user_id === userId)
+    console.log('[AIML Analytics] 👤 Candidate selected for reference photo:', {
+      userId,
+      candidateFound: !!candidate,
+      candidateEmail: candidate?.email,
+      allCandidates: candidates.map(c => ({ user_id: c.user_id, email: c.email }))
+    })
     if (candidate?.email) {
+      console.log('[AIML Analytics] 📞 Calling fetchReferencePhoto with email:', candidate.email)
       fetchReferencePhoto(candidate.email)
+    } else {
+      console.warn('[AIML Analytics] ⚠️ Candidate email not found, cannot fetch reference photo')
     }
     // Scroll to top of analytics content when candidate is selected
     setTimeout(() => {
@@ -804,9 +851,37 @@ export default function AnalyticsPage() {
                   padding: "1.5rem",
                   backgroundColor: "#ffffff",
                 }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
-                    Overall Test Performance
-                  </h2>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, margin: 0 }}>
+                      Overall Test Performance
+                    </h2>
+                    <Link
+                      href={`/aiml/tests/${testId}/live-dashboard`}
+                      className="btn-primary"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        backgroundColor: "#3b82f6",
+                        color: "#ffffff",
+                        textDecoration: "none",
+                        borderRadius: "0.5rem",
+                        fontWeight: 600,
+                        transition: "background-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#2563eb";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#3b82f6";
+                      }}
+                    >
+                      <Video className="h-4 w-4" />
+                      Live Proctoring Dashboard
+                    </Link>
+                  </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Candidates</div>
@@ -940,55 +1015,6 @@ export default function AnalyticsPage() {
                   </div>
                 </div>
 
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
-                </div>
 
                 {/* Proctoring Logs Section */}
                 <div style={{
@@ -1623,15 +1649,6 @@ export default function AnalyticsPage() {
         </div>
       )}
 
-      {/* Live Proctoring Dashboard */}
-      {showLiveProctoring && testId && typeof testId === 'string' && session?.user && (
-        <LiveProctoringDashboard
-          isOpen={showLiveProctoring}
-          onClose={() => setShowLiveProctoring(false)}
-          assessmentId={testId}
-          adminId={session.user.email || session.user.id || 'admin'}
-        />
-      )}
       <style jsx>{`
         @keyframes spin {
           from {

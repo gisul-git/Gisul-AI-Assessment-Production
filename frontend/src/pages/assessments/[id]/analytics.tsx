@@ -8,7 +8,6 @@ import { requireAuth } from '../../../lib/auth'
 import Link from 'next/link'
 import axios from 'axios'
 import { ArrowLeft, AlertTriangle, Clock, Video, Eye, Loader2 } from 'lucide-react'
-import LiveProctoringDashboard from '../../../components/proctor/LiveProctoringDashboard'
 import ProctorLogsReview from '../../../components/admin/ProctorLogsReview'
 
 interface AnswerLog {
@@ -69,8 +68,6 @@ export default function AnalyticsPage() {
   const [eventTypeLabels, setEventTypeLabels] = useState<Record<string, string>>({})
   const [loadingProctorLogs, setLoadingProctorLogs] = useState(false)
   const [showProctorLogs, setShowProctorLogs] = useState(false)
-  const [showLiveProctoring, setShowLiveProctoring] = useState(false)
-  const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
   const [newCandidateName, setNewCandidateName] = useState("")
   const [newCandidateEmail, setNewCandidateEmail] = useState("")
@@ -500,23 +497,6 @@ export default function AnalyticsPage() {
             Back to Dashboard
           </button>
           
-          {/* Live Proctoring Dashboard Button */}
-          <Link
-            href={`/assessments/${assessmentId}/live-dashboard`}
-            className="btn-primary"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              padding: "0.5rem 1rem",
-              fontSize: "0.875rem",
-              backgroundColor: "#8b5cf6",
-              textDecoration: "none",
-            }}
-          >
-            <Video className="h-4 w-4" />
-            Live Proctoring Dashboard
-          </Link>
         </div>
 
         <div style={{ marginBottom: "2rem" }}>
@@ -847,9 +827,37 @@ export default function AnalyticsPage() {
                   padding: "1.5rem",
                   backgroundColor: "#ffffff",
                 }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
-                    Overall Assessment Performance
-                  </h2>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, margin: 0 }}>
+                      Overall Assessment Performance
+                    </h2>
+                    <Link
+                      href={`/assessments/${assessmentId}/live-dashboard`}
+                      className="btn-primary"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        backgroundColor: "#3b82f6",
+                        color: "#ffffff",
+                        textDecoration: "none",
+                        borderRadius: "0.5rem",
+                        fontWeight: 600,
+                        transition: "background-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#2563eb";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#3b82f6";
+                      }}
+                    >
+                      <Video className="h-4 w-4" />
+                      Live Proctoring Dashboard
+                    </Link>
+                  </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Candidates</div>
@@ -920,57 +928,6 @@ export default function AnalyticsPage() {
                       </div>
                     </div>
                   </div>
-                </div>
-
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
                 </div>
 
                 {/* Candidate Performance Table */}
@@ -1308,57 +1265,6 @@ export default function AnalyticsPage() {
                   </div>
                 </div>
 
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
-                </div>
-
                 {/* Proctoring Logs Section */}
                 <div style={{
                   border: "1px solid #e2e8f0",
@@ -1679,15 +1585,6 @@ export default function AnalyticsPage() {
         </div>
       )}
 
-      {/* Live Proctoring Dashboard */}
-      {showLiveProctoring && assessmentId && typeof assessmentId === 'string' && session?.user && (
-        <LiveProctoringDashboard
-          isOpen={showLiveProctoring}
-          onClose={() => setShowLiveProctoring(false)}
-          assessmentId={assessmentId}
-          adminId={session.user.email || session.user.id || 'admin'}
-        />
-      )}
       <style jsx>{`
         @keyframes spin {
           from {

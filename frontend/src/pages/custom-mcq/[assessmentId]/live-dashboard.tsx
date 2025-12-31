@@ -41,7 +41,7 @@ export default function LiveProctoringDashboard({
   const [assessmentCandidates, setAssessmentCandidates] = useState<any[]>([]);
   const router = useRouter()
   const { data: session } = useSession()
-  const { id: routerAssessmentId } = router.query
+  const { assessmentId: routerAssessmentId } = router.query
   
   // Use prop assessmentId if provided, otherwise use router query
   const assessmentId = propAssessmentId || (typeof routerAssessmentId === 'string' ? routerAssessmentId : undefined)
@@ -175,10 +175,10 @@ export default function LiveProctoringDashboard({
       return;
     }
 
-    // Fetch assessment candidates for mapping
-    axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`)
+    // Fetch Custom MCQ assessment candidates for mapping
+    axios.get(`/api/custom-mcq/${assessmentId}`)
       .then((res) => {
-        const candidates = res.data?.data?.assessment?.candidates || [];
+        const candidates = res.data?.data?.candidates || [];
         setAssessmentCandidates(candidates);
       })
       .catch((err) => {
@@ -452,7 +452,7 @@ export default function LiveProctoringDashboard({
               </button>
             ) : (
               <Link
-                href={`/assessments/${assessmentId}/analytics`}
+                href={`/custom-mcq/${assessmentId}`}
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <ArrowLeft className="w-5 h-5" />
@@ -460,7 +460,7 @@ export default function LiveProctoringDashboard({
             )}
             <div>
               <h1 className="text-xl font-semibold text-gray-900">Live Proctoring Dashboard</h1>
-              <p className="text-sm text-gray-600">Assessment: {assessmentId}</p>
+              <p className="text-sm text-gray-600">Custom MCQ Assessment: {assessmentId}</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -608,3 +608,4 @@ function CandidateTile({ candidate, onExpand, onRefresh, videoRefs }: CandidateT
     </div>
   )
 }
+
