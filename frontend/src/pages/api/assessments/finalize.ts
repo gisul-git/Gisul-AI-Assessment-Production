@@ -14,6 +14,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(401).json({ message: "Unauthorized" });
   }
 
+  const payload = req.body;
+  
+  // Log what we're forwarding to backend
+  console.log("=".repeat(80));
+  console.log("[FRONTEND_API] finalize route - Received request body:");
+  console.log("[FRONTEND_API] assessmentId:", payload.assessmentId);
+  console.log("[FRONTEND_API] scoringRules:", payload.scoringRules);
+  console.log("[FRONTEND_API] passPercentage:", payload.passPercentage);
+  console.log("[FRONTEND_API] Full payload keys:", Object.keys(payload));
+  console.log("=".repeat(80));
+
   try {
     const token = (session as any)?.backendToken;
     const response = await fastApiClient.post("/api/v1/assessments/finalize-assessment", req.body, {
@@ -21,6 +32,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         Authorization: `Bearer ${token}`,
       },
     });
+    
+    console.log("[FRONTEND_API] Finalize response status:", response.status);
+    console.log("[FRONTEND_API] Finalize response success:", response.data?.success);
+    
     return res.status(response.status || 200).json(response.data);
   } catch (error: any) {
     console.error("Error in finalize-assessment API route:", error);

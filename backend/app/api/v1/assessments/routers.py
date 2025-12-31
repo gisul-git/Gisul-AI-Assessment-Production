@@ -1550,8 +1550,20 @@ async def finalize_assessment(
     SINGLE DRAFT LOGIC: Converts the existing draft, does NOT create new assessment.
     """
     try:
+        logger.info("=" * 80)
+        logger.info("[FINALIZE] Starting assessment finalization")
+        logger.info(f"[FINALIZE] Assessment ID: {payload.assessmentId}")
+        logger.info(f"[FINALIZE] Received scoringRules in payload: {payload.scoringRules}")
+        logger.info(f"[FINALIZE] Received passPercentage in payload: {payload.passPercentage}")
+        logger.info(f"[FINALIZE] Received enablePerSectionTimers: {payload.enablePerSectionTimers}")
+        logger.info(f"[FINALIZE] Received sectionTimers: {payload.sectionTimers}")
+        
         assessment = await _get_assessment(db, payload.assessmentId)
         _check_assessment_access(assessment, current_user)
+        
+        logger.info(f"[FINALIZE] Current assessment status: {assessment.get('status')}")
+        logger.info(f"[FINALIZE] Existing scoringRules in assessment: {assessment.get('scoringRules')}")
+        logger.info(f"[FINALIZE] Existing passPercentage in assessment: {assessment.get('passPercentage')}")
         
         # Ensure it's a draft before finalizing
         if assessment.get("status") not in {"draft", "ready"}:
@@ -1567,8 +1579,35 @@ async def finalize_assessment(
             assessment["questionTypeTimes"] = payload.questionTypeTimes
         if payload.enablePerSectionTimers is not None:
             assessment["enablePerSectionTimers"] = payload.enablePerSectionTimers
+        if payload.sectionTimers is not None:
+            assessment["sectionTimers"] = payload.sectionTimers
+        if payload.scoringRules is not None:
+            assessment["scoringRules"] = payload.scoringRules
+            logger.info("=" * 80)
+            logger.info(f"[FINALIZE] ✓ SAVING scoringRules from payload")
+            logger.info(f"[FINALIZE] ScoringRules value: {payload.scoringRules}")
+            logger.info(f"[FINALIZE] ScoringRules type: {type(payload.scoringRules)}")
+            logger.info(f"[FINALIZE] ScoringRules keys: {list(payload.scoringRules.keys()) if isinstance(payload.scoringRules, dict) else 'N/A'}")
+            logger.info(f"[FINALIZE] ScoringRules values: {payload.scoringRules}")
+            logger.info("=" * 80)
+        elif assessment.get("scoringRules"):
+            # Preserve existing scoringRules if not provided
+            logger.info("=" * 80)
+            logger.info(f"[FINALIZE] ⚠ No scoringRules in payload, preserving existing")
+            logger.info(f"[FINALIZE] Existing scoringRules: {assessment.get('scoringRules')}")
+            logger.info("=" * 80)
+        else:
+            logger.warning("=" * 80)
+            logger.warning(f"[FINALIZE] ❌ ERROR: No scoringRules provided and none exist in assessment!")
+            logger.warning(f"[FINALIZE] This will cause max_marks to default to 1.0 for all questions")
+            logger.warning("=" * 80)
         if payload.passPercentage is not None:
             assessment["passPercentage"] = payload.passPercentage
+        else:
+            # Preserve existing passPercentage if not provided
+            if "passPercentage" not in assessment:
+                assessment["passPercentage"] = 50  # Default to 50%
+                logger.info(f"[FINALIZE] Setting default passPercentage: 50%")
         
         assessment["finalizedAt"] = _now_utc()
         assessment["updatedAt"] = _now_utc()
@@ -1801,10 +1840,22 @@ async def update_assessment_draft(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """Update assessment draft data (preserves placeholder data). SINGLE DRAFT: Always updates the same draft."""
+    logger.info("=" * 80)
+    logger.info("[UPDATE_DRAFT] Starting draft update")
+    logger.info(f"[UPDATE_DRAFT] Assessment ID: {payload.assessmentId}")
+    logger.info(f"[UPDATE_DRAFT] Received scoringRules: {payload.scoringRules}")
+    logger.info(f"[UPDATE_DRAFT] Received passPercentage: {payload.passPercentage}")
+    logger.info(f"[UPDATE_DRAFT] Received enablePerSectionTimers: {payload.enablePerSectionTimers}")
+    logger.info(f"[UPDATE_DRAFT] Received sectionTimers: {payload.sectionTimers}")
+    
     # SINGLE DRAFT LOGIC: If assessmentId is provided, use it. Otherwise, find existing draft.
     if payload.assessmentId:
         assessment = await _get_assessment(db, payload.assessmentId)
         _check_assessment_access(assessment, current_user)
+        
+        logger.info(f"[UPDATE_DRAFT] Current assessment status: {assessment.get('status')}")
+        logger.info(f"[UPDATE_DRAFT] Existing scoringRules: {assessment.get('scoringRules')}")
+        
         # Ensure it's a draft
         if assessment.get("status") != "draft":
             raise HTTPException(status_code=400, detail="Assessment is not a draft")
@@ -1957,16 +2008,34 @@ async def update_assessment_draft(
     # Update questions if provided
     if payload.questions is not None:
         assessment["questions"] = payload.questions
-        if payload.questionTypeTimes is not None:
-            assessment["questionTypeTimes"] = payload.questionTypeTimes
-        if payload.enablePerSectionTimers is not None:
-            assessment["enablePerSectionTimers"] = payload.enablePerSectionTimers
-        if payload.sectionTimers is not None:
-            assessment["sectionTimers"] = payload.sectionTimers
-        if payload.scoringRules is not None:
-            assessment["scoringRules"] = payload.scoringRules
-        if payload.passPercentage is not None:
-            assessment["passPercentage"] = payload.passPercentage
+    
+    # Update questionTypeTimes independently (can be set without questions)
+    if payload.questionTypeTimes is not None:
+        assessment["questionTypeTimes"] = payload.questionTypeTimes
+    
+    # Update enablePerSectionTimers independently
+    if payload.enablePerSectionTimers is not None:
+        assessment["enablePerSectionTimers"] = payload.enablePerSectionTimers
+    
+    # Update sectionTimers independently
+    if payload.sectionTimers is not None:
+        assessment["sectionTimers"] = payload.sectionTimers
+    
+    # Update scoringRules independently (can be set from review station)
+    if payload.scoringRules is not None:
+        logger.info("=" * 80)
+        logger.info("[UPDATE_DRAFT] Updating scoringRules")
+        logger.info(f"[UPDATE_DRAFT] Received scoringRules: {payload.scoringRules}")
+        logger.info(f"[UPDATE_DRAFT] ScoringRules type: {type(payload.scoringRules)}")
+        logger.info(f"[UPDATE_DRAFT] ScoringRules keys: {list(payload.scoringRules.keys()) if isinstance(payload.scoringRules, dict) else 'N/A'}")
+        assessment["scoringRules"] = payload.scoringRules
+        logger.info(f"[UPDATE_DRAFT] ✓ ScoringRules updated in assessment object")
+        logger.info("=" * 80)
+    
+    # Update passPercentage independently (can be set from review station)
+    if payload.passPercentage is not None:
+        logger.info(f"[UPDATE_DRAFT] Updating passPercentage: {payload.passPercentage}")
+        assessment["passPercentage"] = payload.passPercentage
     
     # Update schedule if provided
     if payload.schedule is not None:
@@ -2001,7 +2070,28 @@ async def update_assessment_draft(
     assessment["status"] = "draft"
     assessment["updatedAt"] = _now_utc()
     
+    # Log what will be saved before saving
+    logger.info("=" * 80)
+    logger.info("[UPDATE_DRAFT] About to save draft assessment:")
+    logger.info(f"[UPDATE_DRAFT]   scoringRules: {assessment.get('scoringRules')}")
+    logger.info(f"[UPDATE_DRAFT]   passPercentage: {assessment.get('passPercentage')}")
+    logger.info(f"[UPDATE_DRAFT]   status: {assessment.get('status')}")
+    logger.info("=" * 80)
+    
     await _save_assessment(db, assessment)
+    
+    # Verify what was actually saved
+    saved_assessment = await _get_assessment(db, payload.assessmentId)
+    logger.info("=" * 80)
+    logger.info("[UPDATE_DRAFT] ✓ Draft saved. Verifying saved values:")
+    logger.info(f"[UPDATE_DRAFT]   Saved scoringRules: {saved_assessment.get('scoringRules')}")
+    logger.info(f"[UPDATE_DRAFT]   Saved passPercentage: {saved_assessment.get('passPercentage')}")
+    if saved_assessment.get('scoringRules') and isinstance(saved_assessment.get('scoringRules'), dict) and len(saved_assessment.get('scoringRules')) > 0:
+        logger.info(f"[UPDATE_DRAFT] ✓ SUCCESS: scoringRules were saved correctly!")
+    else:
+        logger.error(f"[UPDATE_DRAFT] ❌ FAILED: scoringRules were NOT saved correctly or are empty!")
+    logger.info("=" * 80)
+    
     return success_response("Draft updated successfully", serialize_document(assessment))
 
 
@@ -3094,77 +3184,386 @@ async def get_candidate_detailed_results(
         
         # Get submitted answers
         submitted_answers_data = candidate_response.get("answers", {}).get("submitted", [])
+        logger.info(f"[DETAILED_RESULTS] Total submitted answers: {len(submitted_answers_data)}")
         submitted_answers_map = {}  # questionIndex -> answer data
         submitted_answers_by_id = {}  # questionId -> answer data (fallback)
         
-        for answer_data in submitted_answers_data:
+        # Build maps: prioritize answers with both index and ID matching
+        for idx, answer_data in enumerate(submitted_answers_data):
             question_index = answer_data.get("questionIndex")
             question_id = answer_data.get("questionId")
+            logger.info(f"[DETAILED_RESULTS] Answer {idx}: questionIndex={question_index}, questionId={question_id}, keys={list(answer_data.keys())}")
             
+            # Store by index (preferred matching method)
             if question_index is not None:
-                submitted_answers_map[question_index] = answer_data
+                # If multiple answers have same index, keep the one that also has matching ID
+                if question_index not in submitted_answers_map:
+                    submitted_answers_map[question_index] = answer_data
+                else:
+                    # Prefer answer with matching questionId if available
+                    existing_id = submitted_answers_map[question_index].get("questionId")
+                    if question_id and str(question_id) == str(existing_id):
+                        submitted_answers_map[question_index] = answer_data
             
+            # Store by ID for fallback matching
             if question_id:
-                submitted_answers_by_id[question_id] = answer_data
+                question_id_str = str(question_id)
+                # If multiple answers have same ID, keep the one that also has matching index
+                if question_id_str not in submitted_answers_by_id:
+                    submitted_answers_by_id[question_id_str] = answer_data
+                else:
+                    # Prefer answer with matching questionIndex if available
+                    existing_index = submitted_answers_by_id[question_id_str].get("questionIndex")
+                    if question_index is not None and question_index == existing_index:
+                        submitted_answers_by_id[question_id_str] = answer_data
         
         # Build question results with evaluation and answer data
         question_results = []
+        logger.info(f"[DETAILED_RESULTS] Processing {len(all_questions)} questions")
         for q_idx, question in enumerate(all_questions):
             q_id = question.get("questionId") or question.get("_id")
+            q_id_str = str(q_id) if q_id else None
             evaluation = evaluations.get(q_id) if q_id else None
+            question_type = question.get("questionType", "")
             
-            # Try to get answer by index first, then by questionId
-            submitted_answer = submitted_answers_map.get(q_idx)
-            if not submitted_answer and q_id:
-                submitted_answer = submitted_answers_by_id.get(q_id)
+            logger.info(f"[DETAILED_RESULTS] Question {q_idx}: ID={q_id}, Type={question_type}, HasEvaluation={bool(evaluation)}")
+            
+            # Try to get answer by index first (most reliable matching method)
+            submitted_answer = None
+            answer_from_map = submitted_answers_map.get(q_idx)
+            
+            logger.info(f"[DETAILED_RESULTS] Question {q_idx}: answer_from_map exists={bool(answer_from_map)}")
+            
+            if answer_from_map:
+                # Index match found - validate consistency if both ID fields are present
+                answer_id = answer_from_map.get("questionId")
+                if answer_id and q_id_str:
+                    answer_id_str = str(answer_id)
+                    # If both question and answer have IDs, they should match
+                    # This is a validation check to catch data inconsistencies
+                    if answer_id_str == q_id_str:
+                        submitted_answer = answer_from_map
+                    # If IDs don't match but index does, still use it (index is primary)
+                    # but log/warn about inconsistency (for now, we'll use it to avoid losing answers)
+                    else:
+                        submitted_answer = answer_from_map
+                else:
+                    # Index matches, use it (most reliable match)
+                    submitted_answer = answer_from_map
+            
+            # Fallback: try by questionId only if index match failed
+            if not submitted_answer and q_id_str:
+                answer_from_id = submitted_answers_by_id.get(q_id_str)
+                logger.info(f"[DETAILED_RESULTS] Question {q_idx}: Trying ID match, answer_from_id exists={bool(answer_from_id)}")
+                if answer_from_id:
+                    # ID match found - validate that answer's index doesn't conflict
+                    answer_index = answer_from_id.get("questionIndex")
+                    if answer_index is not None:
+                        # If answer has index, check if it matches current question index
+                        if answer_index == q_idx:
+                            # Both ID and index match - perfect match
+                            submitted_answer = answer_from_id
+                            logger.info(f"[DETAILED_RESULTS] Question {q_idx}: Matched by ID with matching index")
+                        # If index doesn't match, this might be a wrong match
+                        # But since index match already failed, use ID match as fallback
+                        else:
+                            submitted_answer = answer_from_id
+                            logger.warning(f"[DETAILED_RESULTS] Question {q_idx}: Matched by ID but index mismatch (answer_index={answer_index}, q_idx={q_idx})")
+                    else:
+                        # ID matches but answer doesn't have index - use it
+                        submitted_answer = answer_from_id
+                        logger.info(f"[DETAILED_RESULTS] Question {q_idx}: Matched by ID (no index in answer)")
+            
+            logger.info(f"[DETAILED_RESULTS] Question {q_idx}: Final submitted_answer exists={bool(submitted_answer)}")
+            if submitted_answer:
+                logger.info(f"[DETAILED_RESULTS] Question {q_idx}: submitted_answer keys={list(submitted_answer.keys())}")
+                # Log the actual answer content (first 200 chars) to help debug
+                answer_content = submitted_answer.get("answer", "")
+                if answer_content:
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx}: submitted_answer['answer'] preview (first 200 chars): {str(answer_content)[:200]}")
             
             # Determine attempt status
             is_attempted = False
-            candidate_answer_text = ""
-            candidate_code = ""
-            candidate_query = ""
+            candidate_answer_text = None
+            candidate_code = None
+            candidate_query = None
+            candidate_selected_answers = None
             test_results = None
             test_result = None
+            aiml_outputs = None
+            has_valid_answer = False
+            
+            # Get question text for validation (to avoid showing question text as answer)
+            question_text = question.get("questionText") or question.get("question") or question.get("description") or ""
+            question_text_normalized = question_text.strip().lower() if question_text else ""
             
             if submitted_answer:
-                is_attempted = True
-                # Extract answer text (for subjective, pseudocode)
-                candidate_answer_text = (
-                    submitted_answer.get("textAnswer") or 
-                    submitted_answer.get("answer", "") or 
-                    ""
-                )
-                # Extract code (for coding, AIML)
-                candidate_code = (
-                    submitted_answer.get("source_code") or 
-                    submitted_answer.get("code", "") or 
-                    ""
-                )
-                # Extract SQL query
-                candidate_query = (
-                    submitted_answer.get("sql_query") or 
-                    submitted_answer.get("query", "") or 
-                    ""
-                )
-                # Extract test results
-                test_results = submitted_answer.get("testResults")
-                test_result = submitted_answer.get("testResult")
+                logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): Extracting answer from submitted_answer")
+                # Extract answer fields based on question type
+                question_type_upper = question_type.upper() if question_type else ""
                 
-                # If answer is just a string, use it as text answer
-                if not candidate_answer_text and not candidate_code and not candidate_query:
-                    answer_value = submitted_answer.get("answer", "")
-                    if isinstance(answer_value, str) and answer_value.strip():
-                        candidate_answer_text = answer_value
+                if question_type_upper in ["SUBJECTIVE", "PSEUDOCODE"]:
+                    # For Subjective and PseudoCode questions, extract text answer
+                    candidate_answer_text = (
+                        submitted_answer.get("textAnswer") or 
+                        submitted_answer.get("answer", "") or 
+                        ""
+                    )
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): textAnswer={bool(submitted_answer.get('textAnswer'))}, answer={bool(submitted_answer.get('answer'))}, extracted_length={len(candidate_answer_text) if candidate_answer_text else 0}")
+                    # If answer is just a string, use it as text answer
+                    if not candidate_answer_text or not candidate_answer_text.strip():
+                        answer_value = submitted_answer.get("answer", "")
+                        if isinstance(answer_value, str) and answer_value.strip():
+                            candidate_answer_text = answer_value
+                            logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): Used fallback answer field, length={len(candidate_answer_text)}")
+                    
+                    # Validate that answer is not empty and not the same as question text
+                    if candidate_answer_text and candidate_answer_text.strip():
+                        answer_text_normalized = candidate_answer_text.strip().lower()
+                        # Check if answer is not the same as question text (avoid showing question as answer)
+                        if answer_text_normalized != question_text_normalized:
+                            has_valid_answer = True
+                            logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): Valid text answer found (length={len(candidate_answer_text)})")
+                        else:
+                            logger.warning(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): Answer matches question text, filtering out")
+                    else:
+                        logger.warning(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): No valid text answer found")
+                
+                elif question_type_upper in ["CODING", "AIML"]:
+                    # For CODING and AIML questions, extract code (try multiple field names)
+                    candidate_code = (
+                        submitted_answer.get("source_code") or 
+                        submitted_answer.get("code") or
+                        submitted_answer.get("answer") or 
+                        ""
+                    )
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): source_code={bool(submitted_answer.get('source_code'))}, code={bool(submitted_answer.get('code'))}, answer={bool(submitted_answer.get('answer'))}, extracted_length={len(candidate_code) if candidate_code else 0}")
+                    # Log what's actually in the answer field
+                    answer_field_value = submitted_answer.get("answer", "")
+                    if answer_field_value:
+                        logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): answer field content preview: {str(answer_field_value)[:200]}")
+                    # Validate that we have valid code (not empty string)
+                    if candidate_code and isinstance(candidate_code, str) and candidate_code.strip():
+                        has_valid_answer = True
+                        logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): Valid code found (length={len(candidate_code)})")
+                    else:
+                        logger.warning(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): No valid code found, answer field was: {str(answer_field_value)[:100] if answer_field_value else 'empty'}")
+                    # Always extract test results for CODING questions (even if code is empty)
+                    if question_type_upper == "CODING":
+                        test_results = submitted_answer.get("testResults") or submitted_answer.get("test_results")
+                        logger.info(f"[DETAILED_RESULTS] Question {q_idx} (CODING): testResults exists={bool(test_results)}")
+                    # Extract AIML outputs for AIML questions
+                    if question_type_upper == "AIML":
+                        aiml_outputs = submitted_answer.get("outputs") or submitted_answer.get("codeOutputs") or submitted_answer.get("code_outputs")
+                        logger.info(f"[DETAILED_RESULTS] Question {q_idx} (AIML): outputs exists={bool(aiml_outputs)}")
+                
+                elif question_type_upper == "SQL":
+                    # For SQL questions, extract SQL query (try multiple field names)
+                    candidate_query = (
+                        submitted_answer.get("sql_query") or 
+                        submitted_answer.get("query") or
+                        submitted_answer.get("sqlQuery") or
+                        submitted_answer.get("answer") or
+                        ""
+                    )
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} (SQL): sql_query={bool(submitted_answer.get('sql_query'))}, query={bool(submitted_answer.get('query'))}, sqlQuery={bool(submitted_answer.get('sqlQuery'))}, answer={bool(submitted_answer.get('answer'))}, extracted_length={len(candidate_query) if candidate_query else 0}")
+                    # Validate that we have a valid SQL query (not empty string)
+                    if candidate_query and isinstance(candidate_query, str) and candidate_query.strip():
+                        has_valid_answer = True
+                        logger.info(f"[DETAILED_RESULTS] Question {q_idx} (SQL): Valid query found (length={len(candidate_query)})")
+                    else:
+                        logger.warning(f"[DETAILED_RESULTS] Question {q_idx} (SQL): No valid query found")
+                    # Always extract test result for SQL questions (even if query is empty)
+                    test_result = submitted_answer.get("testResult") or submitted_answer.get("test_result")
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} (SQL): testResult exists={bool(test_result)}")
+                
+                elif question_type_upper == "MCQ":
+                    # For MCQ questions, extract selected answers
+                    candidate_selected_answers = submitted_answer.get("selectedAnswers", [])
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} (MCQ): selectedAnswers={candidate_selected_answers}, answer={submitted_answer.get('answer')}")
+                    # If selectedAnswers is empty, check if answer field contains the selection
+                    if not candidate_selected_answers or not isinstance(candidate_selected_answers, list) or len(candidate_selected_answers) == 0:
+                        answer_value = submitted_answer.get("answer", "")
+                        if answer_value:
+                            logger.info(f"[DETAILED_RESULTS] Question {q_idx} (MCQ): selectedAnswers empty, checking answer field: {answer_value[:100] if isinstance(answer_value, str) else answer_value}")
+                            # Try to parse answer as list or string
+                            if isinstance(answer_value, list):
+                                candidate_selected_answers = answer_value
+                            elif isinstance(answer_value, str) and answer_value.strip():
+                                # If it's a string, try to split by comma or use as single answer
+                                candidate_selected_answers = [a.strip() for a in answer_value.split(",")] if "," in answer_value else [answer_value.strip()]
+                                logger.info(f"[DETAILED_RESULTS] Question {q_idx} (MCQ): Parsed answer field as selectedAnswers: {candidate_selected_answers}")
+                    # Validate that we have valid selected answers
+                    if candidate_selected_answers and isinstance(candidate_selected_answers, list) and len(candidate_selected_answers) > 0:
+                        has_valid_answer = True
+                        logger.info(f"[DETAILED_RESULTS] Question {q_idx} (MCQ): Valid selectedAnswers found: {candidate_selected_answers}")
             
             # Get score from evaluation
-            score = evaluation.get("score", 0) if evaluation else 0
-            max_marks = evaluation.get("max_marks", question.get("marks", 1)) if evaluation else question.get("marks", 1)
-            percentage = evaluation.get("percentage", 0) if evaluation else 0
+            logger.info("=" * 80)
+            logger.info(f"[DETAILED_RESULTS] Extracting scores for question {q_idx}")
+            logger.info(f"[DETAILED_RESULTS] Question ID: {q_id}")
+            logger.info(f"[DETAILED_RESULTS] Question type: {question_type}")
+            logger.info(f"[DETAILED_RESULTS] Has evaluation: {bool(evaluation)}")
             
+            if evaluation:
+                logger.info(f"[DETAILED_RESULTS] Evaluation keys: {list(evaluation.keys())}")
+                logger.info(f"[DETAILED_RESULTS] evaluation.get('score'): {evaluation.get('score')}")
+                logger.info(f"[DETAILED_RESULTS] evaluation.get('max_marks'): {evaluation.get('max_marks')}")
+                logger.info(f"[DETAILED_RESULTS] evaluation.get('percentage'): {evaluation.get('percentage')}")
+            
+            logger.info(f"[DETAILED_RESULTS] question.get('marks'): {question.get('marks')}")
+            logger.info(f"[DETAILED_RESULTS] question.get('maxMarks'): {question.get('maxMarks')}")
+            
+            score = evaluation.get("score", 0) if evaluation else 0
+            
+            # Extract max_marks with priority: scoringRules > question.marks > question.maxMarks > evaluation.max_marks > default 1
+            # This ensures we use the correct max_marks even if evaluation was stored with wrong value
+            max_marks = 1.0
+            marks_source = "default"
+            
+            # First try scoringRules (highest priority - this is what was set in review station)
+            scoring_rules = assessment.get("scoringRules", {})
+            logger.info(f"[DETAILED_RESULTS] Checking scoringRules: {scoring_rules}")
+            
+            if scoring_rules and isinstance(scoring_rules, dict):
+                # Normalize question type to match scoringRules keys
+                qtype_normalized = question_type
+                if question_type == "PSEUDOCODE" or question_type == "PSEUDO CODE":
+                    qtype_normalized = "PseudoCode"
+                elif question_type not in ["MCQ", "Subjective", "Coding", "SQL", "AIML"]:
+                    qtype_normalized = question_type.capitalize()
+                
+                logger.info(f"[DETAILED_RESULTS] Normalized question type for scoringRules: {qtype_normalized}")
+                logger.info(f"[DETAILED_RESULTS] scoringRules keys: {list(scoring_rules.keys())}")
+                
+                if qtype_normalized in scoring_rules:
+                    max_marks = float(scoring_rules[qtype_normalized])
+                    marks_source = f"scoringRules[{qtype_normalized}]"
+                    logger.info(f"[DETAILED_RESULTS] Found max_marks in scoringRules[{qtype_normalized}]: {max_marks}")
+                elif question_type in scoring_rules:
+                    max_marks = float(scoring_rules[question_type])
+                    marks_source = f"scoringRules[{question_type}]"
+                    logger.info(f"[DETAILED_RESULTS] Found max_marks in scoringRules[{question_type}]: {max_marks}")
+                else:
+                    logger.warning(f"[DETAILED_RESULTS] Question type '{question_type}' or '{qtype_normalized}' not found in scoringRules")
+            else:
+                logger.warning(f"[DETAILED_RESULTS] scoringRules is empty or not a dict: {type(scoring_rules)}")
+            
+            # Fallback to question.marks if scoringRules didn't have it
+            if max_marks == 1.0 and marks_source == "default":
+                if question.get("marks"):
+                    max_marks = float(question.get("marks"))
+                    marks_source = "question.marks"
+                    logger.info(f"[DETAILED_RESULTS] Using max_marks from question.marks: {max_marks}")
+                elif question.get("maxMarks"):
+                    max_marks = float(question.get("maxMarks"))
+                    marks_source = "question.maxMarks"
+                    logger.info(f"[DETAILED_RESULTS] Using max_marks from question.maxMarks: {max_marks}")
+                elif evaluation and evaluation.get("max_marks"):
+                    max_marks = float(evaluation.get("max_marks"))
+                    marks_source = "evaluation.max_marks"
+                    logger.info(f"[DETAILED_RESULTS] Using max_marks from evaluation (fallback): {max_marks}")
+                else:
+                    logger.warning(f"[DETAILED_RESULTS] No max_marks found anywhere, using default 1.0")
+            
+            # Ensure max_marks is valid
+            try:
+                max_marks = float(max_marks)
+                if max_marks <= 0:
+                    logger.warning(f"[DETAILED_RESULTS] max_marks was <= 0, resetting to 1.0")
+                    max_marks = 1.0
+            except (ValueError, TypeError) as e:
+                logger.error(f"[DETAILED_RESULTS] Error converting max_marks to float: {e}, using default 1.0")
+                max_marks = 1.0
+            
+            # Calculate percentage based on correct max_marks
+            if evaluation and max_marks > 0:
+                original_score = evaluation.get("score", 0)
+                percentage = (original_score / max_marks) * 100
+                logger.info(f"[DETAILED_RESULTS] Calculated percentage: {percentage}% (score: {original_score}/{max_marks})")
+            else:
+                percentage = evaluation.get("percentage", 0) if evaluation else 0
+                logger.info(f"[DETAILED_RESULTS] Using percentage from evaluation: {percentage}%")
+            
+            logger.info(f"[DETAILED_RESULTS] Final extracted values:")
+            logger.info(f"[DETAILED_RESULTS]   score: {score}")
+            logger.info(f"[DETAILED_RESULTS]   max_marks: {max_marks}")
+            logger.info(f"[DETAILED_RESULTS]   percentage: {percentage}")
+            logger.info(f"[DETAILED_RESULTS]   Score display will be: {score}/{max_marks}")
+            logger.info("=" * 80)
+            
+            # Determine if question was attempted:
+            # - If evaluation exists, question was definitely attempted
+            # - If valid answer exists, question was attempted
+            # - Otherwise, not attempted
+            is_attempted = bool(evaluation) or (submitted_answer and has_valid_answer)
+            logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): is_attempted={is_attempted} (evaluation={bool(evaluation)}, submitted_answer={bool(submitted_answer)}, has_valid_answer={has_valid_answer})")
+            
+            # Build candidate answer object conditionally based on question type
+            # CRITICAL FIX: Always extract from answer field first as the primary source
+            candidate_answer = {}
+            question_type_upper = question_type.upper() if question_type else ""
+            
+            # PRIMARY EXTRACTION: Always try to get answer from submitted_answer['answer'] field first
+            if submitted_answer:
+                answer_value = submitted_answer.get("answer", "")
+                if answer_value and isinstance(answer_value, str) and answer_value.strip():
+                    if question_type_upper in ["SUBJECTIVE", "PSEUDOCODE"]:
+                        if not candidate_answer_text:
+                            candidate_answer_text = answer_value
+                            logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): PRIMARY extraction - set candidate_answer_text from answer field (length={len(answer_value)})")
+                    elif question_type_upper in ["CODING", "AIML"]:
+                        if not candidate_code:
+                            candidate_code = answer_value
+                            logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): PRIMARY extraction - set candidate_code from answer field (length={len(answer_value)})")
+                    elif question_type_upper == "SQL":
+                        if not candidate_query:
+                            candidate_query = answer_value
+                            logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): PRIMARY extraction - set candidate_query from answer field (length={len(answer_value)})")
+            
+            if question_type_upper in ["SUBJECTIVE", "PSEUDOCODE"]:
+                # Only include if answer exists and is not the same as question text
+                if candidate_answer_text is not None and isinstance(candidate_answer_text, str) and candidate_answer_text.strip():
+                    answer_text_normalized = candidate_answer_text.strip().lower()
+                    if answer_text_normalized != question_text_normalized:
+                        candidate_answer["textAnswer"] = candidate_answer_text
+                        logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): Added textAnswer to candidate_answer (length={len(candidate_answer_text)})")
+                    else:
+                        logger.warning(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): Skipped textAnswer (matches question text)")
+                else:
+                    logger.warning(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): No textAnswer to add - candidate_answer_text={candidate_answer_text}, is_none={candidate_answer_text is None}")
+            elif question_type_upper in ["CODING", "AIML"]:
+                # Include code if it exists and is not empty - check both None and empty string
+                if candidate_code is not None and isinstance(candidate_code, str) and candidate_code.strip():
+                    candidate_answer["code"] = candidate_code
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): Added code to candidate_answer (length={len(candidate_code)})")
+                else:
+                    logger.warning(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): No code to add - candidate_code={candidate_code}, is_none={candidate_code is None}, type={type(candidate_code)}, value_preview={str(candidate_code)[:100] if candidate_code else 'None/Empty'}")
+                # Also include AIML outputs in candidate_answer for easier access
+                if question_type_upper == "AIML" and aiml_outputs:
+                    candidate_answer["outputs"] = aiml_outputs if isinstance(aiml_outputs, list) else [aiml_outputs]
+            elif question_type_upper == "SQL":
+                # Include query if it exists and is not empty
+                if candidate_query and isinstance(candidate_query, str) and candidate_query.strip():
+                    candidate_answer["sqlQuery"] = candidate_query
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} (SQL): Added sqlQuery to candidate_answer (length={len(candidate_query)})")
+                else:
+                    logger.warning(f"[DETAILED_RESULTS] Question {q_idx} (SQL): No sqlQuery to add (empty or None)")
+            elif question_type_upper == "MCQ":
+                # Include selected answers if they exist and are not empty
+                if candidate_selected_answers and isinstance(candidate_selected_answers, list) and len(candidate_selected_answers) > 0:
+                    candidate_answer["selectedAnswers"] = candidate_selected_answers
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} (MCQ): Added selectedAnswers to candidate_answer (count={len(candidate_selected_answers)})")
+                else:
+                    logger.warning(f"[DETAILED_RESULTS] Question {q_idx} (MCQ): No selectedAnswers to add (empty or None)")
+            
+            logger.info(f"[DETAILED_RESULTS] Question {q_idx} ({question_type}): candidate_answer keys={list(candidate_answer.keys())}, candidate_answer={candidate_answer}")
+            
+            # Build question result with conditional answers and test results
             question_result = {
                 "questionId": q_id,
                 "questionIndex": q_idx,
-                "questionType": question.get("questionType", ""),
+                "questionType": question_type,
                 "questionText": question.get("questionText") or question.get("question", ""),
                 "section": question.get("topicLabel", ""),
                 "difficulty": question.get("difficulty", "Medium"),
@@ -3172,22 +3571,99 @@ async def get_candidate_detailed_results(
                 "score": round(score, 2),
                 "maxMarks": max_marks,
                 "percentage": round(percentage, 2),
-                "candidateAnswer": {
-                    "textAnswer": candidate_answer_text,
-                    "code": candidate_code,
-                    "sqlQuery": candidate_query,
-                    "selectedAnswers": submitted_answer.get("selectedAnswers", []) if submitted_answer else []
-                },
+                "candidateAnswer": candidate_answer,
                 "evaluation": serialize_document(evaluation) if evaluation else None,
-                "testResults": test_results,
-                "testResult": serialize_document(test_result) if test_result else None,
             }
+            
+            # Include testResults for CODING questions with full details
+            if question_type_upper == "CODING":
+                # Try to get test_results from evaluation first, then from submitted_answer
+                test_results_for_display = test_results
+                if not test_results_for_display and submitted_answer:
+                    test_results_for_display = submitted_answer.get("testResults") or submitted_answer.get("test_results")
+                
+                if test_results_for_display:
+                    # Ensure test_results is serialized and includes all details
+                    serialized_test_results = []
+                    for tr in test_results_for_display if isinstance(test_results_for_display, list) else []:
+                        serialized_tr = serialize_document(tr) if not isinstance(tr, dict) else tr
+                        # Ensure all fields are present with proper normalization
+                        serialized_tr.setdefault("input", serialized_tr.get("input", serialized_tr.get("visible", {}).get("input", "")))
+                        serialized_tr.setdefault("expected_output", serialized_tr.get("expected_output", serialized_tr.get("expected", serialized_tr.get("visible", {}).get("expected", ""))))
+                        serialized_tr.setdefault("actual_output", serialized_tr.get("actual_output", serialized_tr.get("output", serialized_tr.get("stdout", serialized_tr.get("visible", {}).get("output", "")))))
+                        serialized_tr.setdefault("passed", serialized_tr.get("passed", False))
+                        serialized_tr.setdefault("status", serialized_tr.get("status", "unknown"))
+                        serialized_tr.setdefault("time", serialized_tr.get("time", None))
+                        serialized_tr.setdefault("memory", serialized_tr.get("memory", None))
+                        serialized_tr.setdefault("stdout", serialized_tr.get("stdout", serialized_tr.get("actual_output", "")))
+                        serialized_tr.setdefault("stderr", serialized_tr.get("stderr", ""))
+                        serialized_tr.setdefault("compile_output", serialized_tr.get("compile_output", ""))
+                        serialized_tr.setdefault("error", serialized_tr.get("error", ""))
+                        serialized_test_results.append(serialized_tr)
+                    question_result["testResults"] = serialized_test_results
+                    logger.info(f"[DETAILED_RESULTS] Question {q_idx} (CODING): Added {len(serialized_test_results)} test results to question_result")
+                else:
+                    question_result["testResults"] = []
+                    logger.warning(f"[DETAILED_RESULTS] Question {q_idx} (CODING): No test results found for display")
+            
+            # Include testResult for SQL questions with full details
+            elif question_type_upper == "SQL":
+                if test_result:
+                    serialized_test_result = serialize_document(test_result) if not isinstance(test_result, dict) else test_result
+                    # Ensure all SQL result fields are present
+                    serialized_test_result.setdefault("passed", serialized_test_result.get("passed", False))
+                    serialized_test_result.setdefault("user_output", serialized_test_result.get("user_output", serialized_test_result.get("output", "")))
+                    serialized_test_result.setdefault("expected_output", serialized_test_result.get("expected_output", serialized_test_result.get("reference_result", "")))
+                    serialized_test_result.setdefault("error", serialized_test_result.get("error", ""))
+                    serialized_test_result.setdefault("time", serialized_test_result.get("time", None))
+                    serialized_test_result.setdefault("memory", serialized_test_result.get("memory", None))
+                    serialized_test_result.setdefault("status", serialized_test_result.get("status", "executed"))
+                    question_result["testResult"] = serialized_test_result
+                else:
+                    question_result["testResult"] = None
+            
+            # Include AIML outputs
+            elif question_type_upper == "AIML":
+                if aiml_outputs:
+                    # Ensure outputs are serialized
+                    if isinstance(aiml_outputs, list):
+                        question_result["aimlOutputs"] = [serialize_document(o) if not isinstance(o, dict) else o for o in aiml_outputs]
+                    else:
+                        question_result["aimlOutputs"] = serialize_document(aiml_outputs) if not isinstance(aiml_outputs, dict) else aiml_outputs
+                else:
+                    question_result["aimlOutputs"] = []
+            
             question_results.append(question_result)
+        
+        logger.info(f"[DETAILED_RESULTS] Completed processing. Total question_results: {len(question_results)}")
+        logger.info(f"[DETAILED_RESULTS] Summary - Questions with answers: {sum(1 for qr in question_results if qr.get('candidateAnswer') and len(qr.get('candidateAnswer', {})) > 0)}")
+        logger.info(f"[DETAILED_RESULTS] Summary - Questions attempted: {sum(1 for qr in question_results if qr.get('isAttempted'))}")
+        
+        # Recalculate overall summary from question_results with corrected max_marks
+        total_score = sum(qr.get("score", 0) for qr in question_results)
+        total_max_marks = sum(qr.get("maxMarks", 0) for qr in question_results)
+        overall_percentage = (total_score / total_max_marks * 100) if total_max_marks > 0 else 0.0
+        
+        logger.info(f"[DETAILED_RESULTS] Recalculated overall summary:")
+        logger.info(f"[DETAILED_RESULTS]   total_score: {total_score}")
+        logger.info(f"[DETAILED_RESULTS]   total_max_marks: {total_max_marks}")
+        logger.info(f"[DETAILED_RESULTS]   overall_percentage: {overall_percentage}%")
+        
+        # Update overall summary with corrected values
+        overall_summary = {
+            "overall_score": round(total_score, 2),
+            "overall_max_marks": round(total_max_marks, 2),
+            "overall_percentage": round(overall_percentage, 2),
+            "grade": "A+" if overall_percentage >= 90 else "A" if overall_percentage >= 85 else "B+" if overall_percentage >= 80 else "B" if overall_percentage >= 75 else "C+" if overall_percentage >= 70 else "C" if overall_percentage >= 65 else "D" if overall_percentage >= 60 else "F",
+            **{k: v for k, v in (overall_summary or {}).items() if k not in ["overall_score", "overall_max_marks", "overall_percentage", "grade"]}  # Preserve other fields
+        }
         
         # Calculate pass/fail based on passPercentage
         pass_percentage = assessment.get("passPercentage", 50)
-        overall_percentage = overall_summary.get("overall_percentage", 0) if overall_summary else 0
+        logger.info(f"[DETAILED_RESULTS] Pass percentage: {pass_percentage}%")
+        logger.info(f"[DETAILED_RESULTS] Candidate overall percentage: {overall_percentage}%")
         is_passed = overall_percentage >= pass_percentage
+        logger.info(f"[DETAILED_RESULTS] Pass/fail status: {'PASSED' if is_passed else 'FAILED'}")
         
         # Serialize datetime objects to strings
         completed_at = candidate_response.get("completedAt")
