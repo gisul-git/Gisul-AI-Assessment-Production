@@ -9,8 +9,6 @@ import Link from 'next/link'
 import dsaApi from '../../../../lib/dsa/api'
 import axios from 'axios'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video, Loader2 } from 'lucide-react'
-import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
-import { useMultiLiveProctorAdmin } from '../../../../hooks/useMultiLiveProctorAdmin'
 import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
 
 interface AIFeedback {
@@ -137,7 +135,6 @@ export default function AnalyticsPage() {
   })
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
-  const [sendingFeedback, setSendingFeedback] = useState<string | null>(null) // Track which candidate's feedback is being sent
   const [showLiveProctoring, setShowLiveProctoring] = useState(false)
   const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   const [referencePhoto, setReferencePhoto] = useState<string | null>(null)
@@ -149,40 +146,6 @@ export default function AnalyticsPage() {
   const proctorAssessmentId = useMemo(() => (testId as string) || "", [testId])
   const proctorAdminId = useMemo(() => (session as any)?.user?.id || (session as any)?.user?.email || 'admin', [session])
   
-  // Stable callback to prevent re-renders
-  const handleProctorError = useCallback((error: string) => {
-    console.error('Multi-proctor error:', error)
-  }, [])
-  
-  // Multi-proctor hook for viewing all candidates
-  const {
-    candidateStreams,
-    activeCandidates,
-    isLoading: isProctorLoading,
-    startMonitoring,
-    stopMonitoring,
-    refreshCandidate,
-  } = useMultiLiveProctorAdmin({
-    assessmentId: proctorAssessmentId,
-    adminId: proctorAdminId,
-    onError: handleProctorError,
-    debugMode: true, // Enable debug mode to troubleshoot stream issues
-  })
-  
-  // Start monitoring when live proctor panel opens
-  // Note: startMonitoring/stopMonitoring are excluded from deps to prevent infinite loops
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (showLiveProctoring && testId && typeof testId === 'string') {
-      startMonitoring()
-    } else {
-      stopMonitoring()
-    }
-    
-    return () => {
-      stopMonitoring()
-    }
-  }, [showLiveProctoring, testId])
 
   const fetchAnalytics = async (userId: string, showLoading: boolean = true) => {
     if (!testId || typeof testId !== 'string') return
@@ -302,8 +265,16 @@ export default function AnalyticsPage() {
           fetchAnalytics(candidateUserId)
           fetchProctorLogs(candidateUserId)
           // Try to fetch reference photo if candidate email is available
+          console.log('[DSA Analytics] 🔍 Initial candidate load for reference photo:', {
+            candidateUserId,
+            candidateFound: !!candidate,
+            candidateEmail: candidate?.email
+          })
           if (candidate?.email) {
+            console.log('[DSA Analytics] 📞 Calling fetchReferencePhoto with email:', candidate.email)
             fetchReferencePhoto(candidate.email)
+          } else {
+            console.warn('[DSA Analytics] ⚠️ Candidate email not found in initial load')
           }
         }
       } catch (error) {
@@ -349,12 +320,21 @@ export default function AnalyticsPage() {
   }, [selectedCandidate, testId, analytics])
 
   const fetchReferencePhoto = async (candidateEmail: string) => {
+    console.log('[DSA Analytics] 🔍 fetchReferencePhoto called:', { testId, candidateEmail })
+    
     if (!testId || typeof testId !== 'string' || !candidateEmail) {
+      console.warn('[DSA Analytics] ⚠️ Missing required params:', { testId, candidateEmail })
       setReferencePhoto(null)
       return
     }
 
     try {
+      console.log('[DSA Analytics] 📡 Fetching reference photo from API...', {
+        assessmentId: testId,
+        candidateEmail,
+        endpoint: '/api/v1/candidate/get-reference-photo'
+      })
+      
       // For DSA/AIML tests, identity verification uses testId as assessmentId
       const response = await axios.get(`/api/v1/candidate/get-reference-photo`, {
         params: {
@@ -363,13 +343,37 @@ export default function AnalyticsPage() {
         },
       })
 
+      console.log('[DSA Analytics] 📥 API Response:', {
+        success: response.data?.success,
+        hasReferenceImage: !!response.data?.data?.referenceImage,
+        dataKeys: response.data?.data ? Object.keys(response.data.data) : [],
+        message: response.data?.message,
+        fullResponse: response.data
+      })
+      
+      // Log the assessmentId mismatch if photo not found
+      if (!response.data?.data?.referenceImage && response.data?.message === 'No reference photo found') {
+        console.warn('[DSA Analytics] ⚠️ Reference photo not found. Check if assessmentId matches:', {
+          testIdUsed: testId,
+          candidateEmail,
+          note: 'Photo might have been saved with a different assessmentId. Check candidate side logs for the actual assessmentId used when saving.'
+        })
+      }
+
       if (response.data?.success && response.data?.data?.referenceImage) {
+        console.log('[DSA Analytics] ✅ Reference photo fetched successfully')
         setReferencePhoto(response.data.data.referenceImage)
       } else {
+        console.warn('[DSA Analytics] ⚠️ No reference image in response:', response.data)
         setReferencePhoto(null)
       }
-    } catch (error) {
-      // Silently fail - reference photo might not exist
+    } catch (error: any) {
+      console.error('[DSA Analytics] ❌ Error fetching reference photo:', {
+        error: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        fullError: error
+      })
       setReferencePhoto(null)
     }
   }
@@ -404,19 +408,29 @@ export default function AnalyticsPage() {
 
   const handleCandidateSelect = (userId: string) => {
     const candidate = candidates.find(c => c.user_id === userId)
-    console.log('[Analytics] Candidate selected:', {
+    console.log('[DSA Analytics] 👤 Candidate selected:', {
       userId: userId,
       userIdType: typeof userId,
       candidateData: candidate,
       candidateEmail: candidate?.email,
+      allCandidates: candidates.map(c => ({ user_id: c.user_id, email: c.email }))
     })
     setSelectedCandidate(userId)
     fetchAnalytics(userId)
     // Fetch proctor logs using candidate.user_id (MongoDB ObjectId)
     fetchProctorLogs(userId)
     // Try to fetch reference photo if candidate email is available
+    console.log('[DSA Analytics] 👤 Candidate selected for reference photo:', {
+      userId,
+      candidateFound: !!candidate,
+      candidateEmail: candidate?.email,
+      allCandidates: candidates.map(c => ({ user_id: c.user_id, email: c.email }))
+    })
     if (candidate?.email) {
+      console.log('[DSA Analytics] 📞 Calling fetchReferencePhoto with email:', candidate.email)
       fetchReferencePhoto(candidate.email)
+    } else {
+      console.warn('[DSA Analytics] ⚠️ Candidate email not found, cannot fetch reference photo')
     }
     // Auto-show logs when candidate is selected (same expectation as AI assessment analytics)
     setShowProctorLogs(true)
@@ -1021,55 +1035,6 @@ export default function AnalyticsPage() {
             ) : !selectedCandidate ? (
               // Overall Analytics View
               <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
-                </div>
 
                 <div style={{
                   border: "1px solid #e2e8f0",
@@ -1077,9 +1042,37 @@ export default function AnalyticsPage() {
                   padding: "1.5rem",
                   backgroundColor: "#ffffff",
                 }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
-                    Overall Test Performance
-                  </h2>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, margin: 0 }}>
+                      Overall Test Performance
+                    </h2>
+                    <Link
+                      href={`/dsa/tests/${testId}/live-dashboard`}
+                      className="btn-primary"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        backgroundColor: "#3b82f6",
+                        color: "#ffffff",
+                        textDecoration: "none",
+                        borderRadius: "0.5rem",
+                        fontWeight: 600,
+                        transition: "background-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#2563eb";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#3b82f6";
+                      }}
+                    >
+                      <Video className="h-4 w-4" />
+                      Live Proctoring Dashboard
+                    </Link>
+                  </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Candidates</div>
@@ -2112,121 +2105,6 @@ export default function AnalyticsPage() {
           assessmentId={testId}
           adminId={session.user.email || session.user.id || 'admin'}
         />
-      )}
-
-      {/* Resume Viewer Modal */}
-      {showResumeModal && resumeUrl && (
-        <div style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: "rgba(0, 0, 0, 0.75)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 2000,
-        }}
-        onClick={() => {
-          setShowResumeModal(false)
-          setResumeUrl(null)
-        }}
-        >
-          <div style={{
-            backgroundColor: "#ffffff",
-            borderRadius: "0.75rem",
-            width: "90%",
-            maxWidth: "900px",
-            maxHeight: "90vh",
-            display: "flex",
-            flexDirection: "column",
-            boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.3)",
-          }}
-          onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header */}
-            <div style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              padding: "1rem 1.5rem",
-              borderBottom: "1px solid #e2e8f0",
-            }}>
-              <h2 style={{ fontSize: "1.25rem", fontWeight: 600, margin: 0 }}>
-                Resume - {analytics?.candidate?.name || analytics?.candidate?.email}
-              </h2>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowResumeModal(false)
-                  setResumeUrl(null)
-                }}
-                style={{
-                  background: "none",
-                  border: "none",
-                  fontSize: "1.5rem",
-                  cursor: "pointer",
-                  color: "#64748b",
-                  padding: "0.25rem 0.5rem",
-                  lineHeight: 1,
-                }}
-              >
-                ×
-              </button>
-            </div>
-
-            {/* Resume Content */}
-            <div style={{
-              flex: 1,
-              overflow: "auto",
-              padding: "1.5rem",
-            }}>
-              {resumeUrl.startsWith('data:application/pdf') || resumeUrl.includes('.pdf') ? (
-                <iframe
-                  src={resumeUrl}
-                  style={{
-                    width: "100%",
-                    height: "70vh",
-                    border: "none",
-                    borderRadius: "0.5rem",
-                  }}
-                  title="Resume PDF"
-                />
-              ) : resumeUrl.startsWith('data:image/') ? (
-                <img
-                  src={resumeUrl}
-                  alt="Resume"
-                  style={{
-                    maxWidth: "100%",
-                    height: "auto",
-                    borderRadius: "0.5rem",
-                  }}
-                />
-              ) : (
-                <div style={{ padding: "2rem", textAlign: "center", color: "#64748b" }}>
-                  <p>Unsupported file format. Please download the resume to view it.</p>
-                  <a
-                    href={resumeUrl}
-                    download
-                    style={{
-                      display: "inline-block",
-                      marginTop: "1rem",
-                      padding: "0.5rem 1rem",
-                      backgroundColor: "#3b82f6",
-                      color: "#ffffff",
-                      textDecoration: "none",
-                      borderRadius: "0.5rem",
-                      fontWeight: 600,
-                    }}
-                  >
-                    Download Resume
-                  </a>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
       )}
       <style jsx>{`
         @keyframes spin {

@@ -5,9 +5,9 @@ import axios from 'axios';
 import { useRouter } from 'next/router'
 import { useSession } from 'next-auth/react'
 import { GetServerSideProps } from 'next'
-import { requireAuth } from '../../../lib/auth'
-import { AdminLiveService } from '../../../universal-proctoring/live/AdminLiveService'
-import { CandidateStreamInfo, AdminLiveState } from '../../../universal-proctoring/live/types'
+import { requireAuth } from '../../../../lib/auth'
+import { AdminLiveService } from '../../../../universal-proctoring/live/AdminLiveService'
+import { CandidateStreamInfo, AdminLiveState } from '../../../../universal-proctoring/live/types'
 import { ArrowLeft, Maximize2, Minimize2, RefreshCw, Users, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 
@@ -175,10 +175,10 @@ export default function LiveProctoringDashboard({
       return;
     }
 
-    // Fetch assessment candidates for mapping
-    axios.get(`/api/assessments/get-questions?assessmentId=${assessmentId}`)
+    // Fetch DSA test candidates for mapping
+    axios.get(`/api/dsa/tests/${assessmentId}`)
       .then((res) => {
-        const candidates = res.data?.data?.assessment?.candidates || [];
+        const candidates = res.data?.data?.candidates || [];
         setAssessmentCandidates(candidates);
       })
       .catch((err) => {
@@ -452,7 +452,7 @@ export default function LiveProctoringDashboard({
               </button>
             ) : (
               <Link
-                href={`/assessments/${assessmentId}/analytics`}
+                href={`/dsa/tests/${assessmentId}/analytics`}
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <ArrowLeft className="w-5 h-5" />
@@ -460,7 +460,7 @@ export default function LiveProctoringDashboard({
             )}
             <div>
               <h1 className="text-xl font-semibold text-gray-900">Live Proctoring Dashboard</h1>
-              <p className="text-sm text-gray-600">Assessment: {assessmentId}</p>
+              <p className="text-sm text-gray-600">DSA Test: {assessmentId}</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -608,3 +608,4 @@ function CandidateTile({ candidate, onExpand, onRefresh, videoRefs }: CandidateT
     </div>
   )
 }
+
