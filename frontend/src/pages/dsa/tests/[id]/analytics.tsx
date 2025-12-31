@@ -9,9 +9,8 @@ import Link from 'next/link'
 import dsaApi from '../../../../lib/dsa/api'
 import axios from 'axios'
 import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video, Loader2 } from 'lucide-react'
-import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
-import { useMultiLiveProctorAdmin } from '../../../../hooks/useMultiLiveProctorAdmin'
 import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
+import { LiveProctoringDashboard } from '../../../../components/proctor'
 
 interface AIFeedback {
   overall_score?: number
@@ -80,6 +79,13 @@ interface CandidateAnalytics {
     name: string
     email: string
   }
+  candidateInfo?: {
+    phone?: string | null
+    linkedIn?: string | null
+    github?: string | null
+    hasResume?: boolean
+    customFields?: Record<string, any>
+  } | null
   submission: {
     score: number
     started_at: string | null
@@ -130,48 +136,18 @@ export default function AnalyticsPage() {
   })
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
+  const [sendingFeedback, setSendingFeedback] = useState<string | null>(null)
   const [showLiveProctoring, setShowLiveProctoring] = useState(false)
   const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   const [referencePhoto, setReferencePhoto] = useState<string | null>(null)
+  const [showResumeModal, setShowResumeModal] = useState(false)
+  const [resumeUrl, setResumeUrl] = useState<string | null>(null)
+  const [loadingResume, setLoadingResume] = useState(false)
   
   // Memoize proctorAssessmentId to prevent infinite loops
   const proctorAssessmentId = useMemo(() => (testId as string) || "", [testId])
   const proctorAdminId = useMemo(() => (session as any)?.user?.id || (session as any)?.user?.email || 'admin', [session])
   
-  // Stable callback to prevent re-renders
-  const handleProctorError = useCallback((error: string) => {
-    console.error('Multi-proctor error:', error)
-  }, [])
-  
-  // Multi-proctor hook for viewing all candidates
-  const {
-    candidateStreams,
-    activeCandidates,
-    isLoading: isProctorLoading,
-    startMonitoring,
-    stopMonitoring,
-    refreshCandidate,
-  } = useMultiLiveProctorAdmin({
-    assessmentId: proctorAssessmentId,
-    adminId: proctorAdminId,
-    onError: handleProctorError,
-    debugMode: true, // Enable debug mode to troubleshoot stream issues
-  })
-  
-  // Start monitoring when live proctor panel opens
-  // Note: startMonitoring/stopMonitoring are excluded from deps to prevent infinite loops
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (showLiveProctoring && testId && typeof testId === 'string') {
-      startMonitoring()
-    } else {
-      stopMonitoring()
-    }
-    
-    return () => {
-      stopMonitoring()
-    }
-  }, [showLiveProctoring, testId])
 
   const fetchAnalytics = async (userId: string, showLoading: boolean = true) => {
     if (!testId || typeof testId !== 'string') return
@@ -291,8 +267,16 @@ export default function AnalyticsPage() {
           fetchAnalytics(candidateUserId)
           fetchProctorLogs(candidateUserId)
           // Try to fetch reference photo if candidate email is available
+          console.log('[DSA Analytics] 🔍 Initial candidate load for reference photo:', {
+            candidateUserId,
+            candidateFound: !!candidate,
+            candidateEmail: candidate?.email
+          })
           if (candidate?.email) {
+            console.log('[DSA Analytics] 📞 Calling fetchReferencePhoto with email:', candidate.email)
             fetchReferencePhoto(candidate.email)
+          } else {
+            console.warn('[DSA Analytics] ⚠️ Candidate email not found in initial load')
           }
         }
       } catch (error) {
@@ -338,12 +322,21 @@ export default function AnalyticsPage() {
   }, [selectedCandidate, testId, analytics])
 
   const fetchReferencePhoto = async (candidateEmail: string) => {
+    console.log('[DSA Analytics] 🔍 fetchReferencePhoto called:', { testId, candidateEmail })
+    
     if (!testId || typeof testId !== 'string' || !candidateEmail) {
+      console.warn('[DSA Analytics] ⚠️ Missing required params:', { testId, candidateEmail })
       setReferencePhoto(null)
       return
     }
 
     try {
+      console.log('[DSA Analytics] 📡 Fetching reference photo from API...', {
+        assessmentId: testId,
+        candidateEmail,
+        endpoint: '/api/v1/candidate/get-reference-photo'
+      })
+      
       // For DSA/AIML tests, identity verification uses testId as assessmentId
       const response = await axios.get(`/api/v1/candidate/get-reference-photo`, {
         params: {
@@ -352,32 +345,94 @@ export default function AnalyticsPage() {
         },
       })
 
+      console.log('[DSA Analytics] 📥 API Response:', {
+        success: response.data?.success,
+        hasReferenceImage: !!response.data?.data?.referenceImage,
+        dataKeys: response.data?.data ? Object.keys(response.data.data) : [],
+        message: response.data?.message,
+        fullResponse: response.data
+      })
+      
+      // Log the assessmentId mismatch if photo not found
+      if (!response.data?.data?.referenceImage && response.data?.message === 'No reference photo found') {
+        console.warn('[DSA Analytics] ⚠️ Reference photo not found. Check if assessmentId matches:', {
+          testIdUsed: testId,
+          candidateEmail,
+          note: 'Photo might have been saved with a different assessmentId. Check candidate side logs for the actual assessmentId used when saving.'
+        })
+      }
+
       if (response.data?.success && response.data?.data?.referenceImage) {
+        console.log('[DSA Analytics] ✅ Reference photo fetched successfully')
         setReferencePhoto(response.data.data.referenceImage)
       } else {
+        console.warn('[DSA Analytics] ⚠️ No reference image in response:', response.data)
         setReferencePhoto(null)
       }
-    } catch (error) {
-      // Silently fail - reference photo might not exist
+    } catch (error: any) {
+      console.error('[DSA Analytics] ❌ Error fetching reference photo:', {
+        error: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        fullError: error
+      })
       setReferencePhoto(null)
+    }
+  }
+
+  const fetchResume = async (candidateEmail: string) => {
+    if (!testId || typeof testId !== 'string' || !candidateEmail) {
+      return
+    }
+
+    setLoadingResume(true)
+    try {
+      const response = await dsaApi.get(`/tests/${testId}/candidates/${selectedCandidate}/resume`, {
+        params: {
+          email: candidateEmail,
+        },
+      })
+
+      if (response.data?.resume) {
+        // Resume is returned as base64 data URL
+        setResumeUrl(response.data.resume)
+        setShowResumeModal(true)
+      } else {
+        alert('Resume not found')
+      }
+    } catch (error: any) {
+      console.error('Error fetching resume:', error)
+      alert(error.response?.data?.detail || 'Failed to load resume')
+    } finally {
+      setLoadingResume(false)
     }
   }
 
   const handleCandidateSelect = (userId: string) => {
     const candidate = candidates.find(c => c.user_id === userId)
-    console.log('[Analytics] Candidate selected:', {
+    console.log('[DSA Analytics] 👤 Candidate selected:', {
       userId: userId,
       userIdType: typeof userId,
       candidateData: candidate,
       candidateEmail: candidate?.email,
+      allCandidates: candidates.map(c => ({ user_id: c.user_id, email: c.email }))
     })
     setSelectedCandidate(userId)
     fetchAnalytics(userId)
     // Fetch proctor logs using candidate.user_id (MongoDB ObjectId)
     fetchProctorLogs(userId)
     // Try to fetch reference photo if candidate email is available
+    console.log('[DSA Analytics] 👤 Candidate selected for reference photo:', {
+      userId,
+      candidateFound: !!candidate,
+      candidateEmail: candidate?.email,
+      allCandidates: candidates.map(c => ({ user_id: c.user_id, email: c.email }))
+    })
     if (candidate?.email) {
+      console.log('[DSA Analytics] 📞 Calling fetchReferencePhoto with email:', candidate.email)
       fetchReferencePhoto(candidate.email)
+    } else {
+      console.warn('[DSA Analytics] ⚠️ Candidate email not found, cannot fetch reference photo')
     }
     // Auto-show logs when candidate is selected (same expectation as AI assessment analytics)
     setShowProctorLogs(true)
@@ -474,9 +529,16 @@ export default function AnalyticsPage() {
     if (!confirm(`Are you sure you want to remove ${candidate.name} (${candidate.email}) from this test?`)) return
     
     try {
-      // Note: DSA API may need a remove-candidate endpoint
-      // For now, we'll show an alert that this feature needs backend support
-      alert("Remove candidate functionality requires backend API support. Please contact support.")
+      await dsaApi.delete(`/tests/${testId}/candidates/${userId}`)
+      // Refresh candidates list
+      const candidatesResponse = await dsaApi.get(`/tests/${testId}/candidates`)
+      setCandidates(candidatesResponse.data || [])
+      // Clear selection if removed candidate was selected
+      if (selectedCandidate === userId) {
+        setSelectedCandidate(null)
+        setAnalytics(null)
+      }
+      alert("Candidate removed successfully!")
     } catch (err: any) {
       alert(err.response?.data?.detail || err.response?.data?.message || "Failed to remove candidate")
     }
@@ -549,6 +611,41 @@ export default function AnalyticsPage() {
       setSendingInvitations(false)
     }
   }
+
+  const handleSendFeedback = async (userId: string) => {
+    if (!testId || typeof testId !== 'string') return
+    
+    const candidate = candidates.find(c => c.user_id === userId)
+    if (!candidate) return
+    
+    if (!confirm(`Send AI feedback email to ${candidate.name} (${candidate.email})?`)) {
+      return
+    }
+    
+    setSendingFeedback(userId)
+    try {
+      const response = await dsaApi.post(`/tests/${testId}/candidates/${userId}/send-feedback`)
+      if (response.data) {
+        alert("Feedback email sent successfully!")
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.message || "Failed to send feedback email")
+    } finally {
+      setSendingFeedback(null)
+    }
+  }
+
+  // Check if test has ended
+  const isTestEnded = useMemo(() => {
+    if (!testInfo?.schedule?.endTime) return false
+    try {
+      const endTime = new Date(testInfo.schedule.endTime)
+      const now = new Date()
+      return now >= endTime
+    } catch {
+      return false
+    }
+  }, [testInfo])
 
   if (loading) {
     return (
@@ -785,6 +882,25 @@ export default function AnalyticsPage() {
                         >
                           Resend Invitation
                         </button>
+                        {isTestEnded && candidate.status === "completed" && (
+                          <button
+                            type="button"
+                            onClick={() => handleSendFeedback(candidate.user_id)}
+                            disabled={sendingFeedback === candidate.user_id}
+                            style={{
+                              padding: "0.25rem 0.75rem",
+                              fontSize: "0.75rem",
+                              backgroundColor: sendingFeedback === candidate.user_id ? "#94a3b8" : "#3b82f6",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: sendingFeedback === candidate.user_id ? "not-allowed" : "pointer",
+                              opacity: sendingFeedback === candidate.user_id ? 0.6 : 1,
+                            }}
+                          >
+                            {sendingFeedback === candidate.user_id ? "Sending..." : "📧 Send Feedback"}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => handleRemoveCandidate(candidate.user_id)}
@@ -921,55 +1037,6 @@ export default function AnalyticsPage() {
             ) : !selectedCandidate ? (
               // Overall Analytics View
               <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
-                </div>
 
                 <div style={{
                   border: "1px solid #e2e8f0",
@@ -977,9 +1044,37 @@ export default function AnalyticsPage() {
                   padding: "1.5rem",
                   backgroundColor: "#ffffff",
                 }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
-                    Overall Test Performance
-                  </h2>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, margin: 0 }}>
+                      Overall Test Performance
+                    </h2>
+                    <Link
+                      href={`/dsa/tests/${testId}/live-dashboard`}
+                      className="btn-primary"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        backgroundColor: "#3b82f6",
+                        color: "#ffffff",
+                        textDecoration: "none",
+                        borderRadius: "0.5rem",
+                        fontWeight: 600,
+                        transition: "background-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#2563eb";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#3b82f6";
+                      }}
+                    >
+                      <Video className="h-4 w-4" />
+                      Live Proctoring Dashboard
+                    </Link>
+                  </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Candidates</div>
@@ -1108,6 +1203,87 @@ export default function AnalyticsPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Candidate Requirements Section */}
+                {analytics.candidateInfo && (
+                  <div style={{
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "0.75rem",
+                    padding: "1.5rem",
+                    backgroundColor: "#ffffff",
+                  }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
+                      Candidate Requirements
+                    </h2>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+                      {analytics.candidateInfo.phone && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Phone</div>
+                          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidateInfo.phone}</div>
+                        </div>
+                      )}
+                      {analytics.candidateInfo.linkedIn && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>LinkedIn</div>
+                          <a 
+                            href={analytics.candidateInfo.linkedIn} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            style={{ fontSize: "1rem", fontWeight: 600, color: "#3b82f6", textDecoration: "none" }}
+                          >
+                            {analytics.candidateInfo.linkedIn}
+                          </a>
+                        </div>
+                      )}
+                      {analytics.candidateInfo.github && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>GitHub</div>
+                          <a 
+                            href={analytics.candidateInfo.github} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            style={{ fontSize: "1rem", fontWeight: 600, color: "#3b82f6", textDecoration: "none" }}
+                          >
+                            {analytics.candidateInfo.github}
+                          </a>
+                        </div>
+                      )}
+                      {analytics.candidateInfo.hasResume !== undefined && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Resume</div>
+                          {analytics.candidateInfo.hasResume ? (
+                            <button
+                              type="button"
+                              onClick={() => fetchResume(analytics.candidate.email)}
+                              disabled={loadingResume}
+                              style={{
+                                fontSize: "1rem",
+                                fontWeight: 600,
+                                color: "#3b82f6",
+                                background: "none",
+                                border: "none",
+                                cursor: loadingResume ? "not-allowed" : "pointer",
+                                textDecoration: "underline",
+                                padding: 0,
+                                opacity: loadingResume ? 0.6 : 1,
+                              }}
+                            >
+                              {loadingResume ? "Loading..." : "View Resume"}
+                            </button>
+                          ) : (
+                            <div style={{ fontSize: "1rem", fontWeight: 600 }}>Not Provided</div>
+                          )}
+                        </div>
+                      )}
+                      {analytics.candidateInfo?.customFields && Object.keys(analytics.candidateInfo.customFields).map(key => (
+                        <div key={key}>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>{key}</div>
+                          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidateInfo?.customFields?.[key]}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Overall Performance Summary */}
                 <div style={{
@@ -1412,6 +1588,117 @@ export default function AnalyticsPage() {
                               <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
                                   {qa.ai_feedback.feedback_summary}
                                 </p>
+                              </div>
+                            )}
+
+                            {/* Code Quality */}
+                            {qa.ai_feedback.code_quality && qa.ai_feedback.code_quality.comments && (
+                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem" }}>
+                                Code Quality {qa.ai_feedback.code_quality.score !== undefined && `(${qa.ai_feedback.code_quality.score}/100)`}
+                              </h4>
+                              <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
+                                  {qa.ai_feedback.code_quality.comments}
+                                </p>
+                              </div>
+                            )}
+
+                            {/* Efficiency Comments */}
+                            {qa.ai_feedback.efficiency && qa.ai_feedback.efficiency.comments && (
+                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem" }}>
+                                Efficiency Analysis
+                              </h4>
+                              <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
+                                  {qa.ai_feedback.efficiency.comments}
+                                </p>
+                              </div>
+                            )}
+
+                            {/* Correctness Comments */}
+                            {qa.ai_feedback.correctness && qa.ai_feedback.correctness.comments && (
+                            <div style={{ backgroundColor: "#1e293b", borderRadius: "0.5rem", padding: "0.75rem" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem" }}>
+                                Correctness {qa.ai_feedback.correctness.score !== undefined && `(${qa.ai_feedback.correctness.score}/100)`}
+                              </h4>
+                              <p style={{ fontSize: "0.875rem", color: "#cbd5e1", lineHeight: "1.6" }}>
+                                  {qa.ai_feedback.correctness.comments}
+                                </p>
+                              </div>
+                            )}
+
+                            {/* Strengths */}
+                            {qa.ai_feedback.strengths && qa.ai_feedback.strengths.length > 0 && (
+                            <div style={{ backgroundColor: "#064e3b", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #10b981" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#6ee7b7", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <CheckCircle2 style={{ width: "12px", height: "12px" }} />
+                                  Strengths
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#a7f3d0", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.strengths.map((strength, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{strength}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Areas for Improvement */}
+                            {qa.ai_feedback.areas_for_improvement && qa.ai_feedback.areas_for_improvement.length > 0 && (
+                            <div style={{ backgroundColor: "#7c2d12", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #f97316" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#fdba74", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <AlertTriangle style={{ width: "12px", height: "12px" }} />
+                                  Areas for Improvement
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#fed7aa", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.areas_for_improvement.map((area, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{area}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Improvement Suggestions */}
+                            {qa.ai_feedback.improvement_suggestions && qa.ai_feedback.improvement_suggestions.length > 0 && (
+                            <div style={{ backgroundColor: "#1e3a8a", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #3b82f6" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#93c5fd", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <Lightbulb style={{ width: "12px", height: "12px" }} />
+                                  Improvement Suggestions
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#bfdbfe", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.improvement_suggestions.map((suggestion, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{suggestion}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Suggestions (if different from improvement_suggestions) */}
+                            {qa.ai_feedback.suggestions && qa.ai_feedback.suggestions.length > 0 && (
+                            <div style={{ backgroundColor: "#1e3a8a", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #3b82f6" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#93c5fd", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <Lightbulb style={{ width: "12px", height: "12px" }} />
+                                  Suggestions
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#bfdbfe", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.suggestions.map((suggestion, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{suggestion}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Deduction Reasons */}
+                            {qa.ai_feedback.deduction_reasons && qa.ai_feedback.deduction_reasons.length > 0 && (
+                            <div style={{ backgroundColor: "#7f1d1d", borderRadius: "0.5rem", padding: "0.75rem", border: "1px solid #ef4444" }}>
+                              <h4 style={{ fontSize: "0.75rem", fontWeight: 600, color: "#fca5a5", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <AlertTriangle style={{ width: "12px", height: "12px" }} />
+                                  Deduction Reasons
+                                </h4>
+                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#fecaca", lineHeight: "1.8" }}>
+                                  {qa.ai_feedback.deduction_reasons.map((reason, idx) => (
+                                    <li key={idx} style={{ marginBottom: "0.5rem" }}>{reason}</li>
+                                  ))}
+                                </ul>
                               </div>
                             )}
                           </div>

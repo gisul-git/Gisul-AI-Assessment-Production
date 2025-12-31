@@ -299,9 +299,18 @@ export default function AIMLTestTakePage() {
     console.log('[AIML Take] 🚀 Admin connected! Starting WebRTC...')
     liveProctoringStartedRef.current = true
 
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    // Live proctoring backend expects raw email or token, not formatted userId
+    let rawCandidateId = localCandidateIdStr;
+    if (localCandidateIdStr.startsWith('email:')) {
+      rawCandidateId = localCandidateIdStr.replace('email:', '');
+    } else if (localCandidateIdStr.startsWith('public:')) {
+      rawCandidateId = localCandidateIdStr.replace('public:', '');
+    }
+
     const liveService = new CandidateLiveService({
       assessmentId: localAssessmentIdStr,
-      candidateId: localCandidateIdStr,
+      candidateId: rawCandidateId, // Use raw email/token for live proctoring
       debugMode: debugMode,
     })
 
@@ -340,7 +349,8 @@ export default function AIMLTestTakePage() {
     })
     const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
 
-    if (!liveProctoringEnabled || !liveProctorScreenStream || (timeRemaining !== null && timeRemaining <= 0) || submitted) {
+    // Check all conditions - match Custom MCQ pattern
+    if (!liveProctoringEnabled || !liveProctorScreenStream || !examStarted || submitted || !localAssessmentIdStr || !localCandidateIdStr) {
       return
     }
 
@@ -357,12 +367,21 @@ export default function AIMLTestTakePage() {
     console.log('[AIML Take] 📝 Registering Live Proctoring session...')
     
     // Phase 2.2: Register session with backend
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    // Live proctoring backend expects raw email or token, not formatted userId
+    let rawCandidateId = localCandidateIdStr;
+    if (localCandidateIdStr.startsWith('email:')) {
+      rawCandidateId = localCandidateIdStr.replace('email:', '');
+    } else if (localCandidateIdStr.startsWith('public:')) {
+      rawCandidateId = localCandidateIdStr.replace('public:', '');
+    }
+
     fetch('/api/v1/proctor/live/start-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         assessmentId: localAssessmentIdStr,
-        candidateId: localCandidateIdStr,
+        candidateId: rawCandidateId, // Use raw email/token for live proctoring
       }),
     })
       .then((res) => res.json())
@@ -373,12 +392,38 @@ export default function AIMLTestTakePage() {
           console.log(`[AIML Take] ✅ Session registered: ${sessionId}`);
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
-          const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/proctor/ws/live/candidate/${sessionId}?candidate_id=${localCandidateIdStr}`;
+          // CRITICAL FIX: Use backend URL instead of frontend URL
+          // Use rawCandidateId (without email: or public: prefix) for WebSocket URL
+          const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
+          const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, rawCandidateId);
+          console.log('[AIML Take] Candidate WS connecting to backend...', wsUrl);
           const ws = new WebSocket(wsUrl);
           candidateWsRef.current = ws;
 
           ws.onopen = () => {
             console.log('[AIML Take] ✅ WebSocket connected, waiting for admin...');
+            
+            // CRITICAL FIX: Wait for camera stream to be available before starting WebRTC
+            // The camera is initialized by useUniversalProctoring, so we need to wait for it
+            let retryCount = 0;
+            const maxRetries = 20; // 10 seconds max wait (20 * 500ms)
+            
+            const checkCameraAndStart = () => {
+              const webcamStream = thumbVideoRef.current?.srcObject as MediaStream | null;
+              if (webcamStream && webcamStream.active) {
+                console.log('[AIML Take] ✅ Camera stream available - ready for admin connection');
+                // Don't start WebRTC here - wait for ADMIN_CONNECTED signal
+              } else if (retryCount < maxRetries) {
+                retryCount++;
+                console.log(`[AIML Take] ⏳ Waiting for camera stream... (attempt ${retryCount}/${maxRetries})`);
+                setTimeout(checkCameraAndStart, 500);
+              } else {
+                console.warn('[AIML Take] ⚠️ Camera stream not available after 10 seconds - will proceed anyway');
+              }
+            };
+            
+            // Start checking immediately
+            checkCameraAndStart();
           };
 
           ws.onmessage = (event) => {
@@ -405,14 +450,18 @@ export default function AIMLTestTakePage() {
     
     console.log('[AIML Take] ⏸️ Live Proctoring ready, waiting for admin to connect...')
 
-    // Cleanup WebSocket on unmount
+    // Cleanup WebSocket on unmount or when exam ends
     return () => {
       if (candidateWsRef.current) {
         candidateWsRef.current.close();
         candidateWsRef.current = null;
       }
+      // Reset ref when exam ends to allow re-registration if needed
+      if (!examStarted || submitted) {
+        startSessionCalledRef.current = false;
+      }
     };
-  }, [proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, timeRemaining, submitted, testId, candidateEmail, userId, startLiveProctoring])
+  }, [proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, examStarted, submitted, testId, candidateEmail, userId, startLiveProctoring])
 
   // Stop proctoring when test is submitted
   useEffect(() => {

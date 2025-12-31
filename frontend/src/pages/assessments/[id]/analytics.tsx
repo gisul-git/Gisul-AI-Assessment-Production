@@ -8,7 +8,6 @@ import { requireAuth } from '../../../lib/auth'
 import Link from 'next/link'
 import axios from 'axios'
 import { ArrowLeft, AlertTriangle, Clock, Video, Eye, Loader2 } from 'lucide-react'
-import LiveProctoringDashboard from '../../../components/proctor/LiveProctoringDashboard'
 import ProctorLogsReview from '../../../components/admin/ProctorLogsReview'
 
 interface AnswerLog {
@@ -46,6 +45,13 @@ interface Candidate {
   invitedAt?: string
   startedAt?: string
   completedAt?: string
+  candidateInfo?: {
+    phone?: string | null
+    linkedIn?: string | null
+    github?: string | null
+    hasResume?: boolean
+    customFields?: Record<string, any>
+  } | null
 }
 
 export default function AnalyticsPage() {
@@ -62,8 +68,6 @@ export default function AnalyticsPage() {
   const [eventTypeLabels, setEventTypeLabels] = useState<Record<string, string>>({})
   const [loadingProctorLogs, setLoadingProctorLogs] = useState(false)
   const [showProctorLogs, setShowProctorLogs] = useState(false)
-  const [showLiveProctoring, setShowLiveProctoring] = useState(false)
-  const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
   const [newCandidateName, setNewCandidateName] = useState("")
   const [newCandidateEmail, setNewCandidateEmail] = useState("")
@@ -92,22 +96,67 @@ export default function AnalyticsPage() {
     }
   }
 
-  const fetchProctorLogs = async (userId: string) => {
-    if (!assessmentId || typeof assessmentId !== 'string' || !userId) return
+  const fetchProctorLogs = async (email: string) => {
+    if (!assessmentId || typeof assessmentId !== 'string' || !email) return
     
     setLoadingProctorLogs(true)
     try {
-      console.log('[Analytics] Fetching proctor logs with userId:', userId)
+      // Try multiple userId formats to match how proctoring logs might be stored
+      // Format 1: email:userEmail (Priority 4 in resolveUserIdForProctoring)
+      const emailUserId = `email:${email.trim()}`;
+      console.log('[Analytics] Fetching proctor logs with userId (email format):', emailUserId)
       
-      const response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(userId)}`)
-      const data = await response.json()
+      let response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=${encodeURIComponent(emailUserId)}`)
+      let data = await response.json()
       
-      if (data.success && data.data && data.data.logs) {
+      // If no logs found with email format, try querying all logs for the assessment
+      // and filter by candidate email (handles public:token format)
+      if (!data.success || !data.data || !data.data.logs || data.data.logs.length === 0) {
+        console.log('[Analytics] No logs found with email format, trying all logs for assessment...')
+        
+        // Query all logs for the assessment (userId: "*")
+        response = await fetch(`/api/proctor/logs?assessmentId=${encodeURIComponent(assessmentId)}&userId=*`)
+        data = await response.json()
+        
+        if (data.success && data.data && data.data.logs) {
+          // Filter logs by candidate email - check metadata.candidateEmail (primary) or userId format (fallback)
+          const emailLower = email.trim().toLowerCase();
+          const filteredLogs = data.data.logs.filter((log: any) => {
+            // Primary: Check if metadata contains candidate email (works for all userId formats)
+            if (log.metadata && log.metadata.candidateEmail) {
+              const logEmail = String(log.metadata.candidateEmail).trim().toLowerCase();
+              if (logEmail === emailLower) {
+                return true;
+              }
+            }
+            // Fallback: Check if userId contains email (for email: format)
+            if (log.userId && log.userId.startsWith('email:')) {
+              const userIdEmail = log.userId.replace('email:', '').trim().toLowerCase();
+              if (userIdEmail === emailLower) {
+                return true;
+              }
+            }
+            return false;
+          });
+          
+          if (filteredLogs.length > 0) {
+            console.log(`[Analytics] Found ${filteredLogs.length} logs after filtering by email (from metadata or userId)`)
+            setProctorLogs(filteredLogs)
+            setEventTypeLabels(data.data.eventTypeLabels || {})
+          } else {
+            // No logs matched - candidate might not have any violations yet
+            console.log('[Analytics] No logs found for this candidate')
+            setProctorLogs([])
+            setEventTypeLabels(data.data.eventTypeLabels || {})
+          }
+        } else {
+          setProctorLogs([])
+          setEventTypeLabels({})
+        }
+      } else {
+        // Found logs with email format
         setProctorLogs(data.data.logs)
         setEventTypeLabels(data.data.eventTypeLabels || {})
-      } else {
-        setProctorLogs([])
-        setEventTypeLabels({})
       }
     } catch (error) {
       console.error('Error fetching proctor logs:', error)
@@ -403,6 +452,8 @@ export default function AnalyticsPage() {
     invitedAt: selectedCandidateFromAssessment?.invitedAt || null,
     startedAt: selectedCandidateFromAssessment?.startedAt || null,
     completedAt: selectedCandidateFromAssessment?.completedAt || selectedCandidateFromResults?.submittedAt || null,
+    // Include candidateInfo (requirements) from results
+    candidateInfo: selectedCandidateFromResults?.candidateInfo || selectedCandidateFromAssessment?.candidateInfo || null,
   } : null
 
   // Calculate overall statistics
@@ -446,23 +497,6 @@ export default function AnalyticsPage() {
             Back to Dashboard
           </button>
           
-          {/* Live Proctoring Dashboard Button */}
-          <Link
-            href={`/assessments/${assessmentId}/live-dashboard`}
-            className="btn-primary"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              padding: "0.5rem 1rem",
-              fontSize: "0.875rem",
-              backgroundColor: "#8b5cf6",
-              textDecoration: "none",
-            }}
-          >
-            <Video className="h-4 w-4" />
-            Live Proctoring Dashboard
-          </Link>
         </div>
 
         <div style={{ marginBottom: "2rem" }}>
@@ -793,9 +827,37 @@ export default function AnalyticsPage() {
                   padding: "1.5rem",
                   backgroundColor: "#ffffff",
                 }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
-                    Overall Assessment Performance
-                  </h2>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, margin: 0 }}>
+                      Overall Assessment Performance
+                    </h2>
+                    <Link
+                      href={`/assessments/${assessmentId}/live-dashboard`}
+                      className="btn-primary"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        backgroundColor: "#3b82f6",
+                        color: "#ffffff",
+                        textDecoration: "none",
+                        borderRadius: "0.5rem",
+                        fontWeight: 600,
+                        transition: "background-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#2563eb";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#3b82f6";
+                      }}
+                    >
+                      <Video className="h-4 w-4" />
+                      Live Proctoring Dashboard
+                    </Link>
+                  </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Candidates</div>
@@ -866,57 +928,6 @@ export default function AnalyticsPage() {
                       </div>
                     </div>
                   </div>
-                </div>
-
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
                 </div>
 
                 {/* Candidate Performance Table */}
@@ -1113,6 +1124,84 @@ export default function AnalyticsPage() {
                   </div>
                 </div>
 
+                {/* Candidate Requirements Section */}
+                {selectedCandidateData.candidateInfo && (
+                  <div style={{
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "0.75rem",
+                    padding: "1.5rem",
+                    backgroundColor: "#ffffff",
+                  }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
+                      Candidate Requirements
+                    </h2>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+                      {selectedCandidateData.candidateInfo.phone && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Phone</div>
+                          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{selectedCandidateData.candidateInfo.phone}</div>
+                        </div>
+                      )}
+                      {selectedCandidateData.candidateInfo.linkedIn && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>LinkedIn</div>
+                          <div style={{ fontSize: "1rem" }}>
+                            <a 
+                              href={selectedCandidateData.candidateInfo.linkedIn} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              style={{ color: "#3b82f6", textDecoration: "none", fontWeight: 600 }}
+                            >
+                              {selectedCandidateData.candidateInfo.linkedIn}
+                            </a>
+                          </div>
+                        </div>
+                      )}
+                      {selectedCandidateData.candidateInfo.github && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>GitHub</div>
+                          <div style={{ fontSize: "1rem" }}>
+                            <a 
+                              href={selectedCandidateData.candidateInfo.github} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              style={{ color: "#3b82f6", textDecoration: "none", fontWeight: 600 }}
+                            >
+                              {selectedCandidateData.candidateInfo.github}
+                            </a>
+                          </div>
+                        </div>
+                      )}
+                      <div>
+                        <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Resume</div>
+                        <div style={{ fontSize: "1rem", fontWeight: 600 }}>
+                          {selectedCandidateData.candidateInfo.hasResume ? (
+                            <span style={{ color: "#10b981" }}>✓ Uploaded</span>
+                          ) : (
+                            <span style={{ color: "#94a3b8" }}>Not provided</span>
+                          )}
+                        </div>
+                      </div>
+                      {selectedCandidateData.candidateInfo.customFields && 
+                       Object.keys(selectedCandidateData.candidateInfo.customFields).length > 0 && (
+                        <div style={{ gridColumn: "1 / -1" }}>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.5rem" }}>Custom Fields</div>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+                            {Object.entries(selectedCandidateData.candidateInfo.customFields).map(([key, value]) => (
+                              <div key={key}>
+                                <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>
+                                  {key.charAt(0).toUpperCase() + key.slice(1)}
+                                </div>
+                                <div style={{ fontSize: "1rem", fontWeight: 600 }}>{String(value)}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* Overall Summary */}
                 <div style={{
                   border: "1px solid #e2e8f0",
@@ -1174,57 +1263,6 @@ export default function AnalyticsPage() {
                       {formatDate(selectedCandidateData.submittedAt || null)}
                     </div>
                   </div>
-                </div>
-
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
                 </div>
 
                 {/* Proctoring Logs Section */}
@@ -1547,15 +1585,6 @@ export default function AnalyticsPage() {
         </div>
       )}
 
-      {/* Live Proctoring Dashboard */}
-      {showLiveProctoring && assessmentId && typeof assessmentId === 'string' && session?.user && (
-        <LiveProctoringDashboard
-          isOpen={showLiveProctoring}
-          onClose={() => setShowLiveProctoring(false)}
-          assessmentId={assessmentId}
-          adminId={session.user.email || session.user.id || 'admin'}
-        />
-      )}
       <style jsx>{`
         @keyframes spin {
           from {

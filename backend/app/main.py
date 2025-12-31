@@ -46,6 +46,18 @@ logging.basicConfig(
 logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 
 logger = logging.getLogger("backend")
+
+# Redis imports
+try:
+    import redis.asyncio as redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    try:
+        import redis
+        REDIS_AVAILABLE = True
+    except ImportError:
+        REDIS_AVAILABLE = False
+        logger.warning("Redis not available - caching will be disabled")
  
 # Global variables to store the agent process and log file
 aiml_agent_process = None
@@ -233,6 +245,46 @@ async def lifespan(app: FastAPI):
     await connect_to_dsa_mongo()
     await connect_to_aiml_mongo()
    
+    # Initialize Redis for assessment context caching
+    redis_client = None
+    if REDIS_AVAILABLE:
+        try:
+            settings = get_settings()
+            # Parse Redis URL
+            redis_url = settings.redis_url
+            if redis_url.startswith("redis://"):
+                # Extract host, port, db from URL
+                # Format: redis://localhost:6379/0
+                url_parts = redis_url.replace("redis://", "").split("/")
+                host_port = url_parts[0].split(":")
+                host = host_port[0] if len(host_port) > 0 else "localhost"
+                port = int(host_port[1]) if len(host_port) > 1 else 6379
+                db = int(url_parts[1]) if len(url_parts) > 1 else 0
+                
+                # Try async Redis first
+                try:
+                    redis_client = redis.Redis(host=host, port=port, db=db, decode_responses=False)
+                    # Test connection
+                    await redis_client.ping()
+                    logger.info(f"✅ Redis connected successfully: {host}:{port}/{db}")
+                except Exception as e:
+                    logger.warning(f"Async Redis connection failed, trying sync: {e}")
+                    # Fallback to sync Redis
+                    import redis as redis_sync
+                    redis_client = redis_sync.Redis(host=host, port=port, db=db, decode_responses=False)
+                    redis_client.ping()
+                    logger.info(f"✅ Redis (sync) connected successfully: {host}:{port}/{db}")
+                
+                # Initialize assessment context cache
+                from .api.v1.assessments.services.assessment_cache import init_redis_cache
+                init_redis_cache(redis_client)
+            else:
+                logger.warning(f"Invalid Redis URL format: {redis_url}")
+        except Exception as e:
+            logger.warning(f"Redis initialization failed: {e}. Assessment caching will be disabled.")
+            logger.warning("This is not critical - the app will continue to work without Redis caching.")
+            redis_client = None
+    
     # Start AIML agent
     start_aiml_agent()
    
@@ -240,6 +292,23 @@ async def lifespan(app: FastAPI):
    
     # Shutdown
     stop_aiml_agent()
+    
+    # Close Redis connection
+    if redis_client:
+        try:
+            if hasattr(redis_client, 'close'):
+                if hasattr(redis_client.close, '__call__'):
+                    import inspect
+                    if inspect.iscoroutinefunction(redis_client.close):
+                        await redis_client.close()
+                    else:
+                        redis_client.close()
+            elif hasattr(redis_client, 'aclose'):
+                await redis_client.aclose()
+            logger.info("✅ Redis connection closed")
+        except Exception as e:
+            logger.warning(f"Error closing Redis connection: {e}")
+    
     await close_aiml_mongo_connection()
     await close_dsa_mongo_connection()
     await close_mongo_connection()

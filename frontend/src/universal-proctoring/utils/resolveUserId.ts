@@ -3,8 +3,9 @@
 // ============================================================================
 //
 // Provides consistent userId resolution for proctoring logs across all take pages.
-// Priority: session.user.id > "public:<token>" > "email:<email>" > "anonymous"
+// Priority: session.user.id > urlParam > "email:<email>" > "public:<token>" > "anonymous"
 //
+// Email is preferred over token to ensure consistent userId format for analytics.
 // This ensures proctoring logs are written with identifiers that analytics pages
 // can query using MongoDB ObjectId or predictable fallback formats.
 //
@@ -53,18 +54,18 @@ export function resolveUserIdForProctoring(
     return fallbacks.urlParam.trim();
   }
 
-  // Priority 3: Public token-based access
-  if (fallbacks.token && fallbacks.token.trim()) {
-    const tokenUserId = `public:${fallbacks.token.trim()}`;
-    console.log('[Proctoring] Using public token:', tokenUserId);
-    return tokenUserId;
-  }
-
-  // Priority 4: Email-based identifier
+  // Priority 3: Email-based identifier (preferred over token for analytics consistency)
   if (fallbacks.email && fallbacks.email.trim()) {
     const emailUserId = `email:${fallbacks.email.trim()}`;
     console.log('[Proctoring] Using email identifier:', emailUserId);
     return emailUserId;
+  }
+
+  // Priority 4: Public token-based access (fallback when email not available)
+  if (fallbacks.token && fallbacks.token.trim()) {
+    const tokenUserId = `public:${fallbacks.token.trim()}`;
+    console.log('[Proctoring] Using public token:', tokenUserId);
+    return tokenUserId;
   }
 
   // Fallback: Anonymous

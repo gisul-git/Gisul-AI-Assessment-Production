@@ -105,13 +105,15 @@ Focus on:
 4. Code quality and best practices
 5. Output validity
 
-Provide fair, constructive feedback. Be encouraging but honest."""
+CRITICAL: Provide COMPREHENSIVE, HIGHLY DETAILED feedback with extensive educational context. Users want thorough, detailed feedback, not brief summaries. Every section should be 4-7 sentences with substantial detail, examples, and educational insights. Explain the 'why' behind every observation. Include specific code examples when discussing strengths or improvements. Be educational and comprehensive in every response. Make feedback_summary 5-7 sentences, all comment fields 4-6 sentences, and include multiple detailed suggestions, strengths, and improvement areas.
+
+Provide fair, constructive feedback. Be encouraging but honest. Be detailed and educational."""
                 },
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
             temperature=0.3,
-            max_tokens=2000,
+            max_tokens=4000,  # Increased to allow for more comprehensive feedback
         )
         
         result = json.loads(response.choices[0].message.content)
@@ -180,33 +182,33 @@ Evaluate the submission and return a JSON response with this exact structure:
 
 {{
     "overall_score": <0-100>,
-    "feedback_summary": "<2-3 sentence summary of performance>",
+    "feedback_summary": "<Comprehensive 5-7 sentence detailed summary of performance. Include: (1) Overall assessment with specific details about what was accomplished, (2) Detailed evaluation of code quality and structure, (3) Comprehensive analysis of correctness and results, (4) Detailed discussion of library usage and appropriateness, (5) Detailed analysis of output quality, (6) Specific strengths with examples, (7) Specific areas for improvement with actionable guidance. Make it highly informative, educational, and comprehensive. Provide substantial detail in every sentence.>",
     "one_liner": "<Brief 5-10 word summary like 'Good implementation | Minor issues'>",
     "code_quality": {{
         "score": <0-25>,
-        "comments": "<Assessment of code structure, readability, best practices>"
+        "comments": "<Comprehensive 4-6 sentence detailed assessment of code structure, readability, best practices. Include: (1) Detailed analysis of code organization and structure, (2) Evaluation of readability and clarity with specific examples, (3) Assessment of whether best practices are followed, (4) Discussion of maintainability and scalability, (5) Code style and conventions evaluation, (6) Educational insights about code quality. Be detailed and educational.>"
     }},
     "correctness": {{
         "score": <0-40>,
-        "comments": "<Assessment of whether the code produces correct results>"
+        "comments": "<Comprehensive 4-6 sentence detailed assessment of whether the code produces correct results. Include: (1) Detailed analysis of output correctness with specific observations, (2) Evaluation of logic and algorithm correctness, (3) Discussion of edge case handling, (4) Analysis of whether the solution meets requirements, (5) Comparison with expected results if applicable, (6) Educational insights about correctness. Be detailed and educational.>"
     }},
     "task_completion": {{
         "completed": <number of tasks completed>,
         "total": {len(tasks)},
-        "details": ["<Status for each task>"]
+        "details": ["<Comprehensive status for each task with detailed explanation of what was accomplished or missed>"]
     }},
     "library_usage": {{
         "score": <0-20>,
-        "comments": "<Assessment of appropriate library usage>"
+        "comments": "<Comprehensive 4-6 sentence detailed assessment of appropriate library usage. Include: (1) Detailed evaluation of which libraries were used and why, (2) Assessment of whether libraries were used appropriately and efficiently, (3) Discussion of alternative library choices if relevant, (4) Evaluation of library-specific best practices, (5) Educational insights about library selection and usage, (6) Specific examples of good or poor library usage. Be detailed and educational.>"
     }},
     "output_quality": {{
         "score": <0-15>,
-        "comments": "<Assessment of output format and presentation>"
+        "comments": "<Comprehensive 3-5 sentence detailed assessment of output format and presentation. Include: (1) Detailed evaluation of output format and structure, (2) Assessment of output clarity and presentation, (3) Discussion of whether output meets requirements, (4) Evaluation of output completeness, (5) Educational insights about output quality. Be detailed and educational.>"
     }},
-    "strengths": ["<List of things done well>"],
-    "areas_for_improvement": ["<List of areas to improve>"],
-    "suggestions": ["<Actionable suggestions for better code>"],
-    "deduction_reasons": ["<If score < 80, list specific reasons for deductions>"]
+    "strengths": ["<Comprehensive, detailed strengths - explain what was done well, why it's good, and provide specific examples from the code. Be educational and detailed.>", "<Additional detailed strengths with specific examples>", "<More strengths with explanations of why they matter>"],
+    "areas_for_improvement": ["<Comprehensive, specific areas to improve with detailed explanations, examples, and why these improvements matter. Be educational.>", "<Additional detailed improvement areas with explanations>", "<More improvement areas with specific actionable guidance>"],
+    "suggestions": ["<Comprehensive, detailed actionable suggestions for better code with explanations of why each suggestion would improve the code. Be very specific and educational.>", "<Additional detailed suggestions with explanations>", "<More specific suggestions with code examples if applicable>"],
+    "deduction_reasons": ["<If score < 80, provide comprehensive, detailed list of specific reasons for deductions with explanations. Be very specific and educational.>", "<Additional detailed deduction reasons>"]
 }}
 
 SCORING GUIDELINES for difficulty "{difficulty}":
@@ -216,6 +218,17 @@ SCORING GUIDELINES for difficulty "{difficulty}":
 
 The overall_score should approximately equal: code_quality.score + correctness.score + library_usage.score + output_quality.score
 Adjust slightly based on task completion and overall impression.
+
+IMPORTANT FEEDBACK REQUIREMENTS:
+- Make the feedback_summary 5-7 sentences with substantial detail, context, and educational insights
+- Make all comment fields highly detailed and educational (4-6 sentences each)
+- Provide very specific, actionable feedback with examples from the code
+- Be comprehensive, thorough, and educational - explain the 'why' behind observations
+- Include specific code examples when discussing strengths or improvements
+- Provide educational context about data science, machine learning, and best practices
+- Be detailed in every section - users want comprehensive feedback, not brief summaries
+- For each task, provide detailed status with specific observations
+- Explain library choices and usage patterns in detail
 """
     return prompt
 

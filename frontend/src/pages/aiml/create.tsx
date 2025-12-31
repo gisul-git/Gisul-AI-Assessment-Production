@@ -31,9 +31,9 @@ export default function CreateAIMLCompetencyPage() {
 
   // Candidate Requirements
   const [requirePhone, setRequirePhone] = useState(false);
+  const [requireResume, setRequireResume] = useState(false);
   const [requireLinkedIn, setRequireLinkedIn] = useState(false);
   const [requireGithub, setRequireGithub] = useState(false);
-  const [customFields, setCustomFields] = useState<Array<{ id: string; label: string; required: boolean }>>([]);
 
   const [formData, setFormData] = useState({
     title: "",
@@ -149,9 +149,9 @@ export default function CreateAIMLCompetencyPage() {
           // Candidate Requirements
           candidateRequirements: {
             requirePhone,
+            requireResume,
             requireLinkedIn,
             requireGithub,
-            customFields: customFields.filter(f => f.label.trim()).map(f => ({ label: f.label.trim(), required: f.required })),
           },
         },
         startTime: new Date(formData.start_time).toISOString(),
@@ -497,6 +497,15 @@ export default function CreateAIMLCompetencyPage() {
                 <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
                   <input
                     type="checkbox"
+                    checked={requireResume}
+                    onChange={(e) => setRequireResume(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Resume (File Upload)</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
                     checked={requireLinkedIn}
                     onChange={(e) => setRequireLinkedIn(e.target.checked)}
                     style={{ width: "18px", height: "18px", cursor: "pointer" }}
@@ -512,87 +521,6 @@ export default function CreateAIMLCompetencyPage() {
                   />
                   <span style={{ fontWeight: 600, color: "#1E5A3B" }}>GitHub URL</span>
                 </label>
-              </div>
-              
-              {/* Custom Text Fields */}
-              <div style={{ marginTop: "1.5rem", paddingTop: "1rem", borderTop: "1px solid #A8E8BC" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
-                  <label style={{ fontWeight: 600, color: "#1E5A3B" }}>Custom Text Fields</label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const newId = `custom_${Date.now()}`;
-                      setCustomFields([...customFields, { id: newId, label: "", required: false }]);
-                    }}
-                    style={{
-                      padding: "0.5rem 1rem",
-                      backgroundColor: "#2D7A52",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "0.375rem",
-                      cursor: "pointer",
-                      fontSize: "0.875rem",
-                      fontWeight: 500,
-                    }}
-                  >
-                    + Add Custom Field
-                  </button>
-                </div>
-                {customFields.map((field, index) => (
-                  <div key={field.id} style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem", alignItems: "center" }}>
-                    <input
-                      type="text"
-                      placeholder="Field label (e.g., Portfolio URL, Experience)"
-                      value={field.label}
-                      onChange={(e) => {
-                        const updated = [...customFields];
-                        updated[index].label = e.target.value;
-                        setCustomFields(updated);
-                      }}
-                      style={{
-                        flex: 1,
-                        padding: "0.5rem 0.75rem",
-                        border: "1px solid #A8E8BC",
-                        borderRadius: "0.375rem",
-                        fontSize: "0.875rem",
-                      }}
-                    />
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.875rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={field.required}
-                        onChange={(e) => {
-                          const updated = [...customFields];
-                          updated[index].required = e.target.checked;
-                          setCustomFields(updated);
-                        }}
-                      />
-                      <span>Required</span>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCustomFields(customFields.filter((_, i) => i !== index));
-                      }}
-                      style={{
-                        padding: "0.5rem",
-                        backgroundColor: "#ef4444",
-                        color: "white",
-                        border: "none",
-                        borderRadius: "0.375rem",
-                        cursor: "pointer",
-                        fontSize: "0.875rem",
-                      }}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-                {customFields.length === 0 && (
-                  <p style={{ fontSize: "0.875rem", color: "#64748b", fontStyle: "italic" }}>
-                    No custom fields added. Click "Add Custom Field" to add one.
-                  </p>
-                )}
               </div>
             </div>
 

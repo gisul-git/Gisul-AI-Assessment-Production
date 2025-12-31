@@ -6,10 +6,10 @@ import { customMCQApi } from "../../lib/custom-mcq/api";
 import { CustomMCQAssessment, AssessmentSubmission } from "../../types/custom-mcq";
 import ProctorSummaryCard from "../../components/admin/ProctorSummaryCard";
 import ProctorLogsReview from "../../components/admin/ProctorLogsReview";
-import LiveProctoringDashboard from "../../components/proctor/LiveProctoringDashboard";
 import { useSession } from "next-auth/react";
-import { Eye, Loader2 } from "lucide-react";
+import { Eye, Video } from "lucide-react";
 import axios from "axios";
+import Link from "next/link";
 
 interface CustomMCQDetailsPageProps {
   session: any;
@@ -29,7 +29,6 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
   const [expandedProctorUser, setExpandedProctorUser] = useState<string | null>(null);
   const [expandedAnswerLogsUser, setExpandedAnswerLogsUser] = useState<string | null>(null);
   const [expandedRequirementsUser, setExpandedRequirementsUser] = useState<string | null>(null);
-  const [showLiveProctoring, setShowLiveProctoring] = useState(false);
   const [showCandidates, setShowCandidates] = useState(false);
   const [referencePhotos, setReferencePhotos] = useState<Record<string, string | null>>({});
   // Removed isLiveProctoringCooldown - no longer needed
@@ -265,28 +264,32 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
               <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
               <h2 style={{ fontSize: "1.125rem", fontWeight: 600, margin: 0 }}>Live Proctoring</h2>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowLiveProctoring(true)}
+            <Link
+              href={`/custom-mcq/${assessmentId}/live-dashboard`}
+              className="btn-primary"
               style={{
-                padding: "0.5rem 1rem",
-                fontSize: "0.875rem",
                 display: "flex",
                 alignItems: "center",
                 gap: "0.5rem",
+                padding: "0.5rem 1rem",
+                fontSize: "0.875rem",
                 backgroundColor: "#3b82f6",
                 color: "#ffffff",
-                border: "none",
+                textDecoration: "none",
                 borderRadius: "0.5rem",
-                cursor: "pointer",
                 fontWeight: 600,
+                transition: "background-color 0.2s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = "#2563eb";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = "#3b82f6";
               }}
             >
-              <>
-                <Eye size={16} />
-                Open Live Proctoring
-              </>
-            </button>
+              <Video className="h-4 w-4" />
+              Live Proctoring Dashboard
+            </Link>
           </div>
           <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
             Monitor candidates in real-time via webcam and screen sharing
@@ -1139,15 +1142,6 @@ export default function CustomMCQDetailsPage({ session }: CustomMCQDetailsPagePr
         </div>
       </div>
 
-      {/* Live Proctoring Dashboard */}
-      {showLiveProctoring && assessmentId && typeof assessmentId === 'string' && sessionData?.user && (
-        <LiveProctoringDashboard
-          isOpen={showLiveProctoring}
-          onClose={() => setShowLiveProctoring(false)}
-          assessmentId={assessmentId}
-          adminId={sessionData.user.email || sessionData.user.id || 'admin'}
-        />
-      )}
       <style jsx>{`
         @keyframes spin {
           from {

@@ -65,8 +65,8 @@ const FACE_VERIFICATION_CHECK_INTERVAL = 3000; // Check every 3 seconds (faster 
 const FACE_VERIFICATION_TRIGGER_DURATION = 0; // 0 seconds - trigger immediately when mismatch detected
 const FACE_VERIFICATION_COOLDOWN = 20000; // 20 seconds cooldown (increased for stability)
 const FACE_VERIFICATION_SIMILARITY_THRESHOLD = 0.88; // Minimum similarity (0-1) - Balanced threshold
-const FACE_VERIFICATION_CONSECUTIVE_REQUIRED = 3; // Require 3 consecutive mismatches before triggering (reduced false positives)
-const FACE_VERIFICATION_HIGH_SIMILARITY_THRESHOLD = 0.95; // If similarity > 0.95, likely same person (very high confidence)
+const FACE_VERIFICATION_CONSECUTIVE_REQUIRED = 2; // Require 2 consecutive mismatches before triggering (faster detection)
+const FACE_VERIFICATION_HIGH_SIMILARITY_THRESHOLD = 0.90; // If similarity > 0.90, likely same person (protect from false positives)
 const FACE_VERIFICATION_MIN_CONFIDENCE = 0.8; // Minimum confidence (0-1) to trigger violation
 const FACE_VERIFICATION_BASELINE_DURATION = 60000; // 60 seconds to establish baseline
 const FACE_VERIFICATION_BASELINE_MIN_SAMPLES = 5; // Minimum samples needed for baseline
@@ -1341,11 +1341,21 @@ export class AIProctoringService {
       let isMismatch = false;
       let thresholdUsed = FACE_VERIFICATION_SIMILARITY_THRESHOLD;
       
+      // HIGH SIMILARITY PROTECTION: If similarity is very high (>0.90), it's likely the same person
+      // This prevents false positives for Person A (reference person) even with baseline detection
+      const isHighSimilarity = averagedSimilarity >= FACE_VERIFICATION_HIGH_SIMILARITY_THRESHOLD;
+      
       if (this.baselineEstablished && this.baselineMean !== null && this.baselineStdDev !== null) {
         // Use outlier detection: similarity < (mean - 2 * stdDev)
         const outlierThreshold = this.baselineMean - (FACE_VERIFICATION_OUTLIER_STD_DEVIATIONS * this.baselineStdDev);
         thresholdUsed = Math.max(outlierThreshold, FACE_VERIFICATION_SIMILARITY_THRESHOLD * 0.8); // Don't go too low
-        isMismatch = averagedSimilarity < outlierThreshold && averagedSimilarity < FACE_VERIFICATION_SIMILARITY_THRESHOLD;
+        
+        // Apply high similarity protection: if similarity > 0.90, never trigger mismatch (same person)
+        if (isHighSimilarity) {
+          isMismatch = false; // High similarity = same person, protect from false positive
+        } else {
+          isMismatch = averagedSimilarity < outlierThreshold && averagedSimilarity < FACE_VERIFICATION_SIMILARITY_THRESHOLD;
+        }
         
         console.log("[AIProctoringService] 📊 Using baseline-based detection:", {
           baselineMean: this.baselineMean.toFixed(3),
@@ -1353,10 +1363,11 @@ export class AIProctoringService {
           outlierThreshold: outlierThreshold.toFixed(3),
           currentSimilarity: averagedSimilarity.toFixed(3),
           isOutlier: averagedSimilarity < outlierThreshold,
+          isHighSimilarity,
+          protected: isHighSimilarity,
         });
       } else {
         // Use fixed threshold with dynamic adjustment
-        const isHighSimilarity = averagedSimilarity >= FACE_VERIFICATION_HIGH_SIMILARITY_THRESHOLD;
         const isLowSimilarity = averagedSimilarity < FACE_VERIFICATION_SIMILARITY_THRESHOLD;
         
         // Dynamic threshold adjustment based on embedding quality
@@ -1364,7 +1375,8 @@ export class AIProctoringService {
         const adjustedThreshold = FACE_VERIFICATION_SIMILARITY_THRESHOLD * (0.9 + 0.1 * qualityFactor); // Adjust by ±10%
         thresholdUsed = adjustedThreshold;
         
-        isMismatch = isLowSimilarity && !isHighSimilarity && averagedSimilarity < adjustedThreshold;
+        // Apply high similarity protection: if similarity > 0.90, never trigger mismatch (same person)
+        isMismatch = !isHighSimilarity && isLowSimilarity && averagedSimilarity < adjustedThreshold;
       }
       
       // CONFIDENCE FILTER: Only trigger if confidence is high enough
@@ -1648,6 +1660,24 @@ export class AIProctoringService {
       return;
     }
 
+    // Extract candidate email from sessionStorage for metadata (backup for analytics filtering)
+    let candidateEmail: string | null = null;
+    try {
+      if (typeof window !== 'undefined') {
+        candidateEmail = sessionStorage.getItem('candidateEmail') || null;
+      }
+    } catch (e) {
+      // Ignore sessionStorage errors (SSR or private browsing)
+    }
+
+    // Extract email from userId if it's in email: format
+    const emailFromUserId = this.session.userId.startsWith('email:')
+      ? this.session.userId.replace('email:', '')
+      : null;
+
+    // Use email from userId if available, otherwise from sessionStorage
+    const finalCandidateEmail = emailFromUserId || candidateEmail;
+
     const violation: ProctoringViolation = {
       eventType,
       timestamp: getTimestamp(),
@@ -1656,6 +1686,8 @@ export class AIProctoringService {
       metadata: {
         severity,
         details,
+        // Store candidate email in metadata for analytics filtering (backup)
+        ...(finalCandidateEmail && { candidateEmail: finalCandidateEmail }),
         ...(snapshotBase64 && {
           evidence: {
             type: 'image',

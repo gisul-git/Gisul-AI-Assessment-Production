@@ -314,8 +314,6 @@ export default function CandidateAssessmentPage() {
   // Handle violation callback from universal proctoring
   // THIS IS THE SINGLE SOURCE OF TRUTH for fullscreen lock triggering
   const handleUniversalViolation = useCallback((violation: ProctoringViolation) => {
-    console.log('[Assessment Take] Universal proctoring violation:', violation);
-    
     // Show toast for all violations
     pushViolationToast({
       id: `${violation.eventType}-${Date.now()}`,
@@ -327,7 +325,6 @@ export default function CandidateAssessmentPage() {
     // FULLSCREEN_EXIT violation triggers the fullscreen lock overlay
     // ONLY when AI Proctoring is enabled (Live-only mode should not lock)
     if (violation.eventType === 'FULLSCREEN_EXIT' && aiProctoringEnabled) {
-      console.log('[Assessment Take] FULLSCREEN_EXIT violation - locking screen (AI mode)');
       setFullscreenLocked(true);
       incrementFullscreenExitCount();
     }
@@ -335,10 +332,8 @@ export default function CandidateAssessmentPage() {
 
   // Handle fullscreen re-entry - unlock the screen
   const handleRequestFullscreen = useCallback(async (): Promise<boolean> => {
-    console.log('[Assessment Take] Requesting fullscreen re-entry...');
     const success = await requestFullscreenLock();
     if (success) {
-      console.log('[Assessment Take] Fullscreen re-entered - unlocking screen');
       setFullscreenLocked(false);
     }
     return success;
@@ -361,7 +356,6 @@ export default function CandidateAssessmentPage() {
   // Unlock fullscreen when assessment is submitted/finished
   useEffect(() => {
     if (appState === 'finished' || appState === 'submitting') {
-      console.log('[Assessment Take] Assessment finished - unlocking fullscreen');
       setFullscreenLocked(false);
     }
   }, [appState, setFullscreenLocked]);
@@ -372,7 +366,6 @@ export default function CandidateAssessmentPage() {
       const stream = (window as any).__screenStream as MediaStream;
       if (stream && stream.active && stream.getVideoTracks().length > 0) {
         setLiveProctorScreenStream(stream);
-        console.log('[Assessment Take] Found global screen stream for Live Proctoring');
       }
     }
   }, []);
@@ -380,8 +373,6 @@ export default function CandidateAssessmentPage() {
   // Start proctoring when assessment is ready (AI proctoring + tab switch + fullscreen)
   useEffect(() => {
     if (appState === 'ready' && !isProctoringRunning && isClient && thumbVideoRef.current) {
-      console.log('[Assessment Take] Starting Universal Proctoring...');
-      
       startUniversalProctoring({
         settings: {
           aiProctoringEnabled: aiProctoringEnabled,
@@ -392,12 +383,6 @@ export default function CandidateAssessmentPage() {
           assessmentId: assessmentIdStr,
         },
         videoElement: aiProctoringEnabled ? thumbVideoRef.current : null,
-      }).then((success) => {
-        if (success) {
-          console.log('[Assessment Take] ✅ Universal Proctoring started');
-        } else {
-          console.error('[Assessment Take] ❌ Failed to start Universal Proctoring');
-        }
       });
     }
   }, [appState, isProctoringRunning, isClient, aiProctoringEnabled, liveProctoringEnabled, candidateIdStr, assessmentIdStr, startUniversalProctoring]);
@@ -405,16 +390,23 @@ export default function CandidateAssessmentPage() {
   // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
   const startLiveProctoring = useCallback((sessionId: string, ws: WebSocket) => {
     if (liveProctoringStartedRef.current) {
-      console.log('[Assessment Take] Live Proctoring already started');
       return;
     }
 
-    console.log('[Assessment Take] 🚀 Admin connected! Starting WebRTC...');
     liveProctoringStartedRef.current = true;
+
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    // Live proctoring backend expects raw email or token, not formatted userId
+    let rawCandidateId = candidateIdStr;
+    if (candidateIdStr.startsWith('email:')) {
+      rawCandidateId = candidateIdStr.replace('email:', '');
+    } else if (candidateIdStr.startsWith('public:')) {
+      rawCandidateId = candidateIdStr.replace('public:', '');
+    }
 
     const liveService = new CandidateLiveService({
       assessmentId: assessmentIdStr,
-      candidateId: candidateIdStr,
+      candidateId: rawCandidateId, // Use raw email/token for live proctoring
       debugMode: debugMode,
     });
 
@@ -424,10 +416,10 @@ export default function CandidateAssessmentPage() {
     liveService.start(
       {
         onStateChange: (state) => {
-          console.log('[Assessment Take] Live proctoring state:', state);
+          // State change handler
         },
         onError: (error) => {
-          console.error('[Assessment Take] Live Proctoring error:', error);
+          // Error handler
         },
       },
       liveProctorScreenStream,
@@ -436,10 +428,8 @@ export default function CandidateAssessmentPage() {
       ws // Pass existing WebSocket
     ).then((success) => {
       if (success) {
-        console.log('[Assessment Take] ✅ Live Proctoring WebRTC connected');
         liveProctoringServiceRef.current = liveService;
       } else {
-        console.error('[Assessment Take] ❌ Failed to start Live Proctoring');
         liveProctoringStartedRef.current = false;
       }
     });
@@ -453,7 +443,6 @@ export default function CandidateAssessmentPage() {
 
     // Guard: Ensure start-session is called only once per candidate per test
     if (startSessionCalledRef.current) {
-      console.log('[Assessment Take] ⏭️ start-session already called, skipping to prevent duplicate sessions');
       return;
     }
 
@@ -461,8 +450,6 @@ export default function CandidateAssessmentPage() {
     startSessionCalledRef.current = true;
 
     // Register live session (backend sets status to "candidate_initiated")
-    console.log('[Assessment Take] 📝 Registering Live Proctoring session...');
-    
     // Phase 2.2: Register session with backend
     fetch('/api/v1/proctor/live/start-session', {
       method: 'POST',
@@ -477,7 +464,6 @@ export default function CandidateAssessmentPage() {
         if (data.success && data.data?.sessionId) {
           const sessionId = data.data.sessionId;
           candidateSessionIdRef.current = sessionId;
-          console.log(`[Assessment Take] ✅ Session registered: ${sessionId}`);
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
           // Use backend host for WebSocket connection
@@ -488,32 +474,28 @@ export default function CandidateAssessmentPage() {
           candidateWsRef.current = ws;
 
           ws.onopen = () => {
-            console.log('[Assessment Take] ✅ WebSocket connected, waiting for admin...');
+            // WebSocket connected
           };
 
           ws.onmessage = (event) => {
             const message = JSON.parse(event.data);
             if (message.type === 'ADMIN_CONNECTED') {
-              console.log('[Assessment Take] 🚀 ADMIN_CONNECTED signal received!');
               startLiveProctoring(sessionId, ws);
             }
           };
 
           ws.onerror = (error) => {
-            console.error('[Assessment Take] WebSocket error:', error);
+            // WebSocket error
           };
 
           ws.onclose = () => {
-            console.log('[Assessment Take] WebSocket closed');
             candidateWsRef.current = null;
           };
         }
       })
       .catch((error) => {
-        console.error('[Assessment Take] Failed to register Live Proctoring session:', error);
+        // Failed to register session
       });
-    
-    console.log('[Assessment Take] ⏸️ Live Proctoring ready, waiting for admin to connect...');
 
     // Cleanup WebSocket on unmount
     return () => {
@@ -527,7 +509,6 @@ export default function CandidateAssessmentPage() {
   // Stop proctoring when assessment ends
   useEffect(() => {
     if (appState === 'finished') {
-      console.log('[Assessment Take] Assessment finished, stopping proctoring');
       stopUniversalProctoring();
       
       if (liveProctoringServiceRef.current) {
@@ -563,8 +544,6 @@ export default function CandidateAssessmentPage() {
     };
     const allQuestions: Question[] = [];
 
-    console.log("[take.tsx] Transforming topics_v2:", topics_v2.length, "topics");
-
     // Helper to compute points from difficulty
     const computePoints = (difficulty: string): number => {
       const difficultyLower = (difficulty || "").toLowerCase();
@@ -581,13 +560,11 @@ export default function CandidateAssessmentPage() {
 
     // Process each topic
     if (!Array.isArray(topics_v2) || topics_v2.length === 0) {
-      console.warn("[take.tsx] topics_v2 is not a valid array or is empty");
       return { sections, allQuestions };
     }
     
     topics_v2.forEach((topic, topicIndex) => {
       if (!topic || typeof topic !== "object") {
-        console.warn(`[take.tsx] Topic ${topicIndex} is not a valid object, skipping`);
         return;
       }
 
@@ -595,16 +572,9 @@ export default function CandidateAssessmentPage() {
       const topicLabel = topic.label || topic.topic || `Topic ${topicIndex + 1}`;
       const questionRows = topic.questionRows || [];
 
-      console.log(`[take.tsx] Processing topic ${topicIndex} (${topicLabel}):`, {
-        topicId,
-        topicLabel,
-        questionRowsCount: questionRows.length,
-      });
-
       // Process each question row
       questionRows.forEach((row: any, rowIndex: number) => {
         if (!row || typeof row !== "object") {
-          console.warn(`[take.tsx] Row ${rowIndex} in topic ${topicIndex} is not a valid object, skipping`);
           return;
         }
 
@@ -630,46 +600,16 @@ export default function CandidateAssessmentPage() {
         const isGeneratedOrCompleted = !rowStatus || rowStatus === "generated" || rowStatus === "completed";
         
         if (!isGeneratedOrCompleted) {
-          console.log(`[take.tsx] Row ${rowIndex} (${questionType}) in topic ${topicIndex} has status "${rowStatus}", skipping (not generated/completed)`);
           return;
         }
         
         if (questions.length === 0) {
-          console.warn(`[take.tsx] Row ${rowIndex} (${questionType}) in topic ${topicIndex} has no questions array or it's empty. Row data:`, {
-            rowId,
-            questionType,
-            difficulty,
-            rowStatus,
-            hasQuestionsProperty: 'questions' in row,
-            hasQuestionProperty: 'question' in row,
-            rowKeys: Object.keys(row),
-          });
           return;
-        }
-
-        console.log(`[take.tsx] Processing row ${rowIndex} (${questionType}):`, {
-          rowId,
-          questionType,
-          difficulty,
-          questionsCount: questions.length,
-          questionsArray: questions, // Show actual questions array
-          rowStatus: row.status,
-          rowKeys: Object.keys(row),
-          hasQuestionsProperty: 'questions' in row,
-          questionsIsArray: Array.isArray(questions),
-        });
-        
-        // Log first question if exists
-        if (questions.length > 0) {
-          console.log(`[take.tsx] First question in row ${rowIndex}:`, JSON.stringify(questions[0], null, 2));
-        } else {
-          console.warn(`[take.tsx] Row ${rowIndex} has no questions! Row data:`, JSON.stringify(row, null, 2));
         }
 
         // Process each question in the row
         questions.forEach((question: any, questionIndex: number) => {
           if (!question || typeof question !== "object") {
-            console.warn(`[take.tsx] Question ${questionIndex} in row ${rowIndex} is not a valid object, skipping`);
             return;
           }
 
@@ -719,26 +659,14 @@ export default function CandidateAssessmentPage() {
             } else {
               sectionKey = "subjective"; // Default fallback
             }
-            console.warn(`[take.tsx] Unknown questionType "${questionType}", inferred as "${sectionKey}"`);
           }
 
           if (sectionKey) {
             sections[sectionKey].push(questionObj);
             allQuestions.push(questionObj);
-            console.log(`[take.tsx] Added question to ${sectionKey} section`);
           }
         });
       });
-    });
-
-    console.log("[take.tsx] Transformation complete:", {
-      mcq: sections.mcq.length,
-      pseudocode: sections.pseudocode.length,
-      subjective: sections.subjective.length,
-      coding: sections.coding.length,
-      sql: sections.sql.length,
-      aiml: sections.aiml.length,
-      total: allQuestions.length,
     });
 
     return { sections, allQuestions };
@@ -749,25 +677,18 @@ export default function CandidateAssessmentPage() {
   // ============================================================================
 
   const getCurrentQuestion = useCallback((): Question | null => {
-    console.log("[take.tsx] getCurrentQuestion:", {
-      currentSection,
-    currentQuestionIndex,
-      sectionExists: currentSection ? !!sections[currentSection] : false,
-      sectionLength: currentSection ? sections[currentSection]?.length : 0,
-      sections,
-    });
-    
     if (!currentSection || !sections[currentSection]) {
-      console.warn("[take.tsx] No current section or section doesn't exist");
       return null;
     }
     const sectionQuestions = sections[currentSection];
     if (currentQuestionIndex >= 0 && currentQuestionIndex < sectionQuestions.length) {
       return sectionQuestions[currentQuestionIndex];
     }
-    console.warn("[take.tsx] Question index out of bounds:", currentQuestionIndex, "section length:", sectionQuestions.length);
     return null;
   }, [currentSection, sections, currentQuestionIndex]);
+  
+  // Memoize current question to prevent unnecessary re-renders when only timer updates
+  const currentQuestion = useMemo(() => getCurrentQuestion(), [getCurrentQuestion]);
 
   const getQuestionId = useCallback((question: Question): string => {
     return question._id || `${currentSection}-${currentQuestionIndex}`;
@@ -782,7 +703,6 @@ export default function CandidateAssessmentPage() {
     // Use duration from schedule (in minutes), convert to seconds
     const durationMinutes = settings.duration || 60; // Default to 60 minutes if not set
     const timerSeconds = durationMinutes * 60; // Convert minutes to seconds
-    console.log("[take.tsx] Timer calculation: duration =", durationMinutes, "minutes =", timerSeconds, "seconds");
     return timerSeconds;
   }, []);
 
@@ -809,7 +729,6 @@ export default function CandidateAssessmentPage() {
     try {
       await axios.post("/api/v1/analytics/log-event", logEntry);
     } catch (error) {
-      console.error("[Analytics] Failed to log event:", error);
     }
   }, [attemptId, currentSection, getCurrentQuestion, getQuestionId]);
 
@@ -849,7 +768,6 @@ export default function CandidateAssessmentPage() {
             },
           });
         } catch (logError) {
-          console.warn("[Answer History] Failed to log version history:", logError);
           // Don't block saving if logging fails
         }
 
@@ -865,7 +783,6 @@ export default function CandidateAssessmentPage() {
         lastSavedAnswerRef.current.set(questionId, answer);
         await logAnalyticsEvent("ANSWER_UPDATE", { questionId, section });
       } catch (error) {
-        console.error("[Auto-save] Failed to save answer:", error);
       }
     }, 500);
   }, [attemptId, id, token, timerRemaining, logAnalyticsEvent]);
@@ -969,7 +886,6 @@ export default function CandidateAssessmentPage() {
 
       setQuestionStatus(prev => ({ ...prev, [questionId]: 'attempted' }));
     } catch (error: any) {
-      console.error('Run error:', error);
       
       // Handle network errors more gracefully
       let errorMessage = 'Failed to run code';
@@ -1130,7 +1046,6 @@ export default function CandidateAssessmentPage() {
       // Save the submitted code as answer
       await saveAnswer(questionId, currentCode, currentSection || 'coding');
     } catch (error: any) {
-      console.error('Submit error:', error);
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to submit code';
       setOutput(prev => ({
         ...prev,
@@ -1149,50 +1064,23 @@ export default function CandidateAssessmentPage() {
   // ============================================================================
 
   const navigateToQuestion = useCallback(async (section: keyof Sections, index: number) => {
-    console.log("[NavigateToQuestion] ========== START ==========");
-    console.log("[NavigateToQuestion] Target Section:", section);
-    console.log("[NavigateToQuestion] Target Index:", index);
-    console.log("[NavigateToQuestion] Current Section:", currentSection);
-    console.log("[NavigateToQuestion] Current Question Index:", currentQuestionIndex);
-    
-    // PART 7: Auto-save current answer before switching questions
+    // Auto-save current answer before switching questions
     const currentQuestion = getCurrentQuestion();
-    console.log("[NavigateToQuestion] Current Question:", currentQuestion ? "Found" : "Not Found");
     
     if (currentQuestion && currentSection) {
       const questionId = getQuestionId(currentQuestion);
-      console.log("[NavigateToQuestion] Current Question ID:", questionId);
-      
       const currentAnswer = answers.get(questionId) || codeAnswers.get(questionId) || "";
-      console.log("[NavigateToQuestion] Current Answer from answers Map:", answers.get(questionId) || "NOT FOUND");
-      console.log("[NavigateToQuestion] Current Answer from codeAnswers Map:", codeAnswers.get(questionId) || "NOT FOUND");
-      console.log("[NavigateToQuestion] Final Current Answer:", currentAnswer || "EMPTY");
-      console.log("[NavigateToQuestion] Answer Length:", currentAnswer.length);
       
       if (currentAnswer) {
-        console.log("[NavigateToQuestion] Answer found, attempting to save...");
         // Force immediate save (clear debounce and save)
         if (saveTimeoutRef.current) {
-          console.log("[NavigateToQuestion] Clearing pending debounced save");
           clearTimeout(saveTimeoutRef.current);
           saveTimeoutRef.current = null;
         }
         try {
           const lastSaved = lastSavedAnswerRef.current.get(questionId);
-          console.log("[NavigateToQuestion] Last Saved Answer:", lastSaved || "NOT SAVED YET");
-          console.log("[NavigateToQuestion] Answer Changed?", lastSaved !== currentAnswer);
           
           if (lastSaved !== currentAnswer) {
-            console.log("[NavigateToQuestion] Saving answer immediately...");
-            console.log("[NavigateToQuestion] Save Request:", {
-              attemptId,
-              questionId,
-              answerLength: currentAnswer.length,
-              answerPreview: currentAnswer.substring(0, 100),
-              section: currentSection,
-              timeRemaining: timerRemaining,
-            });
-            
             await axios.post("/api/v1/attempts/save-answer", {
               attemptId,
               questionId,
@@ -1201,21 +1089,11 @@ export default function CandidateAssessmentPage() {
               timeRemaining: timerRemaining,
             });
             
-            console.log("[NavigateToQuestion] ✓ Answer saved successfully");
             lastSavedAnswerRef.current.set(questionId, currentAnswer);
-          } else {
-            console.log("[NavigateToQuestion] Answer unchanged, skipping save");
           }
         } catch (error) {
-          console.error("[NavigateToQuestion] ✗ ERROR saving answer:", error);
-          console.error("[NavigateToQuestion] Error Details:", {
-            message: (error as any)?.message,
-            response: (error as any)?.response?.data,
-            status: (error as any)?.response?.status,
-          });
+          // Error saving answer
         }
-      } else {
-        console.log("[NavigateToQuestion] No answer to save (empty answer)");
       }
       
       // Log question change
@@ -1226,87 +1104,60 @@ export default function CandidateAssessmentPage() {
           toSection: section,
           toIndex: index,
         });
-        console.log("[NavigateToQuestion] Analytics event logged");
       } catch (error) {
-        console.warn("[NavigateToQuestion] Failed to log analytics:", error);
+        // Failed to log analytics
       }
-    } else {
-      console.log("[NavigateToQuestion] No current question or section, skipping save");
     }
     
     // Check if section is locked (only for per-section timers)
     if (examSettings?.enablePerSectionTimers && lockedSections.has(section)) {
-      console.warn("[NavigateToQuestion] Target section is locked:", section);
       alert(`This section has been locked because its timer expired. You cannot access questions in this section.`);
       return;
     }
     
-    console.log("[NavigateToQuestion] Updating state to new question...");
     setCurrentSection(section);
     setCurrentQuestionIndex(index);
     
     const question = sections[section][index];
-    console.log("[NavigateToQuestion] New Question:", question ? "Found" : "Not Found");
     
     if (question) {
       const newQuestionId = getQuestionId(question);
-      console.log("[NavigateToQuestion] New Question ID:", newQuestionId);
       try {
         logAnalyticsEvent("QUESTION_VIEW", {
           section,
           questionIndex: index,
           questionId: newQuestionId,
         });
-        console.log("[NavigateToQuestion] Question view analytics logged");
       } catch (error) {
-        console.warn("[NavigateToQuestion] Failed to log question view:", error);
+        // Failed to log question view
       }
     }
-    
-    console.log("[NavigateToQuestion] ========== COMPLETE ==========");
   }, [sections, logAnalyticsEvent, getQuestionId, getCurrentQuestion, currentSection, answers, codeAnswers, attemptId, timerRemaining, lockedSections, examSettings]);
 
   // Helper function to save current answer before navigation
   const saveCurrentAnswer = useCallback(async (): Promise<boolean> => {
-    console.log("[SaveCurrentAnswer] ========== SAVING CURRENT ANSWER ==========");
     const currentQuestion = getCurrentQuestion();
     if (!currentQuestion || !currentSection) {
-      console.log("[SaveCurrentAnswer] No current question or section, nothing to save");
       return false;
     }
 
     const questionId = getQuestionId(currentQuestion);
     const currentAnswer = answers.get(questionId) || codeAnswers.get(questionId) || "";
-    console.log("[SaveCurrentAnswer] Question ID:", questionId);
-    console.log("[SaveCurrentAnswer] Current Answer:", currentAnswer || "EMPTY");
     
     if (!currentAnswer) {
-      console.log("[SaveCurrentAnswer] No answer to save (empty)");
       return false;
     }
 
     // Clear any pending debounced save
     if (saveTimeoutRef.current) {
-      console.log("[SaveCurrentAnswer] Clearing pending debounced save");
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
     }
 
     try {
       const lastSaved = lastSavedAnswerRef.current.get(questionId);
-      console.log("[SaveCurrentAnswer] Last Saved Answer:", lastSaved || "NOT SAVED YET");
       
       if (lastSaved !== currentAnswer) {
-        console.log("[SaveCurrentAnswer] Answer changed, saving immediately...");
-        console.log("[SaveCurrentAnswer] Save Request:", {
-          attemptId,
-          questionId,
-          answerLength: currentAnswer.length,
-          answerPreview: currentAnswer.substring(0, 100),
-          section: currentSection,
-          timeRemaining: timerRemaining,
-        });
-
         await axios.post("/api/v1/attempts/save-answer", {
           attemptId,
           questionId,
@@ -1315,64 +1166,38 @@ export default function CandidateAssessmentPage() {
           timeRemaining: timerRemaining,
         });
 
-        console.log("[SaveCurrentAnswer] ✓ Answer saved successfully");
         lastSavedAnswerRef.current.set(questionId, currentAnswer);
         return true;
       } else {
-        console.log("[SaveCurrentAnswer] Answer unchanged, already saved");
         return true;
       }
     } catch (error) {
-      console.error("[SaveCurrentAnswer] ✗ ERROR saving answer:", error);
-      console.error("[SaveCurrentAnswer] Error Details:", {
-        message: (error as any)?.message,
-        response: (error as any)?.response?.data,
-        status: (error as any)?.response?.status,
-      });
       return false;
     }
   }, [getCurrentQuestion, getQuestionId, currentSection, answers, codeAnswers, attemptId, timerRemaining]);
 
   const navigateNext = useCallback(async () => {
-    console.log("=".repeat(80));
-    console.log("[Save & Next] ========== NAVIGATE NEXT CLICKED ==========");
-    console.log("[Save & Next] Timestamp:", new Date().toISOString());
-    console.log("[Save & Next] Current Section:", currentSection);
-    console.log("[Save & Next] Current Question Index:", currentQuestionIndex);
-    
     if (!currentSection) {
-      console.error("[Save & Next] ERROR: currentSection is null/undefined");
       return;
     }
 
     // STEP 1: Save current answer FIRST (before any navigation)
-    console.log("[Save & Next] Step 1: Saving current answer...");
     await saveCurrentAnswer();
-    console.log("[Save & Next] Step 1: Answer save completed");
 
     // STEP 2: Navigate to next question or section
     const sectionQuestions = sections[currentSection];
-    console.log("[Save & Next] Step 2: Determining navigation target");
-    console.log("[Save & Next] Section Questions Length:", sectionQuestions.length);
-    console.log("[Save & Next] Is Last Question in Section:", currentQuestionIndex >= sectionQuestions.length - 1);
     
     if (currentQuestionIndex < sectionQuestions.length - 1) {
-      console.log("[Save & Next] Moving to next question in same section");
-      console.log("[Save & Next] Next Question Index:", currentQuestionIndex + 1);
       try {
         await navigateToQuestion(currentSection, currentQuestionIndex + 1);
-        console.log("[Save & Next] Successfully navigated to next question");
         logAnalyticsEvent("NAVIGATION_NEXT", { section: currentSection, index: currentQuestionIndex });
       } catch (error) {
-        console.error("[Save & Next] ERROR navigating to next question:", error);
+        // Error navigating
       }
       } else {
-      console.log("[Save & Next] Moving to next section");
       // Move to next section - skip empty sections
       const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
       const currentIndex = sectionOrder.indexOf(currentSection);
-      console.log("[Save & Next] Current Section Index:", currentIndex);
-      console.log("[Save & Next] Section Order:", sectionOrder);
       
       // Find the next section with questions
       let nextSectionWithQuestions: keyof Sections | null = null;
@@ -1380,11 +1205,9 @@ export default function CandidateAssessmentPage() {
       
       while (nextSectionIndex < sectionOrder.length) {
         const candidateSection = sectionOrder[nextSectionIndex];
-        console.log("[Save & Next] Checking section:", candidateSection, "Questions:", sections[candidateSection]?.length || 0);
         
         // Check if section is locked (for per-section timers)
         if (examSettings.enablePerSectionTimers && lockedSections.has(candidateSection)) {
-          console.warn("[Save & Next] Section is locked:", candidateSection);
           nextSectionIndex++;
           continue;
         }
@@ -1392,7 +1215,6 @@ export default function CandidateAssessmentPage() {
         // Check if section has questions
         if (sections[candidateSection] && sections[candidateSection].length > 0) {
           nextSectionWithQuestions = candidateSection;
-          console.log("[Save & Next] Found next section with questions:", nextSectionWithQuestions);
           break;
         }
         
@@ -1400,23 +1222,14 @@ export default function CandidateAssessmentPage() {
       }
       
       if (nextSectionWithQuestions) {
-        console.log("[Save & Next] Navigating to next section with questions:", nextSectionWithQuestions);
         try {
           await navigateToQuestion(nextSectionWithQuestions, 0);
-          console.log("[Save & Next] Successfully navigated to next section");
           logAnalyticsEvent("SECTION_SWITCH", { from: currentSection, to: nextSectionWithQuestions });
         } catch (error) {
-          console.error("[Save & Next] ERROR navigating to next section:", error);
+          // Error navigating
         }
-      } else {
-        console.log("[Save & Next] No more sections with questions found");
-        console.log("[Save & Next] This appears to be the last question in the assessment");
-        console.log("[Save & Next] Answer was saved successfully");
-        // Optionally show a message or trigger submit button visibility
-        // The submit button should already be visible if isLastQuestion is true
       }
     }
-    console.log("[Save & Next] ============================================");
   }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections, saveCurrentAnswer]);
 
   const navigatePrevious = useCallback(async () => {
@@ -1452,30 +1265,16 @@ export default function CandidateAssessmentPage() {
   // ============================================================================
 
   const submitAssessment = useCallback(async () => {
-    // PART 9: Final Submit Button Logic
-    console.log("=".repeat(80));
-    console.log("[Submit] ========== SUBMIT BUTTON CLICKED ==========");
-    console.log("[Submit] Timestamp:", new Date().toISOString());
-    console.log("[Submit] Assessment ID:", id);
-    console.log("[Submit] Token:", token ? "Present" : "Missing");
-    console.log("[Submit] Candidate Email:", candidateEmail);
-    console.log("[Submit] Candidate Name:", candidateName);
-    console.log("[Submit] Current App State:", appState);
-    
     if (!id || !token || !candidateEmail || !candidateName) {
-      console.error("[Submit] ❌ Missing required fields:", { id, token, candidateEmail, candidateName });
       setError("Missing required information. Please refresh the page and try again.");
       return;
     }
-    
-    console.log("[Submit] ✓ All required fields present, proceeding with submission...");
 
     // Create attemptId if it doesn't exist (generate a temporary one for analytics)
     let currentAttemptId = attemptId;
     if (!currentAttemptId) {
       // Generate a temporary attempt ID for analytics logging
       currentAttemptId = `attempt-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      console.warn("[Submit] No attemptId found, generated temporary ID:", currentAttemptId);
     }
 
     setAppState("submitting");
@@ -1510,7 +1309,7 @@ export default function CandidateAssessmentPage() {
                   answerLength: answer.length,
                 },
               }).then(() => {}).catch((logErr) => {
-                console.warn(`[Submit] Failed to log answer save for ${questionId}:`, logErr);
+                // Failed to log answer save
               })
             );
             
@@ -1525,8 +1324,7 @@ export default function CandidateAssessmentPage() {
               }).then(() => {
                 lastSavedAnswerRef.current.set(questionId, answer);
               }).catch((error) => {
-                console.error(`[Submit] Failed to save answer for ${questionId}:`, error);
-                // Log the error
+                // Failed to save answer - log the error
                 axios.post("/api/v1/analytics/log-event", {
                   attemptId: currentAttemptId,
                   questionId,
@@ -1587,10 +1385,8 @@ export default function CandidateAssessmentPage() {
           section: "all",
           metadata: submissionMetadata,
         });
-        console.log("[Submit] Submission event logged successfully");
       } catch (logError) {
-        console.error("[Submit] Failed to log submission event:", logError);
-        // Try to log the error itself
+        // Failed to log submission event - try to log the error itself
         try {
           await axios.post("/api/v1/analytics/log-event", {
             attemptId: currentAttemptId,
@@ -1600,7 +1396,7 @@ export default function CandidateAssessmentPage() {
             metadata: { error: logError instanceof Error ? logError.message : String(logError) },
           });
         } catch (doubleError) {
-          console.error("[Submit] Failed to log error event:", doubleError);
+          // Failed to log error event
         }
         // Don't block submission if logging fails
       }
@@ -1788,26 +1584,7 @@ export default function CandidateAssessmentPage() {
       console.log(`[Submit] Total answers collected: ${allAnswers.length} out of ${questions.length} total questions`);
 
       // Step 5: Submit to backend with comprehensive data
-      console.log("[Submit] ========== SUBMITTING ASSESSMENT ==========");
-      console.log("[Submit] Assessment ID:", id);
-      console.log("[Submit] Candidate Email:", candidateEmail);
-      console.log("[Submit] Candidate Name:", candidateName);
-      console.log("[Submit] Total Answers:", allAnswers.length);
-      console.log("[Submit] Attempt ID:", currentAttemptId);
-      console.log("[Submit] Answers Detail:", allAnswers.map((a, idx) => ({
-        index: idx,
-        questionIndex: a.questionIndex,
-        answerLength: a.answer?.length || 0,
-        answerPreview: a.answer?.substring(0, 50) || ""
-      })));
-      console.log("[Submit] Submission Metadata:", {
-        totalQuestions: submissionMetadata.totalQuestions,
-        answeredQuestions: submissionMetadata.answeredQuestions,
-        sections: submissionMetadata.sections
-      });
-      
       try {
-        console.log("[Submit] Calling backend API: /api/assessment/submit-answers");
         const submitResponse = await axios.post("/api/assessment/submit-answers", {
           assessmentId: id,
           token,
@@ -1819,17 +1596,33 @@ export default function CandidateAssessmentPage() {
           timerRemaining,
           submissionMetadata, // Include all metadata
         });
-        console.log("[Submit] ========== SUBMISSION SUCCESSFUL ==========");
-        console.log("[Submit] Response Status:", submitResponse.status);
-        console.log("[Submit] Response Data:", submitResponse.data);
-        console.log("[Submit] Evaluation Status:", submitResponse.data?.data?.evaluationStatus || "unknown");
+
+        // Log successful submission
+        try {
+          await axios.post("/api/v1/analytics/log-event", {
+            attemptId: currentAttemptId,
+            eventType: "EXAM_SUBMIT",
+            timestamp: new Date().toISOString(),
+            section: "all",
+            metadata: {
+              assessmentId: id,
+              totalAnswers: allAnswers.length,
+            },
+          });
+        } catch (logError) {
+          // Failed to log EXAM_SUBMIT event
+        }
+
+        // Stop timer interval
+        if (timerIntervalRef.current) {
+          clearInterval(timerIntervalRef.current);
+          timerIntervalRef.current = null;
+        }
+
+        setAppState("finished");
+        router.push(`/assessment/${id}/${token}/completed`);
       } catch (submitError: any) {
-        console.error("[Submit] ========== SUBMISSION FAILED ==========");
-        console.error("[Submit] Error Type:", submitError.name);
-        console.error("[Submit] Error Message:", submitError.message);
-        console.error("[Submit] Response Status:", submitError.response?.status);
-        console.error("[Submit] Response Data:", submitError.response?.data);
-        console.error("[Submit] Full Error:", submitError);
+        // Error submitting assessment
         // Log the submission error
         try {
           await axios.post("/api/v1/analytics/log-event", {
@@ -1843,7 +1636,7 @@ export default function CandidateAssessmentPage() {
             },
           });
         } catch (logErr) {
-          console.error("[Submit] Failed to log submission error:", logErr);
+          // Failed to log submission error
         }
         // Still proceed to redirect - answers are saved locally
       }
@@ -1862,7 +1655,7 @@ export default function CandidateAssessmentPage() {
           },
         });
       } catch (logError) {
-        console.warn("[Submit] Failed to log EXAM_SUBMIT event:", logError);
+        // Failed to log EXAM_SUBMIT event
       }
 
       // Stop timer interval
@@ -1874,8 +1667,6 @@ export default function CandidateAssessmentPage() {
       setAppState("finished");
       router.push(`/assessment/${id}/${token}/completed`);
     } catch (error: any) {
-      console.error("[Submit] Failed to submit assessment:", error);
-      
       // Log the submission failure
       try {
         await axios.post("/api/v1/analytics/log-event", {
@@ -1889,7 +1680,7 @@ export default function CandidateAssessmentPage() {
           },
         });
       } catch (logErr) {
-        console.error("[Submit] Failed to log submission failure:", logErr);
+        // Failed to log submission failure
       }
       
       setError(error.response?.data?.message || "Failed to submit assessment. Please try again.");
@@ -1919,24 +1710,12 @@ export default function CandidateAssessmentPage() {
           `/api/assessment/get-assessment-full?assessmentId=${id}&token=${token}`
         );
 
-        console.log("[take.tsx] Assessment API response:", assessmentResponse.data);
-
         if (!assessmentResponse.data?.success) {
           throw new Error("Failed to load assessment");
         }
 
         const assessment = assessmentResponse.data.data;
         const topics_v2 = assessment?.topics_v2 || [];
-        
-        // Enhanced logging for debugging - EXPAND OBJECTS
-        console.log("[take.tsx] Full assessment data:", JSON.stringify({
-          hasTopicsV2: !!assessment?.topics_v2,
-          topicsV2Type: Array.isArray(assessment?.topics_v2) ? "array" : typeof assessment?.topics_v2,
-          topicsV2Length: Array.isArray(assessment?.topics_v2) ? assessment.topics_v2.length : "N/A",
-          assessmentKeys: assessment ? Object.keys(assessment) : [],
-          assessmentStatus: assessment?.status,
-          allQuestionsGenerated: assessment?.allQuestionsGenerated,
-        }, null, 2));
         
         // Check if topics_v2 exists but is empty or has no questions
         if (Array.isArray(topics_v2) && topics_v2.length > 0) {
@@ -1975,42 +1754,9 @@ export default function CandidateAssessmentPage() {
             }, 0);
           }, 0);
           
-          console.log("[take.tsx] Topics_v2 detailed analysis:", JSON.stringify({
-            topicsCount: topics_v2.length,
-            totalQuestionsInTopics: totalQuestions,
-            topicsWithQuestions: topics_v2.filter(t => {
-              const rows = t?.questionRows || [];
-              return rows.some((r: any) => (r?.questions || []).length > 0);
-            }).length,
-            detailedTopics: detailedAnalysis,
-          }, null, 2));
-          
           if (totalQuestions === 0) {
-            console.error("[take.tsx] Topics_v2 exists but has no questions. Full structure:", 
-              JSON.stringify(topics_v2.map(t => ({
-                id: t?.id,
-                label: t?.label,
-                questionRowsCount: (t?.questionRows || []).length,
-                questionRows: (t?.questionRows || []).map((r: any) => ({
-                  rowId: r?.rowId,
-                  questionType: r?.questionType,
-                  questionsCount: r?.questionsCount,
-                  actualQuestionsLength: (r?.questions || []).length,
-                  hasQuestionsArray: Array.isArray(r?.questions),
-                  questionsArray: r?.questions, // Show actual questions array
-                })),
-              })), null, 2)
-            );
+            // Topics_v2 exists but has no questions
           }
-        } else {
-          console.error("[take.tsx] Topics_v2 is missing or empty:", JSON.stringify({
-            topics_v2,
-            topics_v2Type: typeof topics_v2,
-            topics_v2IsArray: Array.isArray(topics_v2),
-            assessmentHasTopics: !!assessment?.topics,
-            assessmentHasTopicsV2: !!assessment?.topics_v2,
-            assessmentKeys: assessment ? Object.keys(assessment) : [],
-          }, null, 2));
         }
         
         // Get duration from schedule (new Custom-MCQ style) or fallback to assessment duration
@@ -2050,19 +1796,8 @@ export default function CandidateAssessmentPage() {
             const nowIST = new Date(now.getTime() + istOffset);
             const startTimeIST = new Date(startTime.getTime() + istOffset);
             
-            console.log("[take.tsx] Time check (IST comparison):", {
-              nowUTC: now.toISOString(),
-              startTimeUTC: startTime.toISOString(),
-              nowIST: nowIST.toISOString().replace('Z', '+05:30'),
-              startTimeIST: startTimeIST.toISOString().replace('Z', '+05:30'),
-              examMode,
-              isBeforeStart: now < startTime,
-            });
-            
             if (now < startTime) {
               // Before start time - show waiting page
-              const startTimeISTFormatted = startTimeIST.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'medium' });
-              console.log("[take.tsx] Before start time, showing waiting page. Now (IST):", nowIST.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }), "Start (IST):", startTimeISTFormatted);
               isBeforeStartTime = true;
               parsedStartTime = startTime;
               setWaitingForStart(true);
@@ -2071,11 +1806,9 @@ export default function CandidateAssessmentPage() {
               return; // CRITICAL: Don't load questions if before start time - show waiting page instead
             }
             // If we reach here, start time has passed - continue loading questions
-            console.log("[take.tsx] Start time has passed, loading questions");
             // Store parsed time for potential use later
             parsedStartTime = startTime;
           } catch (timeError) {
-            console.error("[take.tsx] Error parsing start time:", timeError);
             // Continue if time parsing fails
           }
         }
@@ -2106,31 +1839,31 @@ export default function CandidateAssessmentPage() {
               sectionTimerMap[sectionKey] = minutes * 60; // Convert to seconds
             }
           });
-          console.log("[take.tsx] Per-section timers initialized:", {
-            enablePerSectionTimers,
-            sectionTimersFromDB,
-            sectionTimerMap,
-            hasTimers: Object.keys(sectionTimerMap).length > 0,
-          });
+          // console.log("[take.tsx] Per-section timers initialized:", {
+          //   enablePerSectionTimers,
+          //   sectionTimersFromDB,
+          //   sectionTimerMap,
+          //   hasTimers: Object.keys(sectionTimerMap).length > 0,
+          // });
           if (Object.keys(sectionTimerMap).length > 0) {
             setSectionTimers(sectionTimerMap);
           } else {
-            console.warn("[take.tsx] Per-section timers enabled but no valid timers found in sectionTimersFromDB");
+            // console.warn("[take.tsx] Per-section timers enabled but no valid timers found in sectionTimersFromDB");
           }
         } else {
-          console.log("[take.tsx] Per-section timers not enabled or missing:", {
-            enablePerSectionTimers,
-            hasSectionTimersFromDB: !!sectionTimersFromDB,
-            sectionTimersFromDB,
-          });
+          // console.log("[take.tsx] Per-section timers not enabled or missing:", {
+          //   enablePerSectionTimers,
+          //   hasSectionTimersFromDB: !!sectionTimersFromDB,
+          //   sectionTimersFromDB,
+          // });
         }
         
-        console.log("[take.tsx] Exam settings:", {
-          enablePerSectionTimers,
-          sectionTimersFromDB,
-          fetchedSettings,
-        });
-        console.log("[take.tsx] Topics_v2 structure (raw):", JSON.stringify(topics_v2, null, 2));
+        // console.log("[take.tsx] Exam settings:", {
+        //   enablePerSectionTimers,
+        //   sectionTimersFromDB,
+        //   fetchedSettings,
+        // });
+        // console.log("[take.tsx] Topics_v2 structure (raw):", JSON.stringify(topics_v2, null, 2));
 
         // Read proctoring flags from schedule.proctoringSettings (if present)
         const proctoringSettings = assessment?.schedule?.proctoringSettings;
@@ -2141,48 +1874,48 @@ export default function CandidateAssessmentPage() {
         setLiveProctoringEnabled(liveFlagFromSchedule === true);
 
         // Transform topics_v2 into sections
-        console.log("[take.tsx] About to transform topics_v2, input length:", topics_v2.length);
-        console.log("[take.tsx] First topic sample:", JSON.stringify(topics_v2[0], null, 2)); // Log first topic as sample
+        // console.log("[take.tsx] About to transform topics_v2, input length:", topics_v2.length);
+        // console.log("[take.tsx] First topic sample:", JSON.stringify(topics_v2[0], null, 2)); // Log first topic as sample
         const transformed = transformTopicsV2ToSections(topics_v2);
-        console.log("[take.tsx] Transformed sections:", {
-          mcq: transformed.sections.mcq.length,
-          subjective: transformed.sections.subjective.length,
-          pseudocode: transformed.sections.pseudocode.length,
-          coding: transformed.sections.coding.length,
-          sql: transformed.sections.sql.length,
-          aiml: transformed.sections.aiml.length,
-          allQuestions: transformed.allQuestions.length,
-        });
+        // console.log("[take.tsx] Transformed sections:", {
+        //   mcq: transformed.sections.mcq.length,
+        //   subjective: transformed.sections.subjective.length,
+        //   pseudocode: transformed.sections.pseudocode.length,
+        //   coding: transformed.sections.coding.length,
+        //   sql: transformed.sections.sql.length,
+        //   aiml: transformed.sections.aiml.length,
+        //   allQuestions: transformed.allQuestions.length,
+        // });
         
         // Debug: Check if transformation actually processed questions
         if (transformed.allQuestions.length === 0) {
-          console.error("[take.tsx] TRANSFORMATION FAILED - No questions in result but questions exist in input!");
-          console.error("[take.tsx] Input topics_v2 structure:", JSON.stringify(topics_v2.map((t: any) => ({
-            id: t?.id,
-            label: t?.label,
-            questionRows: t?.questionRows?.map((r: any) => ({
-              rowId: r?.rowId,
-              questionType: r?.questionType,
-              questionsCount: r?.questions?.length || 0,
-              questions: r?.questions,
-            })),
-          })), null, 2));
+          // console.error("[take.tsx] TRANSFORMATION FAILED - No questions in result but questions exist in input!");
+          // console.error("[take.tsx] Input topics_v2 structure:", JSON.stringify(topics_v2.map((t: any) => ({
+          //   id: t?.id,
+          //   label: t?.label,
+          //   questionRows: t?.questionRows?.map((r: any) => ({
+          //     rowId: r?.rowId,
+          //     questionType: r?.questionType,
+          //     questionsCount: r?.questions?.length || 0,
+          //     questions: r?.questions,
+          //   })),
+          // })), null, 2));
           
           // CRITICAL: If we're before start time and no questions, show waiting page instead of error
           if (isBeforeStartTime && parsedStartTime) {
-            console.log("[take.tsx] Before start time and no questions - showing waiting page instead of error");
+            // console.log("[take.tsx] Before start time and no questions - showing waiting page instead of error");
             setWaitingForStart(true);
             setStartTime(parsedStartTime);
             setAppState("ready");
             return; // Show waiting page, not error
           }
         } else {
-          console.log("[take.tsx] Transformation successful! Questions by section:", {
-            mcq: transformed.sections.mcq.map(q => ({ id: q._id, type: q.type })),
-            subjective: transformed.sections.subjective.map(q => ({ id: q._id, type: q.type })),
-            coding: transformed.sections.coding.map(q => ({ id: q._id, type: q.type })),
-            aiml: transformed.sections.aiml.map(q => ({ id: q._id, type: q.type })),
-          });
+          // console.log("[take.tsx] Transformation successful! Questions by section:", {
+          //   mcq: transformed.sections.mcq.map(q => ({ id: q._id, type: q.type })),
+          //   subjective: transformed.sections.subjective.map(q => ({ id: q._id, type: q.type })),
+          //   coding: transformed.sections.coding.map(q => ({ id: q._id, type: q.type })),
+          //   aiml: transformed.sections.aiml.map(q => ({ id: q._id, type: q.type })),
+          // });
         }
 
         if (transformed.allQuestions.length === 0) {
@@ -2218,14 +1951,14 @@ export default function CandidateAssessmentPage() {
           
           errorMessage += " Please contact the administrator.";
           
-          console.error("[take.tsx] No questions available:", {
-            hasTopicsV2,
-            hasTopics,
-            assessmentStatus,
-            allQuestionsGenerated,
-            topicsV2Length: Array.isArray(topics_v2) ? topics_v2.length : 0,
-            errorMessage,
-          });
+          // console.error("[take.tsx] No questions available:", {
+          //   hasTopicsV2,
+          //   hasTopics,
+          //   assessmentStatus,
+          //   allQuestionsGenerated,
+          //   topicsV2Length: Array.isArray(topics_v2) ? topics_v2.length : 0,
+          //   errorMessage,
+          // });
           
           throw new Error(errorMessage);
         }
@@ -2239,32 +1972,32 @@ export default function CandidateAssessmentPage() {
         // Set first non-empty section as current (order: MCQ → PseudoCode → Subjective → Coding → SQL → AIML)
         const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
         const firstSection = sectionOrder.find((section) => transformed.sections[section].length > 0);
-        console.log("[take.tsx] First section:", firstSection);
+        // console.log("[take.tsx] First section:", firstSection);
         if (firstSection) {
           setCurrentSection(firstSection);
           setCurrentQuestionIndex(0);
         } else {
-          console.warn("[take.tsx] No sections with questions found!");
+          // console.warn("[take.tsx] No sections with questions found!");
         }
 
         // Calculate and set timer
         const calculatedTimer = calculateTimer(fetchedSettings);
-        console.log("[take.tsx] Timer calculation:", {
-          duration: fetchedSettings.duration,
-          examMode: fetchedSettings.examMode,
-          calculatedTimer,
-          sectionsCount: {
-            mcq: transformed.sections.mcq.length,
-            pseudocode: transformed.sections.pseudocode.length,
-            subjective: transformed.sections.subjective.length,
-            coding: transformed.sections.coding.length,
-            sql: transformed.sections.sql.length,
-            aiml: transformed.sections.aiml.length,
-          },
-        });
+        // console.log("[take.tsx] Timer calculation:", {
+        //   duration: fetchedSettings.duration,
+        //   examMode: fetchedSettings.examMode,
+        //   calculatedTimer,
+        //   sectionsCount: {
+        //     mcq: transformed.sections.mcq.length,
+        //     pseudocode: transformed.sections.pseudocode.length,
+        //     subjective: transformed.sections.subjective.length,
+        //     coding: transformed.sections.coding.length,
+        //     sql: transformed.sections.sql.length,
+        //     aiml: transformed.sections.aiml.length,
+        //   },
+        // });
         
         if (calculatedTimer <= 0) {
-          console.warn("[take.tsx] Calculated timer is 0 or negative, using default 60 minutes");
+          // console.warn("[take.tsx] Calculated timer is 0 or negative, using default 60 minutes");
           setTimerRemaining(60 * 60); // Default to 60 minutes
         } else {
           setTimerRemaining(calculatedTimer);
@@ -2272,7 +2005,7 @@ export default function CandidateAssessmentPage() {
 
         setAppState("ready");
       } catch (error: any) {
-        console.error("[Load] Failed to load assessment:", error);
+        // console.error("[Load] Failed to load assessment:", error);
         setError(error.response?.data?.message || "Failed to load assessment");
         setAppState("ready");
       }
@@ -2543,16 +2276,16 @@ export default function CandidateAssessmentPage() {
     );
   }
 
-  const currentQuestion = getCurrentQuestion();
+  // currentQuestion is now memoized above - no need to call getCurrentQuestion() here
   if (!currentQuestion || !currentSection) {
     // Debug information
-    console.error("[take.tsx] No question available:", {
-      currentQuestion,
-      currentSection,
-      sections,
-      questionsLength: questions.length,
-      currentQuestionIndex,
-    });
+    // console.error("[take.tsx] No question available:", {
+    //   currentQuestion,
+    //   currentSection,
+    //   sections,
+    //   questionsLength: questions.length,
+    //   currentQuestionIndex,
+    // });
 
     return (
       <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
@@ -2579,12 +2312,12 @@ export default function CandidateAssessmentPage() {
           )}
           <button
             onClick={() => {
-              console.log("[take.tsx] Full state:", {
-                questions,
-                sections,
-                currentSection,
-                currentQuestionIndex,
-              });
+              // console.log("[take.tsx] Full state:", {
+              //   questions,
+              //   sections,
+              //   currentSection,
+              //   currentQuestionIndex,
+              // });
               // Try to set first available section
               const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
               const firstSection = sectionOrder.find((section) => sections[section].length > 0);
@@ -2888,14 +2621,14 @@ export default function CandidateAssessmentPage() {
                   // Also check for 'question' field which might contain the full formatted text
                   const questionDescription = (currentQuestion as any).question || currentQuestion.questionText || currentQuestion.description || aimlData.description || "";
                   
-                  console.log('[Assessment Take] AIML Question fields:', {
-                    hasQuestion: !!(currentQuestion as any).question,
-                    hasQuestionText: !!currentQuestion.questionText,
-                    hasDescription: !!currentQuestion.description,
-                    questionLength: ((currentQuestion as any).question || '').length,
-                    questionTextLength: (currentQuestion.questionText || '').length,
-                    descriptionLength: (currentQuestion.description || '').length,
-                  });
+                  // console.log('[Assessment Take] AIML Question fields:', {
+                  //   hasQuestion: !!(currentQuestion as any).question,
+                  //   hasQuestionText: !!currentQuestion.questionText,
+                  //   hasDescription: !!currentQuestion.description,
+                  //   questionLength: ((currentQuestion as any).question || '').length,
+                  //   questionTextLength: (currentQuestion.questionText || '').length,
+                  //   descriptionLength: (currentQuestion.description || '').length,
+                  // });
                   const library = currentQuestion.library || aimlData.libraries?.[0] || aimlData.library || "numpy";
                   const tasks = currentQuestion.tasks || aimlData.tasks || [];
                   const publicTestcases = currentQuestion.public_testcases || aimlData.public_testcases || [];
@@ -3267,7 +3000,7 @@ export default function CandidateAssessmentPage() {
                                   }));
                                 }
                               } catch (error: any) {
-                                console.error('SQL run error:', error);
+                                // console.error('SQL run error:', error);
                                 setOutput(prev => ({
                                   ...prev,
                                   [questionId]: {
@@ -3437,7 +3170,7 @@ export default function CandidateAssessmentPage() {
                                 saveAnswer(questionIdStr, newCode, currentSection);
                               }}
                               onRun={async () => {
-                                console.log("SQL run not yet implemented");
+                                // console.log("SQL run not yet implemented");
                               }}
                               onSubmit={async () => {
                                 const currentCode = code[questionIdStr] || codeAnswers.get(questionIdStr) || '';
@@ -3482,15 +3215,7 @@ export default function CandidateAssessmentPage() {
                           expected: tc.expected_output || tc.expected || '',
                         }));
                         
-                        // Debug: Log test cases for troubleshooting
-                        console.log(`[Assessment] Test cases extraction for question ${questionIdStr}:`, {
-                          'publicTestCases.length': publicTestCases.length,
-                          'visibleTestcases.length': visibleTestcases.length,
-                          'publicTestCases': publicTestCases,
-                          'visibleTestcases': visibleTestcases,
-                          'coding_data': currentQuestion.coding_data,
-                          'direct_public_testcases': currentQuestion.public_testcases,
-                        });
+                        // Test cases extracted - no need to log on every render
 
                         return (
                           <EditorContainer
@@ -3687,24 +3412,24 @@ export default function CandidateAssessmentPage() {
                           checked={isSelected}
                           onChange={(e) => {
                             const newAnswer = e.target.value;
-                            console.log("[MCQ Selection] ========== OPTION SELECTED ==========");
-                            console.log("[MCQ Selection] Question ID:", questionId);
-                            console.log("[MCQ Selection] Selected Option:", newAnswer);
-                            console.log("[MCQ Selection] Option Index:", idx);
-                            console.log("[MCQ Selection] Current Section:", currentSection);
+                            // console.log("[MCQ Selection] ========== OPTION SELECTED ==========");
+                            // console.log("[MCQ Selection] Question ID:", questionId);
+                            // console.log("[MCQ Selection] Selected Option:", newAnswer);
+                            // console.log("[MCQ Selection] Option Index:", idx);
+                            // console.log("[MCQ Selection] Current Section:", currentSection);
                             
                             setAnswers((prev) => {
                               const updated = new Map(prev);
                               updated.set(questionId, newAnswer);
-                              console.log("[MCQ Selection] Updated answers Map");
-                              console.log("[MCQ Selection] All answers in Map:", Array.from(updated.entries()));
+                              // console.log("[MCQ Selection] Updated answers Map");
+                              // console.log("[MCQ Selection] All answers in Map:", Array.from(updated.entries()));
                               return updated;
                             });
                             
-                            console.log("[MCQ Selection] Calling saveAnswer...");
+                            // console.log("[MCQ Selection] Calling saveAnswer...");
                             saveAnswer(questionId, newAnswer, currentSection);
-                            console.log("[MCQ Selection] saveAnswer called (debounced)");
-                            console.log("[MCQ Selection] =====================================");
+                            // console.log("[MCQ Selection] saveAnswer called (debounced)");
+                            // console.log("[MCQ Selection] =====================================");
                           }}
                           style={{ width: "20px", height: "20px", cursor: "pointer" }}
                         />
@@ -3793,15 +3518,15 @@ export default function CandidateAssessmentPage() {
                   <button
                     type="button"
                     onClick={(e) => {
-                      console.log("[Button Click] Save & Next button clicked");
-                      console.log("[Button Click] Event:", e);
-                      console.log("[Button Click] App State:", appState);
-                      console.log("[Button Click] Current Section:", currentSection);
-                      console.log("[Button Click] Current Question Index:", currentQuestionIndex);
-                      console.log("[Button Click] Is Disabled?", appState === "submitting");
+                      // console.log("[Button Click] Save & Next button clicked");
+                      // console.log("[Button Click] Event:", e);
+                      // console.log("[Button Click] App State:", appState);
+                      // console.log("[Button Click] Current Section:", currentSection);
+                      // console.log("[Button Click] Current Question Index:", currentQuestionIndex);
+                      // console.log("[Button Click] Is Disabled?", appState === "submitting");
                       
                       if (appState === "submitting") {
-                        console.warn("[Button Click] Button is disabled, ignoring click");
+                        // console.warn("[Button Click] Button is disabled, ignoring click");
                         return;
                       }
                       
@@ -3810,16 +3535,16 @@ export default function CandidateAssessmentPage() {
                       if (currentQuestion) {
                         const questionId = getQuestionId(currentQuestion);
                         const currentAnswer = answers.get(questionId) || codeAnswers.get(questionId) || "";
-                        console.log("[Button Click] Current Question ID:", questionId);
-                        console.log("[Button Click] Current Answer:", currentAnswer || "EMPTY");
-                        console.log("[Button Click] Answer in answers Map:", answers.get(questionId) || "NOT FOUND");
-                        console.log("[Button Click] Answer in codeAnswers Map:", codeAnswers.get(questionId) || "NOT FOUND");
-                        console.log("[Button Click] All answers Map keys:", Array.from(answers.keys()));
-                        console.log("[Button Click] All codeAnswers Map keys:", Array.from(codeAnswers.keys()));
+                        // console.log("[Button Click] Current Question ID:", questionId);
+                        // console.log("[Button Click] Current Answer:", currentAnswer || "EMPTY");
+                        // console.log("[Button Click] Answer in answers Map:", answers.get(questionId) || "NOT FOUND");
+                        // console.log("[Button Click] Answer in codeAnswers Map:", codeAnswers.get(questionId) || "NOT FOUND");
+                        // console.log("[Button Click] All answers Map keys:", Array.from(answers.keys()));
+                        // console.log("[Button Click] All codeAnswers Map keys:", Array.from(codeAnswers.keys()));
                       }
                       
                       navigateNext().catch((error) => {
-                        console.error("[Button Click] ERROR in navigateNext:", error);
+                        // console.error("[Button Click] ERROR in navigateNext:", error);
                       });
                     }}
                     disabled={appState === "submitting"}

@@ -75,28 +75,36 @@ async def verify_candidate(
                 detail="Assessment not found"
             )
         
+        # Check access mode early to handle public links correctly
+        access_mode = assessment.get("accessMode", "private")
+        
         # Check if assessment is paused
         assessment_status = assessment.get("status")
         if assessment_status == "paused":
-            # Check if candidate has already started (has startedAt)
-            candidates = assessment.get("candidates", [])
-            candidate_entry = None
-            for candidate in candidates:
-                if (candidate.get("email", "").lower() == request.email.lower() and
-                    candidate.get("name", "").strip().lower() == request.name.strip().lower()):
-                    candidate_entry = candidate
-                    break
-            
-            # If candidate has started before pause, allow them to continue
-            if candidate_entry and candidate_entry.get("startedAt"):
-                # Allow continuation
+            # For public mode, allow access even if paused (anyone with link can access)
+            if access_mode == "public":
+                # Public mode: allow access regardless of pause status
                 pass
             else:
-                # New entry attempt - block with user-friendly message
-                raise HTTPException(
-                    status_code=status.HTTP_423_LOCKED,
-                    detail="This assessment is currently paused. Please try again later."
-                )
+                # For private mode, check if candidate has already started (has startedAt)
+                candidates = assessment.get("candidates", [])
+                candidate_entry = None
+                for candidate in candidates:
+                    if (candidate.get("email", "").lower() == request.email.lower() and
+                        candidate.get("name", "").strip().lower() == request.name.strip().lower()):
+                        candidate_entry = candidate
+                        break
+                
+                # If candidate has started before pause, allow them to continue
+                if candidate_entry and candidate_entry.get("startedAt"):
+                    # Allow continuation
+                    pass
+                else:
+                    # New entry attempt - block with user-friendly message
+                    raise HTTPException(
+                        status_code=status.HTTP_423_LOCKED,
+                        detail="This assessment is currently paused. Please try again later."
+                    )
         
         # Check assessment start time validation (no access time window)
         from datetime import datetime
@@ -239,10 +247,7 @@ async def verify_candidate(
                     # Allow access if parsing fails (graceful degradation)
         
         # IMPORTANT: If we reach here, access time validation has passed (or was not required)
-        # Now check token and access mode
-        
-        access_mode = assessment.get("accessMode", "private")
-        
+        # Access mode was already checked earlier, but verify again for public mode
         # For public mode, anyone with the link can access
         if access_mode == "public":
             return success_response({
@@ -1216,6 +1221,10 @@ class SaveCandidateInfoRequest(BaseModel):
     name: str
     phone: Optional[str] = None
     hasResume: bool = False
+    resume: Optional[str] = None  # Base64 data URL of resume file
+    linkedIn: Optional[str] = None
+    github: Optional[str] = None
+    customFields: Optional[Dict[str, Any]] = None
 
 
 class SaveReferenceFaceRequest(BaseModel):
@@ -1257,13 +1266,27 @@ async def save_candidate_info(
             }
         
         # Store candidate info
-        assessment["candidateResponses"][candidate_key]["candidateInfo"] = {
+        candidate_info = {
             "email": request.email.lower().strip(),
             "name": request.name.strip(),
             "phone": request.phone.strip() if request.phone else None,
             "hasResume": request.hasResume,
             "savedAt": datetime.now(timezone.utc).isoformat(),
         }
+        
+        # Store resume file if provided
+        if request.resume:
+            candidate_info["resume"] = request.resume
+        
+        # Add LinkedIn, GitHub, and custom fields if provided
+        if request.linkedIn:
+            candidate_info["linkedIn"] = request.linkedIn.strip()
+        if request.github:
+            candidate_info["github"] = request.github.strip()
+        if request.customFields:
+            candidate_info["customFields"] = request.customFields
+        
+        assessment["candidateResponses"][candidate_key]["candidateInfo"] = candidate_info
         
         # Log the event
         if "logs" not in assessment["candidateResponses"][candidate_key]:
@@ -1329,8 +1352,16 @@ async def save_reference_face(
                 collection_name = "custom_mcq_assessments"
         
         # 3. DSA tests (in same database, tests collection)
+        # Check for DSA tests: test_type is "dsa" OR None OR doesn't exist
         if not assessment:
-            assessment = await db.tests.find_one({"_id": assessment_id, "test_type": {"$in": ["dsa", None]}})
+            assessment = await db.tests.find_one({
+                "_id": assessment_id,
+                "$or": [
+                    {"test_type": "dsa"},
+                    {"test_type": None},
+                    {"test_type": {"$exists": False}}
+                ]
+            })
             if assessment:
                 db_to_update = db
                 collection_name = "tests"
@@ -1452,8 +1483,22 @@ async def get_reference_photo(
             assessment = await db.custom_mcq_assessments.find_one({"_id": assessment_id})
         
         # 3. DSA tests (in same database, tests collection)
+        # Check for DSA tests: test_type is "dsa" OR None OR doesn't exist
         if not assessment:
-            assessment = await db.tests.find_one({"_id": assessment_id, "test_type": {"$in": ["dsa", None]}})
+            # First try with explicit test_type filter
+            assessment = await db.tests.find_one({
+                "_id": assessment_id,
+                "$or": [
+                    {"test_type": "dsa"},
+                    {"test_type": None},
+                    {"test_type": {"$exists": False}}
+                ]
+            })
+            # Fallback: if not found, try without test_type filter (for backward compatibility)
+            if not assessment:
+                temp_assessment = await db.tests.find_one({"_id": assessment_id})
+                if temp_assessment and temp_assessment.get("test_type") != "aiml":
+                    assessment = temp_assessment
         
         # 4. AIML tests (in same database, tests collection with test_type: "aiml")
         if not assessment:
@@ -1464,19 +1509,81 @@ async def get_reference_photo(
         
         # Get candidateResponses
         candidate_responses = assessment.get("candidateResponses", {})
-        if not candidate_responses:
-            return success_response("No reference photo found", {"referenceImage": None})
+        email_lower = candidateEmail.lower().strip()
+        candidate_key_found = None
         
         # Find the candidate key (email might be in different format)
-        candidate_key_found = None
-        email_lower = candidateEmail.lower().strip()
+        if candidate_responses:
+            for key in candidate_responses.keys():
+                if email_lower in key.lower():
+                    candidate_key_found = key
+                    break
         
-        for key in candidate_responses.keys():
-            if email_lower in key.lower():
-                candidate_key_found = key
-                break
-        
+        # If candidate not found in this test OR candidateResponses is empty, search across all tests
         if not candidate_key_found:
+            # Candidate not found in this specific test - search across all tests
+            logger.info(f"[Candidate API] Candidate {candidateEmail} not found in test {assessmentId}, searching across all DSA/AIML tests...")
+            
+            # Search all DSA and AIML tests
+            all_tests = []
+            
+            # Get DSA tests (search all, filter in Python for better coverage)
+            dsa_cursor = db.tests.find({
+                "$or": [
+                    {"test_type": "dsa"},
+                    {"test_type": None},
+                    {"test_type": {"$exists": False}}
+                ]
+            }).limit(200)  # Get more tests to search through
+            dsa_tests = await dsa_cursor.to_list(length=200)
+            # Filter to only tests with candidateResponses
+            dsa_tests = [t for t in dsa_tests if t.get("candidateResponses")]
+            logger.info(f"[Candidate API] Found {len(dsa_tests)} DSA tests with candidateResponses")
+            all_tests.extend(dsa_tests)
+            
+            # Get AIML tests
+            aiml_cursor = db.tests.find({
+                "test_type": "aiml"
+            }).limit(200)  # Get more tests to search through
+            aiml_tests = await aiml_cursor.to_list(length=200)
+            # Filter to only tests with candidateResponses
+            aiml_tests = [t for t in aiml_tests if t.get("candidateResponses")]
+            logger.info(f"[Candidate API] Found {len(aiml_tests)} AIML tests with candidateResponses")
+            all_tests.extend(aiml_tests)
+            
+            logger.info(f"[Candidate API] Searching across {len(all_tests)} total tests for candidate {candidateEmail}")
+            
+            # Search across all tests
+            for test in all_tests:
+                # Skip the test we already checked
+                if test["_id"] == assessment_id:
+                    continue
+                    
+                test_responses = test.get("candidateResponses", {})
+                if not test_responses:
+                    continue
+                
+                # Find candidate by email
+                test_candidate_key = None
+                for key in test_responses.keys():
+                    if email_lower in key.lower():
+                        test_candidate_key = key
+                        break
+                
+                if test_candidate_key:
+                    test_candidate_data = test_responses.get(test_candidate_key, {})
+                    test_candidate_verification = test_candidate_data.get("candidateVerification", {})
+                    test_reference_image = test_candidate_verification.get("referenceImage")
+                    
+                    if test_reference_image and isinstance(test_reference_image, str) and len(test_reference_image) >= 50:
+                        # Found it in a different test - return it
+                        logger.info(f"[Candidate API] ✅ Reference photo found for {candidateEmail} in test {test['_id']} (requested test: {assessmentId})")
+                        if not test_reference_image.startswith("data:image"):
+                            test_reference_image = f"data:image/jpeg;base64,{test_reference_image}"
+                        return success_response("Reference photo found", {"referenceImage": test_reference_image})
+            
+            # Not found in any test
+            logger.warning(f"[Candidate API] ❌ Reference photo not found for {candidateEmail} in any of {len(all_tests)} tests searched")
             return success_response("No reference photo found", {"referenceImage": None})
         
         # Get reference image

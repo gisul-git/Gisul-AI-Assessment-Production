@@ -41,6 +41,12 @@ export default function CreateDSACompetencyPage() {
   // Exam window configuration (mirrors Custom MCQ)
   const [examMode, setExamMode] = useState<ExamMode>("strict");
   
+  // Candidate Requirements
+  const [requirePhone, setRequirePhone] = useState(false);
+  const [requireResume, setRequireResume] = useState(false);
+  const [requireLinkedIn, setRequireLinkedIn] = useState(false);
+  const [requireGithub, setRequireGithub] = useState(false);
+  
   const [formData, setFormData] = useState({
     title: "",
     description: "",
@@ -152,6 +158,12 @@ export default function CreateDSACompetencyPage() {
             examMode === "flexible"
               ? (timerMode === "PER_QUESTION" ? calculateTotalDuration() : formData.duration_minutes)
               : null,
+          candidateRequirements: {
+            requirePhone,
+            requireResume,
+            requireLinkedIn,
+            requireGithub,
+          },
         },
         // Also include top-level fields (requested shape)
         startTime: new Date(formData.start_time).toISOString(),
@@ -702,6 +714,52 @@ export default function CreateDSACompetencyPage() {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* Candidate Requirements */}
+            <div style={{ marginBottom: "1.5rem", padding: "1.25rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem", backgroundColor: "#F3FFF8" }}>
+              <h3 style={{ marginBottom: "0.75rem", color: "#1a1625" }}>Candidate Requirements</h3>
+              <p style={{ marginBottom: "1rem", fontSize: "0.875rem", color: "#2D7A52" }}>
+                Select which information candidates must provide before taking the assessment.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requirePhone}
+                    onChange={(e) => setRequirePhone(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Phone Number</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requireResume}
+                    onChange={(e) => setRequireResume(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Resume (File Upload)</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requireLinkedIn}
+                    onChange={(e) => setRequireLinkedIn(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>LinkedIn URL</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={requireGithub}
+                    onChange={(e) => setRequireGithub(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontWeight: 600, color: "#1E5A3B" }}>GitHub URL</span>
+                </label>
+              </div>
             </div>
 
             <div style={{ marginBottom: "1.5rem" }}>

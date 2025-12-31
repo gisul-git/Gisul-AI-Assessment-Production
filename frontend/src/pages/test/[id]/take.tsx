@@ -572,15 +572,24 @@ export default function TestTakePage() {
     console.log('[DSA Take] 🚀 Admin connected! Starting WebRTC...');
     liveProctoringStartedRef.current = true;
 
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    // Live proctoring backend expects raw email or token, not formatted userId
+    let rawCandidateId = candidateIdStr;
+    if (candidateIdStr.startsWith('email:')) {
+      rawCandidateId = candidateIdStr.replace('email:', '');
+    } else if (candidateIdStr.startsWith('public:')) {
+      rawCandidateId = candidateIdStr.replace('public:', '');
+    }
+
     console.log('[DSA Take] Creating CandidateLiveService with:', {
       assessmentId: assessmentIdStr,
-      candidateId: candidateIdStr,
+      candidateId: rawCandidateId, // Use raw email/token for live proctoring
       debugMode: debugMode,
     });
     
     const liveService = new CandidateLiveService({
       assessmentId: assessmentIdStr,
-      candidateId: candidateIdStr,
+      candidateId: rawCandidateId, // Use raw email/token for live proctoring
       debugMode: debugMode,
     });
     
@@ -666,12 +675,20 @@ export default function TestTakePage() {
     console.log('[DSA Take] 📝 Registering Live Proctoring session...');
     
     // Phase 2.2: Register session with backend
+    // Extract raw candidateId for live proctoring (remove email: or public: prefix)
+    let rawCandidateId = candidateIdStr;
+    if (candidateIdStr.startsWith('email:')) {
+      rawCandidateId = candidateIdStr.replace('email:', '');
+    } else if (candidateIdStr.startsWith('public:')) {
+      rawCandidateId = candidateIdStr.replace('public:', '');
+    }
+
     fetch('/api/v1/proctor/live/start-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         assessmentId: assessmentIdStr,
-        candidateId: candidateIdStr,
+        candidateId: rawCandidateId, // Use raw email/token for live proctoring
       }),
     })
       .then((res) => res.json())
@@ -683,8 +700,9 @@ export default function TestTakePage() {
 
           // Phase 2.3: Connect WebSocket and listen for ADMIN_CONNECTED
           // Use backend host for WebSocket connection
+          // Use rawCandidateId (without email: or public: prefix) for WebSocket URL
           const { LIVE_PROCTORING_ENDPOINTS } = require("@/universal-proctoring/live/types");
-          const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, candidateIdStr);
+          const wsUrl = LIVE_PROCTORING_ENDPOINTS.candidateWs(sessionId, rawCandidateId);
           console.log('[DSA Take] Candidate WS connecting...', wsUrl);
           const ws = new WebSocket(wsUrl);
           candidateWsRef.current = ws;
@@ -2579,24 +2597,11 @@ export default function TestTakePage() {
               </div>
             )}
             {submittedQuestions[currentQuestion.id] && currentQuestionIndex === questions.length - 1 && (
-              <div className="bg-blue-600/20 border-t border-blue-500 p-3 flex items-center justify-between flex-shrink-0">
+              <div className="bg-blue-600/20 border-t border-blue-500 p-3 flex items-center justify-center flex-shrink-0">
                 <div className="flex items-center gap-2 text-blue-400">
-                  <span>🎉</span>
+                  
                   <span className="font-medium text-sm">All done!</span>
                 </div>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    console.log('[Submit] Button clicked (mobile)')
-                    handleSubmit(false)
-                  }}
-                  disabled={submitting || !testId || !userId}
-                  className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  type="button"
-                >
-                  {submitting ? 'Submitting...' : 'Submit Test'}
-                </button>
               </div>
             )}
           </div>

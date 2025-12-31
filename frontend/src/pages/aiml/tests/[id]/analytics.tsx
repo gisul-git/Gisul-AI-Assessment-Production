@@ -1,12 +1,11 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useMemo } from 'react'
 import { useRouter } from 'next/router'
 import { GetServerSideProps } from 'next'
 import { requireAuth } from '../../../../lib/auth'
 import Link from 'next/link'
 import aimlApi from '../../../../lib/aiml/api'
 import axios from 'axios'
-import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Loader2 } from 'lucide-react'
-import LiveProctoringDashboard from '../../../../components/proctor/LiveProctoringDashboard'
+import { ArrowLeft, Lightbulb, CheckCircle2, TrendingUp, AlertTriangle, Eye, Clock, Video, Loader2 } from 'lucide-react'
 import { useSession } from 'next-auth/react'
 import ProctorLogsReview from '../../../../components/admin/ProctorLogsReview'
 
@@ -22,6 +21,7 @@ interface AIFeedback {
   strengths?: string[]
   areas_for_improvement?: string[]
   suggestions?: string[]
+  improvement_suggestions?: string[]
   deduction_reasons?: string[]
   ai_generated?: boolean
 }
@@ -47,6 +47,13 @@ interface CandidateAnalytics {
     name: string
     email: string
   }
+  candidateInfo?: {
+    phone?: string | null
+    linkedIn?: string | null
+    github?: string | null
+    hasResume?: boolean
+    customFields?: Record<string, any>
+  } | null
   submission: {
     score: number
     started_at: string | null
@@ -88,8 +95,6 @@ export default function AnalyticsPage() {
   const [eventTypeLabels, setEventTypeLabels] = useState<Record<string, string>>({})
   const [loadingProctorLogs, setLoadingProctorLogs] = useState(false)
   const [showProctorLogs, setShowProctorLogs] = useState(false)
-  const [showLiveProctoring, setShowLiveProctoring] = useState(false)
-  const [isLiveProctoringCooldown, setIsLiveProctoringCooldown] = useState(false)
   const [showAddCandidateModal, setShowAddCandidateModal] = useState(false)
   const [newCandidateName, setNewCandidateName] = useState("")
   const [newCandidateEmail, setNewCandidateEmail] = useState("")
@@ -106,15 +111,25 @@ export default function AnalyticsPage() {
   })
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [sendingInvitations, setSendingInvitations] = useState(false)
+  const [sendingFeedback, setSendingFeedback] = useState<string | null>(null) // Track which candidate's feedback is being sent
   const [referencePhoto, setReferencePhoto] = useState<string | null>(null)
 
   const fetchReferencePhoto = async (candidateEmail: string) => {
+    console.log('[AIML Analytics] 🔍 fetchReferencePhoto called:', { testId, candidateEmail })
+    
     if (!testId || typeof testId !== 'string' || !candidateEmail) {
+      console.warn('[AIML Analytics] ⚠️ Missing required params:', { testId, candidateEmail })
       setReferencePhoto(null)
       return
     }
 
     try {
+      console.log('[AIML Analytics] 📡 Fetching reference photo from API...', {
+        assessmentId: testId,
+        candidateEmail,
+        endpoint: '/api/v1/candidate/get-reference-photo'
+      })
+      
       // For DSA/AIML tests, identity verification uses testId as assessmentId
       const response = await axios.get(`/api/v1/candidate/get-reference-photo`, {
         params: {
@@ -123,13 +138,37 @@ export default function AnalyticsPage() {
         },
       })
 
+      console.log('[AIML Analytics] 📥 API Response:', {
+        success: response.data?.success,
+        hasReferenceImage: !!response.data?.data?.referenceImage,
+        dataKeys: response.data?.data ? Object.keys(response.data.data) : [],
+        message: response.data?.message,
+        fullResponse: response.data
+      })
+      
+      // Log the assessmentId mismatch if photo not found
+      if (!response.data?.data?.referenceImage && response.data?.message === 'No reference photo found') {
+        console.warn('[AIML Analytics] ⚠️ Reference photo not found. Check if assessmentId matches:', {
+          testIdUsed: testId,
+          candidateEmail,
+          note: 'Photo might have been saved with a different assessmentId. Check candidate side logs for the actual assessmentId used when saving.'
+        })
+      }
+
       if (response.data?.success && response.data?.data?.referenceImage) {
+        console.log('[AIML Analytics] ✅ Reference photo fetched successfully')
         setReferencePhoto(response.data.data.referenceImage)
       } else {
+        console.warn('[AIML Analytics] ⚠️ No reference image in response:', response.data)
         setReferencePhoto(null)
       }
-    } catch (error) {
-      // Silently fail - reference photo might not exist
+    } catch (error: any) {
+      console.error('[AIML Analytics] ❌ Error fetching reference photo:', {
+        error: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        fullError: error
+      })
       setReferencePhoto(null)
     }
   }
@@ -226,8 +265,16 @@ export default function AnalyticsPage() {
           fetchAnalytics(candidateUserId)
           // Try to fetch reference photo if candidate email is available
           const candidate = candidatesData.find((c: any) => c.user_id === candidateUserId)
+          console.log('[AIML Analytics] 🔍 Initial candidate load for reference photo:', {
+            candidateUserId,
+            candidateFound: !!candidate,
+            candidateEmail: candidate?.email
+          })
           if (candidate?.email) {
+            console.log('[AIML Analytics] 📞 Scheduling fetchReferencePhoto with email:', candidate.email)
             setTimeout(() => fetchReferencePhoto(candidate.email), 100)
+          } else {
+            console.warn('[AIML Analytics] ⚠️ Candidate email not found in initial load')
           }
         }
       } catch (error) {
@@ -246,8 +293,17 @@ export default function AnalyticsPage() {
     fetchAnalytics(userId)
     // Try to fetch reference photo if candidate email is available
     const candidate = candidates.find(c => c.user_id === userId)
+    console.log('[AIML Analytics] 👤 Candidate selected for reference photo:', {
+      userId,
+      candidateFound: !!candidate,
+      candidateEmail: candidate?.email,
+      allCandidates: candidates.map(c => ({ user_id: c.user_id, email: c.email }))
+    })
     if (candidate?.email) {
+      console.log('[AIML Analytics] 📞 Calling fetchReferencePhoto with email:', candidate.email)
       fetchReferencePhoto(candidate.email)
+    } else {
+      console.warn('[AIML Analytics] ⚠️ Candidate email not found, cannot fetch reference photo')
     }
     // Scroll to top of analytics content when candidate is selected
     setTimeout(() => {
@@ -438,6 +494,41 @@ export default function AnalyticsPage() {
       setSendingInvitations(false)
     }
   }
+
+  const handleSendFeedback = async (userId: string) => {
+    if (!testId || typeof testId !== 'string') return
+    
+    const candidate = candidates.find(c => c.user_id === userId)
+    if (!candidate) return
+    
+    if (!confirm(`Send AI feedback email to ${candidate.name} (${candidate.email})?`)) {
+      return
+    }
+    
+    setSendingFeedback(userId)
+    try {
+      const response = await aimlApi.post(`/tests/${testId}/candidates/${userId}/send-feedback`)
+      if (response.data) {
+        alert("Feedback email sent successfully!")
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.message || "Failed to send feedback email")
+    } finally {
+      setSendingFeedback(null)
+    }
+  }
+
+  // Check if test has ended
+  const isTestEnded = useMemo(() => {
+    if (!testInfo?.schedule?.endTime) return false
+    try {
+      const endTime = new Date(testInfo.schedule.endTime)
+      const now = new Date()
+      return now >= endTime
+    } catch {
+      return false
+    }
+  }, [testInfo])
 
   if (loading) {
     return (
@@ -663,6 +754,25 @@ export default function AnalyticsPage() {
                         >
                           Resend Invitation
                         </button>
+                        {isTestEnded && (candidate.status === "completed" || candidate.has_submitted) && (
+                          <button
+                            type="button"
+                            onClick={() => handleSendFeedback(candidate.user_id)}
+                            disabled={sendingFeedback === candidate.user_id}
+                            style={{
+                              padding: "0.25rem 0.75rem",
+                              fontSize: "0.75rem",
+                              backgroundColor: sendingFeedback === candidate.user_id ? "#94a3b8" : "#3b82f6",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "0.375rem",
+                              cursor: sendingFeedback === candidate.user_id ? "not-allowed" : "pointer",
+                              opacity: sendingFeedback === candidate.user_id ? 0.6 : 1,
+                            }}
+                          >
+                            {sendingFeedback === candidate.user_id ? "Sending..." : "📧 Send Feedback"}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => handleRemoveCandidate(candidate.user_id)}
@@ -804,9 +914,37 @@ export default function AnalyticsPage() {
                   padding: "1.5rem",
                   backgroundColor: "#ffffff",
                 }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
-                    Overall Test Performance
-                  </h2>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, margin: 0 }}>
+                      Overall Test Performance
+                    </h2>
+                    <Link
+                      href={`/aiml/tests/${testId}/live-dashboard`}
+                      className="btn-primary"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        backgroundColor: "#3b82f6",
+                        color: "#ffffff",
+                        textDecoration: "none",
+                        borderRadius: "0.5rem",
+                        fontWeight: 600,
+                        transition: "background-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = "#2563eb";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "#3b82f6";
+                      }}
+                    >
+                      <Video className="h-4 w-4" />
+                      Live Proctoring Dashboard
+                    </Link>
+                  </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem", marginBottom: "1rem" }}>
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Total Candidates</div>
@@ -940,55 +1078,70 @@ export default function AnalyticsPage() {
                   </div>
                 </div>
 
-                {/* Live Proctoring Section */}
-                <div style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.75rem",
-                  padding: "1.5rem",
-                  backgroundColor: "#ffffff",
-                  marginBottom: "1.5rem",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <Eye style={{ width: "20px", height: "20px", color: "#3b82f6" }} />
-                      <h2 style={{ fontSize: "1.125rem", fontWeight: 600 }}>Live Proctoring</h2>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowLiveProctoring(true)}
-                      disabled={isLiveProctoringCooldown}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        fontSize: "0.875rem",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        backgroundColor: isLiveProctoringCooldown ? "#94a3b8" : "#3b82f6",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: "0.5rem",
-                        cursor: isLiveProctoringCooldown ? "not-allowed" : "pointer",
-                        fontWeight: 600,
-                        opacity: isLiveProctoringCooldown ? 0.7 : 1,
-                      }}
-                    >
-                      {isLiveProctoringCooldown ? (
-                        <>
-                          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
-                          Please wait...
-                        </>
-                      ) : (
-                        <>
-                          <Eye size={16} />
-                          Open Live Proctoring
-                        </>
+                {/* Candidate Requirements Section */}
+                {analytics.candidateInfo && (
+                  <div style={{
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "0.75rem",
+                    padding: "1.5rem",
+                    backgroundColor: "#ffffff",
+                  }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "1rem" }}>
+                      Candidate Requirements
+                    </h2>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+                      {analytics.candidateInfo.phone && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Phone</div>
+                          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidateInfo.phone}</div>
+                        </div>
                       )}
-                    </button>
+                      {analytics.candidateInfo.linkedIn && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>LinkedIn</div>
+                          <a 
+                            href={analytics.candidateInfo.linkedIn} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            style={{ fontSize: "1rem", fontWeight: 600, color: "#3b82f6", textDecoration: "none" }}
+                          >
+                            {analytics.candidateInfo.linkedIn}
+                          </a>
+                        </div>
+                      )}
+                      {analytics.candidateInfo.github && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>GitHub</div>
+                          <a 
+                            href={analytics.candidateInfo.github} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            style={{ fontSize: "1rem", fontWeight: 600, color: "#3b82f6", textDecoration: "none" }}
+                          >
+                            {analytics.candidateInfo.github}
+                          </a>
+                        </div>
+                      )}
+                      {analytics.candidateInfo.hasResume !== undefined && (
+                        <div>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>Resume</div>
+                          {analytics.candidateInfo.hasResume ? (
+                            <div style={{ fontSize: "1rem", fontWeight: 600, color: "#10b981" }}>Uploaded</div>
+                          ) : (
+                            <div style={{ fontSize: "1rem", fontWeight: 600 }}>Not Provided</div>
+                          )}
+                        </div>
+                      )}
+                      {analytics.candidateInfo?.customFields && Object.keys(analytics.candidateInfo.customFields).map(key => (
+                        <div key={key}>
+                          <div style={{ fontSize: "0.875rem", color: "#64748b", marginBottom: "0.25rem" }}>{key}</div>
+                          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{analytics.candidateInfo?.customFields?.[key]}</div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b", margin: 0 }}>
-                    Monitor candidates in real-time via webcam and screen sharing
-                  </p>
-                </div>
+                )}
+
 
                 {/* Proctoring Logs Section */}
                 <div style={{
@@ -1236,53 +1389,53 @@ export default function AnalyticsPage() {
                           </div>
                         )}
 
-                        {/* Strengths and Areas for Improvement */}
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
-                          {qa.ai_feedback.strengths && qa.ai_feedback.strengths.length > 0 && (
-                            <div>
-                              <h5 style={{ 
-                                fontSize: "0.875rem", 
-                                fontWeight: 600, 
-                                color: "#166534", 
-                                marginBottom: "0.5rem",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "0.5rem"
-                              }}>
-                                <CheckCircle2 size={16} /> Strengths
-                              </h5>
-                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#166534" }}>
-                                {qa.ai_feedback.strengths.map((strength, idx) => (
-                                  <li key={idx}>{strength}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                          {qa.ai_feedback.areas_for_improvement && qa.ai_feedback.areas_for_improvement.length > 0 && (
-                            <div>
-                              <h5 style={{ 
-                                fontSize: "0.875rem", 
-                                fontWeight: 600, 
-                                color: "#dc2626", 
-                                marginBottom: "0.5rem",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "0.5rem"
-                              }}>
-                                <AlertTriangle size={16} /> Areas to Improve
-                              </h5>
-                              <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#dc2626" }}>
-                                {qa.ai_feedback.areas_for_improvement.map((area, idx) => (
-                                  <li key={idx}>{area}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
+                        {/* Strengths */}
+                        {qa.ai_feedback.strengths && qa.ai_feedback.strengths.length > 0 && (
+                          <div style={{ marginBottom: "1rem", padding: "0.75rem", backgroundColor: "#d1fae5", borderRadius: "0.5rem", border: "1px solid #10b981" }}>
+                            <h5 style={{ 
+                              fontSize: "0.875rem", 
+                              fontWeight: 600, 
+                              color: "#065f46", 
+                              marginBottom: "0.5rem",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.5rem"
+                            }}>
+                              <CheckCircle2 size={16} /> Strengths
+                            </h5>
+                            <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#047857", lineHeight: "1.8" }}>
+                              {qa.ai_feedback.strengths.map((strength, idx) => (
+                                <li key={idx} style={{ marginBottom: "0.5rem" }}>{strength}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
 
-                        {/* Suggestions */}
-                        {qa.ai_feedback.suggestions && qa.ai_feedback.suggestions.length > 0 && (
-                          <div style={{ marginTop: "1rem" }}>
+                        {/* Areas for Improvement */}
+                        {qa.ai_feedback.areas_for_improvement && qa.ai_feedback.areas_for_improvement.length > 0 && (
+                          <div style={{ marginBottom: "1rem", padding: "0.75rem", backgroundColor: "#fee2e2", borderRadius: "0.5rem", border: "1px solid #ef4444" }}>
+                            <h5 style={{ 
+                              fontSize: "0.875rem", 
+                              fontWeight: 600, 
+                              color: "#991b1b", 
+                              marginBottom: "0.5rem",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.5rem"
+                            }}>
+                              <AlertTriangle size={16} /> Areas for Improvement
+                            </h5>
+                            <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#dc2626", lineHeight: "1.8" }}>
+                              {qa.ai_feedback.areas_for_improvement.map((area, idx) => (
+                                <li key={idx} style={{ marginBottom: "0.5rem" }}>{area}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Improvement Suggestions */}
+                        {qa.ai_feedback.improvement_suggestions && qa.ai_feedback.improvement_suggestions.length > 0 && (
+                          <div style={{ marginBottom: "1rem", padding: "0.75rem", backgroundColor: "#dbeafe", borderRadius: "0.5rem", border: "1px solid #3b82f6" }}>
                             <h5 style={{ 
                               fontSize: "0.875rem", 
                               fontWeight: 600, 
@@ -1292,11 +1445,33 @@ export default function AnalyticsPage() {
                               alignItems: "center",
                               gap: "0.5rem"
                             }}>
-                              <TrendingUp size={16} /> Suggestions for Improvement
+                              <Lightbulb size={16} /> Improvement Suggestions
                             </h5>
-                            <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#1e40af" }}>
+                            <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#1e40af", lineHeight: "1.8" }}>
+                              {qa.ai_feedback.improvement_suggestions.map((suggestion: string, idx: number) => (
+                                <li key={idx} style={{ marginBottom: "0.5rem" }}>{suggestion}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Suggestions */}
+                        {qa.ai_feedback.suggestions && qa.ai_feedback.suggestions.length > 0 && (
+                          <div style={{ marginBottom: "1rem", padding: "0.75rem", backgroundColor: "#e0e7ff", borderRadius: "0.5rem", border: "1px solid #6366f1" }}>
+                            <h5 style={{ 
+                              fontSize: "0.875rem", 
+                              fontWeight: 600, 
+                              color: "#4338ca", 
+                              marginBottom: "0.5rem",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.5rem"
+                            }}>
+                              <TrendingUp size={16} /> Suggestions
+                            </h5>
+                            <ul style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem", color: "#4f46e5", lineHeight: "1.8" }}>
                               {qa.ai_feedback.suggestions.map((suggestion, idx) => (
-                                <li key={idx}>{suggestion}</li>
+                                <li key={idx} style={{ marginBottom: "0.5rem" }}>{suggestion}</li>
                               ))}
                             </ul>
                           </div>
@@ -1623,15 +1798,6 @@ export default function AnalyticsPage() {
         </div>
       )}
 
-      {/* Live Proctoring Dashboard */}
-      {showLiveProctoring && testId && typeof testId === 'string' && session?.user && (
-        <LiveProctoringDashboard
-          isOpen={showLiveProctoring}
-          onClose={() => setShowLiveProctoring(false)}
-          assessmentId={testId}
-          adminId={session.user.email || session.user.id || 'admin'}
-        />
-      )}
       <style jsx>{`
         @keyframes spin {
           from {
