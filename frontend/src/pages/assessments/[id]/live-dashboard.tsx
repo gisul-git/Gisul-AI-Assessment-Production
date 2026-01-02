@@ -351,6 +351,16 @@ export default function LiveProctoringDashboard({
     }
   }, [])
 
+  // Refresh all candidate connections
+  const refreshAllCandidates = useCallback(() => {
+    console.log(`[Live Dashboard] Refreshing all ${candidates.length} candidates`)
+    if (serviceRef.current && candidates.length > 0) {
+      candidates.forEach((candidate) => {
+        serviceRef.current?.refreshCandidate(candidate.sessionId)
+      })
+    }
+  }, [candidates])
+
   // Expand/collapse candidate view
   const toggleExpand = useCallback((sessionId: string) => {
     setExpandedSessionId((prev) => (prev === sessionId ? null : sessionId))
@@ -566,6 +576,16 @@ export default function LiveProctoringDashboard({
                 <span className="text-sm font-medium text-green-900">Live</span>
               </div>
             )}
+            {candidates.length > 0 && (
+              <button
+                onClick={refreshAllCandidates}
+                className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                title="Refresh all candidate streams"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span className="text-sm font-medium">Refresh All</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -657,18 +677,18 @@ function CandidateTile({ candidate, onExpand, onRefresh, videoRefs }: CandidateT
           }}
           autoPlay
           playsInline
-          className={`w-full h-full object-contain ${candidate.screenStream ? 'block' : 'hidden'}`}
+          className={`w-full h-full object-contain ${candidate.screenStream && candidate.screenStream.active ? 'block' : 'hidden'}`}
         />
         
         {/* Placeholder when no screen stream */}
-        {!candidate.screenStream && (
+        {!candidate.screenStream || !candidate.screenStream.active ? (
           <div className="absolute inset-0 flex items-center justify-center">
             <p className="text-gray-500 text-sm">No screen share</p>
           </div>
-        )}
+        ) : null}
 
         {/* Webcam (Overlay - Top Right) - Always render so ref exists when streams arrive */}
-        <div className={`absolute top-2 right-2 w-24 h-18 bg-gray-800 rounded overflow-hidden shadow-lg border border-gray-700 ${candidate.webcamStream ? 'block' : 'hidden'}`}>
+        <div className={`absolute top-2 right-2 w-24 h-18 bg-gray-800 rounded overflow-hidden shadow-lg border border-gray-700 ${candidate.webcamStream && candidate.webcamStream.active ? 'block' : 'hidden'}`}>
           <video
             ref={(el) => {
               if (el) {
