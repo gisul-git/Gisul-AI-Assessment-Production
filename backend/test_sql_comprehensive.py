@@ -13,7 +13,7 @@ import sys
 import os
 import json
 
-# Add backend to path
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "."))
 
 from app.api.v1.assessments.services.ai_sql_generator import _generate_sql_questions, SQL_CATEGORIES
@@ -26,7 +26,7 @@ async def test_sql_comprehensive_structure():
     print("=" * 80)
     
     # Test Case 1: Medium difficulty JOIN question
-    print("\n📊 Test Case 1: Medium Difficulty JOIN Question")
+    print("\n Test Case 1: Medium Difficulty JOIN Question")
     print("-" * 80)
     
     try:
@@ -40,7 +40,7 @@ async def test_sql_comprehensive_structure():
         assert len(questions) > 0, "No questions generated"
         q = questions[0]
         
-        print(f"✅ Generated question")
+        print(f" Generated question")
         print(f"   Type: {q.get('type')}")
         print(f"   Difficulty: {q.get('difficulty')}")
         
@@ -48,7 +48,7 @@ async def test_sql_comprehensive_structure():
         sql_data = q.get("sql_data")
         assert sql_data is not None, "Missing sql_data"
         
-        print(f"\n📋 SQL Data Structure:")
+        print(f"\n SQL Data Structure:")
         print(f"   Title: {sql_data.get('title')}")
         print(f"   Description length: {len(sql_data.get('description', ''))} chars")
         print(f"   SQL Category: {sql_data.get('sql_category')}")
@@ -56,13 +56,13 @@ async def test_sql_comprehensive_structure():
         # Validate SQL category
         sql_category = sql_data.get("sql_category")
         if sql_category in SQL_CATEGORIES:
-            print(f"   ✅ SQL category '{sql_category}' is valid")
+            print(f"   SQL category '{sql_category}' is valid")
         else:
             print(f"   ⚠️  SQL category '{sql_category}' is not in valid categories")
         
         # Check schemas
         schemas = sql_data.get("schemas", {})
-        print(f"\n🗄️ Database Schemas:")
+        print(f"\n  Database Schemas:")
         print(f"   Table count: {len(schemas)}")
         for table_name, table_def in list(schemas.items())[:2]:  # Show first 2 tables
             columns = table_def.get("columns", {})
@@ -78,13 +78,13 @@ async def test_sql_comprehensive_structure():
         
         # Validate table count for Medium difficulty
         if 2 <= len(schemas) <= 3:
-            print(f"   ✅ Table count {len(schemas)} is appropriate for Medium (2-3 expected)")
+            print(f"    Table count {len(schemas)} is appropriate for Medium (2-3 expected)")
         else:
             print(f"   ⚠️  Table count {len(schemas)} (expected 2-3 for Medium)")
         
         # Check sample data
         sample_data = sql_data.get("sample_data", {})
-        print(f"\n📊 Sample Data:")
+        print(f"\n Sample Data:")
         print(f"   Tables with data: {len(sample_data)}")
         for table_name, rows in list(sample_data.items())[:2]:  # Show first 2 tables
             print(f"   \n   {table_name}: {len(rows)} rows")
@@ -95,7 +95,7 @@ async def test_sql_comprehensive_structure():
         
         # Check constraints
         constraints = sql_data.get("constraints", [])
-        print(f"\n🔒 Constraints ({len(constraints)}):")
+        print(f"\n Constraints ({len(constraints)}):")
         for constraint in constraints[:3]:  # Show first 3
             print(f"   - {constraint}")
         if len(constraints) > 3:
@@ -104,16 +104,16 @@ async def test_sql_comprehensive_structure():
         # Check starter query
         starter_query = sql_data.get("starter_query", "")
         if starter_query:
-            print(f"\n📝 Starter Query:")
+            print(f"\n Starter Query:")
             print(f"   {starter_query[:50]}..." if len(starter_query) > 50 else f"   {starter_query}")
-            print(f"   ✅ Starter query provided")
+            print(f"    Starter query provided")
         else:
-            print(f"\n⚠️  No starter query provided")
+            print(f"\n  No starter query provided")
         
         # Check hints
         hints = sql_data.get("hints", [])
         if hints:
-            print(f"\n💡 Hints ({len(hints)}):")
+            print(f"\n Hints ({len(hints)}):")
             for hint in hints[:2]:  # Show first 2
                 print(f"   - {hint}")
             if len(hints) > 2:
@@ -122,7 +122,7 @@ async def test_sql_comprehensive_structure():
         # Check evaluation config
         evaluation = sql_data.get("evaluation", {})
         if evaluation:
-            print(f"\n⚙️ Evaluation Config:")
+            print(f"\n Evaluation Config:")
             print(f"   Engine: {evaluation.get('engine')}")
             print(f"   Comparison: {evaluation.get('comparison')}")
             print(f"   Order Sensitive: {evaluation.get('order_sensitive')}")
@@ -139,7 +139,7 @@ async def test_sql_comprehensive_structure():
         return False
     
     # Test Case 2: Easy difficulty SELECT question
-    print("\n\n📊 Test Case 2: Easy Difficulty SELECT Question")
+    print("\n\n Test Case 2: Easy Difficulty SELECT Question")
     print("-" * 80)
     
     try:
@@ -153,7 +153,7 @@ async def test_sql_comprehensive_structure():
         assert len(questions) > 0, "No questions generated"
         q = questions[0]
         
-        print(f"✅ Generated question")
+        print(f" Generated question")
         print(f"   Type: {q.get('type')}")
         print(f"   Difficulty: {q.get('difficulty')}")
         
@@ -184,7 +184,7 @@ async def test_sql_comprehensive_structure():
         return False
     
     # Test Case 3: Hard difficulty Window Functions
-    print("\n\n📊 Test Case 3: Hard Difficulty Window Functions")
+    print("\n\n Test Case 3: Hard Difficulty Window Functions")
     print("-" * 80)
     
     try:
@@ -231,7 +231,7 @@ async def test_sql_comprehensive_structure():
         return False
     
     # Test Case 4: Aggregation Question
-    print("\n\n📊 Test Case 4: Aggregation with GROUP BY")
+    print("\n\n Test Case 4: Aggregation with GROUP BY")
     print("-" * 80)
     
     try:
@@ -267,7 +267,7 @@ async def test_sql_comprehensive_structure():
     print("\n" + "=" * 80)
     print("✅ ALL TESTS PASSED")
     print("=" * 80)
-    print("\n📊 Summary:")
+    print("\n Summary:")
     print("   - SQL questions generated with comprehensive structure")
     print("   - Complete database schemas with proper data types")
     print("   - Sample data (3-5 rows per table) included")
@@ -275,7 +275,7 @@ async def test_sql_comprehensive_structure():
     print("   - Constraints, starter queries, and hints included")
     print("   - Evaluation configuration present")
     print("   - Difficulty-appropriate complexity (table count)")
-    print("\n🚀 SQL comprehensive structure is working!")
+    print("\n SQL comprehensive structure is working!")
     
     return True
 
