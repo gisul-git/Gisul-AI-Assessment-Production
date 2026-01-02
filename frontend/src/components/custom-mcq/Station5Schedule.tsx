@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { CustomMCQAssessment } from "../../types/custom-mcq";
 import { customMCQApi } from "../../lib/custom-mcq/api";
 import EmailInvitationModal from "./EmailInvitationModal";
@@ -13,16 +13,38 @@ interface Station5Props {
   router?: any;
 }
 
+// Helper function to convert UTC ISO string to local datetime-local format (YYYY-MM-DDTHH:mm)
+function utcToLocalDatetimeLocal(utcIsoString: string): string {
+  if (!utcIsoString) return "";
+  const date = new Date(utcIsoString);
+  if (isNaN(date.getTime())) return "";
+  
+  // Get local date/time components
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
 export default function Station5Schedule({ assessmentData, updateAssessmentData, onCreateAssessment, loading, createdAssessmentUrl, assessmentId, router }: Station5Props) {
+  // Track if we're editing: if assessmentId exists when component first mounts and URL doesn't exist yet, we're editing
+  const wasEditingRef = useRef<boolean>(!!assessmentId && !createdAssessmentUrl);
   const [accessMode, setAccessMode] = useState<"private" | "public">(assessmentData.accessMode || "private");
   const [examMode, setExamMode] = useState<"strict" | "flexible">(assessmentData.examMode || "strict");
+  // Initialize from schedule object if available, otherwise from root level
+  const scheduleStartTime = (assessmentData as any)?.schedule?.startTime || assessmentData.startTime;
+  const scheduleEndTime = (assessmentData as any)?.schedule?.endTime || assessmentData.endTime;
+  const scheduleDuration = (assessmentData as any)?.schedule?.duration || assessmentData.duration;
   const [startTime, setStartTime] = useState(
-    assessmentData.startTime ? new Date(assessmentData.startTime).toISOString().slice(0, 16) : ""
+    scheduleStartTime ? utcToLocalDatetimeLocal(scheduleStartTime) : ""
   );
   const [endTime, setEndTime] = useState(
-    assessmentData.endTime ? new Date(assessmentData.endTime).toISOString().slice(0, 16) : ""
+    scheduleEndTime ? utcToLocalDatetimeLocal(scheduleEndTime) : ""
   );
-  const [duration, setDuration] = useState(assessmentData.duration?.toString() || "");
+  const [duration, setDuration] = useState(scheduleDuration?.toString() || "");
   const [accessTimeBeforeStart, setAccessTimeBeforeStart] = useState(
     assessmentData.accessTimeBeforeStart?.toString() || "15"
   );
@@ -45,11 +67,11 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   const [candidateCountWhenSent, setCandidateCountWhenSent] = useState<number>(0);
   
   // Candidate Requirements
-  const [requireName, setRequireName] = useState(
-    (assessmentData as any)?.schedule?.candidateRequirements?.requireName ?? false
+  const [requirePhone, setRequirePhone] = useState(
+    (assessmentData as any)?.schedule?.candidateRequirements?.requirePhone ?? false
   );
-  const [requireEmail, setRequireEmail] = useState(
-    (assessmentData as any)?.schedule?.candidateRequirements?.requireEmail ?? false
+  const [requireResume, setRequireResume] = useState(
+    (assessmentData as any)?.schedule?.candidateRequirements?.requireResume ?? false
   );
   const [requireLinkedIn, setRequireLinkedIn] = useState(
     (assessmentData as any)?.schedule?.candidateRequirements?.requireLinkedIn ?? false
@@ -57,6 +79,88 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   const [requireGithub, setRequireGithub] = useState(
     (assessmentData as any)?.schedule?.candidateRequirements?.requireGithub ?? false
   );
+
+  // Sync state from assessmentData when editing (only once when assessmentId is set and data is loaded)
+  const hasSyncedFromDataRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Reset sync flag if assessmentId changes
+    if (hasSyncedFromDataRef.current !== assessmentId) {
+      hasSyncedFromDataRef.current = null;
+    }
+    
+    // Only sync if we're editing (have assessmentId) and haven't synced yet, and assessmentData has meaningful values
+    if (!assessmentId || hasSyncedFromDataRef.current === assessmentId) return;
+    
+    const schedule = (assessmentData as any)?.schedule || {};
+    const proctoringSettings = (assessmentData as any)?.proctoringSettings;
+    
+    // Sync accessMode and examMode
+    if (assessmentData.accessMode) {
+      setAccessMode(assessmentData.accessMode);
+    }
+    if (assessmentData.examMode) {
+      setExamMode(assessmentData.examMode);
+    }
+    
+    // Sync timing from schedule object
+    const scheduleStartTime = schedule.startTime || assessmentData.startTime;
+    const scheduleEndTime = schedule.endTime || assessmentData.endTime;
+    const scheduleDuration = schedule.duration || assessmentData.duration;
+    
+    if (scheduleStartTime) {
+      setStartTime(utcToLocalDatetimeLocal(scheduleStartTime));
+    }
+    if (scheduleEndTime) {
+      setEndTime(utcToLocalDatetimeLocal(scheduleEndTime));
+    }
+    if (scheduleDuration !== undefined) {
+      setDuration(scheduleDuration.toString());
+    }
+    
+    // Sync other settings
+    if (assessmentData.accessTimeBeforeStart !== undefined) {
+      setAccessTimeBeforeStart(assessmentData.accessTimeBeforeStart.toString());
+    }
+    if (assessmentData.passPercentage !== undefined) {
+      setPassPercentage(assessmentData.passPercentage.toString());
+    }
+    
+    // Sync proctoring settings
+    if (proctoringSettings) {
+      if (proctoringSettings.aiProctoringEnabled !== undefined) {
+        setAiProctoringEnabled(proctoringSettings.aiProctoringEnabled);
+      }
+      if (proctoringSettings.faceMismatchEnabled !== undefined) {
+        setFaceMismatchEnabled(proctoringSettings.faceMismatchEnabled);
+      }
+      if (proctoringSettings.liveProctoringEnabled !== undefined) {
+        setLiveProctoringEnabled(proctoringSettings.liveProctoringEnabled);
+      }
+    }
+    
+    // Sync showResultToCandidate
+    if ((assessmentData as any).showResultToCandidate !== undefined) {
+      setShowResultToCandidate((assessmentData as any).showResultToCandidate);
+    }
+    
+    // Sync candidate requirements
+    const candidateReqs = schedule.candidateRequirements || {};
+    if (candidateReqs.requirePhone !== undefined) {
+      setRequirePhone(candidateReqs.requirePhone);
+    }
+    if (candidateReqs.requireResume !== undefined) {
+      setRequireResume(candidateReqs.requireResume);
+    }
+    if (candidateReqs.requireLinkedIn !== undefined) {
+      setRequireLinkedIn(candidateReqs.requireLinkedIn);
+    }
+    if (candidateReqs.requireGithub !== undefined) {
+      setRequireGithub(candidateReqs.requireGithub);
+    }
+    
+    hasSyncedFromDataRef.current = assessmentId;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assessmentId, assessmentData]);
 
   useEffect(() => {
     updateAssessmentData({
@@ -75,9 +179,12 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       showResultToCandidate,
       schedule: {
         ...(assessmentData as any)?.schedule,
+        startTime: startTime ? new Date(startTime).toISOString() : undefined,
+        endTime: endTime ? new Date(endTime).toISOString() : undefined,
+        duration: duration ? parseInt(duration) : undefined,
         candidateRequirements: {
-          requireName,
-          requireEmail,
+          requirePhone,
+          requireResume,
           requireLinkedIn,
           requireGithub,
         },
@@ -95,8 +202,8 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     faceMismatchEnabled,
     liveProctoringEnabled,
     showResultToCandidate,
-    requireName,
-    requireEmail,
+    requirePhone,
+    requireResume,
     requireLinkedIn,
     requireGithub,
   ]);
@@ -462,20 +569,20 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
             <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
               <input
                 type="checkbox"
-                checked={requireName}
-                onChange={(e) => setRequireName(e.target.checked)}
+                checked={requirePhone}
+                onChange={(e) => setRequirePhone(e.target.checked)}
                 style={{ width: "18px", height: "18px", cursor: "pointer" }}
               />
-              <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Name</span>
+              <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Phone Number</span>
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
               <input
                 type="checkbox"
-                checked={requireEmail}
-                onChange={(e) => setRequireEmail(e.target.checked)}
+                checked={requireResume}
+                onChange={(e) => setRequireResume(e.target.checked)}
                 style={{ width: "18px", height: "18px", cursor: "pointer" }}
               />
-              <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Email</span>
+              <span style={{ fontWeight: 600, color: "#1E5A3B" }}>Resume (File Upload)</span>
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer" }}>
               <input
@@ -519,11 +626,15 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
           </label>
         </div>
 
-        {/* Create Button */}
+        {/* Create/Update Button */}
         <div style={{ padding: "1.5rem", border: "2px solid #2D7A52", borderRadius: "0.5rem", backgroundColor: "#E8FAF0" }}>
-          <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>Ready to Create Assessment</h3>
+          <h3 style={{ marginBottom: "1rem", color: "#1E5A3B" }}>
+            {assessmentId ? "Ready to Update Assessment" : "Ready to Create Assessment"}
+          </h3>
           <p style={{ marginBottom: "1.5rem", color: "#2D7A52", fontSize: "0.875rem" }}>
-            Review all settings above and click the button below to create your assessment. You'll receive a shareable link.
+            {assessmentId
+              ? "Review all settings above and click the button below to update your assessment."
+              : "Review all settings above and click the button below to create your assessment. You'll receive a shareable link."}
           </p>
           <button
             type="button"
@@ -532,14 +643,22 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
             className="btn-primary"
             style={{ width: "100%", padding: "1rem", fontSize: "1.125rem", fontWeight: 600 }}
           >
-            {loading ? "Creating Assessment..." : "✓ Create Assessment"}
+            {loading
+              ? assessmentId
+                ? "Updating Assessment..."
+                : "Creating Assessment..."
+              : assessmentId
+              ? "✓ Update Assessment"
+              : "✓ Create Assessment"}
           </button>
         </div>
         
         {/* Assessment URL Display - Passed from parent */}
         {createdAssessmentUrl && (
           <div id="assessment-url-section" style={{ marginTop: "2rem", padding: "1.5rem", backgroundColor: "#dcfce7", border: "2px solid #10b981", borderRadius: "0.75rem" }}>
-            <h3 style={{ marginBottom: "1rem", color: "#166534" }}>✓ Assessment Created Successfully!</h3>
+            <h3 style={{ marginBottom: "1rem", color: "#166534" }}>
+              ✓ {wasEditingRef.current ? "Assessment Updated Successfully!" : "Assessment Created Successfully!"}
+            </h3>
             <p style={{ marginBottom: "1rem", color: "#166534", fontSize: "0.875rem", fontWeight: 600 }}>
               Share this URL with your candidates:
             </p>

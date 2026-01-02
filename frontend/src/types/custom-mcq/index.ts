@@ -57,8 +57,8 @@ export interface CustomMCQAssessment {
     endTime?: string;
     duration?: number;
     candidateRequirements?: {
-      requireName?: boolean;
-      requireEmail?: boolean;
+      requirePhone?: boolean;
+      requireResume?: boolean;
       requireLinkedIn?: boolean;
       requireGithub?: boolean;
     };

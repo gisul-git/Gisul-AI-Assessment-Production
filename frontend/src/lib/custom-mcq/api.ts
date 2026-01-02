@@ -240,4 +240,26 @@ export const customMCQApi = {
     }
     throw new Error(response.data.message || "Failed to save answer log");
   },
+
+  // Pause assessment
+  pauseAssessment: async (assessmentId: string): Promise<any> => {
+    const response = await fastApiClient.post(`${BASE_URL}/${assessmentId}/pause`);
+    
+    if (!response.data.success) {
+      throw new Error(response.data.message || "Failed to pause assessment");
+    }
+    
+    return response.data.data || {};
+  },
+
+  // Resume assessment
+  resumeAssessment: async (assessmentId: string): Promise<any> => {
+    const response = await fastApiClient.post(`${BASE_URL}/${assessmentId}/resume`);
+    
+    if (!response.data.success) {
+      throw new Error(response.data.message || "Failed to resume assessment");
+    }
+    
+    return response.data.data || {};
+  },
 };

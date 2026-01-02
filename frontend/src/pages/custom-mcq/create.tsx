@@ -39,6 +39,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
   const [initialLoadDone, setInitialLoadDone] = useState(false); // Prevent auto-save from overwriting during initial load
   const isCreatingDraftRef = useRef(false); // Prevent multiple drafts from being created
   const assessmentIdRef = useRef<string | null>(null); // Avoid stale closures during route changes/unload
+  const [isEditingExisting, setIsEditingExisting] = useState(false); // Track if we're editing an existing assessment (loaded from URL)
 
   useEffect(() => {
     assessmentIdRef.current = assessmentId;
@@ -52,6 +53,9 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
     { id: 5, name: "Schedule", icon: "📅" },
   ];
 
+  // Track if we've already determined edit vs create mode (to prevent re-running when URL updates after draft creation)
+  const hasDeterminedEditModeRef = useRef(false);
+  
   // Load draft from backend if assessmentId is in URL
   useEffect(() => {
     const loadDraft = async () => {
@@ -59,13 +63,33 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         const { id, testId } = router.query;
         const assessmentIdParam = (id || testId) as string;
         
+        // If we already have assessmentId and it matches the URL param, we just created a draft
+        // Don't reload - we're still in create mode
+        if (assessmentId && assessmentIdParam && assessmentId === assessmentIdParam && hasDeterminedEditModeRef.current) {
+          // URL was updated after draft creation, but we're still creating, not editing
+          return;
+        }
+        
         setInitialLoadDone(false); // Reset initial load flag - prevent auto-save during load
         
         if (assessmentIdParam) {
-          // Load existing draft from backend
+          // If we already have this assessmentId loaded, skip (we created it)
+          if (assessmentId === assessmentIdParam) {
+            hasDeterminedEditModeRef.current = true;
+            isInitialLoadRef.current = false;
+            setInitialLoadDone(true);
+            return;
+          }
+          
+          // Load existing draft from backend - this is edit mode
           try {
             const assessment = await customMCQApi.getAssessment(assessmentIdParam);
             setAssessmentId(assessmentIdParam);
+            setIsEditingExisting(true); // Mark as editing existing assessment
+            hasDeterminedEditModeRef.current = true;
+            // Extract schedule data if it exists
+            const schedule = (assessment as any).schedule || {};
+            
             setAssessmentData({
               title: assessment.title || "",
               description: assessment.description || "",
@@ -73,11 +97,15 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
               candidates: assessment.candidates || [],
               accessMode: assessment.accessMode || "private",
               examMode: assessment.examMode || "strict",
-              startTime: assessment.startTime,
-              endTime: assessment.endTime,
-              duration: assessment.duration,
+              startTime: schedule.startTime || assessment.startTime,
+              endTime: schedule.endTime || assessment.endTime,
+              duration: schedule.duration || assessment.duration,
               passPercentage: assessment.passPercentage || 50,
-            });
+              schedule: schedule, // Include full schedule object
+              proctoringSettings: (assessment as any).proctoringSettings || undefined,
+              accessTimeBeforeStart: (assessment as any).accessTimeBeforeStart || 15,
+              showResultToCandidate: (assessment as any).showResultToCandidate !== undefined ? (assessment as any).showResultToCandidate : true,
+            } as any);
             
             // Set current station from backend or default to 1
             const station = (assessment as any).currentStation || 1;
@@ -89,10 +117,14 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
             console.error("Error loading draft from backend:", err);
             // If assessment not found, continue with new assessment
             isCreatingDraftRef.current = false; // Allow creation if load fails
+            setIsEditingExisting(false);
+            hasDeterminedEditModeRef.current = true;
           }
         } else {
           // No ID in URL - new assessment
           isCreatingDraftRef.current = false; // Allow creation for new assessment
+          setIsEditingExisting(false);
+          hasDeterminedEditModeRef.current = true;
           console.log("[Custom MCQ] Starting new assessment");
         }
       } catch (err) {
@@ -108,7 +140,8 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
     if (router.isReady) {
       loadDraft();
     }
-  }, [router.isReady, router.query]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady, router.query.id, router.query.testId, assessmentId]);
 
   // Track if assessment was just created/activated to prevent auto-save from overwriting
   const isActivatedRef = useRef(false);
@@ -149,7 +182,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         const result = await customMCQApi.createAssessment(draftData as any);
         setAssessmentId(result.assessmentId);
         // Update URL to include the new ID for consistency (shallow to avoid a full reload)
-        router.replace(`/custom-mcq/create?testId=${result.assessmentId}`, undefined, { shallow: true });
+        router.replace(`/custom-mcq/create?id=${result.assessmentId}`, undefined, { shallow: true });
       } catch (err) {
         // Allow retry if creation fails
         isCreatingDraftRef.current = false;
@@ -185,6 +218,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           status: "draft", // Always save as draft during editing
           currentStation: currentStation,
           proctoringSettings: (assessmentData as any).proctoringSettings,
+          schedule: (assessmentData as any).schedule, // Include schedule object with timing
         };
 
         if (assessmentId) {
@@ -364,7 +398,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         }
       }
 
-      // Prepare data for API - change status from draft to active
+      // Prepare data for API - change status from draft to scheduled/active
       const createData: any = {
         title: assessmentData.title!,
         description: assessmentData.description || "",
@@ -378,18 +412,18 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         accessTimeBeforeStart: assessmentData.accessTimeBeforeStart || 15, // Include access time before start
         showResultToCandidate: (assessmentData as any).showResultToCandidate !== false, // Default to true if not specified
         passPercentage: assessmentData.passPercentage || 50,
-        status: "active", // Change from draft to active
+        status: "scheduled", // Create as scheduled/active (not paused)
         currentStation: currentStation,
         proctoringSettings: (assessmentData as any).proctoringSettings,
         schedule: (assessmentData as any).schedule, // Include schedule with candidateRequirements
       };
 
-      // Mark as activated to prevent auto-save from overwriting
+      // Mark as published to prevent auto-save from overwriting
       isActivatedRef.current = true;
       
       let result: any;
       if (assessmentId) {
-        // Update existing draft to active
+        // Update existing draft to scheduled
         const updateResponse = await customMCQApi.updateAssessment(assessmentId, createData);
         result = await customMCQApi.getAssessment(assessmentId);
         // Get the token and URL from the update response if available
@@ -398,7 +432,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           result.assessmentUrl = (updateResponse as any).assessmentUrl;
         }
       } else {
-        // Create new as active
+        // Create new as scheduled
         result = await customMCQApi.createAssessment(createData);
         setAssessmentId(result.assessmentId);
       }
@@ -457,7 +491,9 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
     <div style={{ backgroundColor: "#ffffff", minHeight: "100vh", padding: "2rem" }}>
       <div className="container" style={{ maxWidth: "1200px", margin: "0 auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2rem" }}>
-          <h1 style={{ margin: 0, color: "#1E5A3B" }}>Create Custom MCQ/Subjective Assessment</h1>
+          <h1 style={{ margin: 0, color: "#1E5A3B" }}>
+            {isEditingExisting ? "Edit Custom MCQ/Subjective Assessment" : "Create Custom MCQ/Subjective Assessment"}
+          </h1>
           {isSaving && (
             <span style={{ fontSize: "0.875rem", color: "#2D7A52", fontStyle: "italic" }}>
               💾 Saving draft...
@@ -623,7 +659,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
               onCreateAssessment={handleCreateAssessment}
               loading={loading}
               createdAssessmentUrl={createdAssessmentUrl}
-              assessmentId={assessmentId}
+              assessmentId={isEditingExisting ? assessmentId : null}
               router={router}
             />
           )}

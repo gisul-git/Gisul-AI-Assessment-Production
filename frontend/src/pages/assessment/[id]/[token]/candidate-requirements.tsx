@@ -313,21 +313,26 @@ export default function CandidateRequirementsPage() {
           const candidateReqs = schedule?.candidateRequirements || {};
           console.log("Candidate requirements from schedule:", candidateReqs);
 
+          // More robust normalization - handle both boolean and string "true"/"false"
+          const normalizeBool = (val: any): boolean => {
+            if (val === true || val === "true" || val === 1 || val === "1") return true;
+            if (val === false || val === "false" || val === 0 || val === "0" || val === null || val === undefined) return false;
+            return Boolean(val);
+          };
+
           const normalizedRequirements = {
-            requireEmail: candidateReqs?.requireEmail === true,
-            requireName: candidateReqs?.requireName === true,
-            requirePhone: candidateReqs?.requirePhone === true,
-            requireResume: candidateReqs?.requireResume === true,
-            requireLinkedIn: candidateReqs?.requireLinkedIn === true,
-            requireGithub: candidateReqs?.requireGithub === true,
+            requireEmail: false, // Email is always collected in entry page
+            requireName: false, // Name is always collected in entry page
+            requirePhone: normalizeBool(candidateReqs?.requirePhone),
+            requireResume: normalizeBool(candidateReqs?.requireResume),
+            requireLinkedIn: normalizeBool(candidateReqs?.requireLinkedIn),
+            requireGithub: normalizeBool(candidateReqs?.requireGithub),
           };
 
           console.log("Normalized candidate requirements for custom MCQ:", normalizedRequirements);
           setCandidateRequirements(normalizedRequirements);
 
           const hasAnyRequirement =
-            normalizedRequirements.requireEmail ||
-            normalizedRequirements.requireName ||
             normalizedRequirements.requirePhone ||
             normalizedRequirements.requireResume ||
             normalizedRequirements.requireLinkedIn ||
@@ -431,12 +436,11 @@ export default function CandidateRequirementsPage() {
         setCandidateRequirements(normalizedRequirements);
  
         const hasAnyRequirement =
-          normalizedRequirements.requireEmail ||
-          normalizedRequirements.requireName ||
           normalizedRequirements.requirePhone ||
           normalizedRequirements.requireResume ||
           normalizedRequirements.requireLinkedIn ||
-          normalizedRequirements.requireGithub;
+          normalizedRequirements.requireGithub ||
+          (customFields.length > 0);
  
         // If no requirements are enabled, skip this page
         if (!hasAnyRequirement && id && token) {

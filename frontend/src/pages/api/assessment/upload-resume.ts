@@ -43,11 +43,10 @@ export default async function handler(
     const mimeType = resumeFile.mimetype || 'application/pdf'
     const dataUrl = `data:${mimeType};base64,${base64Data}`
 
-    // Determine if this is DSA or regular assessment
-    // For DSA, assessmentId is the test_id
-    // Check if it's DSA by trying the DSA endpoint first
+    // Determine assessment type by trying endpoints in order: DSA -> Custom MCQ -> Regular Assessment
+    // Try DSA endpoint first
     try {
-      console.log(`[upload-resume] Uploading resume for DSA test: ${assessmentId}, email: ${email}`)
+      console.log(`[upload-resume] Trying DSA endpoint for: ${assessmentId}, email: ${email}`)
       const dsaResponse = await axios.post(
         `${API_BASE_URL}/api/v1/dsa/tests/${assessmentId}/save-candidate-info`,
         {
@@ -68,35 +67,74 @@ export default async function handler(
       
       return res.status(200).json({ success: true, message: 'Resume uploaded successfully', data: dsaResponse.data })
     } catch (dsaError: any) {
-      // If DSA endpoint fails, try regular assessment endpoint
+      // If DSA endpoint fails with 404, try Custom MCQ endpoint
       if (dsaError.response?.status === 404) {
-        // Try regular assessment endpoint
         try {
-          const response = await axios.post(
-            `${API_BASE_URL}/api/v1/candidate/save-candidate-info`,
+          console.log(`[upload-resume] Trying Custom MCQ endpoint for: ${assessmentId}, email: ${email}`)
+          const customMcqResponse = await axios.post(
+            `${API_BASE_URL}/api/v1/custom-mcq/${assessmentId}/save-candidate-info`,
             {
-              assessmentId,
-              token,
               email: email.trim().toLowerCase(),
               name: name.trim(),
+              token: token,
               hasResume: true,
               resume: dataUrl, // Store resume as base64 data URL
+            },
+            {
+              timeout: 30000, // 30 second timeout for large files
             }
           )
+          
+          console.log(`[upload-resume] Custom MCQ resume upload response:`, customMcqResponse.data)
           
           // Clean up temp file
           fs.unlinkSync(resumeFile.filepath)
           
-          return res.status(200).json({ success: true, message: 'Resume uploaded successfully' })
-        } catch (error: any) {
-          // Clean up temp file
-          if (fs.existsSync(resumeFile.filepath)) {
-            fs.unlinkSync(resumeFile.filepath)
+          return res.status(200).json({ success: true, message: 'Resume uploaded successfully', data: customMcqResponse.data })
+        } catch (customMcqError: any) {
+          // If Custom MCQ endpoint also fails with 404, try regular assessment endpoint
+          if (customMcqError.response?.status === 404) {
+            try {
+              console.log(`[upload-resume] Trying regular assessment endpoint for: ${assessmentId}, email: ${email}`)
+              const response = await axios.post(
+                `${API_BASE_URL}/api/v1/candidate/save-candidate-info`,
+                {
+                  assessmentId,
+                  token,
+                  email: email.trim().toLowerCase(),
+                  name: name.trim(),
+                  hasResume: true,
+                  resume: dataUrl, // Store resume as base64 data URL
+                },
+                {
+                  timeout: 30000, // 30 second timeout for large files
+                }
+              )
+              
+              // Clean up temp file
+              fs.unlinkSync(resumeFile.filepath)
+              
+              return res.status(200).json({ success: true, message: 'Resume uploaded successfully' })
+            } catch (error: any) {
+              // Clean up temp file
+              if (fs.existsSync(resumeFile.filepath)) {
+                fs.unlinkSync(resumeFile.filepath)
+              }
+              
+              return res.status(error.response?.status || 500).json({
+                message: error.response?.data?.detail || 'Failed to upload resume',
+              })
+            }
+          } else {
+            // Clean up temp file
+            if (fs.existsSync(resumeFile.filepath)) {
+              fs.unlinkSync(resumeFile.filepath)
+            }
+            
+            return res.status(customMcqError.response?.status || 500).json({
+              message: customMcqError.response?.data?.detail || 'Failed to upload resume',
+            })
           }
-          
-          return res.status(error.response?.status || 500).json({
-            message: error.response?.data?.detail || 'Failed to upload resume',
-          })
         }
       } else {
         // Clean up temp file

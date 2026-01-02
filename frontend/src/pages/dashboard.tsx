@@ -175,9 +175,14 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
           ? customMcqResponse.value.data.data.assessments 
           : [];
         const customMcqTests = assessmentsList.map((test: any) => {
-          // Backend returns status field, not isDraft, so check status === 'draft'
-          const testStatus = test.status || 'draft';
-          const isDraft = testStatus === 'draft';
+          // Determine status: pausedAt > status field (similar to DSA)
+          let status = 'draft';
+          if (test.pausedAt) {
+            status = 'paused';
+          } else {
+            status = test.status || 'draft';
+          }
+          const isDraft = status === 'draft';
           
           // Check if schedule exists (startTime and endTime in schedule object or direct fields)
           const schedule = test.schedule || {};
@@ -186,19 +191,20 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
             startTime: schedule.startTime || test.startTime,
             endTime: schedule.endTime || test.endTime,
             duration: schedule.duration || test.duration,
-            isActive: testStatus === 'active', // Active if status is active
+            isActive: status === 'active', // Active if status is active (not paused)
           } : null;
           
           return {
             id: test.id,
             title: test.title || 'Untitled Custom MCQ/Subjective Test',
-            status: testStatus,
+            status: status as 'draft' | 'active' | 'paused',
             isDraft: isDraft,
             hasSchedule: hasSchedule,
             scheduleStatus: scheduleStatus,
             createdAt: test.createdAt,
             updatedAt: test.updatedAt || test.createdAt,
             type: 'custom_mcq' as const,
+            pausedAt: test.pausedAt, // Store pausedAt for reference
           };
         });
         allAssessments.push(...customMcqTests);
@@ -502,11 +508,11 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       const updatedAssessment = response.data?.data?.assessment || response.data?.data || response.data?.assessment || response.data;
       
       if (updatedAssessment || response.data?.success !== false) {
-        // For AIML and DSA, paused status is determined by pausedAt field
+        // For AIML, DSA, and Custom MCQ, paused status is determined by pausedAt field
         // For other assessments, use the status from response
         let finalStatus: "active" | "scheduled" | "draft" | "paused" = updatedAssessment?.status || 'paused' as const;
-        if (assessmentType === 'aiml' || assessmentType === 'dsa') {
-          // For AIML/DSA tests, if paused, status should be 'paused'
+        if (assessmentType === 'aiml' || assessmentType === 'dsa' || assessmentType === 'custom_mcq') {
+          // For AIML/DSA/Custom MCQ tests, if paused, status should be 'paused'
           finalStatus = 'paused';
         }
         
@@ -516,7 +522,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
             ? { 
                 ...a, 
                 status: finalStatus,
-                pausedAt: updatedAssessment?.pausedAt || new Date().toISOString()
+                pausedAt: (updatedAssessment?.pausedAt || new Date().toISOString()) as any
               }
             : a
         ));
@@ -566,10 +572,10 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       
       if (updatedAssessment || response.data?.success !== false) {
         // Determine the correct status after resume
-        // For AIML and DSA, if is_published is true, status should be 'active'
+        // For AIML, DSA, and Custom MCQ, resumed means active
         let finalStatus: "active" | "scheduled" | "draft" | "paused" = newStatus as "active" | "scheduled";
-        if (assessmentType === 'aiml' || assessmentType === 'dsa') {
-          // For AIML/DSA tests, resumed means active (is_published = true)
+        if (assessmentType === 'aiml' || assessmentType === 'dsa' || assessmentType === 'custom_mcq') {
+          // For AIML/DSA/Custom MCQ tests, resumed means active
           finalStatus = 'active';
         }
         
@@ -580,7 +586,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                 ...a, 
                 status: finalStatus,
                 resumeAt: updatedAssessment?.resumeAt || new Date().toISOString(),
-                pausedAt: undefined
+                pausedAt: undefined as any
               }
             : a
         ));
@@ -1432,7 +1438,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                         router.push(`/aiml/tests/${assessment.id}/edit`);
                       } else if (assessment.status === 'draft') {
                         if (assessment.type === 'custom_mcq') {
-                          router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                          router.push(`/custom-mcq/create?id=${assessment.id}`);
                         } else {
                           router.push(`/assessments/create-new?id=${assessment.id}`);
                         }
@@ -1822,7 +1828,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                               // keep existing AIML behavior (do not change)
                               router.push(`/tests/${assessment.id}/edit`);
                             } else if (assessment.type === 'custom_mcq') {
-                              router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                              router.push(`/custom-mcq/create?id=${assessment.id}`);
                             } else {
                               router.push(`/assessments/create-new?id=${assessment.id}`);
                             }
@@ -1917,7 +1923,7 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                                 // keep existing AIML behavior (do not change)
                                 router.push(`/tests/${assessment.id}/edit`);
                               } else if (assessment.type === 'custom_mcq') {
-                                router.push(`/custom-mcq/create?testId=${assessment.id}`);
+                                router.push(`/custom-mcq/create?id=${assessment.id}`);
                               } else {
                                 router.push(`/assessments/create-new?id=${assessment.id}`);
                               }
@@ -1980,8 +1986,8 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                           </button>
                         </>
                       )}
-                      {/* CASE B2: Active/Published - Show Analytics and Delete, HIDE Edit */}
-                      {(assessment.status === 'active' || assessment.status === 'published') && (
+                      {/* CASE B2: Active/Published/Scheduled - Show Analytics and Delete, HIDE Edit */}
+                      {(assessment.status === 'active' || assessment.status === 'published' || assessment.status === 'scheduled') && (
                         <>
                           <button
                             type="button"
