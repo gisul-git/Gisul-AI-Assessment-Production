@@ -25,7 +25,7 @@ export default async function handler(
     }
 
     const backendResponse = await axios.post(
-      `${BACKEND_URL}/api/v1/assessment/start-session`,
+      `${BACKEND_URL}/api/v1/assessments/start-session`,
       { assessmentId, token, email, name },
       {
         headers: { "Content-Type": "application/json" },
