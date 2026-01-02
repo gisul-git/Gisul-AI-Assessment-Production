@@ -1615,16 +1615,39 @@ async def submit_custom_mcq_assessment(
         # Get existing submission data to preserve answerLogs
         existing_submission = submissions.get(candidate_key, {})
         existing_answer_logs = existing_submission.get("answerLogs", {})
+        existing_candidate_info = existing_submission.get("candidateInfo", {})
+        
+        # Merge candidate requirements from request with existing candidateInfo (resume, phone, LinkedIn, GitHub)
+        # This ensures resume and other info saved earlier are included in candidateRequirements
+        candidate_requirements = request.candidateRequirements.copy() if request.candidateRequirements else {}
+        
+        # Merge resume from candidateInfo if it exists and wasn't already in candidateRequirements
+        if existing_candidate_info.get("resume") and "resume" not in candidate_requirements:
+            candidate_requirements["resume"] = existing_candidate_info.get("resume")
+            candidate_requirements["hasResume"] = existing_candidate_info.get("hasResume", False)
+        
+        # Merge phone, LinkedIn, GitHub from candidateInfo if they exist and weren't already in candidateRequirements
+        if existing_candidate_info.get("phone") and "phone" not in candidate_requirements:
+            candidate_requirements["phone"] = existing_candidate_info.get("phone")
+        if existing_candidate_info.get("linkedIn") and "linkedIn" not in candidate_requirements:
+            candidate_requirements["linkedIn"] = existing_candidate_info.get("linkedIn")
+        if existing_candidate_info.get("github") and "github" not in candidate_requirements:
+            candidate_requirements["github"] = existing_candidate_info.get("github")
         
         # Log candidate requirements received
         logger.info(f"Received candidate requirements for {candidate_key}: {request.candidateRequirements}")
+        logger.info(f"Merged candidate requirements (including resume) for {candidate_key}: {candidate_requirements}")
+        
+        # Prepare candidateInfo - preserve existing data (resume, phone, LinkedIn, GitHub) and update name/email
+        candidate_info = existing_candidate_info.copy() if existing_candidate_info else {}
+        candidate_info.update({
+            "name": request.name,
+            "email": request.email,
+        })
         
         # Save submission
         submission_data = {
-            "candidateInfo": {
-                "name": request.name,
-                "email": request.email,
-            },
+            "candidateInfo": candidate_info,  # Preserve existing candidateInfo including resume
             "submissions": graded_submissions,
             "score": total_score,
             "totalMarks": total_marks,
@@ -1639,7 +1662,7 @@ async def submit_custom_mcq_assessment(
             "subjectiveScore": subjective_score,
             "subjectiveTotal": subjective_total,
             "answerLogs": existing_answer_logs,  # Preserve answer logs from previous saves
-            "candidateRequirements": request.candidateRequirements if request.candidateRequirements else {},  # Store candidate requirements
+            "candidateRequirements": candidate_requirements,  # Store merged candidate requirements (including resume)
         }
         
         logger.info(f"Storing candidate requirements in submission: {submission_data.get('candidateRequirements')}")
@@ -2183,33 +2206,31 @@ async def save_custom_mcq_candidate_info(
         # Update or create submission entry with candidate info
         # This allows us to store candidate requirements before they submit the assessment
         now = _now_utc()
-        update_doc = {
-            f"submissions.{candidate_key}.candidateInfo": candidate_info,
-            "updated_at": now,
-        }
         
         # If this is a new submission entry, initialize it
         if candidate_key not in submissions:
-            update_doc[f"submissions.{candidate_key}"] = {
-                "candidateInfo": candidate_info,
-                "status": "in_progress",
-                "startedAt": None,
-                "submittedAt": None,
-                "score": None,
-                "submissions": [],
+            update_doc = {
+                f"submissions.{candidate_key}": {
+                    "candidateInfo": candidate_info,
+                    "status": "in_progress",
+                    "startedAt": None,
+                    "submittedAt": None,
+                    "score": None,
+                    "submissions": [],
+                },
+                "updated_at": now,
+            }
+        else:
+            # If submission already exists, only update the candidateInfo field
+            update_doc = {
+                f"submissions.{candidate_key}.candidateInfo": candidate_info,
+                "updated_at": now,
             }
         
         result = await db.custom_mcq_assessments.update_one(
             {"_id": assessment_oid},
             {"$set": update_doc}
         )
-        
-        if result.modified_count == 0 and candidate_key in submissions:
-            # If submission already existed, try again with just the candidateInfo update
-            await db.custom_mcq_assessments.update_one(
-                {"_id": assessment_oid},
-                {"$set": {f"submissions.{candidate_key}.candidateInfo": candidate_info, "updated_at": now}}
-            )
         
         return success_response(
             "Candidate information saved successfully",

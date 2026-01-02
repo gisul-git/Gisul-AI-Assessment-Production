@@ -13,6 +13,22 @@ interface Station5Props {
   router?: any;
 }
 
+// Helper function to convert UTC ISO string to local datetime-local format (YYYY-MM-DDTHH:mm)
+function utcToLocalDatetimeLocal(utcIsoString: string): string {
+  if (!utcIsoString) return "";
+  const date = new Date(utcIsoString);
+  if (isNaN(date.getTime())) return "";
+  
+  // Get local date/time components
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
 export default function Station5Schedule({ assessmentData, updateAssessmentData, onCreateAssessment, loading, createdAssessmentUrl, assessmentId, router }: Station5Props) {
   // Track if we're editing: if assessmentId exists when component first mounts and URL doesn't exist yet, we're editing
   const wasEditingRef = useRef<boolean>(!!assessmentId && !createdAssessmentUrl);
@@ -23,10 +39,10 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   const scheduleEndTime = (assessmentData as any)?.schedule?.endTime || assessmentData.endTime;
   const scheduleDuration = (assessmentData as any)?.schedule?.duration || assessmentData.duration;
   const [startTime, setStartTime] = useState(
-    scheduleStartTime ? new Date(scheduleStartTime).toISOString().slice(0, 16) : ""
+    scheduleStartTime ? utcToLocalDatetimeLocal(scheduleStartTime) : ""
   );
   const [endTime, setEndTime] = useState(
-    scheduleEndTime ? new Date(scheduleEndTime).toISOString().slice(0, 16) : ""
+    scheduleEndTime ? utcToLocalDatetimeLocal(scheduleEndTime) : ""
   );
   const [duration, setDuration] = useState(scheduleDuration?.toString() || "");
   const [accessTimeBeforeStart, setAccessTimeBeforeStart] = useState(
@@ -63,6 +79,88 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   const [requireGithub, setRequireGithub] = useState(
     (assessmentData as any)?.schedule?.candidateRequirements?.requireGithub ?? false
   );
+
+  // Sync state from assessmentData when editing (only once when assessmentId is set and data is loaded)
+  const hasSyncedFromDataRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Reset sync flag if assessmentId changes
+    if (hasSyncedFromDataRef.current !== assessmentId) {
+      hasSyncedFromDataRef.current = null;
+    }
+    
+    // Only sync if we're editing (have assessmentId) and haven't synced yet, and assessmentData has meaningful values
+    if (!assessmentId || hasSyncedFromDataRef.current === assessmentId) return;
+    
+    const schedule = (assessmentData as any)?.schedule || {};
+    const proctoringSettings = (assessmentData as any)?.proctoringSettings;
+    
+    // Sync accessMode and examMode
+    if (assessmentData.accessMode) {
+      setAccessMode(assessmentData.accessMode);
+    }
+    if (assessmentData.examMode) {
+      setExamMode(assessmentData.examMode);
+    }
+    
+    // Sync timing from schedule object
+    const scheduleStartTime = schedule.startTime || assessmentData.startTime;
+    const scheduleEndTime = schedule.endTime || assessmentData.endTime;
+    const scheduleDuration = schedule.duration || assessmentData.duration;
+    
+    if (scheduleStartTime) {
+      setStartTime(utcToLocalDatetimeLocal(scheduleStartTime));
+    }
+    if (scheduleEndTime) {
+      setEndTime(utcToLocalDatetimeLocal(scheduleEndTime));
+    }
+    if (scheduleDuration !== undefined) {
+      setDuration(scheduleDuration.toString());
+    }
+    
+    // Sync other settings
+    if (assessmentData.accessTimeBeforeStart !== undefined) {
+      setAccessTimeBeforeStart(assessmentData.accessTimeBeforeStart.toString());
+    }
+    if (assessmentData.passPercentage !== undefined) {
+      setPassPercentage(assessmentData.passPercentage.toString());
+    }
+    
+    // Sync proctoring settings
+    if (proctoringSettings) {
+      if (proctoringSettings.aiProctoringEnabled !== undefined) {
+        setAiProctoringEnabled(proctoringSettings.aiProctoringEnabled);
+      }
+      if (proctoringSettings.faceMismatchEnabled !== undefined) {
+        setFaceMismatchEnabled(proctoringSettings.faceMismatchEnabled);
+      }
+      if (proctoringSettings.liveProctoringEnabled !== undefined) {
+        setLiveProctoringEnabled(proctoringSettings.liveProctoringEnabled);
+      }
+    }
+    
+    // Sync showResultToCandidate
+    if ((assessmentData as any).showResultToCandidate !== undefined) {
+      setShowResultToCandidate((assessmentData as any).showResultToCandidate);
+    }
+    
+    // Sync candidate requirements
+    const candidateReqs = schedule.candidateRequirements || {};
+    if (candidateReqs.requirePhone !== undefined) {
+      setRequirePhone(candidateReqs.requirePhone);
+    }
+    if (candidateReqs.requireResume !== undefined) {
+      setRequireResume(candidateReqs.requireResume);
+    }
+    if (candidateReqs.requireLinkedIn !== undefined) {
+      setRequireLinkedIn(candidateReqs.requireLinkedIn);
+    }
+    if (candidateReqs.requireGithub !== undefined) {
+      setRequireGithub(candidateReqs.requireGithub);
+    }
+    
+    hasSyncedFromDataRef.current = assessmentId;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assessmentId, assessmentData]);
 
   useEffect(() => {
     updateAssessmentData({

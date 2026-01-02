@@ -102,6 +102,9 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
               duration: schedule.duration || assessment.duration,
               passPercentage: assessment.passPercentage || 50,
               schedule: schedule, // Include full schedule object
+              proctoringSettings: (assessment as any).proctoringSettings || undefined,
+              accessTimeBeforeStart: (assessment as any).accessTimeBeforeStart || 15,
+              showResultToCandidate: (assessment as any).showResultToCandidate !== undefined ? (assessment as any).showResultToCandidate : true,
             } as any);
             
             // Set current station from backend or default to 1
