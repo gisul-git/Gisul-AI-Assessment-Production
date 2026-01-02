@@ -369,14 +369,17 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
       }
 
       // Validate schedule based on exam mode - NEW IMPLEMENTATION
+      // Check duration in schedule.duration first (for per-section timers), then assessmentData.duration
+      const durationToValidate = (assessmentData as any).schedule?.duration || assessmentData.duration;
+      
       if (assessmentData.examMode === "strict") {
         if (!assessmentData.startTime) {
           setError("Start time is required for strict window mode");
           setLoading(false);
           return;
         }
-        if (!assessmentData.duration) {
-          setError("Duration is required for strict window mode");
+        if (!durationToValidate || parseInt(String(durationToValidate), 10) <= 0) {
+          setError("Duration is required and must be greater than 0 for strict window mode");
           setLoading(false);
           return;
         }
@@ -392,14 +395,18 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
           setLoading(false);
           return;
         }
-        if (!assessmentData.duration) {
-          setError("Duration is required for flexible window mode");
+        if (!durationToValidate || parseInt(String(durationToValidate), 10) <= 0) {
+          setError("Duration is required and must be greater than 0 for flexible window mode");
           setLoading(false);
           return;
         }
       }
 
       // Prepare data for API - change status from draft to scheduled/active
+      // Ensure duration is a number (handle per-section timer auto-calculation)
+      const durationValue = (assessmentData as any).schedule?.duration || assessmentData.duration;
+      const finalDuration = durationValue ? parseInt(String(durationValue), 10) : undefined;
+      
       const createData: any = {
         title: assessmentData.title!,
         description: assessmentData.description || "",
@@ -409,7 +416,7 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         examMode: assessmentData.examMode || "strict",
         startTime: assessmentData.startTime,
         endTime: assessmentData.endTime,
-        duration: assessmentData.duration,
+        duration: finalDuration,
         showResultToCandidate: (assessmentData as any).showResultToCandidate !== false, // Default to true if not specified
         passPercentage: assessmentData.passPercentage || 50,
         enablePerSectionTimers: (assessmentData as any).enablePerSectionTimers || false,

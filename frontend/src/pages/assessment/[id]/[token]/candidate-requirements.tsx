@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
 import { getGateContext } from "@/lib/gateContext";
@@ -43,14 +43,29 @@ export default function CandidateRequirementsPage() {
     requireGithub?: boolean;
   }>(DEFAULT_REQUIREMENTS);
 
+  // Guard to prevent multiple navigations
+  const hasNavigatedRef = useRef(false);
+
   // Determine flow type (accessible in render)
   const ctx = getGateContext(id as string);
   const isAIFlow = !ctx || ctx?.flowType === "ai";
   const isCustomMCQFlow = ctx?.flowType === "custom-mcq";
   const isAIMLFlow = ctx?.flowType === "aiml";
   const isDSAFlow = ctx?.flowType === "dsa";
+  
+  console.log("[CANDIDATE-REQUIREMENTS DEBUG] Flow type detection:", {
+    ctx,
+    flowType: ctx?.flowType,
+    isAIFlow,
+    isCustomMCQFlow,
+    isAIMLFlow,
+    isDSAFlow,
+    id,
+    token
+  });
 
   useEffect(() => {
+    console.log("[CANDIDATE-REQUIREMENTS DEBUG] useEffect triggered - checking flow and loading requirements");
     const storedEmail = sessionStorage.getItem("candidateEmail");
     const storedName = sessionStorage.getItem("candidateName");
    
@@ -151,11 +166,13 @@ export default function CandidateRequirementsPage() {
           console.log("[DSA] Has any requirement?", hasAnyRequirement);
 
           // If no requirements are enabled, skip this page (but add a small delay to prevent race conditions)
-          if (!hasAnyRequirement && id && token) {
+          if (!hasAnyRequirement && id && token && !hasNavigatedRef.current) {
             console.log("[DSA] No candidate requirements enabled, will skip to identity verification after short delay");
+            // Set flag BEFORE navigating to prevent redirect loop
+            hasNavigatedRef.current = true;
+            sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
             // Use setTimeout to prevent immediate navigation that might cause abort errors
             setTimeout(() => {
-              sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
               router.replace(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
                 // Ignore abort errors during navigation
                 if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
@@ -181,8 +198,10 @@ export default function CandidateRequirementsPage() {
     // For AIML flow, fetch requirements from AIML test
     // Only fetch if explicitly AIML flow (not DSA)
     if (isAIMLFlow && !isDSAFlow && id && token) {
+      console.log("[CANDIDATE-REQUIREMENTS DEBUG] Using AIML flow - fetching AIML test");
       const fetchAIMLTest = async () => {
         try {
+          console.log("[AIML DEBUG] Starting fetchAIMLTest");
           setFetchingAssessment(true);
           setError(null);
 
@@ -232,27 +251,56 @@ export default function CandidateRequirementsPage() {
 
           // Handle custom fields
           const customFieldsData = candidateReqs?.customFields || [];
-          console.log("Custom fields from schedule:", customFieldsData);
+          console.log("[AIML DEBUG] Custom fields from schedule:", customFieldsData);
+          console.log("[AIML DEBUG] Custom fields length:", customFieldsData.length);
           setCustomFields(customFieldsData);
 
-          console.log("Normalized candidate requirements for AIML:", normalizedRequirements);
+          console.log("[AIML DEBUG] Normalized candidate requirements for AIML:", normalizedRequirements);
           setCandidateRequirements(normalizedRequirements);
 
           const hasAnyRequirement =
+            normalizedRequirements.requireEmail ||
+            normalizedRequirements.requireName ||
             normalizedRequirements.requirePhone ||
             normalizedRequirements.requireResume ||
             normalizedRequirements.requireLinkedIn ||
             normalizedRequirements.requireGithub ||
             (customFieldsData.length > 0);
 
+          console.log("[AIML DEBUG] hasAnyRequirement check breakdown:", {
+            requireEmail: normalizedRequirements.requireEmail,
+            requireName: normalizedRequirements.requireName,
+            requirePhone: normalizedRequirements.requirePhone,
+            requireResume: normalizedRequirements.requireResume,
+            requireLinkedIn: normalizedRequirements.requireLinkedIn,
+            requireGithub: normalizedRequirements.requireGithub,
+            customFieldsLength: customFieldsData.length,
+            hasAnyRequirement: hasAnyRequirement,
+            hasNavigatedRef: hasNavigatedRef.current,
+            id: id,
+            token: token
+          });
+
           // If no requirements are enabled, skip this page
-          if (!hasAnyRequirement && id && token) {
-            console.log("No candidate requirements enabled for AIML, skipping to identity verification");
+          if (!hasAnyRequirement && id && token && !hasNavigatedRef.current) {
+            console.log("[AIML DEBUG] ⚠️ No candidate requirements enabled for AIML, skipping to identity verification");
+            // Set flag BEFORE navigating to prevent redirect loop
             sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
-            router.push(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+            hasNavigatedRef.current = true;
+            // Use replace instead of push to avoid history stack issues
+            router.replace(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+              // Ignore abort errors during navigation
               if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
                 console.error("Navigation error:", err);
               }
+            });
+          } else {
+            console.log("[AIML DEBUG] ✅ Requirements ARE enabled or navigation guard active - staying on candidate requirements page");
+            console.log("[AIML DEBUG] Navigation blocked because:", {
+              hasAnyRequirement: hasAnyRequirement,
+              hasNavigatedRef: hasNavigatedRef.current,
+              hasId: !!id,
+              hasToken: !!token
             });
           }
 
@@ -339,10 +387,14 @@ export default function CandidateRequirementsPage() {
             normalizedRequirements.requireGithub;
 
           // If no requirements are enabled, skip this page
-          if (!hasAnyRequirement && id && token) {
+          if (!hasAnyRequirement && id && token && !hasNavigatedRef.current) {
             console.log("No candidate requirements enabled for custom MCQ, skipping to identity verification");
+            // Set flag BEFORE navigating to prevent redirect loop
             sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
-            router.push(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+            hasNavigatedRef.current = true;
+            // Use replace instead of push to avoid history stack issues
+            router.replace(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+              // Ignore abort errors during navigation
               if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
                 console.error("Navigation error:", err);
               }
@@ -383,11 +435,13 @@ export default function CandidateRequirementsPage() {
 
     // AI: Fetch assessment info to get candidate requirements settings
     const fetchAssessment = async () => {
+      console.log("[AI DEBUG] Starting fetchAssessment for regular AI flow");
       if (!id || !token) {
+        console.log("[AI DEBUG] Missing id or token, aborting");
         setFetchingAssessment(false);
         return;
       }
- 
+
       try {
         setFetchingAssessment(true);
         setError(null);
@@ -421,7 +475,13 @@ export default function CandidateRequirementsPage() {
         // 🔧 FIX: Use optional chaining throughout and provide defaults
         const schedule = assessment?.schedule;
         const candidateReqs = schedule?.candidateRequirements;
- 
+
+        // Handle custom fields
+        const customFieldsData = candidateReqs?.customFields || [];
+        console.log("[AI DEBUG] Custom fields from schedule:", customFieldsData);
+        console.log("[AI DEBUG] Custom fields length:", customFieldsData.length);
+        setCustomFields(customFieldsData);
+
         // 🔧 FIX: If candidateRequirements doesn't exist, use defaults
         const normalizedRequirements = {
           requireEmail: candidateReqs?.requireEmail ?? DEFAULT_REQUIREMENTS.requireEmail,
@@ -431,21 +491,55 @@ export default function CandidateRequirementsPage() {
           requireLinkedIn: candidateReqs?.requireLinkedIn ?? DEFAULT_REQUIREMENTS.requireLinkedIn,
           requireGithub: candidateReqs?.requireGithub ?? DEFAULT_REQUIREMENTS.requireGithub,
         };
- 
-        console.log("Normalized candidate requirements:", normalizedRequirements);
+
+        console.log("[AI DEBUG] Raw candidateReqs:", candidateReqs);
+        console.log("[AI DEBUG] Normalized candidate requirements:", normalizedRequirements);
         setCandidateRequirements(normalizedRequirements);
- 
+
         const hasAnyRequirement =
+          normalizedRequirements.requireEmail ||
+          normalizedRequirements.requireName ||
           normalizedRequirements.requirePhone ||
           normalizedRequirements.requireResume ||
           normalizedRequirements.requireLinkedIn ||
           normalizedRequirements.requireGithub ||
-          (customFields.length > 0);
+          (customFieldsData.length > 0);
+
+        console.log("[AI DEBUG] hasAnyRequirement check breakdown:", {
+          requireEmail: normalizedRequirements.requireEmail,
+          requireName: normalizedRequirements.requireName,
+          requirePhone: normalizedRequirements.requirePhone,
+          requireResume: normalizedRequirements.requireResume,
+          requireLinkedIn: normalizedRequirements.requireLinkedIn,
+          requireGithub: normalizedRequirements.requireGithub,
+          customFieldsLength: customFieldsData.length,
+          hasAnyRequirement: hasAnyRequirement,
+          hasNavigatedRef: hasNavigatedRef.current,
+          id: id,
+          token: token
+        });
  
         // If no requirements are enabled, skip this page
-        if (!hasAnyRequirement && id && token) {
-          console.log("No candidate requirements enabled, skipping to identity verification");
-          router.push(`/assessment/${id}/${token}/identity-verify`);
+        if (!hasAnyRequirement && id && token && !hasNavigatedRef.current) {
+          console.log("[AI DEBUG] ⚠️ No candidate requirements enabled, skipping to identity verification");
+          // Set flag BEFORE navigating to prevent redirect loop
+          sessionStorage.setItem(`candidateRequirementsCompleted_${id}`, "true");
+          hasNavigatedRef.current = true;
+          // Use replace instead of push to avoid history stack issues
+          router.replace(`/assessment/${id}/${token}/identity-verify`).catch((err) => {
+            // Ignore abort errors during navigation
+            if (err.name !== "AbortError" && err.message !== "Abort fetching component") {
+              console.error("Navigation error:", err);
+            }
+          });
+        } else {
+          console.log("[AI DEBUG] ✅ Requirements ARE enabled or navigation guard active - staying on candidate requirements page");
+          console.log("[AI DEBUG] Navigation blocked because:", {
+            hasAnyRequirement: hasAnyRequirement,
+            hasNavigatedRef: hasNavigatedRef.current,
+            hasId: !!id,
+            hasToken: !!token
+          });
         }
        
         // Clear any previous errors since we successfully loaded the assessment
@@ -467,7 +561,8 @@ export default function CandidateRequirementsPage() {
     if (id && token) {
       fetchAssessment();
     }
-  }, [id, token, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, token]);
  
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

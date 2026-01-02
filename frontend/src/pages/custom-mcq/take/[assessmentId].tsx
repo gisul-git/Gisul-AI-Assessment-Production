@@ -35,7 +35,13 @@ export default function CustomMCQTakePage() {
   
   // Sequential flow: MCQ first, then Subjective
   const [assessmentPhase, setAssessmentPhase] = useState<"mcq" | "subjective">("mcq");
+  const assessmentPhaseRef = useRef<"mcq" | "subjective">("mcq");
   const [mcqSubmitted, setMcqSubmitted] = useState(false);
+  
+  // Keep ref in sync with state
+  useEffect(() => {
+    assessmentPhaseRef.current = assessmentPhase;
+  }, [assessmentPhase]);
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
   
@@ -513,11 +519,16 @@ export default function CustomMCQTakePage() {
             
             if (enablePerSectionTimers && sectionTimersConfig) {
               // Convert minutes to seconds for timers
+              const mcqSeconds = (sectionTimersConfig.MCQ || 20) * 60;
+              const subjectiveSeconds = (sectionTimersConfig.Subjective || 30) * 60;
+              const totalDurationSeconds = mcqSeconds + subjectiveSeconds;
+              
               setSectionTimers({
-                MCQ: (sectionTimersConfig.MCQ || 20) * 60,
-                Subjective: (sectionTimersConfig.Subjective || 30) * 60,
+                MCQ: mcqSeconds,
+                Subjective: subjectiveSeconds,
               });
-              setTimeRemaining(null); // Don't use global timer when per-section timers are enabled
+              // Set global timer to total duration (sum of section timers)
+              setTimeRemaining(totalDurationSeconds);
             } else {
               setTimeRemaining(accessControl.timeRemaining || null);
             }
@@ -536,11 +547,16 @@ export default function CustomMCQTakePage() {
             
             if (enablePerSectionTimers && sectionTimersConfig) {
               // Convert minutes to seconds for timers
+              const mcqSeconds = (sectionTimersConfig.MCQ || 20) * 60;
+              const subjectiveSeconds = (sectionTimersConfig.Subjective || 30) * 60;
+              const totalDurationSeconds = mcqSeconds + subjectiveSeconds;
+              
               setSectionTimers({
-                MCQ: (sectionTimersConfig.MCQ || 20) * 60,
-                Subjective: (sectionTimersConfig.Subjective || 30) * 60,
+                MCQ: mcqSeconds,
+                Subjective: subjectiveSeconds,
               });
-              setTimeRemaining(null); // Don't use global timer when per-section timers are enabled
+              // Set global timer to total duration (sum of section timers)
+              setTimeRemaining(totalDurationSeconds);
             } else {
               setTimeRemaining(accessControl.timeRemaining || null);
             }
@@ -592,11 +608,16 @@ export default function CustomMCQTakePage() {
             
             if (enablePerSectionTimers && sectionTimersConfig) {
               // Convert minutes to seconds for timers
+              const mcqSeconds = (sectionTimersConfig.MCQ || 20) * 60;
+              const subjectiveSeconds = (sectionTimersConfig.Subjective || 30) * 60;
+              const totalDurationSeconds = mcqSeconds + subjectiveSeconds;
+              
               setSectionTimers({
-                MCQ: (sectionTimersConfig.MCQ || 20) * 60,
-                Subjective: (sectionTimersConfig.Subjective || 30) * 60,
+                MCQ: mcqSeconds,
+                Subjective: subjectiveSeconds,
               });
-              setTimeRemaining(null); // Don't use global timer when per-section timers are enabled
+              // Set global timer to total duration (sum of section timers)
+              setTimeRemaining(totalDurationSeconds);
             } else {
               setTimeRemaining(accessControl.timeRemaining || null);
             }
@@ -895,10 +916,9 @@ export default function CustomMCQTakePage() {
     }
   }, [timeRemaining, submitting, assessment, candidateInfo, waitingForStart, handleSubmit]);
 
-  // Global timer countdown (only if per-section timers are not enabled)
+  // Global timer countdown (works for both per-section timers and regular mode)
   useEffect(() => {
-    const enablePerSectionTimers = (assessment as any)?.enablePerSectionTimers || false;
-    if (enablePerSectionTimers || timeRemaining === null || timeRemaining <= 0 || isNaN(timeRemaining) || waitingForStart) {
+    if (timeRemaining === null || timeRemaining <= 0 || isNaN(timeRemaining) || waitingForStart || !examStarted) {
       return;
     }
 
@@ -913,7 +933,7 @@ export default function CustomMCQTakePage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [timeRemaining, waitingForStart, assessment]);
+  }, [timeRemaining, waitingForStart, examStarted]);
 
   // Per-section timer countdown (when per-section timers are enabled)
   useEffect(() => {
@@ -945,7 +965,11 @@ export default function CustomMCQTakePage() {
     // Start countdown for current section
     sectionTimerIntervalRef.current = setInterval(() => {
       setSectionTimers((prev) => {
-        const currentTimer = prev[currentSection];
+        // Get the current phase from ref to avoid stale closure
+        const currentPhase = assessmentPhaseRef.current;
+        const currentSectionKey = currentPhase === "mcq" ? "MCQ" : "Subjective";
+        const currentTimer = prev[currentSectionKey];
+        
         if (!currentTimer || currentTimer <= 1) {
           // Clear interval first
           if (sectionTimerIntervalRef.current) {
@@ -953,10 +977,10 @@ export default function CustomMCQTakePage() {
             sectionTimerIntervalRef.current = null;
           }
           
-          // Section timer expired - lock this section
+          // Section timer expired - lock this section and handle navigation
           setLockedSections((prevLocked) => {
             const newLockedSet = new Set(prevLocked);
-            newLockedSet.add(assessmentPhase);
+            newLockedSet.add(currentPhase);
             
             // Get questions from assessment to check section availability
             const assessmentQuestions = assessment?.questions || [];
@@ -968,16 +992,27 @@ export default function CustomMCQTakePage() {
             );
             
             // If MCQ section expired, lock it and mark as submitted
-            if (assessmentPhase === "mcq") {
+            if (currentPhase === "mcq") {
               setMcqSubmitted(true);
               sessionStorage.setItem(`mcqSubmitted_${assessmentId}`, "true");
               
-              // If there are subjective questions, move to subjective section
+              // If there are subjective questions and subjective section is not locked, navigate to it
               if (hasSubjective && !newLockedSet.has("subjective")) {
+                // Find the index of the first subjective question in the sorted array
+                // sortedQuestionsForInit has MCQ first, then Subjective, so we need to count MCQ questions
+                const assessmentQuestions = assessment?.questions || [];
+                const mcqCount = assessmentQuestions.filter((q: Question) => 
+                  q.questionType === "mcq" || ("options" in q && "correctAn" in q)
+                ).length;
+                // First subjective question index = number of MCQ questions (since sorted array has MCQ first)
+                const firstSubjectiveIndex = mcqCount;
+                
+                // Use setTimeout to ensure state updates are processed first
                 setTimeout(() => {
                   setAssessmentPhase("subjective");
-                  setCurrentQuestionIndex(0);
-                }, 0);
+                  // Set index to first subjective question in the sorted array
+                  setCurrentQuestionIndex(firstSubjectiveIndex);
+                }, 100);
               }
             }
             
@@ -985,7 +1020,7 @@ export default function CustomMCQTakePage() {
             const allSectionsLocked = 
               (!hasMCQ || newLockedSet.has("mcq")) && 
               (!hasSubjective || newLockedSet.has("subjective"));
-            if (allSectionsLocked || (assessmentPhase === "subjective" && newLockedSet.has("subjective"))) {
+            if (allSectionsLocked || (currentPhase === "subjective" && newLockedSet.has("subjective"))) {
               // Save all answer logs first, then auto-submit
               setTimeout(() => {
                 saveAllAnswerLogs().then(() => {
@@ -993,15 +1028,15 @@ export default function CustomMCQTakePage() {
                 }).catch(() => {
                   handleSubmit(true);
                 });
-              }, 1000); // Small delay to ensure state is updated
+              }, 1000);
             }
             
             return newLockedSet;
           });
           
-          return { ...prev, [currentSection]: 0 };
+          return { ...prev, [currentSectionKey]: 0 };
         }
-        return { ...prev, [currentSection]: currentTimer - 1 };
+        return { ...prev, [currentSectionKey]: currentTimer - 1 };
       });
     }, 1000);
 
@@ -1419,51 +1454,70 @@ export default function CustomMCQTakePage() {
               </p>
             )}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
             {(() => {
               const enablePerSectionTimers = (assessment as any)?.enablePerSectionTimers || false;
               
               if (enablePerSectionTimers && examStarted) {
-                // Show per-section timer
+                // Show both per-section timer and global duration timer
                 const currentSection = assessmentPhase === "mcq" ? "MCQ" : "Subjective";
                 const currentTimer = sectionTimers[currentSection] || 0;
                 const isLocked = lockedSections.has(assessmentPhase);
                 
-                if (currentTimer > 0 && !isLocked) {
-                  return (
-                    <div
-                      style={{
-                        padding: "0.75rem 1.5rem",
-                        backgroundColor: currentTimer < 300 ? "#fee2e2" : "#ffffff",
-                        border: `2px solid ${currentTimer < 300 ? "#ef4444" : "#2D7A52"}`,
-                        borderRadius: "0.5rem",
-                        fontSize: "1.5rem",
-                        fontWeight: 700,
-                        color: currentTimer < 300 ? "#991b1b" : "#1E5A3B",
-                      }}
-                    >
-                      {currentSection}: {formatTime(currentTimer)}
-                    </div>
-                  );
-                } else if (isLocked) {
-                  return (
-                    <div
-                      style={{
-                        padding: "0.75rem 1.5rem",
-                        backgroundColor: "#fee2e2",
-                        border: "2px solid #ef4444",
-                        borderRadius: "0.5rem",
-                        fontSize: "1rem",
-                        fontWeight: 600,
-                        color: "#991b1b",
-                      }}
-                    >
-                      {currentSection} Section Locked
-                    </div>
-                  );
-                }
+                return (
+                  <>
+                    {/* Per-section timer */}
+                    {currentTimer > 0 && !isLocked ? (
+                      <div
+                        style={{
+                          padding: "0.75rem 1.5rem",
+                          backgroundColor: currentTimer < 300 ? "#fee2e2" : "#ffffff",
+                          border: `2px solid ${currentTimer < 300 ? "#ef4444" : "#2D7A52"}`,
+                          borderRadius: "0.5rem",
+                          fontSize: "1.25rem",
+                          fontWeight: 700,
+                          color: currentTimer < 300 ? "#991b1b" : "#1E5A3B",
+                        }}
+                      >
+                        {currentSection}: {formatTime(currentTimer)}
+                      </div>
+                    ) : isLocked ? (
+                      <div
+                        style={{
+                          padding: "0.75rem 1.5rem",
+                          backgroundColor: "#fee2e2",
+                          border: "2px solid #ef4444",
+                          borderRadius: "0.5rem",
+                          fontSize: "1rem",
+                          fontWeight: 600,
+                          color: "#991b1b",
+                        }}
+                      >
+                        {currentSection} Section Locked
+                      </div>
+                    ) : null}
+                    
+                    {/* Global duration timer */}
+                    {timeRemaining !== null && !isNaN(timeRemaining) && (
+                      <div
+                        style={{
+                          padding: "0.75rem 1.5rem",
+                          backgroundColor: timeRemaining < 300 ? "#fee2e2" : "#e0f2fe",
+                          border: `2px solid ${timeRemaining < 300 ? "#ef4444" : "#0ea5e9"}`,
+                          borderRadius: "0.5rem",
+                          fontSize: "1.25rem",
+                          fontWeight: 700,
+                          color: timeRemaining < 300 ? "#991b1b" : "#0c4a6e",
+                        }}
+                        title="Total assessment duration"
+                      >
+                        Total: {formatTime(timeRemaining)}
+                      </div>
+                    )}
+                  </>
+                );
               } else if (timeRemaining !== null && !isNaN(timeRemaining)) {
-                // Show global timer
+                // Show global timer only (per-section timers disabled)
                 return (
                   <div
                     style={{
