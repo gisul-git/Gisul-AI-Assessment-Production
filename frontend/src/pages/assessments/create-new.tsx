@@ -2790,6 +2790,16 @@ export default function CreateNewAssessmentPage() {
     });
   }, [currentStation, topicsV2]);
 
+  // Auto-update duration when per-section timers are enabled and section times change
+  useEffect(() => {
+    if (!enablePerSectionTimers) return;
+    
+    const totalSectionTime = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
+    if (totalSectionTime > 0) {
+      setDuration(totalSectionTime.toString());
+    }
+  }, [sectionTimers, enablePerSectionTimers]);
+
   // Auto-calculate section timers from questions when enabled
   useEffect(() => {
     if (currentStation !== 3 || !enablePerSectionTimers || !topicsV2 || topicsV2.length === 0) return;
@@ -10365,6 +10375,17 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                           {allReviewQuestions.length}
                         </span>
                       </div>
+                      {enablePerSectionTimers && (() => {
+                        const totalSectionTime = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
+                        return totalSectionTime > 0 ? (
+                          <div>
+                            <span style={{ color: "#64748b", fontSize: "0.875rem", marginRight: "0.5rem" }}>Total Time (All Sections):</span>
+                            <span style={{ color: "#1e293b", fontSize: "1.125rem", fontWeight: 700 }}>
+                              {totalSectionTime} minutes
+                            </span>
+                          </div>
+                        ) : null;
+                      })()}
                     </div>
                   </div>
                 );
@@ -10899,15 +10920,44 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                 <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
                             Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
                           </label>
-                          <input
-                            type="number"
-                            value={duration}
-                            onChange={(e) => setDuration(e.target.value)}
-                            placeholder="e.g., 80"
-                            min={1}
-                            required
-                            style={{ width: "100%", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
-                          />
+                          {enablePerSectionTimers ? (() => {
+                            const totalSectionTime = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
+                            return (
+                              <div>
+                                <input
+                                  type="number"
+                                  value={totalSectionTime > 0 ? totalSectionTime : duration}
+                                  readOnly
+                                  disabled
+                                  placeholder="Auto-calculated"
+                                  min={1}
+                                  required
+                                  style={{ 
+                                    width: "100%", 
+                                    padding: "0.75rem", 
+                                    border: "1px solid #e2e8f0", 
+                                    borderRadius: "0.5rem",
+                                    backgroundColor: "#f1f5f9",
+                                    cursor: "not-allowed",
+                                    color: "#64748b"
+                                  }}
+                                />
+                                <p style={{ fontSize: "0.875rem", color: "#64748b", marginTop: "0.5rem" }}>
+                                  Auto-calculated from section timers in Review Questions. Total: {totalSectionTime} minutes
+                                </p>
+                              </div>
+                            );
+                          })() : (
+                            <input
+                              type="number"
+                              value={duration}
+                              onChange={(e) => setDuration(e.target.value)}
+                              placeholder="e.g., 80"
+                              min={1}
+                              required
+                              style={{ width: "100%", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
+                            />
+                          )}
                         </div>
                       </div>
                       {startTime && duration && (
@@ -10962,18 +11012,53 @@ SQL Queries,"JOIN operations and subqueries; indexing strategies",High`;
                         <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1e293b" }}>
                           Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
                         </label>
-                        <input
-                          type="number"
-                          value={duration}
-                          onChange={(e) => setDuration(e.target.value)}
-                          placeholder="e.g., 70"
-                          min={1}
-                          required
-                          style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
-                        />
-                        <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
-                          Candidates can start the assessment anytime between the schedule start and end times. Once started, they have this duration to complete the assessment.
-                        </p>
+                        {enablePerSectionTimers ? (() => {
+                          const totalSectionTime = Object.values(sectionTimers).reduce((sum, time) => sum + time, 0);
+                          return (
+                            <div>
+                              <input
+                                type="number"
+                                value={totalSectionTime > 0 ? totalSectionTime : duration}
+                                readOnly
+                                disabled
+                                placeholder="Auto-calculated"
+                                min={1}
+                                required
+                                style={{ 
+                                  width: "100%", 
+                                  maxWidth: "300px", 
+                                  padding: "0.75rem", 
+                                  border: "1px solid #e2e8f0", 
+                                  borderRadius: "0.5rem",
+                                  backgroundColor: "#f1f5f9",
+                                  cursor: "not-allowed",
+                                  color: "#64748b"
+                                }}
+                              />
+                              <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                                Auto-calculated from section timers in Review Questions. Total: {totalSectionTime} minutes
+                              </p>
+                              <p style={{ marginTop: "0.25rem", fontSize: "0.875rem", color: "#64748b" }}>
+                                Candidates can start the assessment anytime between the schedule start and end times. Once started, they have this duration to complete the assessment.
+                              </p>
+                            </div>
+                          );
+                        })() : (
+                          <>
+                            <input
+                              type="number"
+                              value={duration}
+                              onChange={(e) => setDuration(e.target.value)}
+                              placeholder="e.g., 70"
+                              min={1}
+                              required
+                              style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #e2e8f0", borderRadius: "0.5rem" }}
+                            />
+                            <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#64748b" }}>
+                              Candidates can start the assessment anytime between the schedule start and end times. Once started, they have this duration to complete the assessment.
+                            </p>
+                          </>
+                        )}
                     </div>
                     </>
                   )}
