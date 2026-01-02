@@ -246,6 +246,16 @@ export default function LiveProctoringDashboard({
     }
   }, [])
 
+  // Refresh all candidate connections
+  const refreshAllCandidates = useCallback(() => {
+    console.log(`[Live Dashboard] Refreshing all ${candidates.length} candidates`)
+    if (serviceRef.current && candidates.length > 0) {
+      candidates.forEach((candidate) => {
+        serviceRef.current?.refreshCandidate(candidate.sessionId)
+      })
+    }
+  }, [candidates])
+
   // Expand/collapse candidate view
   const toggleExpand = useCallback((sessionId: string) => {
     setExpandedSessionId((prev) => (prev === sessionId ? null : sessionId))
@@ -494,6 +504,16 @@ export default function LiveProctoringDashboard({
                 <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
                 <span className="text-sm font-medium text-green-900">Live</span>
               </div>
+            )}
+            {candidates.length > 0 && (
+              <button
+                onClick={refreshAllCandidates}
+                className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                title="Refresh all candidate streams"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span className="text-sm font-medium">Refresh All</span>
+              </button>
             )}
           </div>
         </div>

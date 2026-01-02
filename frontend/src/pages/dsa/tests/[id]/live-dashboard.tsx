@@ -505,6 +505,16 @@ export default function LiveProctoringDashboard({
                 <span className="text-sm font-medium text-green-900">Live</span>
               </div>
             )}
+            {candidates.length > 0 && (
+              <button
+                onClick={refreshAllCandidates}
+                className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                title="Refresh all candidate streams"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span className="text-sm font-medium">Refresh All</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
