@@ -7,6 +7,7 @@ import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 import csv
 import io
 
@@ -973,19 +974,34 @@ async def verify_custom_mcq_candidate(
         # NEW: Check access time based on exam mode (BEFORE checking access mode)
         from datetime import datetime, timedelta
         
+        # Use IST (Indian Standard Time) for custom MCQ assessments
+        IST = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(IST).replace(tzinfo=None)  # Make naive for comparison
+        
         exam_mode = assessment.get("examMode", "strict")
         schedule = assessment.get("schedule") or {}
         start_time_str = schedule.get("startTime") if isinstance(schedule, dict) else None
         end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
-        now = datetime.utcnow()
         
         if exam_mode == "strict" and start_time_str:
             # Strict mode: Check if assessment has started
-            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+            # Times are stored in UTC, convert to IST for comparison
+            start_time_str_clean = start_time_str.replace('Z', '+00:00') if 'Z' in start_time_str else start_time_str
+            if '+' not in start_time_str_clean and '-' not in start_time_str_clean[10:]:
+                # No timezone info, assume UTC
+                start_time_str_clean = start_time_str_clean + '+00:00'
+            
+            # Parse as UTC time
+            start_time_utc = datetime.fromisoformat(start_time_str_clean)
+            if start_time_utc.tzinfo is None:
+                start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
+            
+            # Convert UTC to IST for comparison
+            start_time = start_time_utc.astimezone(IST).replace(tzinfo=None)
             
             if now < start_time:
                 # Too early - cannot access yet
-                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S IST')
                 return error_response(
                     f"You cannot access this assessment yet. The assessment will start at {start_time_formatted}.",
                     status_code=403
@@ -995,21 +1011,37 @@ async def verify_custom_mcq_candidate(
             if not start_time_str:
                 return error_response("Assessment schedule is not properly configured", status_code=400)
             
-            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+            # Times are stored in UTC, convert to IST for comparison
+            start_time_str_clean = start_time_str.replace('Z', '+00:00') if 'Z' in start_time_str else start_time_str
+            if '+' not in start_time_str_clean and '-' not in start_time_str_clean[10:]:
+                start_time_str_clean = start_time_str_clean + '+00:00'
+            
+            start_time_utc = datetime.fromisoformat(start_time_str_clean)
+            if start_time_utc.tzinfo is None:
+                start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
+            start_time = start_time_utc.astimezone(IST).replace(tzinfo=None)
             
             if now < start_time:
                 # Before scheduled start time - cannot access yet
-                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S IST')
                 return error_response(
                     f"You cannot access this assessment yet. The assessment window will be available from {start_time_formatted}.",
                     status_code=403
                 )
             
             if end_time_str:
-                end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                end_time_str_clean = end_time_str.replace('Z', '+00:00') if 'Z' in end_time_str else end_time_str
+                if '+' not in end_time_str_clean and '-' not in end_time_str_clean[10:]:
+                    end_time_str_clean = end_time_str_clean + '+00:00'
+                
+                end_time_utc = datetime.fromisoformat(end_time_str_clean)
+                if end_time_utc.tzinfo is None:
+                    end_time_utc = end_time_utc.replace(tzinfo=timezone.utc)
+                end_time = end_time_utc.astimezone(IST).replace(tzinfo=None)
+                
                 if now > end_time:
                     # After scheduled end time - window has closed
-                    end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S IST')
                     return error_response(
                         f"The assessment window has ended. The assessment was available until {end_time_formatted}. You cannot take this assessment.",
                         status_code=403
@@ -1130,13 +1162,16 @@ async def get_custom_mcq_assessment_for_taking(
         # NEW IMPLEMENTATION: Check access based on exam mode
         from datetime import datetime, timedelta
         
+        # Use IST (Indian Standard Time) for custom MCQ assessments
+        IST = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(IST).replace(tzinfo=None)  # Make naive for comparison
+        
         exam_mode = assessment.get("examMode", "strict")
         schedule = assessment.get("schedule") or {}
         start_time_str = schedule.get("startTime") if isinstance(schedule, dict) else None
         end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
         duration = schedule.get("duration") if isinstance(schedule, dict) else None
         
-        now = datetime.utcnow()
         can_access = False
         can_start = False
         waiting_for_start = False
@@ -1145,15 +1180,34 @@ async def get_custom_mcq_assessment_for_taking(
         error_message = None
         
         if exam_mode == "strict":
-            if not start_time_str or not duration:
+            if not start_time_str or duration is None:
                 return error_response("Assessment schedule is not properly configured", status_code=400)
             
-            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
-            end_time = start_time + timedelta(minutes=duration)
+            # Ensure duration is a valid integer
+            try:
+                duration_int = int(duration) if duration else None
+            except (ValueError, TypeError):
+                return error_response("Invalid duration value", status_code=400)
+            
+            if duration_int is None or duration_int <= 0:
+                return error_response("Duration must be a positive number", status_code=400)
+            
+            # Times are stored in UTC, convert to IST for comparison
+            start_time_str_clean = start_time_str.replace('Z', '+00:00') if 'Z' in start_time_str else start_time_str
+            if '+' not in start_time_str_clean and '-' not in start_time_str_clean[10:]:
+                start_time_str_clean = start_time_str_clean + '+00:00'
+            
+            start_time_utc = datetime.fromisoformat(start_time_str_clean)
+            if start_time_utc.tzinfo is None:
+                start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
+            
+            # Convert UTC to IST for comparison
+            start_time = start_time_utc.astimezone(IST).replace(tzinfo=None)
+            end_time = start_time + timedelta(minutes=duration_int)
             
             if now < start_time:
                 # Too early - cannot access yet - return error response immediately
-                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S IST')
                 return error_response(
                     f"You cannot access this assessment yet. The assessment will start at {start_time_formatted}.",
                     status_code=403
@@ -1173,19 +1227,35 @@ async def get_custom_mcq_assessment_for_taking(
             if not start_time_str or not end_time_str or not duration:
                 return error_response("Assessment schedule is not properly configured", status_code=400)
             
-            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
-            end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+            # Times are stored in UTC, convert to IST for comparison
+            start_time_str_clean = start_time_str.replace('Z', '+00:00') if 'Z' in start_time_str else start_time_str
+            if '+' not in start_time_str_clean and '-' not in start_time_str_clean[10:]:
+                start_time_str_clean = start_time_str_clean + '+00:00'
+            
+            start_time_utc = datetime.fromisoformat(start_time_str_clean)
+            if start_time_utc.tzinfo is None:
+                start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
+            start_time = start_time_utc.astimezone(IST).replace(tzinfo=None)
+            
+            end_time_str_clean = end_time_str.replace('Z', '+00:00') if 'Z' in end_time_str else end_time_str
+            if '+' not in end_time_str_clean and '-' not in end_time_str_clean[10:]:
+                end_time_str_clean = end_time_str_clean + '+00:00'
+            
+            end_time_utc = datetime.fromisoformat(end_time_str_clean)
+            if end_time_utc.tzinfo is None:
+                end_time_utc = end_time_utc.replace(tzinfo=timezone.utc)
+            end_time = end_time_utc.astimezone(IST).replace(tzinfo=None)
             
             if now < start_time:
                 # Before scheduled start time - cannot access yet - return error response immediately
-                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S IST')
                 return error_response(
                     f"You cannot access this assessment yet. The assessment window will be available from {start_time_formatted}.",
                     status_code=403
                 )
             elif now > end_time:
                 # After scheduled end time - window has closed - return error response immediately
-                end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S IST')
                 return error_response(
                     f"The assessment window has ended. The assessment was available until {end_time_formatted}. You cannot take this assessment.",
                     status_code=403
