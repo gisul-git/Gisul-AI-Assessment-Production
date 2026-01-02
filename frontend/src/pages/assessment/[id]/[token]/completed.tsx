@@ -6,7 +6,7 @@ export default function AssessmentCompletedPage() {
   const { id, token } = router.query;
 
   useEffect(() => {
-    // Clear session storage after submission
+    // Clear session storage after submissions
     sessionStorage.removeItem("candidateEmail");
     sessionStorage.removeItem("candidateName");
   }, []);
