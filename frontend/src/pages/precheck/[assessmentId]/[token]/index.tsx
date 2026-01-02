@@ -70,6 +70,7 @@ export default function PrecheckPage() {
   const [samplesAboveThreshold, setSamplesAboveThreshold] = useState(0);
   const [totalSamples, setTotalSamples] = useState(0);
   const [micTestStarted, setMicTestStarted] = useState(false);
+  const hasNavigatedRef = useRef(false); // Prevent multiple navigations
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1320,11 +1321,20 @@ export default function PrecheckPage() {
   
   // Handle completion
   const handleComplete = useCallback(async () => {
+    // Prevent multiple navigation attempts
+    if (hasNavigatedRef.current) {
+      console.log("[PRECHECK] ⚠️ Navigation already initiated, skipping duplicate call");
+      return;
+    }
+    
     const allPassed = steps.every(step => step.status === "passed");
     
     // Note: Extension blocking is handled on browser step (step 0) only
     // If user reaches here, they've already passed the browser step without extensions
     if (!allPassed) return;
+    
+    // Mark navigation as initiated BEFORE any async operations
+    hasNavigatedRef.current = true;
     
     // Store precheck completion
     try {
@@ -1359,16 +1369,43 @@ export default function PrecheckPage() {
     // Route to new instructions page
     // Use replace to avoid adding to history stack and prevent navigation conflicts
     if (router.isReady && assessmentId && token) {
+      const targetUrl = `/assessment/${assessmentId}/${token}/instructions-new`;
+      console.log("[PRECHECK] 🔄 Navigating to instructions-new", {
+        targetUrl,
+        assessmentId,
+        token,
+        routerIsReady: router.isReady,
+        timestamp: new Date().toISOString()
+      });
       try {
-        await router.replace(`/assessment/${assessmentId}/${token}/instructions-new`);
+        await router.replace(targetUrl);
+        console.log("[PRECHECK] ✅ Navigation to instructions-new completed");
       } catch (error: any) {
         // Ignore navigation cancellation errors (expected when navigating quickly)
         if (error?.name === 'AbortError' || error?.message?.includes('Abort')) {
-          console.log("[Precheck] Navigation was cancelled (expected)");
+          console.log("[PRECHECK] ⚠️ Navigation was cancelled (expected)", {
+            errorName: error?.name,
+            errorMessage: error?.message
+          });
           return;
         }
-        console.error("[Precheck] Navigation error:", error);
+        console.error("[PRECHECK] ❌ Navigation error:", {
+          error,
+          name: error?.name,
+          message: error?.message,
+          stack: error?.stack
+        });
+        // Reset navigation flag on error (except abort errors)
+        hasNavigatedRef.current = false;
       }
+    } else {
+      console.log("[PRECHECK] ⚠️ Cannot navigate - conditions not met", {
+        routerIsReady: router.isReady,
+        hasAssessmentId: !!assessmentId,
+        hasToken: !!token
+      });
+      // Reset navigation flag if conditions not met
+      hasNavigatedRef.current = false;
     }
   }, [steps, assessmentId, token, email, name, capturedPhoto, router]);
   
@@ -1384,8 +1421,15 @@ export default function PrecheckPage() {
       allStepsPassed,
       assessmentId,
       token,
-      stepsStatus: steps.map(s => ({ id: s.id, status: s.status }))
+      stepsStatus: steps.map(s => ({ id: s.id, status: s.status })),
+      hasNavigated: hasNavigatedRef.current
     });
+    
+    // Prevent duplicate navigation attempts
+    if (hasNavigatedRef.current) {
+      console.log("[Precheck] ⚠️ Navigation already initiated, skipping auto-redirect");
+      return;
+    }
     
     if (allStepsPassed && assessmentId && token) {
       console.log("[Precheck] ✅ All steps passed! Redirecting to instructions page in 1.5 seconds...");

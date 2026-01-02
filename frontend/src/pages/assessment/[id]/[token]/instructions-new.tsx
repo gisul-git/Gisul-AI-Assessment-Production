@@ -7,6 +7,14 @@ export default function AssessmentInstructionsPage() {
   const router = useRouter();
   const { id, token } = router.query;
   
+  console.log("[INSTRUCTIONS-NEW] Component rendering", {
+    id,
+    token,
+    routerIsReady: router.isReady,
+    currentPath: router.asPath,
+    timestamp: new Date().toISOString()
+  });
+  
   const [email, setEmail] = useState<string | null>(null);
   const [name, setName] = useState<string | null>(null);
   const [assessmentInfo, setAssessmentInfo] = useState<any>(null);
@@ -16,64 +24,126 @@ export default function AssessmentInstructionsPage() {
   const hasCheckedRef = useRef(false); // Prevent multiple redirects
   
   useEffect(() => {
+    console.log("[INSTRUCTIONS-NEW] useEffect triggered", {
+      routerIsReady: router.isReady,
+      hasChecked: hasCheckedRef.current,
+      id,
+      token,
+      timestamp: new Date().toISOString()
+    });
+    
     // Wait for router to be ready
-    if (!router.isReady) return;
+    if (!router.isReady) {
+      console.log("[INSTRUCTIONS-NEW] Router not ready, waiting...");
+      return;
+    }
     
     // Prevent multiple redirects
-    if (hasCheckedRef.current) return;
+    if (hasCheckedRef.current) {
+      console.log("[INSTRUCTIONS-NEW] Already checked, skipping...");
+      return;
+    }
     
     const storedEmail = sessionStorage.getItem("candidateEmail");
     const storedName = sessionStorage.getItem("candidateName");
+    
+    console.log("[INSTRUCTIONS-NEW] Session storage check", {
+      storedEmail: !!storedEmail,
+      storedName: !!storedName,
+      emailLength: storedEmail?.length,
+      nameLength: storedName?.length
+    });
     
     setEmail(storedEmail);
     setName(storedName);
     
     if (!storedEmail || !storedName) {
+      console.log("[INSTRUCTIONS-NEW] ⚠️ Missing email/name, redirecting to entry", {
+        hasId: !!id,
+        hasToken: !!token
+      });
       if (id && token) {
         hasCheckedRef.current = true;
         const ctx = getGateContext(id as string);
-        router.replace(ctx?.entryUrl || `/assessment/${id}/${token}`);
+        const targetUrl = ctx?.entryUrl || `/assessment/${id}/${token}`;
+        console.log("[INSTRUCTIONS-NEW] 🔄 Navigating to:", targetUrl);
+        router.replace(targetUrl).catch((err) => {
+          console.error("[INSTRUCTIONS-NEW] ❌ Navigation error:", {
+            error: err,
+            name: err?.name,
+            message: err?.message,
+            stack: err?.stack
+          });
+        });
       }
       return;
     }
     
     // Check precheck completion
     const precheckCompleted = sessionStorage.getItem(`precheckCompleted_${id}`);
+    console.log("[INSTRUCTIONS-NEW] Precheck check", {
+      precheckCompleted: !!precheckCompleted,
+      id
+    });
+    
     if (!precheckCompleted && id && token) {
+      console.log("[INSTRUCTIONS-NEW] ⚠️ Precheck not completed, redirecting to precheck");
       hasCheckedRef.current = true;
-      router.replace(`/precheck/${id}/${token}`);
+      const targetUrl = `/precheck/${id}/${token}`;
+      console.log("[INSTRUCTIONS-NEW] 🔄 Navigating to:", targetUrl);
+      router.replace(targetUrl).catch((err) => {
+        console.error("[INSTRUCTIONS-NEW] ❌ Navigation error:", {
+          error: err,
+          name: err?.name,
+          message: err?.message,
+          stack: err?.stack
+        });
+      });
       return;
     }
     
+    console.log("[INSTRUCTIONS-NEW] ✅ All checks passed, proceeding with component initialization");
     hasCheckedRef.current = true;
     
     const ctx = getGateContext(id as string);
     const isAIFlow = !ctx || ctx.flowType === "ai";
+    
+    console.log("[INSTRUCTIONS-NEW] Flow type check", {
+      ctx,
+      flowType: ctx?.flowType,
+      isAIFlow
+    });
 
     // AI: fetch schedule; non-AI: skip fetch and show defaults
     if (!isAIFlow) {
+      console.log("[INSTRUCTIONS-NEW] Non-AI flow, skipping fetch");
       setAssessmentInfo(null);
       setIsLoading(false);
       return;
     }
 
     const fetchAssessment = async () => {
+      console.log("[INSTRUCTIONS-NEW] Starting assessment fetch");
       try {
         const response = await axios.get(
           `/api/assessment/get-schedule?assessmentId=${id}&token=${token}`
         );
 
         if (response.data?.success) {
+          console.log("[INSTRUCTIONS-NEW] ✅ Assessment fetched successfully");
           setAssessmentInfo(response.data.data);
         }
       } catch (error) {
-        console.error("Error fetching assessment:", error);
+        console.error("[INSTRUCTIONS-NEW] ❌ Error fetching assessment:", error);
       } finally {
         setIsLoading(false);
+        console.log("[INSTRUCTIONS-NEW] Fetch complete, loading set to false");
       }
     };
 
-    if (id && token) fetchAssessment();
+    if (id && token) {
+      fetchAssessment();
+    }
   }, [id, token, router]);
   
   const handleAcknowledge = useCallback(async () => {
