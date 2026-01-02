@@ -38,6 +38,11 @@ export default function CustomMCQTakePage() {
   const [mcqSubmitted, setMcqSubmitted] = useState(false);
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
+  
+  // Per-section timer state
+  const [sectionTimers, setSectionTimers] = useState<{ MCQ: number; Subjective: number }>({ MCQ: 0, Subjective: 0 }); // in seconds
+  const [lockedSections, setLockedSections] = useState<Set<"mcq" | "subjective">>(new Set());
+  const sectionTimerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -501,7 +506,22 @@ export default function CustomMCQTakePage() {
             // Exam has started (both strict and flexible mode now auto-start)
             setWaitingForStart(false);
             setExamStarted(true);
-            setTimeRemaining(accessControl.timeRemaining || null);
+            
+            // Initialize per-section timers if enabled
+            const enablePerSectionTimers = (assessmentData as any).enablePerSectionTimers || false;
+            const sectionTimersConfig = (assessmentData as any).sectionTimers || {};
+            
+            if (enablePerSectionTimers && sectionTimersConfig) {
+              // Convert minutes to seconds for timers
+              setSectionTimers({
+                MCQ: (sectionTimersConfig.MCQ || 20) * 60,
+                Subjective: (sectionTimersConfig.Subjective || 30) * 60,
+              });
+              setTimeRemaining(null); // Don't use global timer when per-section timers are enabled
+            } else {
+              setTimeRemaining(accessControl.timeRemaining || null);
+            }
+            
             setStartedAt(new Date());
             setError(null);
           } else if (accessControl.canStart) {
@@ -509,7 +529,22 @@ export default function CustomMCQTakePage() {
             // But keep as fallback
             setWaitingForStart(false);
             setExamStarted(true);
-            setTimeRemaining(accessControl.timeRemaining || null);
+            
+            // Initialize per-section timers if enabled
+            const enablePerSectionTimers = (assessmentData as any).enablePerSectionTimers || false;
+            const sectionTimersConfig = (assessmentData as any).sectionTimers || {};
+            
+            if (enablePerSectionTimers && sectionTimersConfig) {
+              // Convert minutes to seconds for timers
+              setSectionTimers({
+                MCQ: (sectionTimersConfig.MCQ || 20) * 60,
+                Subjective: (sectionTimersConfig.Subjective || 30) * 60,
+              });
+              setTimeRemaining(null); // Don't use global timer when per-section timers are enabled
+            } else {
+              setTimeRemaining(accessControl.timeRemaining || null);
+            }
+            
             setStartedAt(new Date());
             setError(null);
           }
@@ -550,7 +585,22 @@ export default function CustomMCQTakePage() {
           if (accessControl?.examStarted) {
             setWaitingForStart(false);
             setExamStarted(true);
-            setTimeRemaining(accessControl.timeRemaining || null);
+            
+            // Initialize per-section timers if enabled
+            const enablePerSectionTimers = (updatedAssessment as any).enablePerSectionTimers || false;
+            const sectionTimersConfig = (updatedAssessment as any).sectionTimers || {};
+            
+            if (enablePerSectionTimers && sectionTimersConfig) {
+              // Convert minutes to seconds for timers
+              setSectionTimers({
+                MCQ: (sectionTimersConfig.MCQ || 20) * 60,
+                Subjective: (sectionTimersConfig.Subjective || 30) * 60,
+              });
+              setTimeRemaining(null); // Don't use global timer when per-section timers are enabled
+            } else {
+              setTimeRemaining(accessControl.timeRemaining || null);
+            }
+            
             setStartedAt(new Date());
             setError(null);
           }
@@ -831,9 +881,10 @@ export default function CustomMCQTakePage() {
     }
   }, [assessment, candidateInfo, submitting, answers, assessmentId, token, startedAt, router]);
 
-  // Auto-submit when timer reaches zero
+  // Auto-submit when global timer reaches zero (only if per-section timers are not enabled)
   useEffect(() => {
-    if (timeRemaining === 0 && !submitting && assessment && candidateInfo && !waitingForStart) {
+    const enablePerSectionTimers = (assessment as any)?.enablePerSectionTimers || false;
+    if (!enablePerSectionTimers && timeRemaining === 0 && !submitting && assessment && candidateInfo && !waitingForStart) {
       // Timer has reached zero - save all answer logs first, then auto-submit
       saveAllAnswerLogs().then(() => {
         handleSubmit(true);
@@ -844,9 +895,10 @@ export default function CustomMCQTakePage() {
     }
   }, [timeRemaining, submitting, assessment, candidateInfo, waitingForStart, handleSubmit]);
 
-  // Timer countdown
+  // Global timer countdown (only if per-section timers are not enabled)
   useEffect(() => {
-    if (timeRemaining === null || timeRemaining <= 0 || isNaN(timeRemaining) || waitingForStart) {
+    const enablePerSectionTimers = (assessment as any)?.enablePerSectionTimers || false;
+    if (enablePerSectionTimers || timeRemaining === null || timeRemaining <= 0 || isNaN(timeRemaining) || waitingForStart) {
       return;
     }
 
@@ -861,7 +913,115 @@ export default function CustomMCQTakePage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [timeRemaining, waitingForStart]);
+  }, [timeRemaining, waitingForStart, assessment]);
+
+  // Per-section timer countdown (when per-section timers are enabled)
+  useEffect(() => {
+    const enablePerSectionTimers = (assessment as any)?.enablePerSectionTimers || false;
+    if (!enablePerSectionTimers || !examStarted || waitingForStart) {
+      return;
+    }
+
+    // Determine current section based on assessmentPhase
+    const currentSection = assessmentPhase === "mcq" ? "MCQ" : "Subjective";
+    
+    // Check if current section is already locked
+    const isLocked = lockedSections.has(assessmentPhase);
+    if (isLocked) {
+      return;
+    }
+
+    const currentSectionTimer = sectionTimers[currentSection];
+    if (!currentSectionTimer || currentSectionTimer <= 0) {
+      return;
+    }
+
+    // Clear any existing interval before starting a new one
+    if (sectionTimerIntervalRef.current) {
+      clearInterval(sectionTimerIntervalRef.current);
+      sectionTimerIntervalRef.current = null;
+    }
+    
+    // Start countdown for current section
+    sectionTimerIntervalRef.current = setInterval(() => {
+      setSectionTimers((prev) => {
+        const currentTimer = prev[currentSection];
+        if (!currentTimer || currentTimer <= 1) {
+          // Clear interval first
+          if (sectionTimerIntervalRef.current) {
+            clearInterval(sectionTimerIntervalRef.current);
+            sectionTimerIntervalRef.current = null;
+          }
+          
+          // Section timer expired - lock this section
+          setLockedSections((prevLocked) => {
+            const newLockedSet = new Set(prevLocked);
+            newLockedSet.add(assessmentPhase);
+            
+            // Get questions from assessment to check section availability
+            const assessmentQuestions = assessment?.questions || [];
+            const hasMCQ = assessmentQuestions.some((q: Question) => 
+              q.questionType === "mcq" || ("options" in q && "correctAn" in q)
+            );
+            const hasSubjective = assessmentQuestions.some((q: Question) => 
+              q.questionType === "subjective" || !("options" in q && "correctAn" in q)
+            );
+            
+            // If MCQ section expired, lock it and mark as submitted
+            if (assessmentPhase === "mcq") {
+              setMcqSubmitted(true);
+              sessionStorage.setItem(`mcqSubmitted_${assessmentId}`, "true");
+              
+              // If there are subjective questions, move to subjective section
+              if (hasSubjective && !newLockedSet.has("subjective")) {
+                setTimeout(() => {
+                  setAssessmentPhase("subjective");
+                  setCurrentQuestionIndex(0);
+                }, 0);
+              }
+            }
+            
+            // If subjective section expired or both sections locked, auto-submit
+            const allSectionsLocked = 
+              (!hasMCQ || newLockedSet.has("mcq")) && 
+              (!hasSubjective || newLockedSet.has("subjective"));
+            if (allSectionsLocked || (assessmentPhase === "subjective" && newLockedSet.has("subjective"))) {
+              // Save all answer logs first, then auto-submit
+              setTimeout(() => {
+                saveAllAnswerLogs().then(() => {
+                  handleSubmit(true);
+                }).catch(() => {
+                  handleSubmit(true);
+                });
+              }, 1000); // Small delay to ensure state is updated
+            }
+            
+            return newLockedSet;
+          });
+          
+          return { ...prev, [currentSection]: 0 };
+        }
+        return { ...prev, [currentSection]: currentTimer - 1 };
+      });
+    }, 1000);
+
+    return () => {
+      if (sectionTimerIntervalRef.current) {
+        clearInterval(sectionTimerIntervalRef.current);
+        sectionTimerIntervalRef.current = null;
+      }
+    };
+  }, [examStarted, waitingForStart, assessmentPhase, sectionTimers, lockedSections, assessment, assessmentId, handleSubmit]);
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (sectionTimerIntervalRef.current) {
+        clearInterval(sectionTimerIntervalRef.current);
+        sectionTimerIntervalRef.current = null;
+      }
+    };
+  }, []);
 
   // Sort questions: MCQ first, then Subjective (for initialization)
   const sortedQuestionsForInit = useMemo(() => {
@@ -1260,21 +1420,68 @@ export default function CustomMCQTakePage() {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-            {timeRemaining !== null && !isNaN(timeRemaining) && (
-              <div
-                style={{
-                  padding: "0.75rem 1.5rem",
-                  backgroundColor: timeRemaining < 300 ? "#fee2e2" : "#ffffff",
-                  border: `2px solid ${timeRemaining < 300 ? "#ef4444" : "#2D7A52"}`,
-                  borderRadius: "0.5rem",
-                  fontSize: "1.5rem",
-                  fontWeight: 700,
-                  color: timeRemaining < 300 ? "#991b1b" : "#1E5A3B",
-                }}
-              >
-                {formatTime(timeRemaining)}
-              </div>
-            )}
+            {(() => {
+              const enablePerSectionTimers = (assessment as any)?.enablePerSectionTimers || false;
+              
+              if (enablePerSectionTimers && examStarted) {
+                // Show per-section timer
+                const currentSection = assessmentPhase === "mcq" ? "MCQ" : "Subjective";
+                const currentTimer = sectionTimers[currentSection] || 0;
+                const isLocked = lockedSections.has(assessmentPhase);
+                
+                if (currentTimer > 0 && !isLocked) {
+                  return (
+                    <div
+                      style={{
+                        padding: "0.75rem 1.5rem",
+                        backgroundColor: currentTimer < 300 ? "#fee2e2" : "#ffffff",
+                        border: `2px solid ${currentTimer < 300 ? "#ef4444" : "#2D7A52"}`,
+                        borderRadius: "0.5rem",
+                        fontSize: "1.5rem",
+                        fontWeight: 700,
+                        color: currentTimer < 300 ? "#991b1b" : "#1E5A3B",
+                      }}
+                    >
+                      {currentSection}: {formatTime(currentTimer)}
+                    </div>
+                  );
+                } else if (isLocked) {
+                  return (
+                    <div
+                      style={{
+                        padding: "0.75rem 1.5rem",
+                        backgroundColor: "#fee2e2",
+                        border: "2px solid #ef4444",
+                        borderRadius: "0.5rem",
+                        fontSize: "1rem",
+                        fontWeight: 600,
+                        color: "#991b1b",
+                      }}
+                    >
+                      {currentSection} Section Locked
+                    </div>
+                  );
+                }
+              } else if (timeRemaining !== null && !isNaN(timeRemaining)) {
+                // Show global timer
+                return (
+                  <div
+                    style={{
+                      padding: "0.75rem 1.5rem",
+                      backgroundColor: timeRemaining < 300 ? "#fee2e2" : "#ffffff",
+                      border: `2px solid ${timeRemaining < 300 ? "#ef4444" : "#2D7A52"}`,
+                      borderRadius: "0.5rem",
+                      fontSize: "1.5rem",
+                      fontWeight: 700,
+                      color: timeRemaining < 300 ? "#991b1b" : "#1E5A3B",
+                    }}
+                  >
+                    {formatTime(timeRemaining)}
+                  </div>
+                );
+              }
+              return null;
+            })()}
             {examStarted && (
               <button
                 type="button"

@@ -44,7 +44,6 @@ export interface CustomMCQAssessment {
   startTime?: string;
   endTime?: string;
   duration?: number; // In minutes, required for both modes
-  accessTimeBeforeStart?: number; // Minutes before start time candidates can access (strict mode only)
   passPercentage: number;
   status?: string;
   totalQuestions?: number;
@@ -62,6 +61,11 @@ export interface CustomMCQAssessment {
       requireLinkedIn?: boolean;
       requireGithub?: boolean;
     };
+  };
+  enablePerSectionTimers?: boolean;
+  sectionTimers?: {
+    MCQ?: number; // Duration in minutes
+    Subjective?: number; // Duration in minutes
   };
   proctoringSettings?: {
     aiProctoringEnabled?: boolean;

@@ -59,10 +59,11 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     startTime: Optional[datetime] = None
     endTime: Optional[datetime] = None  # For flexible mode only, calculated for strict mode
     duration: Optional[int] = None  # In minutes, required for both modes
-    accessTimeBeforeStart: Optional[int] = Field(default=15, ge=0, description="Minutes before start time candidates can access (strict mode only)")
     passPercentage: int = Field(default=50, ge=0, le=100)
     status: Optional[str] = Field(default="draft", pattern=r"^(draft|scheduled)$")  # Draft or scheduled
     currentStation: Optional[int] = Field(default=1, ge=1, le=5)  # Track which station user is on
+    enablePerSectionTimers: Optional[bool] = Field(default=False, description="Enable per-section timers")
+    sectionTimers: Optional[Dict[str, int]] = Field(default=None, description="Timer durations in minutes for each section (MCQ, Subjective)")
     proctoringSettings: Optional[ProctoringSettings] = None
     showResultToCandidate: Optional[bool] = Field(default=True, description="Whether to show results to candidates after submission")
 
@@ -78,10 +79,11 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     startTime: Optional[datetime] = None
     endTime: Optional[datetime] = None  # For flexible mode only, calculated for strict mode
     duration: Optional[int] = None
-    accessTimeBeforeStart: Optional[int] = Field(default=None, ge=0, description="Minutes before start time candidates can access (strict mode only)")
     passPercentage: Optional[int] = Field(default=None, ge=0, le=100)
     status: Optional[str] = Field(default=None, pattern=r"^(draft|scheduled)$")  # Allow status updates
     currentStation: Optional[int] = Field(default=None, ge=1, le=5)  # Track which station user is on
+    enablePerSectionTimers: Optional[bool] = Field(default=None, description="Enable per-section timers")
+    sectionTimers: Optional[Dict[str, int]] = Field(default=None, description="Timer durations in minutes for each section (MCQ, Subjective)")
     proctoringSettings: Optional[ProctoringSettings] = None
     showResultToCandidate: Optional[bool] = Field(default=None, description="Whether to show results to candidates after submission")
 
@@ -188,10 +190,11 @@ class CreateCustomMCQAssessmentRequest(BaseModel):
     startTime: Optional[datetime] = Field(None, description="Start time (required for both modes)")
     endTime: Optional[datetime] = Field(None, description="End time (for flexible mode only, calculated for strict mode)")
     duration: Optional[int] = Field(None, description="Duration in minutes (required for both modes)")
-    accessTimeBeforeStart: Optional[int] = Field(default=15, ge=0, description="Minutes before start time candidates can access (strict mode only)")
     passPercentage: float = Field(50.0, ge=0, le=100, description="Passing percentage")
     status: Optional[str] = Field("draft", description="Assessment status")
     currentStation: Optional[int] = Field(1, description="Current station/step")
+    enablePerSectionTimers: Optional[bool] = Field(default=False, description="Enable per-section timers")
+    sectionTimers: Optional[Dict[str, int]] = Field(default=None, description="Timer durations in minutes for each section (MCQ, Subjective)")
     proctoringSettings: Optional[ProctoringSettings] = None
     showResultToCandidate: Optional[bool] = Field(default=True, description="Whether to show results to candidates after submission")
 
@@ -207,10 +210,11 @@ class UpdateCustomMCQAssessmentRequest(BaseModel):
     startTime: Optional[datetime] = Field(None, description="Start time (required for both modes)")
     endTime: Optional[datetime] = Field(None, description="End time (for flexible mode only, calculated for strict mode)")
     duration: Optional[int] = Field(None, description="Duration in minutes (required for both modes)")
-    accessTimeBeforeStart: Optional[int] = Field(None, ge=0, description="Minutes before start time candidates can access (strict mode only)")
     passPercentage: Optional[float] = Field(None, ge=0, le=100, description="Passing percentage")
     status: Optional[str] = Field(None, description="Assessment status")
     currentStation: Optional[int] = Field(None, description="Current station/step")
+    enablePerSectionTimers: Optional[bool] = Field(default=None, description="Enable per-section timers")
+    sectionTimers: Optional[Dict[str, int]] = Field(default=None, description="Timer durations in minutes for each section (MCQ, Subjective)")
     proctoringSettings: Optional[ProctoringSettings] = None
     showResultToCandidate: Optional[bool] = Field(default=None, description="Whether to show results to candidates after submission")
 

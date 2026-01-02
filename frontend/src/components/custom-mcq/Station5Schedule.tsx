@@ -45,9 +45,6 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     scheduleEndTime ? utcToLocalDatetimeLocal(scheduleEndTime) : ""
   );
   const [duration, setDuration] = useState(scheduleDuration?.toString() || "");
-  const [accessTimeBeforeStart, setAccessTimeBeforeStart] = useState(
-    assessmentData.accessTimeBeforeStart?.toString() || "15"
-  );
   const [passPercentage, setPassPercentage] = useState(assessmentData.passPercentage?.toString() || "50");
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(
     (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled ?? false
@@ -118,9 +115,6 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     }
     
     // Sync other settings
-    if (assessmentData.accessTimeBeforeStart !== undefined) {
-      setAccessTimeBeforeStart(assessmentData.accessTimeBeforeStart.toString());
-    }
     if (assessmentData.passPercentage !== undefined) {
       setPassPercentage(assessmentData.passPercentage.toString());
     }
@@ -169,7 +163,6 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       startTime: startTime ? new Date(startTime).toISOString() : undefined,
       endTime: endTime ? new Date(endTime).toISOString() : undefined,
       duration: duration ? parseInt(duration) : undefined,
-      accessTimeBeforeStart: accessTimeBeforeStart ? parseInt(accessTimeBeforeStart) : 15,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
       proctoringSettings: {
         aiProctoringEnabled,
@@ -196,7 +189,6 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     startTime,
     endTime,
     duration,
-    accessTimeBeforeStart,
     passPercentage,
     aiProctoringEnabled,
     faceMismatchEnabled,
@@ -337,7 +329,7 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
               />
               <strong style={{ color: "#1E5A3B" }}>Strict Window</strong>
               <p style={{ margin: "0.5rem 0 0 0", fontSize: "0.875rem", color: "#2D7A52" }}>
-                Assessment starts at a fixed time. Candidates can access before start time for pre-checks.
+                Assessment starts at a fixed time and ends after the specified duration.
               </p>
             </label>
             <label
@@ -397,22 +389,6 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
                       style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
                     />
                   </div>
-                </div>
-                <div style={{ flex: 1, minWidth: "200px" }}>
-                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
-                    Access Time Before Start (minutes)
-                  </label>
-                  <input
-                    type="number"
-                    value={accessTimeBeforeStart}
-                    onChange={(e) => setAccessTimeBeforeStart(e.target.value)}
-                    placeholder="e.g., 15"
-                    min={0}
-                    style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
-                  />
-                  <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#2D7A52" }}>
-                    Candidates can access the assessment this many minutes before the start time to complete pre-checks. Questions will start automatically at the scheduled start time.
-                  </p>
                 </div>
                 {startTime && duration && (
                   <div style={{ padding: "0.75rem", backgroundColor: "#E8FAF0", borderRadius: "0.5rem", fontSize: "0.875rem", color: "#2D7A52" }}>

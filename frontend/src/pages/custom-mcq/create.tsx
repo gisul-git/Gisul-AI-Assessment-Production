@@ -103,7 +103,8 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
               passPercentage: assessment.passPercentage || 50,
               schedule: schedule, // Include full schedule object
               proctoringSettings: (assessment as any).proctoringSettings || undefined,
-              accessTimeBeforeStart: (assessment as any).accessTimeBeforeStart || 15,
+              enablePerSectionTimers: (assessment as any).enablePerSectionTimers || false,
+              sectionTimers: (assessment as any).sectionTimers || undefined,
               showResultToCandidate: (assessment as any).showResultToCandidate !== undefined ? (assessment as any).showResultToCandidate : true,
             } as any);
             
@@ -409,9 +410,10 @@ export default function CreateCustomMCQPage({ session }: CreateCustomMCQPageProp
         startTime: assessmentData.startTime,
         endTime: assessmentData.endTime,
         duration: assessmentData.duration,
-        accessTimeBeforeStart: assessmentData.accessTimeBeforeStart || 15, // Include access time before start
         showResultToCandidate: (assessmentData as any).showResultToCandidate !== false, // Default to true if not specified
         passPercentage: assessmentData.passPercentage || 50,
+        enablePerSectionTimers: (assessmentData as any).enablePerSectionTimers || false,
+        sectionTimers: (assessmentData as any).sectionTimers || undefined,
         status: "scheduled", // Create as scheduled/active (not paused)
         currentStation: currentStation,
         proctoringSettings: (assessmentData as any).proctoringSettings,
