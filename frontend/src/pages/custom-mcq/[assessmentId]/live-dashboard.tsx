@@ -145,28 +145,7 @@ export default function LiveProctoringDashboard({
     });
 
     setCandidates(dedupedCandidates);
-
-    // Attach streams to video elements
-    dedupedCandidates.forEach((candidate) => {
-      if (candidate.webcamStream) {
-        const webcamVideo = videoRefs.current.get(`webcam-${candidate.sessionId}`);
-        if (webcamVideo && webcamVideo.srcObject !== candidate.webcamStream) {
-          webcamVideo.srcObject = candidate.webcamStream;
-          webcamVideo.play().catch((err) => {
-            console.error(`[Live Dashboard] Failed to play webcam for ${candidate.sessionId}:`, err);
-          });
-        }
-      }
-      if (candidate.screenStream) {
-        const screenVideo = videoRefs.current.get(`screen-${candidate.sessionId}`);
-        if (screenVideo && screenVideo.srcObject !== candidate.screenStream) {
-          screenVideo.srcObject = candidate.screenStream;
-          screenVideo.play().catch((err) => {
-            console.error(`[Live Dashboard] Failed to play screen for ${candidate.sessionId}:`, err);
-          });
-        }
-      }
-    });
+    // NOTE: Stream attachment is now handled by useEffect below, not here
   }, [assessmentCandidates])
 
   // Fetch assessment candidates and initialize service
@@ -299,6 +278,46 @@ export default function LiveProctoringDashboard({
     // Update previous expanded session ID
     prevExpandedSessionIdRef.current = expandedSessionId
   }, [expandedSessionId]) // Only depend on expandedSessionId, not candidates
+
+  // Attach streams to grid view video elements when candidates change (similar to expanded view)
+  useEffect(() => {
+    if (expandedSessionId) return; // Skip if in expanded view (handled separately)
+
+    // Small delay to ensure video elements are rendered (same as expanded view)
+    const timeoutId = setTimeout(() => {
+      candidates.forEach((candidate) => {
+        // Attach screen stream
+        if (candidate.screenStream) {
+          const screenVideo = videoRefs.current.get(`screen-${candidate.sessionId}`);
+          if (screenVideo && screenVideo.srcObject !== candidate.screenStream) {
+            screenVideo.srcObject = candidate.screenStream;
+            // Only play if not already playing (prevents AbortError from rapid updates)
+            if (screenVideo.paused) {
+              screenVideo.play().catch((err) => {
+                console.error(`[Live Dashboard] Failed to play screen for ${candidate.sessionId}:`, err);
+              });
+            }
+          }
+        }
+
+        // Attach webcam stream
+        if (candidate.webcamStream) {
+          const webcamVideo = videoRefs.current.get(`webcam-${candidate.sessionId}`);
+          if (webcamVideo && webcamVideo.srcObject !== candidate.webcamStream) {
+            webcamVideo.srcObject = candidate.webcamStream;
+            // Only play if not already playing (prevents AbortError from rapid updates)
+            if (webcamVideo.paused) {
+              webcamVideo.play().catch((err) => {
+                console.error(`[Live Dashboard] Failed to play webcam for ${candidate.sessionId}:`, err);
+              });
+            }
+          }
+        }
+      });
+    }, 100); // Same delay as expanded view
+
+    return () => clearTimeout(timeoutId);
+  }, [candidates, expandedSessionId]);
 
   // Attach streams to expanded video elements when expanded view is shown
   useEffect(() => {
@@ -556,36 +575,33 @@ function CandidateTile({ candidate, onExpand, onRefresh, videoRefs }: CandidateT
 
       {/* Video Feeds */}
       <div className="aspect-video bg-gray-900 relative">
-        {/* Screen Share (Background) */}
-        {candidate.screenStream ? (
+        {/* Screen Share (Background) - Always render video element */}
+        <video
+          ref={(el) => {
+            if (el) videoRefs.current.set(`screen-${candidate.sessionId}`, el)
+          }}
+          autoPlay
+          playsInline
+          className={`w-full h-full object-contain ${candidate.screenStream && candidate.screenStream.active ? 'block' : 'hidden'}`}
+        />
+        {!candidate.screenStream || !candidate.screenStream.active ? (
+          <div className="w-full h-full flex items-center justify-center absolute inset-0">
+            <p className="text-gray-500 text-sm">No screen share</p>
+          </div>
+        ) : null}
+
+        {/* Webcam (Overlay - Top Right) - Always render video element */}
+        <div className={`absolute top-2 right-2 w-24 h-18 bg-gray-800 rounded overflow-hidden shadow-lg border border-gray-700 ${candidate.webcamStream && candidate.webcamStream.active ? 'block' : 'hidden'}`}>
           <video
             ref={(el) => {
-              if (el) videoRefs.current.set(`screen-${candidate.sessionId}`, el)
+              if (el) videoRefs.current.set(`webcam-${candidate.sessionId}`, el)
             }}
             autoPlay
             playsInline
-            className="w-full h-full object-contain"
+            muted
+            className="w-full h-full object-cover"
           />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <p className="text-gray-500 text-sm">No screen share</p>
-          </div>
-        )}
-
-        {/* Webcam (Overlay - Top Right) */}
-        {candidate.webcamStream && (
-          <div className="absolute top-2 right-2 w-24 h-18 bg-gray-800 rounded overflow-hidden shadow-lg border border-gray-700">
-            <video
-              ref={(el) => {
-                if (el) videoRefs.current.set(`webcam-${candidate.sessionId}`, el)
-              }}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover"
-            />
-          </div>
-        )}
+        </div>
       </div>
 
       {/* Actions */}

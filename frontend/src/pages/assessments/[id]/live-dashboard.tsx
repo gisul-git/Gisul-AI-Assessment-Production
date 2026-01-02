@@ -657,18 +657,18 @@ function CandidateTile({ candidate, onExpand, onRefresh, videoRefs }: CandidateT
           }}
           autoPlay
           playsInline
-          className={`w-full h-full object-contain ${candidate.screenStream ? 'block' : 'hidden'}`}
+          className={`w-full h-full object-contain ${candidate.screenStream && candidate.screenStream.active ? 'block' : 'hidden'}`}
         />
         
         {/* Placeholder when no screen stream */}
-        {!candidate.screenStream && (
+        {!candidate.screenStream || !candidate.screenStream.active ? (
           <div className="absolute inset-0 flex items-center justify-center">
             <p className="text-gray-500 text-sm">No screen share</p>
           </div>
-        )}
+        ) : null}
 
         {/* Webcam (Overlay - Top Right) - Always render so ref exists when streams arrive */}
-        <div className={`absolute top-2 right-2 w-24 h-18 bg-gray-800 rounded overflow-hidden shadow-lg border border-gray-700 ${candidate.webcamStream ? 'block' : 'hidden'}`}>
+        <div className={`absolute top-2 right-2 w-24 h-18 bg-gray-800 rounded overflow-hidden shadow-lg border border-gray-700 ${candidate.webcamStream && candidate.webcamStream.active ? 'block' : 'hidden'}`}>
           <video
             ref={(el) => {
               if (el) {
