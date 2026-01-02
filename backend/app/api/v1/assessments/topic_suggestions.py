@@ -27,7 +27,6 @@ def _is_technical_topic(topic: str) -> bool:
     """
     topic_lower = topic.lower()
     
-    # Technical keywords that should be blocked
     technical_keywords = [
         # Programming languages
         "java", "python", "javascript", "typescript", "c++", "c#", "cpp", "c ", "go ", "rust", "ruby", "php", "swift", "kotlin", "scala", "r ",
