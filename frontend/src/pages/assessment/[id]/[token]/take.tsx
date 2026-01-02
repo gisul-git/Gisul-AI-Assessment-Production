@@ -231,7 +231,10 @@ export default function CandidateAssessmentPage() {
   const [aimlOutputs, setAimlOutputs] = useState<Record<string, any[]>>({});
   const [timerRemaining, setTimerRemaining] = useState<number>(0); // in seconds (for overall timer)
   const [sectionTimers, setSectionTimers] = useState<Record<string, number>>({}); // per-section timers in seconds
-  const [lockedSections, setLockedSections] = useState<Set<string>>(new Set()); // locked section keys
+  const [lockedSections, setLockedSections] = useState<Set<string>>(new Set()); // locked section keys (timer-based)
+  const [completedSections, setCompletedSections] = useState<Set<string>>(new Set()); // completed sections (manually completed)
+  const [showSectionLockPopup, setShowSectionLockPopup] = useState<boolean>(false);
+  const [pendingNextSection, setPendingNextSection] = useState<keyof Sections | null>(null);
   const [examSettings, setExamSettings] = useState<ExamSettings>({
     duration: 60,
   });
@@ -1063,6 +1066,19 @@ export default function CandidateAssessmentPage() {
   // NAVIGATION
   // ============================================================================
 
+  // Check if all questions in a section are answered
+  const areAllQuestionsAnswered = useCallback((section: keyof Sections): boolean => {
+    const sectionQuestions = sections[section] || [];
+    if (sectionQuestions.length === 0) return false;
+    
+    return sectionQuestions.every((question) => {
+      const questionId = getQuestionId(question);
+      const answer = answers.get(questionId) || codeAnswers.get(questionId) || "";
+      // Consider answered if there's any value (even empty string counts as "answered")
+      return answer !== undefined && answer !== null;
+    });
+  }, [sections, answers, codeAnswers, getQuestionId]);
+
   const navigateToQuestion = useCallback(async (section: keyof Sections, index: number) => {
     // Auto-save current answer before switching questions
     const currentQuestion = getCurrentQuestion();
@@ -1109,10 +1125,24 @@ export default function CandidateAssessmentPage() {
       }
     }
     
-    // Check if section is locked (only for per-section timers)
-    if (examSettings?.enablePerSectionTimers && lockedSections.has(section)) {
-      alert(`This section has been locked because its timer expired. You cannot access questions in this section.`);
+    // Check if section is locked (timer-based or completed)
+    if ((examSettings?.enablePerSectionTimers && lockedSections.has(section)) || completedSections.has(section)) {
+      // Section is locked - don't allow navigation (button should be disabled)
       return;
+    }
+    
+    // Enforce sequential access - can't jump to sections before completing previous ones
+    const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
+    const targetIndex = sectionOrder.indexOf(section);
+    const currentIndex = currentSection ? sectionOrder.indexOf(currentSection) : -1;
+    
+    // Check if trying to access a section that comes before the first incomplete section
+    for (let i = 0; i < targetIndex; i++) {
+      const prevSection = sectionOrder[i];
+      if (sections[prevSection]?.length > 0 && !completedSections.has(prevSection)) {
+        // Trying to jump ahead - not allowed
+        return;
+      }
     }
     
     setCurrentSection(section);
@@ -1132,7 +1162,7 @@ export default function CandidateAssessmentPage() {
         // Failed to log question view
       }
     }
-  }, [sections, logAnalyticsEvent, getQuestionId, getCurrentQuestion, currentSection, answers, codeAnswers, attemptId, timerRemaining, lockedSections, examSettings]);
+  }, [sections, logAnalyticsEvent, getQuestionId, getCurrentQuestion, currentSection, answers, codeAnswers, attemptId, timerRemaining, lockedSections, completedSections, examSettings]);
 
   // Helper function to save current answer before navigation
   const saveCurrentAnswer = useCallback(async (): Promise<boolean> => {
@@ -1195,6 +1225,44 @@ export default function CandidateAssessmentPage() {
         // Error navigating
       }
       } else {
+      // On last question of section - check if all questions are answered
+      const allAnswered = areAllQuestionsAnswered(currentSection);
+      
+      if (allAnswered && !completedSections.has(currentSection)) {
+        // All questions answered - show popup before moving to next section
+        const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
+        const currentIndex = sectionOrder.indexOf(currentSection);
+        
+        // Find the next section with questions
+        let nextSectionWithQuestions: keyof Sections | null = null;
+        let nextSectionIndex = currentIndex + 1;
+        
+        while (nextSectionIndex < sectionOrder.length) {
+          const candidateSection = sectionOrder[nextSectionIndex];
+          
+          // Check if section is locked (for per-section timers) or completed
+          if ((examSettings.enablePerSectionTimers && lockedSections.has(candidateSection)) || completedSections.has(candidateSection)) {
+            nextSectionIndex++;
+            continue;
+          }
+          
+          // Check if section has questions
+          if (sections[candidateSection] && sections[candidateSection].length > 0) {
+            nextSectionWithQuestions = candidateSection;
+            break;
+          }
+          
+          nextSectionIndex++;
+        }
+        
+        if (nextSectionWithQuestions) {
+          // Show popup
+          setPendingNextSection(nextSectionWithQuestions);
+          setShowSectionLockPopup(true);
+          return;
+        }
+      }
+      
       // Move to next section - skip empty sections
       const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
       const currentIndex = sectionOrder.indexOf(currentSection);
@@ -1206,8 +1274,8 @@ export default function CandidateAssessmentPage() {
       while (nextSectionIndex < sectionOrder.length) {
         const candidateSection = sectionOrder[nextSectionIndex];
         
-        // Check if section is locked (for per-section timers)
-        if (examSettings.enablePerSectionTimers && lockedSections.has(candidateSection)) {
+        // Check if section is locked (for per-section timers) or completed
+        if ((examSettings.enablePerSectionTimers && lockedSections.has(candidateSection)) || completedSections.has(candidateSection)) {
           nextSectionIndex++;
           continue;
         }
@@ -1230,10 +1298,15 @@ export default function CandidateAssessmentPage() {
         }
       }
     }
-  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections, saveCurrentAnswer]);
+  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections, completedSections, areAllQuestionsAnswered, saveCurrentAnswer]);
 
   const navigatePrevious = useCallback(async () => {
     if (!currentSection) return;
+
+    // Check if current section is completed - don't allow going back within completed section
+    if (completedSections.has(currentSection)) {
+      return;
+    }
 
     if (currentQuestionIndex > 0) {
       await navigateToQuestion(currentSection, currentQuestionIndex - 1);
@@ -1245,9 +1318,9 @@ export default function CandidateAssessmentPage() {
       if (currentIndex > 0) {
         const prevSection = sectionOrder[currentIndex - 1];
         
-        // Check if previous section is locked (for per-section timers)
-        if (examSettings.enablePerSectionTimers && lockedSections.has(prevSection)) {
-          alert(`The ${getSectionName(prevSection)} section is locked because its timer expired. You cannot access questions in this section.`);
+        // Check if previous section is locked (timer-based or completed)
+        if ((examSettings.enablePerSectionTimers && lockedSections.has(prevSection)) || completedSections.has(prevSection)) {
+          // Previous section is locked - don't allow navigation
           return;
         }
         
@@ -1258,7 +1331,53 @@ export default function CandidateAssessmentPage() {
         }
       }
     }
-  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections]);
+  }, [currentSection, currentQuestionIndex, sections, navigateToQuestion, logAnalyticsEvent, examSettings.enablePerSectionTimers, lockedSections, completedSections]);
+
+  // Handle section lock popup Continue
+  const handleSectionLockContinue = useCallback(async () => {
+    if (!currentSection || !pendingNextSection) return;
+    
+    // Save current answer before switching
+    await saveCurrentAnswer();
+    
+    // Lock the current section
+    setCompletedSections((prev) => {
+      const newSet = new Set(prev);
+      newSet.add(currentSection);
+      return newSet;
+    });
+    
+    // Close popup
+    setShowSectionLockPopup(false);
+    
+    // Navigate directly to next section (bypass sequential check since we're moving forward after completion)
+    setCurrentSection(pendingNextSection);
+    setCurrentQuestionIndex(0);
+    
+    // Log analytics
+    try {
+      await logAnalyticsEvent("SECTION_SWITCH", { from: currentSection, to: pendingNextSection });
+      const nextQuestion = sections[pendingNextSection]?.[0];
+      if (nextQuestion) {
+        const questionId = getQuestionId(nextQuestion);
+        await logAnalyticsEvent("QUESTION_VIEW", {
+          section: pendingNextSection,
+          questionIndex: 0,
+          questionId: questionId,
+        });
+      }
+    } catch (error) {
+      // Failed to log analytics
+    }
+    
+    setPendingNextSection(null);
+  }, [currentSection, pendingNextSection, saveCurrentAnswer, sections, getQuestionId, logAnalyticsEvent]);
+
+  // Handle section lock popup Cancel
+  const handleSectionLockCancel = useCallback(() => {
+    setShowSectionLockPopup(false);
+    setPendingNextSection(null);
+  }, []);
 
   // ============================================================================
   // FINAL SUBMISSION
@@ -2037,17 +2156,8 @@ export default function CandidateAssessmentPage() {
   // TIMER COUNTDOWN
   // ============================================================================
 
-  // Overall timer countdown (when per-section timers are disabled)
+  // Overall timer countdown (always runs, even when per-section timers are enabled)
   useEffect(() => {
-    // Skip if per-section timers are enabled
-    if (examSettings.enablePerSectionTimers) {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-      return;
-    }
-    
     // Only start timer when appState is ready AND timerRemaining is greater than 0
     if (appState !== "ready" || timerRemaining <= 0) {
       // Clear interval if timer is 0 or appState is not ready
@@ -2084,7 +2194,7 @@ export default function CandidateAssessmentPage() {
         timerIntervalRef.current = null;
       }
     };
-  }, [appState, timerRemaining, submitAssessment, examSettings.enablePerSectionTimers]);
+  }, [appState, timerRemaining, submitAssessment]);
 
   // Per-section timer countdown (when per-section timers are enabled)
   useEffect(() => {
@@ -2469,25 +2579,51 @@ export default function CandidateAssessmentPage() {
                 if (sectionQuestions.length === 0) return null;
 
                 const isActive = section === currentSection;
+                const isTimerLocked = examSettings?.enablePerSectionTimers && lockedSections.has(section);
+                const isCompleted = completedSections.has(section);
+                const isLocked = isTimerLocked || isCompleted;
+                
+                // Check if section is accessible (sequential access enforcement)
+                const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
+                const sectionIndex = sectionOrder.indexOf(section);
+                let isAccessible = true;
+                for (let i = 0; i < sectionIndex; i++) {
+                  const prevSection = sectionOrder[i];
+                  if (sections[prevSection]?.length > 0 && !completedSections.has(prevSection)) {
+                    isAccessible = false;
+                    break;
+                  }
+                }
+                
                 return (
                   <button
                     key={section}
                     type="button"
-                    onClick={() => navigateToQuestion(section, 0)}
+                    onClick={() => !isLocked && isAccessible && navigateToQuestion(section, 0)}
+                    disabled={isLocked || !isAccessible}
                     style={{
                       padding: "0.75rem",
                       textAlign: "left",
-                      backgroundColor: isActive ? "#6953a3" : "#f8fafc",
-                      color: isActive ? "#ffffff" : "#64748b",
-                      border: `2px solid ${isActive ? "#6953a3" : "#e2e8f0"}`,
+                      backgroundColor: isLocked || !isAccessible ? "#e2e8f0" : (isActive ? "#6953a3" : "#f8fafc"),
+                      color: isLocked || !isAccessible ? "#94a3b8" : (isActive ? "#ffffff" : "#64748b"),
+                      border: `2px solid ${isLocked || !isAccessible ? "#cbd5e1" : (isActive ? "#6953a3" : "#e2e8f0")}`,
                       borderRadius: "0.5rem",
-                      cursor: "pointer",
+                      cursor: isLocked || !isAccessible ? "not-allowed" : "pointer",
                       fontWeight: isActive ? 700 : 500,
                       fontSize: "0.875rem",
                       transition: "all 0.2s",
+                      opacity: isLocked || !isAccessible ? 0.6 : 1,
                     }}
+                    title={
+                      isLocked 
+                        ? (isCompleted ? "This section is locked because it has been completed" : "This section is locked because its timer expired")
+                        : !isAccessible 
+                        ? "Complete previous sections first"
+                        : undefined
+                    }
                   >
                     {getSectionName(section)} ({sectionQuestions.length})
+                    {isLocked && " 🔒"}
                   </button>
                 );
               })}
@@ -2508,33 +2644,58 @@ export default function CandidateAssessmentPage() {
           }}>
             {/* Timer */}
             {examSettings?.enablePerSectionTimers && currentSection && sectionTimers[currentSection] !== undefined && sectionTimers[currentSection] >= 0 ? (
-              // Per-section timer display
-              <div style={{
-                marginBottom: "1.5rem",
-                padding: "1rem",
-                backgroundColor: (sectionTimers[currentSection] || 0) < 300 ? "#fef2f2" : "#f0f9ff",
-                border: `2px solid ${(sectionTimers[currentSection] || 0) < 300 ? "#ef4444" : "#3b82f6"}`,
-                borderRadius: "0.5rem",
-                textAlign: "center",
-              }}>
-                <p style={{ color: "#64748b", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
-                  {getSectionName(currentSection)} Section Timer:
-                </p>
-                <p style={{ 
-                  fontSize: "1.5rem",
-                  fontWeight: 700, 
-                  color: (sectionTimers[currentSection] || 0) < 300 ? "#dc2626" : "#1e40af",
+              // Both timers display when per-section timers are enabled
+              <div style={{ marginBottom: "1.5rem", display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+                {/* Per-section timer */}
+                <div style={{
+                  flex: 1,
+                  minWidth: "200px",
+                  padding: "1rem",
+                  backgroundColor: (sectionTimers[currentSection] || 0) < 300 ? "#fef2f2" : "#f0f9ff",
+                  border: `2px solid ${(sectionTimers[currentSection] || 0) < 300 ? "#ef4444" : "#3b82f6"}`,
+                  borderRadius: "0.5rem",
+                  textAlign: "center",
                 }}>
-                  {formatTime(sectionTimers[currentSection] || 0)}
-                </p>
-                {lockedSections.has(currentSection) && (
-                  <p style={{ color: "#dc2626", fontSize: "0.875rem", marginTop: "0.5rem", fontWeight: 600 }}>
-                    ⚠️ This section is locked
+                  <p style={{ color: "#64748b", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
+                    {getSectionName(currentSection)} Section Timer:
                   </p>
-                )}
+                  <p style={{ 
+                    fontSize: "1.5rem",
+                    fontWeight: 700, 
+                    color: (sectionTimers[currentSection] || 0) < 300 ? "#dc2626" : "#1e40af",
+                  }}>
+                    {formatTime(sectionTimers[currentSection] || 0)}
+                  </p>
+                  {lockedSections.has(currentSection) && (
+                    <p style={{ color: "#dc2626", fontSize: "0.875rem", marginTop: "0.5rem", fontWeight: 600 }}>
+                      ⚠️ This section is locked
+                    </p>
+                  )}
+                </div>
+                {/* Overall duration timer */}
+                <div style={{
+                  flex: 1,
+                  minWidth: "200px",
+                  padding: "1rem",
+                  backgroundColor: timerRemaining < 300 ? "#fef2f2" : "#f0f9ff",
+                  border: `2px solid ${timerRemaining < 300 ? "#ef4444" : "#3b82f6"}`,
+                  borderRadius: "0.5rem",
+                  textAlign: "center",
+                }}>
+                  <p style={{ color: "#64748b", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
+                    Assessment Duration Remaining:
+                  </p>
+                  <p style={{ 
+                    fontSize: "1.5rem",
+                    fontWeight: 700, 
+                    color: timerRemaining < 300 ? "#dc2626" : "#1e40af",
+                  }}>
+                    {formatTime(timerRemaining)}
+                  </p>
+                </div>
               </div>
             ) : (
-              // Overall timer display
+              // Overall timer display (when per-section timers are disabled)
               <div style={{
                 marginBottom: "1.5rem",
                 padding: "1rem",
@@ -3568,6 +3729,102 @@ export default function CandidateAssessmentPage() {
           </div>
         </div>
         
+        {/* Section Lock Confirmation Popup */}
+        {showSectionLockPopup && currentSection && (
+          <div style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 10000,
+            padding: "1rem",
+          }}>
+            <div style={{
+              backgroundColor: "#ffffff",
+              borderRadius: "0.75rem",
+              padding: "2rem",
+              maxWidth: "500px",
+              width: "100%",
+              boxShadow: "0 10px 25px rgba(0, 0, 0, 0.2)",
+            }}>
+              <h2 style={{
+                fontSize: "1.5rem",
+                fontWeight: 700,
+                color: "#1a1625",
+                marginBottom: "1rem",
+              }}>
+                Section Lock Confirmation
+              </h2>
+              <p style={{
+                fontSize: "1rem",
+                color: "#64748b",
+                marginBottom: "2rem",
+                lineHeight: "1.6",
+              }}>
+                You have answered all questions in the <strong>{getSectionName(currentSection)}</strong> section. 
+                If you continue to the next section, this section will be locked and you won't be able to access it again.
+              </p>
+              <div style={{
+                display: "flex",
+                gap: "1rem",
+                justifyContent: "flex-end",
+              }}>
+                <button
+                  type="button"
+                  onClick={handleSectionLockCancel}
+                  style={{
+                    padding: "0.75rem 1.5rem",
+                    backgroundColor: "#f8fafc",
+                    color: "#1a1625",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "0.5rem",
+                    cursor: "pointer",
+                    fontSize: "0.875rem",
+                    fontWeight: 600,
+                    transition: "all 0.2s",
+                  }}
+                  onMouseOver={(e) => {
+                    e.currentTarget.style.backgroundColor = "#e2e8f0";
+                  }}
+                  onMouseOut={(e) => {
+                    e.currentTarget.style.backgroundColor = "#f8fafc";
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSectionLockContinue}
+                  style={{
+                    padding: "0.75rem 1.5rem",
+                    backgroundColor: "#6953a3",
+                    color: "#ffffff",
+                    border: "none",
+                    borderRadius: "0.5rem",
+                    cursor: "pointer",
+                    fontSize: "0.875rem",
+                    fontWeight: 600,
+                    transition: "all 0.2s",
+                  }}
+                  onMouseOver={(e) => {
+                    e.currentTarget.style.backgroundColor = "#5a4288";
+                  }}
+                  onMouseOut={(e) => {
+                    e.currentTarget.style.backgroundColor = "#6953a3";
+                  }}
+                >
+                  Continue
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Proctoring Components */}
         <ViolationToast />
         {aiProctoringEnabled && (
