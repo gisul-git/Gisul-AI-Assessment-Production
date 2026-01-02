@@ -449,11 +449,12 @@ async def create_custom_mcq_assessment(
                 "duration": request.duration,  # In minutes
                 "candidateRequirements": candidate_requirements,
             },
-            "accessTimeBeforeStart": request.accessTimeBeforeStart if request.accessTimeBeforeStart is not None else 15,  # Default 15 minutes
             "passPercentage": request.passPercentage,
             "submissions": {},  # Store candidate submissions
             "totalMarks": total_marks,
             "currentStation": request.currentStation or 1,  # Track current station
+            "enablePerSectionTimers": request.enablePerSectionTimers if request.enablePerSectionTimers is not None else False,
+            "sectionTimers": request.sectionTimers if request.sectionTimers else None,
             "proctoringSettings": request.proctoringSettings.model_dump() if getattr(request, "proctoringSettings", None) else None,
         "showResultToCandidate": request.showResultToCandidate if request.showResultToCandidate is not None else True,
         }
@@ -752,12 +753,13 @@ async def update_custom_mcq_assessment(
         if request.passPercentage is not None:
             update_doc["passPercentage"] = request.passPercentage
         
-        # Handle accessTimeBeforeStart update
-        if request.accessTimeBeforeStart is not None:
-            update_doc["accessTimeBeforeStart"] = request.accessTimeBeforeStart
-        elif request.examMode == "strict" and "accessTimeBeforeStart" not in assessment:
-            # Set default if switching to strict mode and not set
-            update_doc["accessTimeBeforeStart"] = 15
+        # Update enablePerSectionTimers if provided
+        if request.enablePerSectionTimers is not None:
+            update_doc["enablePerSectionTimers"] = request.enablePerSectionTimers
+        
+        # Update sectionTimers if provided
+        if request.sectionTimers is not None:
+            update_doc["sectionTimers"] = request.sectionTimers
         
         # For strict mode, recalculate endTime if startTime or duration changed
         if update_doc.get("examMode") == "strict" or (request.examMode is None and assessment.get("examMode") == "strict"):
@@ -975,19 +977,17 @@ async def verify_custom_mcq_candidate(
         schedule = assessment.get("schedule") or {}
         start_time_str = schedule.get("startTime") if isinstance(schedule, dict) else None
         end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
-        access_time_before_start = assessment.get("accessTimeBeforeStart", 15)  # Default 15 minutes
         now = datetime.utcnow()
         
         if exam_mode == "strict" and start_time_str:
-            # Strict mode: Check access time before start
+            # Strict mode: Check if assessment has started
             start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
-            access_start_time = start_time - timedelta(minutes=access_time_before_start)
             
-            if now < access_start_time:
+            if now < start_time:
                 # Too early - cannot access yet
-                access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
                 return error_response(
-                    f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}.",
+                    f"You cannot access this assessment yet. The assessment will start at {start_time_formatted}.",
                     status_code=403
                 )
         elif exam_mode == "flexible":
@@ -1135,7 +1135,6 @@ async def get_custom_mcq_assessment_for_taking(
         start_time_str = schedule.get("startTime") if isinstance(schedule, dict) else None
         end_time_str = schedule.get("endTime") if isinstance(schedule, dict) else None
         duration = schedule.get("duration") if isinstance(schedule, dict) else None
-        access_time_before_start = assessment.get("accessTimeBeforeStart", 15)  # Default 15 minutes
         
         now = datetime.utcnow()
         can_access = False
@@ -1151,20 +1150,14 @@ async def get_custom_mcq_assessment_for_taking(
             
             start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
             end_time = start_time + timedelta(minutes=duration)
-            access_start_time = start_time - timedelta(minutes=access_time_before_start)
             
-            if now < access_start_time:
+            if now < start_time:
                 # Too early - cannot access yet - return error response immediately
-                access_start_time_formatted = access_start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                start_time_formatted = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
                 return error_response(
-                    f"You cannot access this assessment yet. Access will be available {access_time_before_start} minutes before the start time. Access opens at {access_start_time_formatted}.",
+                    f"You cannot access this assessment yet. The assessment will start at {start_time_formatted}.",
                     status_code=403
                 )
-            elif access_start_time <= now < start_time:
-                # Within access window but before start time - can access for pre-checks
-                can_access = True
-                can_start = False
-                waiting_for_start = True
             elif start_time <= now < end_time:
                 # Exam is running
                 can_access = True

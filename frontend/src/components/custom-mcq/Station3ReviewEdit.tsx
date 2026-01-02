@@ -176,12 +176,108 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
   const mcqCount = questionsWithIds.filter(q => q.questionType === "mcq" || ("options" in q && "correctAn" in q)).length;
   const subjectiveCount = questionsWithIds.filter(q => q.questionType === "subjective" || !("options" in q && "correctAn" in q)).length;
 
+  // Per-section timer state
+  const enablePerSectionTimers = (assessmentData as any).enablePerSectionTimers || false;
+  const sectionTimers = (assessmentData as any).sectionTimers || { MCQ: 20, Subjective: 30 };
+
+  const handleEnablePerSectionTimersChange = (enabled: boolean) => {
+    updateAssessmentData({
+      enablePerSectionTimers: enabled,
+      sectionTimers: enabled ? sectionTimers : undefined,
+    } as any);
+  };
+
+  const handleSectionTimerChange = (section: "MCQ" | "Subjective", value: string) => {
+    const numValue = parseInt(value) || 1;
+    updateAssessmentData({
+      sectionTimers: {
+        ...sectionTimers,
+        [section]: numValue,
+      },
+    } as any);
+  };
+
   return (
     <div>
       <h2 style={{ marginBottom: "1.5rem", color: "#1E5A3B" }}>✏️ Review & Edit Questions</h2>
       <p style={{ marginBottom: "2rem", color: "#2D7A52" }}>
         Review, edit, or add questions. All questions from your CSV are shown below.
       </p>
+
+      {/* Per-Section Timer Settings */}
+      <div style={{ 
+        marginBottom: "2rem", 
+        padding: "1.5rem", 
+        backgroundColor: "#f8fafc", 
+        borderRadius: "0.75rem", 
+        border: "2px solid #e2e8f0" 
+      }}>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer", marginBottom: enablePerSectionTimers ? "1rem" : "0" }}>
+          <input
+            type="checkbox"
+            checked={enablePerSectionTimers}
+            onChange={(e) => handleEnablePerSectionTimersChange(e.target.checked)}
+            style={{ width: "20px", height: "20px", cursor: "pointer" }}
+          />
+          <div>
+            <div style={{ fontWeight: 600, color: "#1e293b", fontSize: "1rem" }}>
+              Enable Per-Section Timer
+            </div>
+            <div style={{ fontSize: "0.875rem", color: "#64748b", marginTop: "0.25rem" }}>
+              Each section (MCQ/Subjective) will have its own timer. Sections will be locked when their timer expires.
+            </div>
+          </div>
+        </label>
+
+        {enablePerSectionTimers && (
+          <div style={{ marginTop: "1.5rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+            {mcqCount > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                <label style={{ display: "block", minWidth: "120px", fontWeight: 600, color: "#1E5A3B" }}>
+                  MCQ Timer (minutes):
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={sectionTimers.MCQ || 20}
+                  onChange={(e) => handleSectionTimerChange("MCQ", e.target.value)}
+                  style={{ 
+                    width: "150px", 
+                    padding: "0.75rem", 
+                    border: "1px solid #A8E8BC", 
+                    borderRadius: "0.5rem" 
+                  }}
+                />
+                <span style={{ fontSize: "0.875rem", color: "#64748b" }}>
+                  {mcqCount} question{mcqCount !== 1 ? 's' : ''} in MCQ section
+                </span>
+              </div>
+            )}
+            {subjectiveCount > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                <label style={{ display: "block", minWidth: "120px", fontWeight: 600, color: "#1E5A3B" }}>
+                  Subjective Timer (minutes):
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={sectionTimers.Subjective || 30}
+                  onChange={(e) => handleSectionTimerChange("Subjective", e.target.value)}
+                  style={{ 
+                    width: "150px", 
+                    padding: "0.75rem", 
+                    border: "1px solid #A8E8BC", 
+                    borderRadius: "0.5rem" 
+                  }}
+                />
+                <span style={{ fontSize: "0.875rem", color: "#64748b" }}>
+                  {subjectiveCount} question{subjectiveCount !== 1 ? 's' : ''} in Subjective section
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
         <div>
