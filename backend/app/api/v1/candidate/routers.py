@@ -4,7 +4,7 @@ Candidate API endpoints for assessment taking.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -78,6 +78,44 @@ async def verify_candidate(
         # Check access mode early to handle public links correctly
         access_mode = assessment.get("accessMode", "private")
         
+        # Check if candidate has already submitted or is currently taking the assessment
+        # This prevents retaking and concurrent sessions (BEFORE checking time validation)
+        candidate_key = f"{request.email.lower()}_{request.name.strip().lower()}"
+        candidate_responses = assessment.get("candidateResponses", {})
+        existing_response = candidate_responses.get(candidate_key)
+        
+        if existing_response:
+            response_status = existing_response.get("status")
+            completed_at = existing_response.get("completedAt")
+            submitted_at = existing_response.get("answers", {}).get("submittedAt")
+            started_at = existing_response.get("startedAt")
+            
+            # Check if they've completed the assessment
+            has_completed = (
+                response_status == "completed" or
+                completed_at is not None or
+                submitted_at is not None
+            )
+            
+            # Check if they're currently taking it (started but not submitted)
+            is_in_progress = (
+                started_at is not None and
+                not has_completed
+            )
+            
+            if has_completed:
+                logger.warning(f"Blocking access for {candidate_key} - already submitted (status: {response_status}, completedAt: {completed_at}, submittedAt: {submitted_at})")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="You have already submitted this assessment. You cannot take the test again."
+                )
+            elif is_in_progress:
+                logger.warning(f"Blocking access for {candidate_key} - currently taking assessment (startedAt: {started_at}, completedAt: {completed_at})")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="You are already taking this assessment in another tab or browser. Please complete it there first."
+                )
+        
         # Check if assessment is paused
         assessment_status = assessment.get("status")
         if assessment_status == "paused":
@@ -142,7 +180,7 @@ async def verify_candidate(
         
         # Validate access time based on exam mode
         if exam_mode == "strict":
-            logger.info(f"[Verify Candidate] STRICT MODE - Validating start time...")
+            logger.info(f"[Verify Candidate] STRICT MODE - Validating start time and end time...")
             if not start_time_str:
                 logger.warning(f"[Verify Candidate] Strict mode but no startTime found. Assessment: {assessment_id}")
                 raise HTTPException(
@@ -167,7 +205,39 @@ async def verify_candidate(
                     IST = ZoneInfo("Asia/Kolkata")
                     start_time = start_time_utc.astimezone(IST).replace(tzinfo=None)
                     
-                    logger.info(f"[Verify Candidate] Time check - Now (IST): {now}, Start Time (IST): {start_time}")
+                    # Get duration to calculate end time
+                    duration_minutes = schedule.get("duration") if isinstance(schedule, dict) else None
+                    if not duration_minutes:
+                        duration_minutes = assessment.get("duration")
+                    
+                    # Calculate end time: start_time + duration
+                    end_time = None
+                    if duration_minutes:
+                        try:
+                            duration_int = int(duration_minutes)
+                            if duration_int > 0:
+                                end_time = start_time + timedelta(minutes=duration_int)
+                                logger.info(f"[Verify Candidate] Calculated end time: {end_time} (start: {start_time}, duration: {duration_int} minutes)")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"[Verify Candidate] Failed to parse duration: {duration_minutes}, error: {e}")
+                    
+                    # If end_time_str is provided, use it (takes precedence over calculated)
+                    if end_time_str:
+                        try:
+                            end_time_str_clean = end_time_str.replace('Z', '+00:00') if 'Z' in end_time_str else end_time_str
+                            if '+' not in end_time_str_clean and '-' not in end_time_str_clean[10:]:
+                                end_time_str_clean = end_time_str_clean + '+00:00'
+                            
+                            end_time_utc = datetime.fromisoformat(end_time_str_clean)
+                            if end_time_utc.tzinfo is None:
+                                end_time_utc = end_time_utc.replace(tzinfo=timezone.utc)
+                            
+                            end_time = end_time_utc.astimezone(IST).replace(tzinfo=None)
+                            logger.info(f"[Verify Candidate] Using provided end time: {end_time}")
+                        except (ValueError, AttributeError, TypeError) as e:
+                            logger.warning(f"[Verify Candidate] Failed to parse end_time_str: {end_time_str}, error: {e}")
+                    
+                    logger.info(f"[Verify Candidate] Time check - Now (IST): {now}, Start Time (IST): {start_time}, End Time (IST): {end_time}")
                     
                     # Block access if current time is before start time
                     if now < start_time:
@@ -178,8 +248,17 @@ async def verify_candidate(
                             status_code=status.HTTP_403_FORBIDDEN,
                             detail=error_message
                         )
+                    # Block access if current time is after end time
+                    elif end_time and now > end_time:
+                        end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M:%S IST')
+                        error_message = f"The assessment has ended. The assessment was available until {end_time_formatted}. You cannot take this assessment."
+                        logger.warning(f"[Verify Candidate] Access DENIED - after end time. Now: {now}, End: {end_time_formatted}")
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=error_message
+                        )
                     else:
-                        logger.info(f"[Verify Candidate] Access ALLOWED - start time has passed. Now: {now}, Start: {start_time}")
+                        logger.info(f"[Verify Candidate] Access ALLOWED - within time window. Now: {now}, Start: {start_time}, End: {end_time}")
                 except HTTPException as http_exc:
                     # Re-raise HTTP exceptions (access denied) - this is critical
                     raise http_exc

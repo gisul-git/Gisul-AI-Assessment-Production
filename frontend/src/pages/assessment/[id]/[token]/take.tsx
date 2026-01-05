@@ -742,6 +742,11 @@ export default function CandidateAssessmentPage() {
   const saveAnswer = useCallback(async (questionId: string, answer: string, section: string) => {
     if (!attemptId || !id || !token) return;
 
+    // Don't allow saving if section is locked (timer expired)
+    if (examSettings?.enablePerSectionTimers && lockedSections.has(section)) {
+      return;
+    }
+
     // Clear existing timeout
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -788,13 +793,18 @@ export default function CandidateAssessmentPage() {
       } catch (error) {
       }
     }, 500);
-  }, [attemptId, id, token, timerRemaining, logAnalyticsEvent]);
+  }, [attemptId, id, token, timerRemaining, logAnalyticsEvent, examSettings, lockedSections]);
 
   // ============================================================================
   // CODE EXECUTION (DSA-style)
   // ============================================================================
 
   const handleRunCode = async (questionId: string, question: Question) => {
+    // Don't allow running code if section is locked
+    if (examSettings?.enablePerSectionTimers && currentSection && lockedSections.has(currentSection)) {
+      return;
+    }
+
     setRunning(true);
     setOutput(prev => ({ ...prev, [questionId]: {} }));
     setPublicResults(prev => ({ ...prev, [questionId]: [] }));
@@ -935,6 +945,11 @@ export default function CandidateAssessmentPage() {
   };
 
   const handleSubmitCode = async (questionId: string, question: Question) => {
+    // Don't allow submitting code if section is locked
+    if (examSettings?.enablePerSectionTimers && currentSection && lockedSections.has(currentSection)) {
+      return;
+    }
+
     setSubmitting(true);
     setOutput(prev => ({ ...prev, [questionId]: {} }));
     setPublicResults(prev => ({ ...prev, [questionId]: [] }));
@@ -1132,16 +1147,22 @@ export default function CandidateAssessmentPage() {
     }
     
     // Enforce sequential access - can't jump to sections before completing previous ones
+    // Note: Both completed sections and locked sections (timer-based) are considered "accessible past"
     const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
     const targetIndex = sectionOrder.indexOf(section);
     const currentIndex = currentSection ? sectionOrder.indexOf(currentSection) : -1;
     
-    // Check if trying to access a section that comes before the first incomplete section
+    // Check if trying to access a section that comes before the first incomplete/unlocked section
     for (let i = 0; i < targetIndex; i++) {
       const prevSection = sectionOrder[i];
-      if (sections[prevSection]?.length > 0 && !completedSections.has(prevSection)) {
-        // Trying to jump ahead - not allowed
-        return;
+      if (sections[prevSection]?.length > 0) {
+        // Allow navigation if previous section is either completed OR locked (timer-based)
+        const isCompleted = completedSections.has(prevSection);
+        const isLocked = examSettings?.enablePerSectionTimers && lockedSections.has(prevSection);
+        if (!isCompleted && !isLocked) {
+          // Trying to jump ahead - not allowed
+          return;
+        }
       }
     }
     
@@ -1163,6 +1184,87 @@ export default function CandidateAssessmentPage() {
       }
     }
   }, [sections, logAnalyticsEvent, getQuestionId, getCurrentQuestion, currentSection, answers, codeAnswers, attemptId, timerRemaining, lockedSections, completedSections, examSettings]);
+
+  // Helper function to save all answers in a section
+  const saveAllAnswersInSection = useCallback(async (section: keyof Sections): Promise<void> => {
+    if (!attemptId || !id || !token) return;
+
+    // Clear any pending debounced saves
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
+    const savePromises: Promise<void>[] = [];
+    const sectionQuestions = sections[section] || [];
+
+    sectionQuestions.forEach((question) => {
+      const questionId = question._id || question.id || `${section}-${sectionQuestions.indexOf(question)}`;
+      const answer = answers.get(questionId) || codeAnswers.get(questionId) || "";
+      const lastSaved = lastSavedAnswerRef.current.get(questionId);
+
+      if (answer && answer !== lastSaved) {
+        // Save answer to backend
+        savePromises.push(
+          axios.post("/api/v1/attempts/save-answer", {
+            attemptId,
+            questionId,
+            answer,
+            section,
+            timeRemaining: timerRemaining,
+          }).then(() => {
+            lastSavedAnswerRef.current.set(questionId, answer);
+          }).catch(() => {
+            // Failed to save answer - ignore error
+          })
+        );
+      }
+    });
+
+    await Promise.allSettled(savePromises);
+  }, [attemptId, id, token, sections, answers, codeAnswers, timerRemaining]);
+
+  // Helper function to save all answers from all sections (used before auto-submit)
+  const saveAllAnswersFromAllSections = useCallback(async (): Promise<void> => {
+    if (!attemptId || !id || !token) return;
+
+    // Clear any pending debounced saves
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
+    const savePromises: Promise<void>[] = [];
+    const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
+
+    sectionOrder.forEach((section) => {
+      const sectionQuestions = sections[section] || [];
+      sectionQuestions.forEach((question) => {
+        const questionId = question._id || question.id || `${section}-${sectionQuestions.indexOf(question)}`;
+        const answer = answers.get(questionId) || codeAnswers.get(questionId) || "";
+        const lastSaved = lastSavedAnswerRef.current.get(questionId);
+
+        if (answer && answer !== lastSaved) {
+          // Save answer to backend
+          savePromises.push(
+            axios.post("/api/v1/attempts/save-answer", {
+              attemptId,
+              questionId,
+              answer,
+              section,
+              timeRemaining: timerRemaining,
+            }).then(() => {
+              lastSavedAnswerRef.current.set(questionId, answer);
+            }).catch(() => {
+              // Failed to save answer - ignore error
+            })
+          );
+        }
+      });
+    });
+
+    await Promise.allSettled(savePromises);
+  }, [attemptId, id, token, sections, answers, codeAnswers, timerRemaining]);
 
   // Helper function to save current answer before navigation
   const saveCurrentAnswer = useCallback(async (): Promise<boolean> => {
@@ -1208,6 +1310,11 @@ export default function CandidateAssessmentPage() {
 
   const navigateNext = useCallback(async () => {
     if (!currentSection) {
+      return;
+    }
+
+    // Check if current section is locked - don't allow navigation
+    if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
       return;
     }
 
@@ -1524,7 +1631,6 @@ export default function CandidateAssessmentPage() {
       // Collect all answers for final submission
       // IMPORTANT: Use questions array (allQuestions) to maintain the same order as backend
       // Backend expects answers in the order of topics_v2 -> questionRows -> questions
-      console.log("[Submit] Collecting all answers for submission...");
       const allAnswers: Array<any> = [];
 
       questions.forEach((question, globalIndex) => {
@@ -1557,7 +1663,6 @@ export default function CandidateAssessmentPage() {
               memory: r.memory,
               error: r.error || "",
             }));
-            console.log(`[Submit] Coding question ${globalIndex}: Added ${answerObj.testResults.length} test results`);
           } else if (publicResults[questionId] && publicResults[questionId].length > 0) {
             // Fallback to publicResults if submission history not available
             answerObj.testResults = publicResults[questionId].map((r: any) => ({
@@ -1573,7 +1678,6 @@ export default function CandidateAssessmentPage() {
               memory: r.memory,
               error: r.error || "",
             }));
-            console.log(`[Submit] Coding question ${globalIndex}: Added ${answerObj.testResults.length} test results from publicResults`);
           }
           
           // Also include source_code field for coding
@@ -1597,7 +1701,6 @@ export default function CandidateAssessmentPage() {
               time: sqlTestResult.time,
               memory: sqlTestResult.memory,
             };
-            console.log(`[Submit] SQL question ${globalIndex}: Added test result from sqlTestResults`);
           } else {
             // Fallback: try to get from output if test result not stored
             const sqlOutput = output[questionId];
@@ -1608,7 +1711,6 @@ export default function CandidateAssessmentPage() {
                 user_output: sqlOutput.stdout || "",
                 error: sqlOutput.stderr || sqlOutput.error || "",
               };
-              console.log(`[Submit] SQL question ${globalIndex}: Added test result from output (fallback)`);
             }
           }
           
@@ -1654,7 +1756,6 @@ export default function CandidateAssessmentPage() {
             });
             answerObj.outputs = parsedOutputs;
             answerObj.aimlOutputs = parsedOutputs;
-            console.log(`[Submit] AIML question ${globalIndex}: Added ${parsedOutputs.length} outputs`);
           }
           
           if (answer.trim()) {
@@ -1694,13 +1795,8 @@ export default function CandidateAssessmentPage() {
         
         if (answer.trim() || answerObj.testResults || answerObj.testResult || answerObj.selectedAnswers) {
           allAnswers.push(answerObj);
-          console.log(`[Submit] Collected answer for questionIndex ${globalIndex} (${questionType}): length=${answer.length}, hasTestResults=${!!answerObj.testResults}, hasTestResult=${!!answerObj.testResult}`);
-        } else {
-          console.log(`[Submit] Skipping empty answer for questionIndex ${globalIndex} (${questionType})`);
         }
       });
-      
-      console.log(`[Submit] Total answers collected: ${allAnswers.length} out of ${questions.length} total questions`);
 
       // Step 5: Submit to backend with comprehensive data
       try {
@@ -1958,31 +2054,10 @@ export default function CandidateAssessmentPage() {
               sectionTimerMap[sectionKey] = minutes * 60; // Convert to seconds
             }
           });
-          // console.log("[take.tsx] Per-section timers initialized:", {
-          //   enablePerSectionTimers,
-          //   sectionTimersFromDB,
-          //   sectionTimerMap,
-          //   hasTimers: Object.keys(sectionTimerMap).length > 0,
-          // });
           if (Object.keys(sectionTimerMap).length > 0) {
             setSectionTimers(sectionTimerMap);
-          } else {
-            // console.warn("[take.tsx] Per-section timers enabled but no valid timers found in sectionTimersFromDB");
           }
-        } else {
-          // console.log("[take.tsx] Per-section timers not enabled or missing:", {
-          //   enablePerSectionTimers,
-          //   hasSectionTimersFromDB: !!sectionTimersFromDB,
-          //   sectionTimersFromDB,
-          // });
         }
-        
-        // console.log("[take.tsx] Exam settings:", {
-        //   enablePerSectionTimers,
-        //   sectionTimersFromDB,
-        //   fetchedSettings,
-        // });
-        // console.log("[take.tsx] Topics_v2 structure (raw):", JSON.stringify(topics_v2, null, 2));
 
         // Read proctoring flags from schedule.proctoringSettings (if present)
         const proctoringSettings = assessment?.schedule?.proctoringSettings;
@@ -1993,48 +2068,17 @@ export default function CandidateAssessmentPage() {
         setLiveProctoringEnabled(liveFlagFromSchedule === true);
 
         // Transform topics_v2 into sections
-        // console.log("[take.tsx] About to transform topics_v2, input length:", topics_v2.length);
-        // console.log("[take.tsx] First topic sample:", JSON.stringify(topics_v2[0], null, 2)); // Log first topic as sample
         const transformed = transformTopicsV2ToSections(topics_v2);
-        // console.log("[take.tsx] Transformed sections:", {
-        //   mcq: transformed.sections.mcq.length,
-        //   subjective: transformed.sections.subjective.length,
-        //   pseudocode: transformed.sections.pseudocode.length,
-        //   coding: transformed.sections.coding.length,
-        //   sql: transformed.sections.sql.length,
-        //   aiml: transformed.sections.aiml.length,
-        //   allQuestions: transformed.allQuestions.length,
-        // });
         
         // Debug: Check if transformation actually processed questions
         if (transformed.allQuestions.length === 0) {
-          // console.error("[take.tsx] TRANSFORMATION FAILED - No questions in result but questions exist in input!");
-          // console.error("[take.tsx] Input topics_v2 structure:", JSON.stringify(topics_v2.map((t: any) => ({
-          //   id: t?.id,
-          //   label: t?.label,
-          //   questionRows: t?.questionRows?.map((r: any) => ({
-          //     rowId: r?.rowId,
-          //     questionType: r?.questionType,
-          //     questionsCount: r?.questions?.length || 0,
-          //     questions: r?.questions,
-          //   })),
-          // })), null, 2));
-          
           // CRITICAL: If we're before start time and no questions, show waiting page instead of error
           if (isBeforeStartTime && parsedStartTime) {
-            // console.log("[take.tsx] Before start time and no questions - showing waiting page instead of error");
             setWaitingForStart(true);
             setStartTime(parsedStartTime);
             setAppState("ready");
             return; // Show waiting page, not error
           }
-        } else {
-          // console.log("[take.tsx] Transformation successful! Questions by section:", {
-          //   mcq: transformed.sections.mcq.map(q => ({ id: q._id, type: q.type })),
-          //   subjective: transformed.sections.subjective.map(q => ({ id: q._id, type: q.type })),
-          //   coding: transformed.sections.coding.map(q => ({ id: q._id, type: q.type })),
-          //   aiml: transformed.sections.aiml.map(q => ({ id: q._id, type: q.type })),
-          // });
         }
 
         if (transformed.allQuestions.length === 0) {
@@ -2070,15 +2114,6 @@ export default function CandidateAssessmentPage() {
           
           errorMessage += " Please contact the administrator.";
           
-          // console.error("[take.tsx] No questions available:", {
-          //   hasTopicsV2,
-          //   hasTopics,
-          //   assessmentStatus,
-          //   allQuestionsGenerated,
-          //   topicsV2Length: Array.isArray(topics_v2) ? topics_v2.length : 0,
-          //   errorMessage,
-          // });
-          
           throw new Error(errorMessage);
         }
 
@@ -2091,32 +2126,15 @@ export default function CandidateAssessmentPage() {
         // Set first non-empty section as current (order: MCQ → PseudoCode → Subjective → Coding → SQL → AIML)
         const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
         const firstSection = sectionOrder.find((section) => transformed.sections[section].length > 0);
-        // console.log("[take.tsx] First section:", firstSection);
         if (firstSection) {
           setCurrentSection(firstSection);
           setCurrentQuestionIndex(0);
-        } else {
-          // console.warn("[take.tsx] No sections with questions found!");
         }
 
         // Calculate and set timer
         const calculatedTimer = calculateTimer(fetchedSettings);
-        // console.log("[take.tsx] Timer calculation:", {
-        //   duration: fetchedSettings.duration,
-        //   examMode: fetchedSettings.examMode,
-        //   calculatedTimer,
-        //   sectionsCount: {
-        //     mcq: transformed.sections.mcq.length,
-        //     pseudocode: transformed.sections.pseudocode.length,
-        //     subjective: transformed.sections.subjective.length,
-        //     coding: transformed.sections.coding.length,
-        //     sql: transformed.sections.sql.length,
-        //     aiml: transformed.sections.aiml.length,
-        //   },
-        // });
         
         if (calculatedTimer <= 0) {
-          // console.warn("[take.tsx] Calculated timer is 0 or negative, using default 60 minutes");
           setTimerRemaining(60 * 60); // Default to 60 minutes
         } else {
           setTimerRemaining(calculatedTimer);
@@ -2124,7 +2142,6 @@ export default function CandidateAssessmentPage() {
 
         setAppState("ready");
       } catch (error: any) {
-        // console.error("[Load] Failed to load assessment:", error);
         setError(error.response?.data?.message || "Failed to load assessment");
         setAppState("ready");
       }
@@ -2176,12 +2193,18 @@ export default function CandidateAssessmentPage() {
     timerIntervalRef.current = setInterval(() => {
       setTimerRemaining((prev) => {
         if (prev <= 1) {
-          // Timer expired - auto-submit
+          // Timer expired - save all answers first, then auto-submit
           if (timerIntervalRef.current) {
             clearInterval(timerIntervalRef.current);
             timerIntervalRef.current = null;
           }
-          submitAssessment();
+          // Save all answers before submitting to ensure backend has all data for evaluation
+          saveAllAnswersFromAllSections().then(() => {
+            submitAssessment();
+          }).catch(() => {
+            // If save fails, still submit (answers may already be saved)
+            submitAssessment();
+          });
           return 0;
         }
         return prev - 1;
@@ -2194,7 +2217,7 @@ export default function CandidateAssessmentPage() {
         timerIntervalRef.current = null;
       }
     };
-  }, [appState, timerRemaining, submitAssessment]);
+  }, [appState, timerRemaining, submitAssessment, saveAllAnswersFromAllSections]);
 
   // Per-section timer countdown (when per-section timers are enabled)
   useEffect(() => {
@@ -2229,43 +2252,63 @@ export default function CandidateAssessmentPage() {
             sectionTimerIntervalRef.current = null;
           }
           
-          // Section timer expired - lock this section and handle navigation
-          setLockedSections((currentLocked) => {
-            const newLockedSet = new Set(currentLocked);
-            newLockedSet.add(currentSection);
-            
-            // If current section is locked, try to move to next unlocked section
-            const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
-            const currentIndex = sectionOrder.indexOf(currentSection as keyof Sections);
-            
-            // Find next unlocked section
-            let foundNext = false;
-            for (let i = currentIndex + 1; i < sectionOrder.length; i++) {
-              const nextSection = sectionOrder[i];
-              const isLocked = newLockedSet.has(nextSection);
-              if (sections[nextSection]?.length > 0 && !isLocked) {
-                // Use setTimeout to avoid state update conflicts
-                setTimeout(() => {
-                  setCurrentSection(nextSection);
-                  setCurrentQuestionIndex(0);
-                }, 0);
-                foundNext = true;
-                break;
+          // Section timer expired - save all answers first, then lock this section and handle navigation
+          // Auto-save all answers in the expiring section before locking (handle async outside state setter)
+          const sectionToLock = currentSection;
+          saveAllAnswersInSection(sectionToLock as keyof Sections).then(() => {
+            // After saving, lock the section
+            setLockedSections((currentLocked) => {
+              const newLockedSet = new Set(currentLocked);
+              newLockedSet.add(sectionToLock);
+              
+              // If current section is locked, try to move to next unlocked section
+              const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
+              const currentIndex = sectionOrder.indexOf(sectionToLock as keyof Sections);
+              
+              // Find next unlocked section
+              let foundNext = false;
+              for (let i = currentIndex + 1; i < sectionOrder.length; i++) {
+                const nextSection = sectionOrder[i];
+                const isLocked = newLockedSet.has(nextSection);
+                if (sections[nextSection]?.length > 0 && !isLocked) {
+                  // Use setTimeout to avoid state update conflicts
+                  setTimeout(() => {
+                    setCurrentSection(nextSection);
+                    setCurrentQuestionIndex(0);
+                  }, 0);
+                  foundNext = true;
+                  break;
+                }
               }
-            }
-            
-            // If all sections are locked, auto-submit
-            if (!foundNext) {
-              const allSectionsLocked = sectionOrder.every(section => {
-                const isLocked = newLockedSet.has(section);
-                return isLocked || sections[section]?.length === 0;
-              });
-              if (allSectionsLocked) {
-                setTimeout(() => submitAssessment(), 0);
+              
+              // If all sections are locked, save all answers first, then auto-submit
+              if (!foundNext) {
+                const allSectionsLocked = sectionOrder.every(section => {
+                  const isLocked = newLockedSet.has(section);
+                  return isLocked || sections[section]?.length === 0;
+                });
+                if (allSectionsLocked) {
+                  // Save all answers from all sections before submitting to ensure backend has all data for evaluation
+                  setTimeout(() => {
+                    saveAllAnswersFromAllSections().then(() => {
+                      submitAssessment();
+                    }).catch(() => {
+                      // If save fails, still submit (answers may already be saved)
+                      submitAssessment();
+                    });
+                  }, 0);
+                }
               }
-            }
-            
-            return newLockedSet;
+              
+              return newLockedSet;
+            });
+          }).catch(() => {
+            // If save fails, still lock the section
+            setLockedSections((currentLocked) => {
+              const newLockedSet = new Set(currentLocked);
+              newLockedSet.add(sectionToLock);
+              return newLockedSet;
+            });
           });
           
           return { ...prev, [currentSection]: 0 };
@@ -2280,7 +2323,7 @@ export default function CandidateAssessmentPage() {
         sectionTimerIntervalRef.current = null;
       }
     };
-  }, [appState, currentSection, examSettings.enablePerSectionTimers, sections, submitAssessment, lockedSections, sectionTimers]);
+  }, [appState, currentSection, examSettings.enablePerSectionTimers, sections, submitAssessment, lockedSections, sectionTimers, saveAllAnswersInSection]);
 
   // ============================================================================
   // RENDERING
@@ -2388,15 +2431,6 @@ export default function CandidateAssessmentPage() {
 
   // currentQuestion is now memoized above - no need to call getCurrentQuestion() here
   if (!currentQuestion || !currentSection) {
-    // Debug information
-    // console.error("[take.tsx] No question available:", {
-    //   currentQuestion,
-    //   currentSection,
-    //   sections,
-    //   questionsLength: questions.length,
-    //   currentQuestionIndex,
-    // });
-
     return (
       <div style={{ backgroundColor: "#f1dcba", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
         <div style={{ textAlign: "center", maxWidth: "600px" }}>
@@ -2422,12 +2456,6 @@ export default function CandidateAssessmentPage() {
           )}
           <button
             onClick={() => {
-              // console.log("[take.tsx] Full state:", {
-              //   questions,
-              //   sections,
-              //   currentSection,
-              //   currentQuestionIndex,
-              // });
               // Try to set first available section
               const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "aiml"];
               const firstSection = sectionOrder.find((section) => sections[section].length > 0);
@@ -2584,14 +2612,20 @@ export default function CandidateAssessmentPage() {
                 const isLocked = isTimerLocked || isCompleted;
                 
                 // Check if section is accessible (sequential access enforcement)
+                // Note: Both completed sections and locked sections (timer-based) are considered "accessible past"
                 const sectionOrder: (keyof Sections)[] = ["mcq", "pseudocode", "subjective", "coding", "sql", "aiml"];
                 const sectionIndex = sectionOrder.indexOf(section);
                 let isAccessible = true;
                 for (let i = 0; i < sectionIndex; i++) {
                   const prevSection = sectionOrder[i];
-                  if (sections[prevSection]?.length > 0 && !completedSections.has(prevSection)) {
-                    isAccessible = false;
-                    break;
+                  if (sections[prevSection]?.length > 0) {
+                    // Allow access if previous section is either completed OR locked (timer-based)
+                    const isCompleted = completedSections.has(prevSection);
+                    const isLocked = examSettings?.enablePerSectionTimers && lockedSections.has(prevSection);
+                    if (!isCompleted && !isLocked) {
+                      isAccessible = false;
+                      break;
+                    }
                   }
                 }
                 
@@ -2782,14 +2816,6 @@ export default function CandidateAssessmentPage() {
                   // Also check for 'question' field which might contain the full formatted text
                   const questionDescription = (currentQuestion as any).question || currentQuestion.questionText || currentQuestion.description || aimlData.description || "";
                   
-                  // console.log('[Assessment Take] AIML Question fields:', {
-                  //   hasQuestion: !!(currentQuestion as any).question,
-                  //   hasQuestionText: !!currentQuestion.questionText,
-                  //   hasDescription: !!currentQuestion.description,
-                  //   questionLength: ((currentQuestion as any).question || '').length,
-                  //   questionTextLength: (currentQuestion.questionText || '').length,
-                  //   descriptionLength: (currentQuestion.description || '').length,
-                  // });
                   const library = currentQuestion.library || aimlData.libraries?.[0] || aimlData.library || "numpy";
                   const tasks = currentQuestion.tasks || aimlData.tasks || [];
                   const publicTestcases = currentQuestion.public_testcases || aimlData.public_testcases || [];
@@ -2834,7 +2860,12 @@ export default function CandidateAssessmentPage() {
                       sessionId={`assessment_${id}_question_${questionIdStr}`}
                       testId={id as string}
                       userId={candidateEmail}
+                      readOnly={examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)}
                       onCodeChange={(allCode) => {
+                        // Don't allow changes if section is locked
+                        if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                          return;
+                        }
                         setCode({ ...code, [questionIdStr]: allCode });
                         setCodeAnswers((prev) => {
                           const updated = new Map(prev);
@@ -2844,6 +2875,10 @@ export default function CandidateAssessmentPage() {
                         saveAnswer(questionIdStr, allCode, currentSection);
                       }}
                       onSubmit={(allCode, outputs) => {
+                        // Don't allow submission if section is locked
+                        if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                          return;
+                        }
                         // Store AIML outputs in state
                         if (outputs && outputs.length > 0) {
                           setAimlOutputs(prev => ({ ...prev, [questionIdStr]: outputs }));
@@ -3079,6 +3114,10 @@ export default function CandidateAssessmentPage() {
                             code={currentCode}
                             question={sqlQuestion}
                             onCodeChange={(newCode) => {
+                              // Don't allow changes if section is locked
+                              if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                                return;
+                              }
                               const updatedCode = { ...code, [questionIdStr]: newCode };
                               setCode(updatedCode);
                               setCodeAnswers((prev) => {
@@ -3161,7 +3200,6 @@ export default function CandidateAssessmentPage() {
                                   }));
                                 }
                               } catch (error: any) {
-                                // console.error('SQL run error:', error);
                                 setOutput(prev => ({
                                   ...prev,
                                   [questionId]: {
@@ -3250,7 +3288,6 @@ export default function CandidateAssessmentPage() {
                                 
                                 await saveAnswer(questionId, currentCode, currentSection || 'sql');
                               } catch (error: any) {
-                                console.error('SQL submit error:', error);
                                 setOutput(prev => ({
                                   ...prev,
                                   [questionId]: {
@@ -3263,6 +3300,10 @@ export default function CandidateAssessmentPage() {
                               }
                             }}
                             onReset={() => {
+                              // Don't allow reset if section is locked
+                              if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                                return;
+                              }
                               const starterQuery = currentQuestion.starter_query || '-- Write your SQL query here\n\nSELECT ';
                               setCode({ ...code, [questionIdStr]: starterQuery });
                               setCodeAnswers((prev) => {
@@ -3321,6 +3362,10 @@ export default function CandidateAssessmentPage() {
                               code={currentCode}
                               question={currentQuestion as any}
                               onCodeChange={(newCode) => {
+                                // Don't allow changes if section is locked
+                                if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                                  return;
+                                }
                                 const updatedCode = { ...code, [questionIdStr]: newCode };
                                 setCode(updatedCode);
                                 setCodeAnswers((prev) => {
@@ -3331,7 +3376,6 @@ export default function CandidateAssessmentPage() {
                                 saveAnswer(questionIdStr, newCode, currentSection);
                               }}
                               onRun={async () => {
-                                // console.log("SQL run not yet implemented");
                               }}
                               onSubmit={async () => {
                                 const currentCode = code[questionIdStr] || codeAnswers.get(questionIdStr) || '';
@@ -3385,6 +3429,10 @@ export default function CandidateAssessmentPage() {
                             languages={availableLanguages}
                             starterCode={starterCodeObj}
                             onCodeChange={(newCode) => {
+                              // Don't allow changes if section is locked
+                              if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                                return;
+                              }
                               const updatedCode = { ...code, [questionIdStr]: newCode };
                               setCode(updatedCode);
                               setCodeAnswers((prev) => {
@@ -3483,8 +3531,14 @@ export default function CandidateAssessmentPage() {
                           ) : (
                             <button
                               type="button"
-                              onClick={navigateNext}
-                              disabled={appState === "submitting"}
+                              onClick={() => {
+                                // Don't allow navigation if section is locked
+                                if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                                  return;
+                                }
+                                navigateNext();
+                              }}
+                              disabled={appState === "submitting" || (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection))}
                               style={{ 
                                 padding: "0.75rem 1.5rem",
                                 backgroundColor: appState === "submitting" ? "#e2e8f0" : "#6953a3",
@@ -3571,28 +3625,28 @@ export default function CandidateAssessmentPage() {
                           name={`question-${questionId}`}
                           value={option}
                           checked={isSelected}
+                          disabled={examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)}
                           onChange={(e) => {
+                            // Don't allow changes if section is locked
+                            if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                              return;
+                            }
                             const newAnswer = e.target.value;
-                            // console.log("[MCQ Selection] ========== OPTION SELECTED ==========");
-                            // console.log("[MCQ Selection] Question ID:", questionId);
-                            // console.log("[MCQ Selection] Selected Option:", newAnswer);
-                            // console.log("[MCQ Selection] Option Index:", idx);
-                            // console.log("[MCQ Selection] Current Section:", currentSection);
                             
                             setAnswers((prev) => {
                               const updated = new Map(prev);
                               updated.set(questionId, newAnswer);
-                              // console.log("[MCQ Selection] Updated answers Map");
-                              // console.log("[MCQ Selection] All answers in Map:", Array.from(updated.entries()));
                               return updated;
                             });
                             
-                            // console.log("[MCQ Selection] Calling saveAnswer...");
                             saveAnswer(questionId, newAnswer, currentSection);
-                            // console.log("[MCQ Selection] saveAnswer called (debounced)");
-                            // console.log("[MCQ Selection] =====================================");
                           }}
-                          style={{ width: "20px", height: "20px", cursor: "pointer" }}
+                          style={{ 
+                            width: "20px", 
+                            height: "20px", 
+                            cursor: (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) ? "not-allowed" : "pointer",
+                            opacity: (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) ? 0.5 : 1,
+                          }}
                         />
                         <span style={{ color: "#1a1625", fontSize: "0.875rem" }}>{option}</span>
                     </label>
@@ -3605,7 +3659,12 @@ export default function CandidateAssessmentPage() {
                 <div style={{ marginBottom: "1.5rem" }}>
                 <textarea
                     value={answers.get(questionId) || ""}
+                    disabled={examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)}
                     onChange={(e) => {
+                      // Don't allow changes if section is locked
+                      if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
+                        return;
+                      }
                       const newAnswer = e.target.value;
                       setAnswers((prev) => {
                         const updated = new Map(prev);
@@ -3624,6 +3683,9 @@ export default function CandidateAssessmentPage() {
                     fontSize: "0.875rem",
                       fontFamily: (currentQuestion.type && (currentQuestion.type.toLowerCase() === "pseudocode" || currentQuestion.type.toLowerCase() === "pseudo code")) || currentSection === "pseudocode" ? "monospace" : "inherit",
                     resize: "vertical",
+                    opacity: (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) ? 0.6 : 1,
+                    cursor: (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) ? "not-allowed" : "text",
+                    backgroundColor: (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) ? "#f3f4f6" : "#ffffff",
                     }}
                   />
                 </div>
@@ -3679,45 +3741,28 @@ export default function CandidateAssessmentPage() {
                   <button
                     type="button"
                     onClick={(e) => {
-                      // console.log("[Button Click] Save & Next button clicked");
-                      // console.log("[Button Click] Event:", e);
-                      // console.log("[Button Click] App State:", appState);
-                      // console.log("[Button Click] Current Section:", currentSection);
-                      // console.log("[Button Click] Current Question Index:", currentQuestionIndex);
-                      // console.log("[Button Click] Is Disabled?", appState === "submitting");
-                      
                       if (appState === "submitting") {
-                        // console.warn("[Button Click] Button is disabled, ignoring click");
+                        return;
+                      }
+                      // Don't allow navigation if section is locked
+                      if (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) {
                         return;
                       }
                       
-                      // Get current question info for logging
-                      const currentQuestion = getCurrentQuestion();
-                      if (currentQuestion) {
-                        const questionId = getQuestionId(currentQuestion);
-                        const currentAnswer = answers.get(questionId) || codeAnswers.get(questionId) || "";
-                        // console.log("[Button Click] Current Question ID:", questionId);
-                        // console.log("[Button Click] Current Answer:", currentAnswer || "EMPTY");
-                        // console.log("[Button Click] Answer in answers Map:", answers.get(questionId) || "NOT FOUND");
-                        // console.log("[Button Click] Answer in codeAnswers Map:", codeAnswers.get(questionId) || "NOT FOUND");
-                        // console.log("[Button Click] All answers Map keys:", Array.from(answers.keys()));
-                        // console.log("[Button Click] All codeAnswers Map keys:", Array.from(codeAnswers.keys()));
-                      }
-                      
                       navigateNext().catch((error) => {
-                        // console.error("[Button Click] ERROR in navigateNext:", error);
                       });
                     }}
-                    disabled={appState === "submitting"}
+                    disabled={appState === "submitting" || (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection))}
                     style={{ 
                       padding: "0.75rem 1.5rem",
-                      backgroundColor: appState === "submitting" ? "#e2e8f0" : "#6953a3",
+                      backgroundColor: (appState === "submitting" || (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection))) ? "#e2e8f0" : "#6953a3",
                       color: "#ffffff",
                       border: "none",
                       borderRadius: "0.5rem",
-                      cursor: appState === "submitting" ? "not-allowed" : "pointer",
+                      cursor: (appState === "submitting" || (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection))) ? "not-allowed" : "pointer",
                       fontSize: "0.875rem",
                       fontWeight: 600,
+                      opacity: (examSettings?.enablePerSectionTimers && lockedSections.has(currentSection)) ? 0.6 : 1,
                     }}
                   >
                     Save & Next

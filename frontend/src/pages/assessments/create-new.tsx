@@ -2838,6 +2838,9 @@ export default function CreateNewAssessmentPage() {
     
     // Calculate section timers as sum of question times (in minutes)
     const calculateSectionTime = (questions: Array<{ difficulty: string }>, questionType: string): number => {
+      if (questions.length === 0) {
+        return 0; // Return 0 if no questions
+      }
       const totalSeconds = questions.reduce((sum, q) => {
         const baseTime = getBaseTimePerQuestion(questionType);
         const multiplier = getDifficultyMultiplier(q.difficulty);
@@ -2859,22 +2862,9 @@ export default function CreateNewAssessmentPage() {
       AIML: calculateSectionTime(questionsByType.AIML, "AIML"),
     };
     
-    // Only update if timers are 0 (initial state) or if questions changed significantly
-    setSectionTimers(prev => {
-      const hasZeroTimers = Object.values(prev).every(t => t === 0);
-      if (hasZeroTimers) {
-        return newTimers;
-      }
-      // If user has manually edited, only update sections that are still 0
-      return {
-        MCQ: prev.MCQ === 0 ? newTimers.MCQ : prev.MCQ,
-        Subjective: prev.Subjective === 0 ? newTimers.Subjective : prev.Subjective,
-        PseudoCode: prev.PseudoCode === 0 ? newTimers.PseudoCode : prev.PseudoCode,
-        Coding: prev.Coding === 0 ? newTimers.Coding : prev.Coding,
-        SQL: prev.SQL === 0 ? newTimers.SQL : prev.SQL,
-        AIML: prev.AIML === 0 ? newTimers.AIML : prev.AIML,
-      };
-    });
+    // Always update section timers based on current questions when per-section timers are enabled
+    // This ensures timers reflect the actual question count (reduces when questions are removed)
+    setSectionTimers(newTimers);
   }, [currentStation, enablePerSectionTimers, topicsV2]);
 
   // Save scoring rules, pass percentage, and section timers to draft when they change
