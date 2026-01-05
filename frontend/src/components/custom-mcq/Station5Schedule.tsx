@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { CustomMCQAssessment } from "../../types/custom-mcq";
 import { customMCQApi } from "../../lib/custom-mcq/api";
 import EmailInvitationModal from "./EmailInvitationModal";
@@ -46,6 +46,10 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
   );
   const [duration, setDuration] = useState(scheduleDuration?.toString() || "");
   const [passPercentage, setPassPercentage] = useState(assessmentData.passPercentage?.toString() || "50");
+  
+  // Get per-section timer settings (memoized to avoid unnecessary re-renders)
+  const enablePerSectionTimers = useMemo(() => (assessmentData as any)?.enablePerSectionTimers || false, [assessmentData]);
+  const sectionTimers = useMemo(() => (assessmentData as any)?.sectionTimers || {}, [assessmentData]);
   const [aiProctoringEnabled, setAiProctoringEnabled] = useState(
     (assessmentData as any)?.proctoringSettings?.aiProctoringEnabled ?? false
   );
@@ -110,7 +114,16 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     if (scheduleEndTime) {
       setEndTime(utcToLocalDatetimeLocal(scheduleEndTime));
     }
-    if (scheduleDuration !== undefined) {
+    
+    // Auto-calculate duration from section timers if per-section timers are enabled
+    const perSectionTimersEnabled = (assessmentData as any)?.enablePerSectionTimers || false;
+    const sectionTimersData = (assessmentData as any)?.sectionTimers || {};
+    if (perSectionTimersEnabled && sectionTimersData) {
+      const totalMinutes = (sectionTimersData.MCQ || 0) + (sectionTimersData.Subjective || 0);
+      if (totalMinutes > 0) {
+        setDuration(totalMinutes.toString());
+      }
+    } else if (scheduleDuration !== undefined) {
       setDuration(scheduleDuration.toString());
     }
     
@@ -156,13 +169,46 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assessmentId, assessmentData]);
 
+  // Auto-calculate duration from section timers when per-section timers are enabled
   useEffect(() => {
+    if (enablePerSectionTimers && sectionTimers) {
+      const totalMinutes = (sectionTimers.MCQ || 0) + (sectionTimers.Subjective || 0);
+      if (totalMinutes > 0) {
+        setDuration(totalMinutes.toString());
+      }
+    }
+  }, [enablePerSectionTimers, sectionTimers]);
+
+  // Use ref to preserve existing schedule fields that we're not updating in this effect
+  const scheduleRef = useRef<any>((assessmentData as any)?.schedule || {});
+  
+  // Update ref when assessmentData changes from external source (initial load, etc.)
+  useEffect(() => {
+    const currentSchedule = (assessmentData as any)?.schedule;
+    if (currentSchedule && Object.keys(currentSchedule).length > 0) {
+      scheduleRef.current = currentSchedule;
+    }
+  }, [assessmentId]); // Only update ref when assessmentId changes (new assessment loaded)
+  
+  useEffect(() => {
+    // Calculate duration - use auto-calculated if per-section timers enabled, otherwise use manual input
+    let finalDuration = duration ? parseInt(duration) : undefined;
+    if (enablePerSectionTimers && sectionTimers) {
+      const totalMinutes = (sectionTimers.MCQ || 0) + (sectionTimers.Subjective || 0);
+      if (totalMinutes > 0) {
+        finalDuration = totalMinutes;
+      }
+    }
+    
+    // Preserve existing schedule data that we're not updating here
+    const existingSchedule = scheduleRef.current || {};
+    
     updateAssessmentData({
       accessMode,
       examMode,
       startTime: startTime ? new Date(startTime).toISOString() : undefined,
       endTime: endTime ? new Date(endTime).toISOString() : undefined,
-      duration: duration ? parseInt(duration) : undefined,
+      duration: finalDuration,
       passPercentage: passPercentage ? parseInt(passPercentage) : 50,
       proctoringSettings: {
         aiProctoringEnabled,
@@ -171,10 +217,10 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
       } as CustomMCQAssessment["proctoringSettings"],
       showResultToCandidate,
       schedule: {
-        ...(assessmentData as any)?.schedule,
+        ...existingSchedule,
         startTime: startTime ? new Date(startTime).toISOString() : undefined,
         endTime: endTime ? new Date(endTime).toISOString() : undefined,
-        duration: duration ? parseInt(duration) : undefined,
+        duration: finalDuration,
         candidateRequirements: {
           requirePhone,
           requireResume,
@@ -183,6 +229,20 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
         },
       },
     } as any);
+    
+    // Update ref with the schedule we just set (excluding candidateRequirements since we set those explicitly)
+    scheduleRef.current = {
+      ...existingSchedule,
+      startTime: startTime ? new Date(startTime).toISOString() : undefined,
+      endTime: endTime ? new Date(endTime).toISOString() : undefined,
+      duration: finalDuration,
+      candidateRequirements: {
+        requirePhone,
+        requireResume,
+        requireLinkedIn,
+        requireGithub,
+      },
+    };
   }, [
     accessMode,
     examMode,
@@ -198,6 +258,10 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
     requireResume,
     requireLinkedIn,
     requireGithub,
+    enablePerSectionTimers,
+    sectionTimers,
+    // Removed assessmentData from dependencies to prevent infinite loop
+    // updateAssessmentData is stable and doesn't need to be in dependencies
   ]);
 
   const handleSendInvitations = async (template: {
@@ -378,6 +442,11 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
                   <div style={{ flex: 1, minWidth: "200px" }}>
                     <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
                       Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
+                      {enablePerSectionTimers && (
+                        <span style={{ fontSize: "0.75rem", fontWeight: 400, color: "#64748b", marginLeft: "0.5rem" }}>
+                          (Auto-calculated from section timers)
+                        </span>
+                      )}
                     </label>
                     <input
                       type="number"
@@ -386,8 +455,22 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
                       placeholder="e.g., 80"
                       min={1}
                       required
-                      style={{ width: "100%", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
+                      disabled={enablePerSectionTimers}
+                      style={{ 
+                        width: "100%", 
+                        padding: "0.75rem", 
+                        border: "1px solid #A8E8BC", 
+                        borderRadius: "0.5rem",
+                        backgroundColor: enablePerSectionTimers ? "#f3f4f6" : "#ffffff",
+                        cursor: enablePerSectionTimers ? "not-allowed" : "text",
+                        opacity: enablePerSectionTimers ? 0.7 : 1,
+                      }}
                     />
+                    {enablePerSectionTimers && (
+                      <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#2D7A52" }}>
+                        Duration is automatically calculated from the sum of MCQ and Subjective section timers set in Review & Edit Questions.
+                      </p>
+                    )}
                   </div>
                 </div>
                 {startTime && duration && (
@@ -430,6 +513,11 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
                 <div style={{ flex: 1, minWidth: "200px" }}>
                   <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, color: "#1E5A3B" }}>
                     Duration (minutes) <span style={{ color: "#ef4444" }}>*</span>
+                    {enablePerSectionTimers && (
+                      <span style={{ fontSize: "0.75rem", fontWeight: 400, color: "#64748b", marginLeft: "0.5rem" }}>
+                        (Auto-calculated from section timers)
+                      </span>
+                    )}
                   </label>
                   <input
                     type="number"
@@ -438,10 +526,23 @@ export default function Station5Schedule({ assessmentData, updateAssessmentData,
                     placeholder="e.g., 70"
                     min={1}
                     required
-                    style={{ width: "100%", maxWidth: "300px", padding: "0.75rem", border: "1px solid #A8E8BC", borderRadius: "0.5rem" }}
+                    disabled={enablePerSectionTimers}
+                    style={{ 
+                      width: "100%", 
+                      maxWidth: "300px", 
+                      padding: "0.75rem", 
+                      border: "1px solid #A8E8BC", 
+                      borderRadius: "0.5rem",
+                      backgroundColor: enablePerSectionTimers ? "#f3f4f6" : "#ffffff",
+                      cursor: enablePerSectionTimers ? "not-allowed" : "text",
+                      opacity: enablePerSectionTimers ? 0.7 : 1,
+                    }}
                   />
                   <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#2D7A52" }}>
-                    Candidates can start the assessment anytime between the schedule start and end times. Once started, they have this duration to complete the assessment.
+                    {enablePerSectionTimers 
+                      ? "Duration is automatically calculated from the sum of MCQ and Subjective section timers set in Review & Edit Questions."
+                      : "Candidates can start the assessment anytime between the schedule start and end times. Once started, they have this duration to complete the assessment."
+                    }
                   </p>
                 </div>
               </>

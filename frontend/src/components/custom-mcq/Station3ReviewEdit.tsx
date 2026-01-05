@@ -189,10 +189,20 @@ export default function Station3ReviewEdit({ assessmentData, updateAssessmentDat
 
   const handleSectionTimerChange = (section: "MCQ" | "Subjective", value: string) => {
     const numValue = parseInt(value) || 1;
+    const newSectionTimers = {
+      ...sectionTimers,
+      [section]: numValue,
+    };
+    
+    // Calculate total duration from section timers
+    const totalDuration = (newSectionTimers.MCQ || 0) + (newSectionTimers.Subjective || 0);
+    
     updateAssessmentData({
-      sectionTimers: {
-        ...sectionTimers,
-        [section]: numValue,
+      sectionTimers: newSectionTimers,
+      duration: totalDuration > 0 ? totalDuration : undefined,
+      schedule: {
+        ...(assessmentData as any)?.schedule,
+        duration: totalDuration > 0 ? totalDuration : undefined,
       },
     } as any);
   };
