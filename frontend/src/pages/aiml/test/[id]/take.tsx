@@ -108,6 +108,7 @@ export default function AIMLTestTakePage() {
   const [cameraProctorEnabled, setCameraProctorEnabled] = useState(true)
   const [candidateEmail, setCandidateEmail] = useState<string | null>(null)
   const [proctoringSettings, setProctoringSettings] = useState<any>({})
+  const [liveProctoringEnabled, setLiveProctoringEnabled] = useState(false) // Extract to separate state like DSA
   const [liveProctorScreenStream, setLiveProctorScreenStream] = useState<MediaStream | null>(null)
   const [debugMode, setDebugMode] = useState(false)
   // Per-question timer states
@@ -258,7 +259,7 @@ export default function AIMLTestTakePage() {
       urlParam: userId as string,
       email: candidateEmail,
     })
-    const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
+    // Use the extracted state variable (matching DSA pattern)
     
     if (questions.length > 0 && !isProctoringRunning && !submitted && localCandidateIdStr && thumbVideoRef.current) {
       console.log('[AIML Take] Starting Universal Proctoring...')
@@ -281,7 +282,7 @@ export default function AIMLTestTakePage() {
         }
       })
     }
-  }, [questions.length, isProctoringRunning, submitted, testId, candidateEmail, userId, cameraProctorEnabled, proctoringSettings?.liveProctoringEnabled, startUniversalProctoring])
+  }, [questions.length, isProctoringRunning, submitted, testId, candidateEmail, userId, cameraProctorEnabled, liveProctoringEnabled, startUniversalProctoring])
 
   // ✅ PHASE 2.4: Lazy start function (called only when admin connects)
   const startLiveProctoring = useCallback((sessionId: string, ws: WebSocket) => {
@@ -347,10 +348,23 @@ export default function AIMLTestTakePage() {
       urlParam: userId as string,
       email: candidateEmail,
     })
-    const liveProctoringEnabled = proctoringSettings?.liveProctoringEnabled === true
+    // Use the extracted state variable (matching DSA pattern)
 
-    // Check all conditions - match Custom MCQ pattern
-    if (!liveProctoringEnabled || !liveProctorScreenStream || !examStarted || submitted || !localAssessmentIdStr || !localCandidateIdStr) {
+    // Debug: Log all conditions to identify which one is failing
+    console.log('[AIML Take] Live Proctoring registration check:', {
+      liveProctoringEnabled,
+      hasScreenStream: !!liveProctorScreenStream,
+      questionsCount: questions.length,
+      submitted,
+      hasAssessmentId: !!localAssessmentIdStr,
+      hasCandidateId: !!localCandidateIdStr,
+      assessmentId: localAssessmentIdStr,
+      candidateId: localCandidateIdStr,
+    })
+
+    // Check all conditions - match DSA pattern (register as soon as page loads, not wait for exam start)
+    if (!liveProctoringEnabled || !liveProctorScreenStream || questions.length === 0 || submitted || !localAssessmentIdStr || !localCandidateIdStr) {
+      console.log('[AIML Take] ⏸️ Live Proctoring registration skipped - conditions not met')
       return
     }
 
@@ -457,11 +471,11 @@ export default function AIMLTestTakePage() {
         candidateWsRef.current = null;
       }
       // Reset ref when exam ends to allow re-registration if needed
-      if (!examStarted || submitted) {
+      if (submitted) {
         startSessionCalledRef.current = false;
       }
     };
-  }, [proctoringSettings?.liveProctoringEnabled, liveProctorScreenStream, examStarted, submitted, testId, candidateEmail, userId, startLiveProctoring])
+  }, [liveProctoringEnabled, liveProctorScreenStream, questions.length, submitted, testId, candidateEmail, userId, startLiveProctoring])
 
   // Stop proctoring when test is submitted
   useEffect(() => {
@@ -574,9 +588,18 @@ export default function AIMLTestTakePage() {
 
       // Apply runtime camera toggle based on admin proctoring setting:
       // Only explicit true enables camera/model; missing/false => OFF (per PROCTORING_AI_TOGGLE_NOTES.md)
-      const aiEnabled = testData?.proctoringSettings?.aiProctoringEnabled === true
-      setCameraProctorEnabled(aiEnabled)
-      setProctoringSettings(testData?.proctoringSettings || {})
+      // Load proctoring settings from test data (matching DSA pattern)
+      if (testData?.proctoringSettings) {
+        console.log('[AIML Take] Loading proctoring settings:', testData.proctoringSettings);
+        setProctoringSettings(testData.proctoringSettings);
+        setCameraProctorEnabled(testData.proctoringSettings.aiProctoringEnabled === true);
+        setLiveProctoringEnabled(testData.proctoringSettings.liveProctoringEnabled === true);
+      } else {
+        console.log('[AIML Take] No proctoring settings found in test data');
+        setProctoringSettings({ aiProctoringEnabled: false, liveProctoringEnabled: false });
+        setCameraProctorEnabled(false);
+        setLiveProctoringEnabled(false);
+      }
       
       // NEW IMPLEMENTATION: Use accessControl from backend (matching Custom MCQ structure)
       const accessControl = testData.accessControl

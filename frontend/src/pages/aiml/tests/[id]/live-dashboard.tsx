@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
-import axios from 'axios';
 import { useRouter } from 'next/router'
 import { useSession } from 'next-auth/react'
 import { GetServerSideProps } from 'next'
@@ -10,6 +9,7 @@ import { AdminLiveService } from '../../../../universal-proctoring/live/AdminLiv
 import { CandidateStreamInfo, AdminLiveState } from '../../../../universal-proctoring/live/types'
 import { ArrowLeft, Maximize2, Minimize2, RefreshCw, Users, Loader2 } from 'lucide-react'
 import Link from 'next/link'
+import aimlApi from '../../../../lib/aiml/api'
 
 // Server-side auth check
 export const getServerSideProps: GetServerSideProps = requireAuth
@@ -155,12 +155,13 @@ export default function LiveProctoringDashboard({
     }
 
     // Fetch AIML test candidates for mapping
-    axios.get(`/api/aiml/tests/${assessmentId}`)
+    aimlApi.get(`/tests/${assessmentId}/candidates`)
       .then((res) => {
-        const candidates = res.data?.data?.candidates || [];
+        const candidates = res.data || [];
         setAssessmentCandidates(candidates);
       })
       .catch((err) => {
+        console.error('[Live Dashboard] Failed to fetch AIML test candidates:', err);
         setAssessmentCandidates([]);
       });
 
@@ -644,4 +645,3 @@ function CandidateTile({ candidate, onExpand, onRefresh, videoRefs }: CandidateT
     </div>
   )
 }
-
