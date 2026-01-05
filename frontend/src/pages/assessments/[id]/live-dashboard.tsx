@@ -59,9 +59,6 @@ export default function LiveProctoringDashboard({
 
   // Refs for video elements
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
-  
-  // Track which streams are already attached to avoid re-attachment
-  const attachedStreamsRef = useRef<Map<string, { webcam: string | null; screen: string | null }>>(new Map())
 
   // Update candidates list from stream map
   const updateCandidates = useCallback((streamMap: Map<string, CandidateStreamInfo>) => {
@@ -148,110 +145,48 @@ export default function LiveProctoringDashboard({
     });
 
     setCandidates(dedupedCandidates);
-
-    // Note: Stream attachment is now handled by useEffect hook below
-    // This ensures video elements are in DOM before attachment
+    // NOTE: Stream attachment is now handled by useEffect below, not here
   }, [assessmentCandidates])
 
-  // Create stable stream signature to detect actual stream changes (not just array reference changes)
-  const streamSignature = useMemo(() => {
-    if (candidates.length === 0) return '';
-    return candidates
-      .map(c => ({
-        sessionId: c.sessionId,
-        webcamStreamId: c.webcamStream?.id || null,
-        screenStreamId: c.screenStream?.id || null,
-      }))
-      .sort((a, b) => a.sessionId.localeCompare(b.sessionId))
-      .map(s => `${s.sessionId}:${s.webcamStreamId}:${s.screenStreamId}`)
-      .join('|');
-  }, [candidates]);
-
-  // Track previous signature to detect actual changes
-  const prevStreamSignatureRef = useRef<string>('');
-
-  // Attach streams to grid view video elements when DOM is ready (direct attachment - no refresh/reconnect)
-  // Video elements are always rendered now, so they exist when streams arrive
-  // Only runs when streams actually change (not on every state update)
+  // Attach streams to grid view video elements when candidates change (similar to expanded view)
   useEffect(() => {
-    if (candidates.length === 0) return;
-    if (expandedSessionId) return; // Don't attach if expanded view is shown
-    if (streamSignature === prevStreamSignatureRef.current) return; // Streams haven't actually changed
+    if (expandedSessionId) return; // Skip if in expanded view (handled separately)
 
-    // Update previous signature
-    prevStreamSignatureRef.current = streamSignature;
-
-    // Debounce: Wait for state to stabilize and DOM to be ready
-    let rafId: number;
+    // Small delay to ensure video elements are rendered (same as expanded view)
     const timeoutId = setTimeout(() => {
-      rafId = requestAnimationFrame(() => {
-        // Double-check expanded view hasn't been opened during delay
-        if (expandedSessionId) return;
+      candidates.forEach((candidate) => {
+        // Attach screen stream
+        if (candidate.screenStream && candidate.screenStream.active) {
+          const screenVideo = videoRefs.current.get(`screen-${candidate.sessionId}`);
+          if (screenVideo && screenVideo.srcObject !== candidate.screenStream) {
+            screenVideo.srcObject = candidate.screenStream;
+            // Only play if not already playing (prevents AbortError from rapid updates)
+            if (screenVideo.paused) {
+              screenVideo.play().catch((err) => {
+                console.error(`[Live Dashboard] Failed to play screen for ${candidate.sessionId}:`, err);
+              });
+            }
+          }
+        }
 
-        candidates.forEach((candidate) => {
-          const sessionId = candidate.sessionId;
-          const attached = attachedStreamsRef.current.get(sessionId) || { webcam: null, screen: null };
-          
-          // Attach screen stream (direct attachment - no refresh)
-          if (candidate.screenStream && candidate.screenStream.active) {
-            const streamId = candidate.screenStream.id;
-            // Only attach if this specific stream hasn't been attached yet
-            if (attached.screen !== streamId) {
-              const screenVideo = videoRefs.current.get(`screen-${sessionId}`);
-              // Verify element exists, is connected to DOM, and stream isn't already attached
-              if (screenVideo && screenVideo.isConnected && screenVideo.srcObject !== candidate.screenStream) {
-                try {
-                  screenVideo.srcObject = candidate.screenStream;
-                  // Track that we've attached this stream
-                  attachedStreamsRef.current.set(sessionId, { ...attached, screen: streamId });
-                  // Use play() with error handling - AbortError is expected when media changes
-                  screenVideo.play().catch((err) => {
-                    // AbortError is expected when media is removed/changed - ignore it
-                    if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
-                      console.error(`[Live Dashboard] Failed to play screen for ${sessionId}:`, err);
-                    }
-                  });
-                } catch (err) {
-                  // Ignore errors during attachment (element might be removed)
-                }
-              }
+        // Attach webcam stream
+        if (candidate.webcamStream && candidate.webcamStream.active) {
+          const webcamVideo = videoRefs.current.get(`webcam-${candidate.sessionId}`);
+          if (webcamVideo && webcamVideo.srcObject !== candidate.webcamStream) {
+            webcamVideo.srcObject = candidate.webcamStream;
+            // Only play if not already playing (prevents AbortError from rapid updates)
+            if (webcamVideo.paused) {
+              webcamVideo.play().catch((err) => {
+                console.error(`[Live Dashboard] Failed to play webcam for ${candidate.sessionId}:`, err);
+              });
             }
           }
-          
-          // Attach webcam stream (direct attachment - no refresh)
-          if (candidate.webcamStream && candidate.webcamStream.active) {
-            const streamId = candidate.webcamStream.id;
-            // Only attach if this specific stream hasn't been attached yet
-            if (attached.webcam !== streamId) {
-              const webcamVideo = videoRefs.current.get(`webcam-${sessionId}`);
-              // Verify element exists, is connected to DOM, and stream isn't already attached
-              if (webcamVideo && webcamVideo.isConnected && webcamVideo.srcObject !== candidate.webcamStream) {
-                try {
-                  webcamVideo.srcObject = candidate.webcamStream;
-                  // Track that we've attached this stream
-                  attachedStreamsRef.current.set(sessionId, { ...attached, webcam: streamId });
-                  // Use play() with error handling - AbortError is expected when media changes
-                  webcamVideo.play().catch((err) => {
-                    // AbortError is expected when media is removed/changed - ignore it
-                    if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
-                      console.error(`[Live Dashboard] Failed to play webcam for ${sessionId}:`, err);
-                    }
-                  });
-                } catch (err) {
-                  // Ignore errors during attachment (element might be removed)
-                }
-              }
-            }
-          }
-        });
+        }
       });
-    }, 500); // Debounce delay to wait for state to stabilize (prevents rapid re-attachments)
+    }, 100); // Same delay as expanded view
 
-    return () => {
-      clearTimeout(timeoutId);
-      if (rafId) cancelAnimationFrame(rafId);
-    };
-  }, [streamSignature, expandedSessionId, candidates]); // Only run when stream signature actually changes
+    return () => clearTimeout(timeoutId);
+  }, [candidates, expandedSessionId]);
 
   // Fetch assessment candidates and initialize service
   useEffect(() => {
@@ -404,29 +339,23 @@ export default function LiveProctoringDashboard({
     // Small delay to ensure video elements are rendered
     const timeoutId = setTimeout(() => {
       // Attach screen stream
-      if (expandedCandidate.screenStream && expandedCandidate.screenStream.active) {
+      if (expandedCandidate.screenStream) {
         const screenVideo = videoRefs.current.get(`screen-${expandedSessionId}`)
-        if (screenVideo && screenVideo.isConnected && screenVideo.srcObject !== expandedCandidate.screenStream) {
+        if (screenVideo && screenVideo.srcObject !== expandedCandidate.screenStream) {
           screenVideo.srcObject = expandedCandidate.screenStream
           screenVideo.play().catch((err) => {
-            // AbortError is expected when media is removed - ignore it
-            if (err.name !== 'AbortError') {
-              console.error(`[Live Dashboard] Failed to play screen in expanded view for ${expandedSessionId}:`, err)
-            }
+            console.error(`[Live Dashboard] Failed to play screen in expanded view for ${expandedSessionId}:`, err)
           })
         }
       }
 
       // Attach webcam stream
-      if (expandedCandidate.webcamStream && expandedCandidate.webcamStream.active) {
+      if (expandedCandidate.webcamStream) {
         const webcamVideo = videoRefs.current.get(`webcam-${expandedSessionId}`)
-        if (webcamVideo && webcamVideo.isConnected && webcamVideo.srcObject !== expandedCandidate.webcamStream) {
+        if (webcamVideo && webcamVideo.srcObject !== expandedCandidate.webcamStream) {
           webcamVideo.srcObject = expandedCandidate.webcamStream
           webcamVideo.play().catch((err) => {
-            // AbortError is expected when media is removed - ignore it
-            if (err.name !== 'AbortError') {
-              console.error(`[Live Dashboard] Failed to play webcam in expanded view for ${expandedSessionId}:`, err)
-            }
+            console.error(`[Live Dashboard] Failed to play webcam in expanded view for ${expandedSessionId}:`, err)
           })
         }
       }
