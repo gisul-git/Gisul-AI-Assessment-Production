@@ -90,8 +90,27 @@ export default function CandidateRequirementsPage() {
    
     // Check instructions acknowledgment
     const instructionsAcknowledged = sessionStorage.getItem(`instructionsAcknowledged_${id}`);
+    console.log("[CANDIDATE-REQUIREMENTS] Instructions acknowledgment check", {
+      instructionsAcknowledged: !!instructionsAcknowledged,
+      id,
+      token,
+      timestamp: new Date().toISOString()
+    });
     if (!instructionsAcknowledged && id && token) {
-      router.replace(`/assessment/${id}/${token}/instructions-new`);
+      const targetUrl = `/assessment/${id}/${token}/instructions-new`;
+      console.log("[CANDIDATE-REQUIREMENTS] 🔄 Instructions not acknowledged, navigating to instructions-new", {
+        targetUrl,
+        id,
+        token
+      });
+      router.replace(targetUrl).catch((err) => {
+        console.error("[CANDIDATE-REQUIREMENTS] ❌ Navigation error:", {
+          error: err,
+          name: err?.name,
+          message: err?.message,
+          stack: err?.stack
+        });
+      });
       return;
     }
    
