@@ -381,7 +381,7 @@ export default function EditDSACompetencyPage() {
           <button
             type="button"
             className="btn-secondary"
-            onClick={() => router.push(`/dsa/tests?testId=${encodeURIComponent(String(testId))}`)}
+            onClick={() => router.push("/dashboard")}
             style={{
               display: "flex",
               alignItems: "center",
@@ -390,7 +390,7 @@ export default function EditDSACompetencyPage() {
               fontSize: "0.875rem",
             }}
           >
-            ← Back to Test Management
+            ← Back to Dashboard
           </button>
         </div>
 

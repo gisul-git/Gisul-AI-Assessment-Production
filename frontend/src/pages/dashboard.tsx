@@ -8,11 +8,12 @@ import Image from "next/image";
 import axios from "@/lib/axios-config"; // Use configured axios with auth interceptor
 import dsaApi from "../lib/dsa/api";
 import aimlApi from "../lib/aiml/api";
+import DashboardCard from "../components/DashboardCard";
 
 interface Assessment {
   id: string;
   title: string;
-  status: string;
+  status?: string; // Optional - hook determines status from is_published/status field
   hasSchedule: boolean;
   scheduleStatus?: {
     startTime?: string;
@@ -24,6 +25,10 @@ interface Assessment {
   updatedAt?: string;
   type?: 'assessment' | 'dsa' | 'custom_mcq' | 'aiml'; // Add type to distinguish
   isDraft?: boolean; // Add isDraft to interface
+  // Fields for DSA/AIML/Custom MCQ
+  is_published?: boolean;
+  is_active?: boolean;
+  pausedAt?: string;
 }
 
 interface DashboardPageProps {
@@ -260,12 +265,17 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                 status = 'active'; // Use 'active' instead of 'published' to match AI assessment pattern
               }
               
+              // For DSA: if schedule is None/null, there's no schedule even if start_time/end_time exist
+              // (backend sets default start_time/end_time even when keepSchedule: false)
+              const schedule = test.schedule;
+              const hasSchedule = schedule !== null && schedule !== undefined && !!(test.start_time && test.end_time);
+              
               return {
                 id: test.id || test._id,
                 title: test.title || 'Untitled DSA Test',
                 status: status as 'draft' | 'active' | 'paused',
-                hasSchedule: !!(test.start_time && test.end_time),
-                scheduleStatus: test.start_time && test.end_time ? {
+                hasSchedule: hasSchedule,
+                scheduleStatus: hasSchedule ? {
                   startTime: test.start_time,
                   endTime: test.end_time,
                   duration: test.duration_minutes || 0,
@@ -273,7 +283,10 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
                 } : null,
                 createdAt: test.created_at || null,
                 updatedAt: test.updated_at || null,
-                type: 'dsa' as const
+                type: 'dsa' as const,
+                is_published: test.is_published,
+                is_active: test.is_active,
+                pausedAt: test.pausedAt
               };
             });
           allAssessments.push(...dsaTests);
@@ -314,34 +327,29 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
               return matches;
             })
             .map((test: any) => {
-              // Determine status: paused > published > draft
-              let status = 'draft';
-              if (test.pausedAt) {
-                status = 'paused';
-              } else if (test.is_published) {
-                status = 'active'; // Use 'active' instead of 'published' to match AI assessment pattern
-              }
-              
-              // Extract schedule information (similar to DSA)
-              const schedule = test.schedule || {};
-              const startTime = schedule.startTime || test.start_time;
-              const endTime = schedule.endTime || test.end_time;
-              const hasSchedule = !!(startTime && endTime);
+              // Extract schedule information (same logic as DSA)
+              // For AIML: if schedule is None/null, there's no schedule even if start_time/end_time exist
+              // (backend sets default start_time/end_time even when keepSchedule: false)
+              const schedule = test.schedule;
+              const hasSchedule = schedule !== null && schedule !== undefined && !!(test.start_time && test.end_time);
               
               return {
                 id: test.id || test._id,
                 title: test.title || 'Untitled AIML Test',
-                status: status as 'draft' | 'active' | 'paused',
                 hasSchedule: hasSchedule,
                 scheduleStatus: hasSchedule ? {
-                  startTime: startTime,
-                  endTime: endTime,
-                  duration: schedule.duration || test.duration_minutes || 0,
+                  startTime: test.start_time,
+                  endTime: test.end_time,
+                  duration: schedule?.duration || test.duration_minutes || 0,
                   isActive: test.is_published || false
                 } : null,
                 createdAt: test.created_at || null,
                 updatedAt: test.updated_at || null,
-                type: 'aiml' as const
+                type: 'aiml' as const,
+                is_published: test.is_published,
+                is_active: test.is_active,
+                pausedAt: test.pausedAt
+                // Note: status field is NOT set here - the hook determines it from is_published/pausedAt
               };
             });
           allAssessments.push(...aimlTests);
@@ -625,8 +633,16 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
           keepCandidates: false,
         });
         response = { data: r.data }; // normalize
+      } else if (assessmentType === 'aiml') {
+        // AIML has its own backend clone endpoint
+        const r = await aimlApi.post(`/tests/${assessmentId}/clone`, {
+          newTitle: newTitle.trim(),
+          keepSchedule: false,
+          keepCandidates: false,
+        });
+        response = { data: r.data }; // normalize
       } else {
-        // Keep existing behavior for other cards (do not change)
+        // Regular assessments and custom_mcq use Next.js API routes
         const endpoint = assessmentType === 'custom_mcq' 
           ? `/api/custom-mcq/clone?assessmentId=${assessmentId}`
           : `/api/assessments/clone?assessmentId=${assessmentId}`;
@@ -642,25 +658,57 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
       const responseData = response.data;
       console.log("[Clone] Full response:", responseData);
       
-      const clonedAssessment = responseData?.data?.assessment || responseData?.assessment || responseData?.data;
+      // AIML and DSA return data directly, regular assessments wrap it in {assessment: ...}
+      let clonedAssessment: any;
+      if (assessmentType === 'aiml' || assessmentType === 'dsa') {
+        // AIML/DSA: response.data has {message, data: {id, title, ...}}
+        clonedAssessment = responseData?.data || responseData;
+      } else {
+        // Regular assessments: response.data has {success, data: {assessment: {...}}}
+        clonedAssessment = responseData?.data?.assessment || responseData?.assessment || responseData?.data;
+      }
+      
       console.log("[Clone] Cloned assessment data:", clonedAssessment);
       
-      if (responseData?.success !== false && clonedAssessment) {
+      // Check success condition - AIML/DSA use 'message', regular assessments use 'success'
+      const isSuccess = assessmentType === 'aiml' || assessmentType === 'dsa'
+        ? responseData?.message || clonedAssessment?.id
+        : responseData?.success !== false;
+      
+      if (isSuccess && clonedAssessment) {
         // Get the new assessment ID
         const newId = clonedAssessment.id || clonedAssessment._id || responseData?.data?.assessmentId || responseData?.assessmentId;
         console.log("[Clone] New assessment ID:", newId);
         
         if (newId) {
+          // Clones should ALWAYS be "draft" with no schedule (keepSchedule: false)
+          // Force status to "draft" regardless of what backend returns
+          let status: "draft" | "scheduled" | "active" | "paused" | "completed" | "published" = "draft";
+          
+          // Clones never have schedule since keepSchedule: false
+          let hasSchedule = false;
+          let scheduleStatus = null;
+          
+          // For AIML/DSA: ensure is_published is false and no schedule
+          // For Regular/Custom MCQ: status is already "draft" from backend, but force it anyway
+          
           // Create new assessment object matching the dashboard format
+          // Clones are ALWAYS draft with no schedule (keepSchedule: false)
+          // For AIML/DSA: Backend may return start_time/end_time even when keepSchedule is false,
+          // but we should ignore them and treat as no schedule
           const newAssessment: Assessment = {
             id: String(newId),
             title: clonedAssessment.title || newTitle.trim(),
-            status: (clonedAssessment.status || "draft") as "draft" | "scheduled" | "active" | "paused" | "completed" | "published",
-            hasSchedule: false,
-            createdAt: clonedAssessment.createdAt || new Date().toISOString(),
-            updatedAt: clonedAssessment.updatedAt || new Date().toISOString(),
+            status: "draft", // Always draft for clones
+            hasSchedule: false, // Always false since keepSchedule: false - ignore backend schedule data
+            createdAt: clonedAssessment.created_at || clonedAssessment.createdAt || new Date().toISOString(),
+            updatedAt: clonedAssessment.updated_at || clonedAssessment.updatedAt || new Date().toISOString(),
             type: assessmentType,
-            scheduleStatus: null,
+            scheduleStatus: null, // Always null for clones - ignore start_time/end_time from backend
+            // For AIML/DSA: ensure these are set to draft state
+            is_published: false, // Clones are never published
+            is_active: false, // Clones are never active
+            pausedAt: undefined // Clones are never paused
           };
           
           // Close modal first
@@ -1391,808 +1439,26 @@ export default function DashboardPage({ session: serverSession }: DashboardPageP
               }}
             >
               {assessments.map((assessment) => {
-                // Check if end time has passed to determine if status should be "completed"
-                const endTime = assessment.scheduleStatus?.endTime;
-                const isEndTimePassed = endTime ? new Date(endTime) < new Date() : false;
-                const displayStatus = (assessment.status === "active" || assessment.status === "published") && isEndTimePassed 
-                  ? "completed" 
-                  : assessment.status;
-                const statusColors = getStatusColor(displayStatus);
                 return (
-                  <div
+                  <DashboardCard
                     key={assessment.id}
-                    className="card-hover"
-                    style={{
-                      border: assessment.status === "paused" 
-                        ? "2px solid #fbbf24" 
-                        : "1.5px solid #A8E8BC",
-                      borderRadius: "1rem",
-                      padding: "1.5rem",
-                      backgroundColor: assessment.status === "paused" 
-                        ? "#fffbeb" 
-                        : "#ffffff",
-                      cursor: "pointer",
-                      transition: "all 0.2s ease",
-                      boxShadow: assessment.status === "paused"
-                        ? "0 2px 8px rgba(251, 191, 36, 0.2), 0 0 0 1px rgba(251, 191, 36, 0.1)"
-                        : "0 2px 6px rgba(168, 232, 188, 0.15), 0 0 0 1px rgba(168, 232, 188, 0.1)",
-                      position: "relative",
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.transform = "translateY(-3px)";
-                      e.currentTarget.style.boxShadow = assessment.status === "paused"
-                        ? "0 8px 20px rgba(251, 191, 36, 0.3), 0 0 0 1px rgba(251, 191, 36, 0.2)"
-                        : "0 6px 16px rgba(168, 232, 188, 0.3), 0 0 0 1px rgba(168, 232, 188, 0.15)";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.transform = "translateY(0)";
-                      e.currentTarget.style.boxShadow = assessment.status === "paused"
-                        ? "0 2px 8px rgba(251, 191, 36, 0.2), 0 0 0 1px rgba(251, 191, 36, 0.1)"
-                        : "0 2px 6px rgba(168, 232, 188, 0.15), 0 0 0 1px rgba(168, 232, 188, 0.1)";
-                    }}
-                    onClick={() => {
-                      // Direct navigation by type, avoiding intermediate list pages
-                      if (assessment.type === 'dsa') {
-                        router.push(`/dsa/tests/${assessment.id}/edit`);
-                      } else if (assessment.type === 'aiml') {
-                        router.push(`/aiml/tests/${assessment.id}/edit`);
-                      } else if (assessment.status === 'draft') {
-                        if (assessment.type === 'custom_mcq') {
-                          router.push(`/custom-mcq/create?id=${assessment.id}`);
-                        } else {
-                          router.push(`/assessments/create-new?id=${assessment.id}`);
-                        }
-                      } else {
-                        // For active/paused/completed assessments of other types, go to analytics
-                        if (assessment.type === 'custom_mcq') {
-                          router.push(`/custom-mcq/${assessment.id}`);
-                        } else {
-                          router.push(`/assessments/${assessment.id}/analytics`);
-                        }
-                      }
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "start",
-                        marginBottom: "1rem",
-                        position: "relative",
-                      }}
-                    >
-                      <h3
-                        style={{
-                          margin: 0,
-                          color: "#1a1625",
-                          fontSize: "1.125rem",
-                          fontWeight: 600,
-                          flex: 1,
-                        }}
-                      >
-                        {assessment.title}
-                      </h3>
-                      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                        {/* Overflow Menu */}
-                        <div style={{ position: "relative" }} data-menu-id={assessment.id}>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setOpenMenuId(openMenuId === assessment.id ? null : assessment.id);
-                            }}
-                            style={{
-                              background: openMenuId === assessment.id ? "#f1f5f9" : "transparent",
-                              border: "none",
-                              cursor: "pointer",
-                              padding: "0.375rem",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              color: "#64748b",
-                              borderRadius: "0.375rem",
-                              transition: "all 0.2s ease",
-                              width: "28px",
-                              height: "28px",
-                            }}
-                            onMouseEnter={(e) => {
-                              if (openMenuId !== assessment.id) {
-                                e.currentTarget.style.backgroundColor = "#f8fafc";
-                                e.currentTarget.style.color = "#475569";
-                              }
-                            }}
-                            onMouseLeave={(e) => {
-                              if (openMenuId !== assessment.id) {
-                                e.currentTarget.style.backgroundColor = "transparent";
-                                e.currentTarget.style.color = "#64748b";
-                              }
-                            }}
-                            title="More options"
-                          >
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <circle cx="12" cy="5" r="1.5" />
-                              <circle cx="12" cy="12" r="1.5" />
-                              <circle cx="12" cy="19" r="1.5" />
-                            </svg>
-                          </button>
-                          {openMenuId === assessment.id && (
-                            <div
-                              style={{
-                                position: "absolute",
-                                top: "calc(100% + 0.5rem)",
-                                right: 0,
-                                backgroundColor: "#ffffff",
-                                border: "1px solid #e2e8f0",
-                                borderRadius: "0.75rem",
-                                boxShadow: "0 10px 25px rgba(0, 0, 0, 0.1), 0 4px 6px rgba(0, 0, 0, 0.05)",
-                                minWidth: "200px",
-                                zIndex: 1000,
-                                padding: "0.5rem",
-                                animation: "fadeIn 0.15s ease-out",
-                              }}
-                            >
-                              <style dangerouslySetInnerHTML={{__html: `
-                                @keyframes fadeIn {
-                                  from {
-                                    opacity: 0;
-                                    transform: translateY(-4px);
-                                  }
-                                  to {
-                                    opacity: 1;
-                                    transform: translateY(0);
-                                  }
-                                }
-                              `}} />
-                              {/* Pause/Resume Menu Item */}
-                              {(assessment.status === "active" || assessment.status === "scheduled" || assessment.status === "paused") && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    if (assessment.status === "paused") {
-                                      handleResumeAssessment(assessment.id, e);
-                                    } else {
-                                      handlePauseAssessment(assessment.id, e);
-                                    }
-                                  }}
-                                  style={{
-                                    width: "100%",
-                                    textAlign: "left",
-                                    padding: "0.625rem 0.875rem",
-                                    background: "none",
-                                    border: "none",
-                                    cursor: "pointer",
-                                    fontSize: "0.875rem",
-                                    color: assessment.status === "paused" ? "#059669" : "#1e293b",
-                                    fontWeight: 500,
-                                    borderRadius: "0.5rem",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: "0.625rem",
-                                    transition: "all 0.15s ease",
-                                  }}
-                                  onMouseEnter={(e) => {
-                                    e.currentTarget.style.backgroundColor = assessment.status === "paused" ? "#ecfdf5" : "#f8fafc";
-                                  }}
-                                  onMouseLeave={(e) => {
-                                    e.currentTarget.style.backgroundColor = "transparent";
-                                  }}
-                                >
-                                  {assessment.status === "paused" ? (
-                                    <>
-                                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <polygon points="5 3 19 12 5 21 5 3" />
-                                      </svg>
-                                      Resume Assessment
-                                    </>
-                                  ) : (
-                                    <>
-                                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <rect x="6" y="4" width="4" height="16" />
-                                        <rect x="14" y="4" width="4" height="16" />
-                                      </svg>
-                                      Pause Assessment
-                                    </>
-                                  )}
-                                </button>
-                              )}
-                              {/* Divider */}
-                              {(assessment.status === "active" || assessment.status === "scheduled" || assessment.status === "paused") && (
-                                <div style={{ height: "1px", backgroundColor: "#e2e8f0", margin: "0.375rem 0" }} />
-                              )}
-                              {/* Clone Menu Item */}
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
+                    {...assessment}
+                    type={assessment.type || 'assessment'}
+                    isMenuOpen={openMenuId === assessment.id}
+                    onMenuToggle={() => setOpenMenuId(openMenuId === assessment.id ? null : assessment.id)}
+                    onPause={handlePauseAssessment}
+                    onResume={handleResumeAssessment}
+                    onDelete={handleDeleteAssessment}
+                    onClone={(id, title) => {
                                   setCloneModal({
                                     show: true,
-                                    assessmentId: assessment.id,
-                                    assessmentTitle: assessment.title,
-                                    newTitle: `${assessment.title} (Copy)`,
+                        assessmentId: id,
+                        assessmentTitle: title,
+                        newTitle: `${title} (Copy)`,
                                   });
                                   setOpenMenuId(null);
                                 }}
-                                style={{
-                                  width: "100%",
-                                  textAlign: "left",
-                                  padding: "0.625rem 0.875rem",
-                                  background: "none",
-                                  border: "none",
-                                  cursor: "pointer",
-                                  fontSize: "0.875rem",
-                                  color: "#1e293b",
-                                  fontWeight: 500,
-                                  borderRadius: "0.5rem",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: "0.625rem",
-                                  transition: "all 0.15s ease",
-                                }}
-                                onMouseEnter={(e) => {
-                                  e.currentTarget.style.backgroundColor = "#f8fafc";
-                                }}
-                                onMouseLeave={(e) => {
-                                  e.currentTarget.style.backgroundColor = "transparent";
-                                }}
-                              >
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                                </svg>
-                                Clone Assessment
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        {assessment.type === 'dsa' && (
-                          <span
-                            className="badge"
-                            style={{
-                              backgroundColor: "#E8FAF0",
-                              color: "#2D7A52",
-                              border: "1px solid #A8E8BC",
-                              fontSize: "0.75rem",
-                              padding: "0.25rem 0.5rem",
-                            }}
-                          >
-                            DSA
-                          </span>
-                        )}
-                        {assessment.type === 'aiml' && (
-                          <span
-                            className="badge"
-                            style={{
-                              backgroundColor: "#C9F4D4",
-                              color: "#1E5A3B",
-                              border: "1px solid #A8E8BC",
-                              fontSize: "0.75rem",
-                              padding: "0.25rem 0.5rem",
-                              fontWeight: 600,
-                            }}
-                          >
-                            AIML
-                          </span>
-                        )}
-                        {assessment.type === 'custom_mcq' && (
-                          <span
-                            className="badge"
-                            style={{
-                              backgroundColor: "#EDE9FE",
-                              color: "#7C3AED",
-                              border: "1px solid #C4B5FD",
-                              fontSize: "0.75rem",
-                              padding: "0.25rem 0.5rem",
-                              fontWeight: 600,
-                            }}
-                          >
-                            Custom MCQ/Subjective
-                          </span>
-                        )}
-                        <span
-                          className="badge"
-                          style={{
-                            backgroundColor: statusColors.bg,
-                            color: statusColors.text,
-                            border: `1px solid ${statusColors.border}`,
-                            textTransform: "capitalize",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "0.375rem",
-                            fontWeight: 600,
-                            fontSize: "0.75rem",
-                            padding: "0.375rem 0.75rem",
-                          }}
-                        >
-                          {displayStatus === "paused" && "⏸️"}
-                          {displayStatus}
-                        </span>
-                      </div>
-                    </div>
-                    <div style={{ 
-                      color: "#64748b", 
-                      fontSize: "0.875rem", 
-                      marginBottom: "0.75rem",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "0.5rem",
-                    }}>
-                      <div style={{ 
-                        display: "flex", 
-                        alignItems: "center", 
-                        gap: "0.5rem",
-                        color: "#475569",
-                      }}>
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <circle cx="12" cy="12" r="10" />
-                          <polyline points="12 6 12 12 16 14" />
-                        </svg>
-                        <span><strong>Created:</strong> {formatDate(assessment.createdAt)}</span>
-                      </div>
-                      {/* Always show schedule status */}
-                      <div style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                      }}>
-                        {assessment.hasSchedule && assessment.scheduleStatus ? (() => {
-                          const endTime = assessment.scheduleStatus.endTime;
-                          const isEndTimePassed = endTime ? new Date(endTime) < new Date() : false;
-                          
-                          if (isEndTimePassed && assessment.scheduleStatus.isActive) {
-                            // Show Completed if end time has passed
-                            return (
-                              <>
-                                <div style={{
-                                  width: "8px",
-                                  height: "8px",
-                                  borderRadius: "50%",
-                                  backgroundColor: "#6b7280",
-                                  boxShadow: "0 0 0 2px rgba(107, 114, 128, 0.2)",
-                                }} />
-                                <span style={{ color: "#6b7280", fontWeight: 500 }}>Completed</span>
-                              </>
-                            );
-                          } else if (assessment.scheduleStatus.isActive) {
-                            // Show Active if test is active and end time hasn't passed
-                            return (
-                              <>
-                                <div style={{
-                                  width: "8px",
-                                  height: "8px",
-                                  borderRadius: "50%",
-                                  backgroundColor: "#10b981",
-                                  boxShadow: "0 0 0 2px rgba(16, 185, 129, 0.2)",
-                                }} />
-                                <span style={{ color: "#10b981", fontWeight: 500 }}>Active</span>
-                              </>
-                            );
-                          } else {
-                            // Show Scheduled if not active yet
-                            return (
-                              <>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                  <circle cx="12" cy="12" r="10" />
-                                  <polyline points="12 6 12 12 16 14" />
-                                </svg>
-                                <span style={{ color: "#f59e0b", fontWeight: 500 }}>Scheduled</span>
-                              </>
-                            );
-                          }
-                        })() : (
-                          <>
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <circle cx="12" cy="12" r="10" />
-                              <line x1="12" y1="8" x2="12" y2="12" />
-                              <line x1="12" y1="16" x2="12.01" y2="16" />
-                            </svg>
-                            <span style={{ color: "#94a3b8", fontWeight: 500 }}>Not Scheduled</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ 
-                      marginTop: "1rem", 
-                      display: "flex", 
-                      flexDirection: "row", 
-                      gap: "0.5rem", 
-                      paddingTop: "1rem", 
-                      borderTop: "1px solid #E8FAF0" 
-                    }}>
-                      {/* CASE A: Draft - Show Edit and Delete, HIDE Analytics */}
-                      {assessment.status === 'draft' && (
-                        <>
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          style={{
-                            fontSize: "0.875rem",
-                            padding: "0.625rem 1rem",
-                            marginTop: 0,
-                            flex: 1,
-                            fontWeight: 600,
-                            transition: "all 0.15s ease",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            gap: "0.5rem",
-                            borderRadius: "0.5rem",
-                            border: "1px solid #A8E8BC",
-                            backgroundColor: "#ffffff",
-                            color: "#2D7A52",
-                          }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (assessment.type === 'dsa') {
-                              router.push(`/dsa/tests/${assessment.id}/edit`);
-                            } else if (assessment.type === 'aiml') {
-                              // keep existing AIML behavior (do not change)
-                              router.push(`/tests/${assessment.id}/edit`);
-                            } else if (assessment.type === 'custom_mcq') {
-                              router.push(`/custom-mcq/create?id=${assessment.id}`);
-                            } else {
-                              router.push(`/assessments/create-new?id=${assessment.id}`);
-                            }
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.transform = "translateY(-1px)";
-                            e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.3)";
-                            e.currentTarget.style.backgroundColor = "#f0fdf4";
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.transform = "translateY(0)";
-                            e.currentTarget.style.boxShadow = "none";
-                            e.currentTarget.style.backgroundColor = "#ffffff";
-                          }}
-                        >
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                          </svg>
-                          Edit
-                        </button>
-                          <button
-                            type="button"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              backgroundColor: "#ef4444",
-                              color: "#ffffff",
-                              border: "none",
-                              borderRadius: "0.5rem",
-                              cursor: "pointer",
-                              transition: "all 0.15s ease",
-                              flex: 1,
-                              fontWeight: 600,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = "#dc2626";
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(239, 68, 68, 0.3)";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = "#ef4444";
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                            }}
-                          >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="3 6 5 6 21 6" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                            Delete
-                          </button>
-                        </>
-                      )}
-                      
-                      {/* CASE B: Active/Published - Show Analytics and Delete, HIDE Edit */}
-                      {/* CASE B1: Paused - Show Edit instead of Analytics */}
-                      {assessment.status === 'paused' && (
-                        <>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              marginTop: 0,
-                              flex: 1,
-                              fontWeight: 600,
-                              transition: "all 0.15s ease",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                              borderRadius: "0.5rem",
-                              border: "1px solid #A8E8BC",
-                              backgroundColor: "#ffffff",
-                              color: "#2D7A52",
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (assessment.type === 'dsa') {
-                                router.push(`/dsa/tests/${assessment.id}/edit`);
-                              } else if (assessment.type === 'aiml') {
-                                // keep existing AIML behavior (do not change)
-                                router.push(`/tests/${assessment.id}/edit`);
-                              } else if (assessment.type === 'custom_mcq') {
-                                router.push(`/custom-mcq/create?id=${assessment.id}`);
-                              } else {
-                                router.push(`/assessments/create-new?id=${assessment.id}`);
-                              }
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.3)";
-                              e.currentTarget.style.backgroundColor = "#f0fdf4";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                              e.currentTarget.style.backgroundColor = "#ffffff";
-                            }}
-                          >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                            </svg>
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              backgroundColor: "#ef4444",
-                              color: "#ffffff",
-                              border: "none",
-                              borderRadius: "0.5rem",
-                              cursor: "pointer",
-                              transition: "all 0.15s ease",
-                              flex: 1,
-                              fontWeight: 600,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = "#dc2626";
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(239, 68, 68, 0.3)";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = "#ef4444";
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                            }}
-                          >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="3 6 5 6 21 6" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                            Delete
-                          </button>
-                        </>
-                      )}
-                      {/* CASE B2: Active/Published/Scheduled - Show Analytics and Delete, HIDE Edit */}
-                      {(assessment.status === 'active' || assessment.status === 'published' || assessment.status === 'scheduled') && (
-                        <>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              marginTop: 0,
-                              flex: 1,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                              fontWeight: 600,
-                              transition: "all 0.15s ease",
-                              borderRadius: "0.5rem",
-                              border: "1px solid #A8E8BC",
-                              backgroundColor: "#ffffff",
-                              color: "#2D7A52",
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              // DSA/AIML assessments use different analytics route
-                              if (assessment.type === 'dsa') {
-                                router.push(`/dsa/tests/${assessment.id}/analytics`);
-                              } else if (assessment.type === 'aiml') {
-                                router.push(`/aiml/tests/${assessment.id}/analytics`);
-                              } else if (assessment.type === 'custom_mcq') {
-                                router.push(`/custom-mcq/${assessment.id}`);
-                              } else {
-                                router.push(`/assessments/${assessment.id}/analytics`);
-                              }
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.3)";
-                              e.currentTarget.style.backgroundColor = "#f0fdf4";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                              e.currentTarget.style.backgroundColor = "#ffffff";
-                            }}
-                          >
-                            <svg 
-                              width="16" 
-                              height="16" 
-                              viewBox="0 0 24 24" 
-                              fill="none" 
-                              stroke="currentColor" 
-                              strokeWidth="2" 
-                              strokeLinecap="round" 
-                              strokeLinejoin="round"
-                            >
-                              <line x1="18" y1="20" x2="18" y2="10" />
-                              <line x1="12" y1="20" x2="12" y2="4" />
-                              <line x1="6" y1="20" x2="6" y2="14" />
-                            </svg>
-                            Analytics
-                          </button>
-                          <button
-                            type="button"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              backgroundColor: "#ef4444",
-                              color: "#ffffff",
-                              border: "none",
-                              borderRadius: "0.5rem",
-                              cursor: "pointer",
-                              transition: "all 0.15s ease",
-                              flex: 1,
-                              fontWeight: 600,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = "#dc2626";
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(239, 68, 68, 0.3)";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = "#ef4444";
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                            }}
-                          >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="3 6 5 6 21 6" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                            Delete
-                          </button>
-                        </>
-                      )}
-                      
-                      {/* CASE C: Completed - Show Analytics and Delete, HIDE Edit */}
-                      {assessment.status === 'completed' && (
-                        <>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              marginTop: 0,
-                              flex: 1,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                              fontWeight: 600,
-                              transition: "all 0.15s ease",
-                              borderRadius: "0.5rem",
-                              border: "1px solid #A8E8BC",
-                              backgroundColor: "#ffffff",
-                              color: "#2D7A52",
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              // DSA/AIML assessments use different analytics route
-                              if (assessment.type === 'dsa') {
-                                router.push(`/dsa/tests/${assessment.id}/analytics`);
-                              } else if (assessment.type === 'aiml') {
-                                router.push(`/aiml/tests/${assessment.id}/analytics`);
-                              } else {
-                                router.push(`/assessments/${assessment.id}/analytics`);
-                              }
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(168, 232, 188, 0.3)";
-                              e.currentTarget.style.backgroundColor = "#f0fdf4";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                              e.currentTarget.style.backgroundColor = "#ffffff";
-                            }}
-                          >
-                            <svg 
-                              width="16" 
-                              height="16" 
-                              viewBox="0 0 24 24" 
-                              fill="none" 
-                              stroke="currentColor" 
-                              strokeWidth="2" 
-                              strokeLinecap="round" 
-                              strokeLinejoin="round"
-                            >
-                              <line x1="18" y1="20" x2="18" y2="10" />
-                              <line x1="12" y1="20" x2="12" y2="4" />
-                              <line x1="6" y1="20" x2="6" y2="14" />
-                            </svg>
-                            Analytics
-                          </button>
-                          <button
-                            type="button"
-                            style={{
-                              fontSize: "0.875rem",
-                              padding: "0.625rem 1rem",
-                              backgroundColor: "#ef4444",
-                              color: "#ffffff",
-                              border: "none",
-                              borderRadius: "0.5rem",
-                              cursor: "pointer",
-                              transition: "all 0.15s ease",
-                              flex: 1,
-                              fontWeight: 600,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "0.5rem",
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = "#dc2626";
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "0 2px 6px rgba(239, 68, 68, 0.3)";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = "#ef4444";
-                              e.currentTarget.style.transform = "translateY(0)";
-                              e.currentTarget.style.boxShadow = "none";
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAssessment(assessment.id, assessment.title, assessment.type);
-                            }}
-                          >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="3 6 5 6 21 6" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                            Delete
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
+                  />
                 );
               })}
             </div>
